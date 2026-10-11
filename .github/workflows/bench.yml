@@ -49,15 +49,15 @@ jobs:
     env:
       REPS: ${{ inputs.reps || '3' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v2
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
         with:
           toolchain: stable
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: |
             . -> target
@@ -65,12 +65,12 @@ jobs:
             bench/ladder/contenders/chromey -> target
 
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.27"
 
@@ -142,8 +142,10 @@ jobs:
 
       - name: Build baseline navigera (A/B)
         if: inputs.baseline_ref != ''
+        env:
+          BASELINE_REF: ${{ inputs.baseline_ref }}
         run: |
-          git fetch --depth=1 origin "${{ inputs.baseline_ref }}"
+          git fetch --depth=1 origin "$BASELINE_REF"
           git worktree add /tmp/nv-baseline FETCH_HEAD
           cargo build --release --bin navigera \
             --manifest-path /tmp/nv-baseline/Cargo.toml --target-dir /tmp/nv-baseline-target
@@ -182,14 +184,16 @@ jobs:
       - name: Run ladder
         env:
           LADDER_PROFILE: ${{ inputs.profile == 'true' && '1' || '0' }}
+          ONLY: ${{ inputs.only || '' }}
+          SCENARIOS: ${{ inputs.scenarios || 'eval,cold,realworld,browse,agent' }}
         run: |
           set -o pipefail
           export NAVIGERA="$PWD/target/release/navigera"
           export CHROME_BIN
           mkdir -p bench/ladder/out
           python3 bench/ladder/ladder.py --out-dir bench/ladder/out \
-            --reps "$REPS" --only "${{ inputs.only || '' }}" \
-            --scenarios "${{ inputs.scenarios || 'eval,cold,realworld,browse,agent' }}" 2>&1 | tee bench/ladder/out/ladder.log
+            --reps "$REPS" --only "$ONLY" \
+            --scenarios "$SCENARIOS" 2>&1 | tee bench/ladder/out/ladder.log
 
       - name: Table as annotations (readable via the checks API)
         if: always()
@@ -206,7 +210,7 @@ jobs:
           python3 bench/ladder/annotate.py /tmp/ladder-tail.log "ladder log tail"
 
       - name: Upload results
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ladder-results
           path: bench/ladder/out/

@@ -97,7 +97,7 @@ jobs:
       HAS_KEY: ${{ secrets[matrix.run.key] != '' || secrets.GEMINI_API_KEY != '' }}
       KEY_SLOT: ${{ secrets[matrix.run.key] != '' && matrix.run.key || 'GEMINI_API_KEY' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/agent-setup
       - name: Scripted baseline (site + checks + harness, no model)
         if: matrix.run.tool == 'navigera'
@@ -159,7 +159,7 @@ jobs:
             --model "$MODEL" --gemini "$GEMINI_BIN" --reps "$REPS" --out out/gemini
       - name: Upload this tool's results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: eval-${{ matrix.run.tool }}-${{ matrix.run.os }}
           path: out/gemini/summary-*.json
@@ -170,8 +170,8 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: eval-*
           path: dl
@@ -191,7 +191,7 @@ jobs:
         run: python3 bench/agent-eval/annotate_runs.py out/summary-skilled.json "agent eval json skilled"
       - name: Upload merged results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: agent-eval
           path: out/
