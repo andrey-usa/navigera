@@ -211,6 +211,51 @@ model turn. A wrapper pays off only for long runs with no decision between
 steps, written by a program that already exists; a script that launches its
 own `serve` pays a browser cold start and loses cookies on every run.
 
+## MCP server (IDE agents)
+
+`navigera mcp` serves the [Model Context Protocol](https://modelcontextprotocol.io)
+on stdio, for agents that take their tools over MCP: Cline, Roo Code, Kilo
+Code, Continue, VS Code, Claude Desktop, Cursor. Each tool is one serve op, so
+it behaves exactly like the CLI. The browser starts on the first tool call.
+`--headed`, `--profile <name>` (a persistent, signed-in browser) and
+`--attach` work as they do for sessions.
+
+| tool | does |
+|---|---|
+| `browser_navigate` | `goto` |
+| `browser_snapshot` | `ax`: the tree with `[ref=N]` (optional `ref`/`selector` scope, `limit`) |
+| `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_select_option`, `browser_hover`, `browser_scroll`, `browser_file_upload` | the element ops, by `ref`, `selector` or `text` |
+| `browser_wait_for`, `browser_evaluate`, `browser_screenshot` (returns the image), `browser_tabs`, `browser_history`, `browser_handle_dialog` | as the CLI |
+| `browser_run` | several ops in one call (`[{"op":"fill","ref":21,"value":"Ada"}, {"op":"click","ref":30}]`), stopping at the first failure, ending with a snapshot |
+| `browser_close` | close the browser; the next call starts a fresh one |
+
+Every action takes `snapshot: true` to return the updated tree in the same
+call. The whole tool list is about 10 KB (~2,600 tokens), against ~20 KB for
+Playwright MCP 0.0.83 and ~26 KB for Chrome DevTools MCP 1.10.1.
+
+Client configuration (all run the same command):
+
+```jsonc
+// Cline (cline_mcp_settings.json), Roo Code (.roo/mcp.json), Claude Desktop, Cursor
+{ "mcpServers": { "navigera": { "command": "navigera", "args": ["mcp"] } } }
+
+// Kilo Code (kilo.json)
+{ "mcp": { "navigera": { "type": "local", "command": ["navigera", "mcp"] } } }
+
+// VS Code (.vscode/mcp.json)
+{ "servers": { "navigera": { "type": "stdio", "command": "navigera", "args": ["mcp"] } } }
+```
+
+```yaml
+# Continue (config.yaml)
+mcpServers:
+  - name: navigera
+    command: navigera
+    args: [mcp]
+```
+
+From a shell: `cline mcp install navigera -- navigera mcp`, `claude mcp add navigera -- navigera mcp`.
+
 ## Browsers and engines
 
 - **Chrome-family (default).** navigera looks for a browser in this

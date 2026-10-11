@@ -118,6 +118,17 @@ one JSON command per stdin line, for example
 `{"id":1,"op":"goto","url":"https://example.com"}`. The session socket speaks
 the same protocol.
 
+## IDE agents (MCP)
+
+`navigera mcp` is a Model Context Protocol server for Cline, Roo Code, Kilo
+Code, Continue, VS Code, Claude Desktop and Cursor, with the same tree, refs and
+waits as the CLI and a tool list half the size of Playwright MCP's. Add it as
+`{"command": "navigera", "args": ["mcp"]}`; per-client snippets are in
+[docs/navigera.md](docs/navigera.md#mcp-server-ide-agents). Agents that run
+shell commands (Kilo, Cline CLI, Gemini CLI, Codex) can use the CLI and the
+skill directly: `navigera install-skill` writes it to `.agents/skills`, where
+they look for it.
+
 ## Supported browsers
 
 CI runs the full end-to-end suite on:

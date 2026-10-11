@@ -6,6 +6,7 @@
 
 pub mod browser;
 pub mod cdp;
+pub mod mcp;
 pub mod proc;
 pub mod protocol;
 pub mod session;

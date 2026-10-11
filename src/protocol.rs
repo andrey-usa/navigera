@@ -431,7 +431,7 @@ const DEFAULT_ATTACH: &str = "chrome";
 
 /// True when `word` is a command name (so it can't be `--attach`'s value).
 fn is_command_word(word: &str) -> bool {
-    matches!(word, "serve" | "skill" | "install-skill" | "help") || OPS.iter().any(|(name, _, _)| *name == word)
+    matches!(word, "serve" | "mcp" | "skill" | "install-skill" | "help") || OPS.iter().any(|(name, _, _)| *name == word)
 }
 
 /// Pull `--attach [value]` out of argv; a bare `--attach` means `chrome`.
@@ -482,6 +482,8 @@ pub struct ParsedArgs {
     pub start: bool,
     /// A command that runs without a browser.
     pub local: Option<Local>,
+    /// `mcp`: serve the Model Context Protocol on stdin/stdout.
+    pub mcp: bool,
 }
 
 /// One op's CLI documentation: (name, synopsis, what it does).
@@ -512,6 +514,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("tab-close", "[<index>]", "close a tab (default: active)"),
     ("dialog", "--accept [--prompt-text <t>] | --dismiss", "how alert/confirm/prompt are answered (default: accept; every dialog is reported)"),
     ("quit", "[--close-browser]", "close the browser and the session server; attached (--attach/--profile): only disconnect, unless --close-browser"),
+    ("mcp", "[--headed] [--profile <name> | --attach [<where>]]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
     ("skill", "", "print the agent skill (usage guide) for this version"),
     ("install-skill", "[--dir <skills dir>] [--claude] [--global]", "install the skill for agents (default ./.agents/skills; --claude: ./.claude/skills)"),
 ];
@@ -821,7 +824,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                     .map_err(|_| ArgsError::Invalid(format!("--idle-timeout-s must be whole seconds, got {raw:?}")))?;
             }
             "-V" | "--version" => {
-                return Ok(ParsedArgs { config, command: None, start: false, local: Some(Local::Version) })
+                return Ok(ParsedArgs { config, command: None, start: false, local: Some(Local::Version), mcp: false })
             }
             "-h" | "--help" => return Err(ArgsError::Help(usage(&program))),
             other => {
@@ -848,7 +851,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         }
     }
     consume_globals(&mut args, &mut config).map_err(ArgsError::Invalid)?;
-    let parsed = |config, command, start, local| Ok(ParsedArgs { config, command, start, local });
+    let parsed = |config, command, start, local| Ok(ParsedArgs { config, command, start, local, mcp: false });
 
     match op.as_str() {
         "serve" | "start" => {
@@ -859,6 +862,15 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 return invalid(format!("unexpected argument {extra:?} after {op}"));
             }
             return parsed(config, None, op == "start", None);
+        }
+        "mcp" => {
+            if let Some(raw) = str_flag(&mut args, "--timeout-ms")? {
+                config.timeout_ms = parse_f64(&raw, "--timeout-ms").map_err(ArgsError::Invalid)?;
+            }
+            if let Some(extra) = args.front() {
+                return invalid(format!("unexpected argument {extra:?} after mcp"));
+            }
+            return Ok(ParsedArgs { config, command: None, start: false, local: None, mcp: true });
         }
         "skill" => return parsed(config, None, false, Some(Local::Skill)),
         "install-skill" => {

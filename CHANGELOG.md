@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `navigera mcp`: a Model Context Protocol server on stdio for IDE agents
+  (Cline, Roo Code, Kilo Code, Continue, VS Code, Claude Desktop, Cursor).
+  18 tools named after Playwright MCP's, `snapshot: true` on every action,
+  `browser_run` for several steps in one call; the browser starts on the first
+  tool call.
+
 ## [0.4.0] - 2026-10-09
 
 First public release.
