@@ -10,6 +10,7 @@ Your own browser: `navigera -s me start --attach` connects to the user's running
 
 ## Docs
 
+- [MCP server](https://raw.githubusercontent.com/andrey-usa/navigera/master/docs/navigera.md): `navigera mcp` for Cline, Roo Code, Kilo Code, Continue, VS Code, Claude Desktop and Cursor; client configuration snippets
 - [Agent skill (usage guide)](https://raw.githubusercontent.com/andrey-usa/navigera/master/skills/navigera/SKILL.md): the loop, reading `ax`, every command, error recovery
 - [Command and protocol reference](https://raw.githubusercontent.com/andrey-usa/navigera/master/docs/navigera.md): CLI flags, JSON-lines serve protocol, sessions, engines
 - [README](https://raw.githubusercontent.com/andrey-usa/navigera/master/README.md): install, supported browsers, benchmarks, agent eval
