@@ -16,10 +16,10 @@ include = ["/src/**", "/skills/**", "/tests/**", "/bench/site/server.py", "/Carg
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "net", "macros"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
 tempfile = "3"
-base64 = "0.21"
+base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
