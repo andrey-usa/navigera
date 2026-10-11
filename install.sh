@@ -7,6 +7,10 @@
 # Env: NAVIGERA_INSTALL_DIR (default ~/.local/bin), NAVIGERA_VERSION
 # (a tag such as v0.2.0; default: latest release), NAVIGERA_GIT_REV
 # (commit for the source build; default: master).
+#
+# The archive is checked against the SHA-256 the release publishes next to
+# it; a mismatch or a missing checksum stops the install
+# (NAVIGERA_NO_VERIFY=1 skips the check).
 set -eu
 
 REPO="andrey-usa/navigera"
@@ -33,7 +37,34 @@ mkdir -p "$DIR"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-if [ -n "$target" ] && curl -fsSL --retry 3 -o "$tmp/navigera.tar.gz" "$url" 2>/dev/null; then
+fetch() { curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$2" "$1"; }
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+  else return 1
+  fi
+}
+
+verify() {
+  [ "${NAVIGERA_NO_VERIFY:-}" = 1 ] && return 0
+  if ! fetch "$url.sha256" "$tmp/navigera.tar.gz.sha256" 2>/dev/null; then
+    echo "error: no checksum published at $url.sha256 (NAVIGERA_NO_VERIFY=1 to install anyway)" >&2
+    exit 1
+  fi
+  want=$(cut -d' ' -f1 < "$tmp/navigera.tar.gz.sha256")
+  if ! got=$(sha256 "$tmp/navigera.tar.gz"); then
+    echo "error: need sha256sum or shasum to verify the download (NAVIGERA_NO_VERIFY=1 to skip)" >&2
+    exit 1
+  fi
+  if [ "$want" != "$got" ]; then
+    echo "error: checksum mismatch for $url (want $want, got $got)" >&2
+    exit 1
+  fi
+}
+
+if [ -n "$target" ] && fetch "$url" "$tmp/navigera.tar.gz" 2>/dev/null; then
+  verify
   tar -xzf "$tmp/navigera.tar.gz" -C "$tmp"
   install -m 0755 "$tmp/navigera" "$DIR/navigera"
   echo "installed $DIR/navigera ($target, $VERSION)"

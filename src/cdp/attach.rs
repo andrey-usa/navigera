@@ -184,7 +184,7 @@ pub fn ensure_profile_browser(exe: &str, dir: &Path, headless: bool) -> Result<S
     if headless {
         cmd.arg("--headless=new");
     }
-    if running_as_root() {
+    if crate::proc::running_as_root() {
         // Chrome refuses to start its sandbox as root (containers, CI).
         cmd.arg("--no-sandbox");
     }
@@ -216,20 +216,6 @@ pub fn ensure_profile_browser(exe: &str, dir: &Path, headless: bool) -> Result<S
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-}
-
-#[cfg(unix)]
-fn running_as_root() -> bool {
-    extern "C" {
-        fn geteuid() -> u32;
-    }
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { geteuid() == 0 }
-}
-
-#[cfg(not(unix))]
-fn running_as_root() -> bool {
-    false
 }
 
 #[cfg(test)]

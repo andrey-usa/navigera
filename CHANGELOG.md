@@ -14,6 +14,18 @@ All notable changes to this project are documented here. The format follows
   `browser_run` for several steps in one call; the browser starts on the first
   tool call.
 
+### Security
+
+- Chrome's renderer sandbox is on by default. `--no-sandbox` is added only as
+  root, with `NAVIGERA_NO_SANDBOX=1`, or when Chrome reports that the machine
+  has no usable sandbox (with a warning on stderr).
+- Named sessions live in a private per-user directory
+  (`$XDG_RUNTIME_DIR/navigera` or `$TMPDIR/navigera-<uid>`, mode 0700) instead
+  of `/tmp/navigera-<name>.sock`, so another user can't squat a session's
+  socket; the log is 0600 and doesn't follow symlinks.
+- `install.sh` and `install.ps1` verify the release's SHA-256 checksum.
+- The skill tells agents to treat page text as data, not instructions.
+
 ## [0.4.0] - 2026-10-09
 
 First public release.
