@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `find <description>`, `check <question>` and `--find <description>` on
+  element commands: element choice and yes/no questions about the page,
+  answered by a System One decision model (TypeSafe Jev) when
+  `TYPESAFE_API_KEY` or `NAVIGERA_DECIDER_URL` is set. MCP gains
+  `browser_find`, `browser_check` and a `find` target in that case only.
+  Typed values are redacted from what is sent.
 - `navigera mcp`: a Model Context Protocol server on stdio for IDE agents
   (Cline, Roo Code, Kilo Code, Continue, VS Code, Claude Desktop, Cursor).
   18 tools named after Playwright MCP's, `snapshot: true` on every action,

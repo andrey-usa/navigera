@@ -22,7 +22,7 @@ mod events;
 mod page;
 mod procjob;
 mod profile;
-mod transport;
+pub(crate) mod transport;
 
 pub use browser::{Browser, LaunchOptions};
 pub use events::DialogPolicy;

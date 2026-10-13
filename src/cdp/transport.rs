@@ -516,7 +516,7 @@ pub(crate) fn http_get_body(host: &str, port: u16, path: &str) -> Result<String>
 /// The response body once `buf` holds all of it (by Content-Length or
 /// chunked encoding); `None` while more bytes are needed or the framing is
 /// unknown (then the caller reads to EOF).
-fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
     let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
     let head = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
     let body = &buf[header_end + 4..];

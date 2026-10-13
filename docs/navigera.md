@@ -64,6 +64,8 @@ Selector and text targets auto-wait (default 5 s) for the element to appear.
 | `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--ms <n>`; `--timeout-ms` | state + `waited_ms` |
 | `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value (an arrow function is called; promises are awaited) |
 | `text` | `--selector <css>` | `textContent` or `null` |
+| `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
+| `check` | `<yes/no question>` | `{question, yes, answer}`: the probability the answer is yes |
 | `title` / `url` | — | string / state |
 | `back` / `forward` / `reload` | — | state |
 | `screenshot` | `[<path>]` or `--path`; `--full-page` | `{path, bytes}` |
@@ -149,6 +151,41 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 - **No `Runtime.enable`:** it is the best-known automation fingerprint, and
   nothing here needs it.
 - **Logs:** launch details go to stderr only with `NAVIGERA_VERBOSE=1`.
+
+## Decisions: `find` and `check`
+
+Two small decisions an agent otherwise spends a page snapshot and an LLM turn
+on can go to a System One model instead: TypeSafe's
+[Jev](https://docs.typesafe.ai), which answers typed questions (a choice
+among options, a yes/no probability) in a few hundred milliseconds and bills
+input tokens only. Opt-in: nothing is sent anywhere unless one of these is set
+where the session (or `navigera mcp`) starts:
+
+| variable | |
+|---|---|
+| `TYPESAFE_API_KEY` | TypeSafe's API, `https://api.typesafe.ai/v1/systemone` |
+| `NAVIGERA_DECIDER_URL` | an endpoint with the same API (a LiteLLM proxy's `/typesafe/v1/systemone`, a mock); `http://` directly, `https://` through `curl` |
+| `NAVIGERA_DECIDER_MODEL` | model id (default `jev-latest`) |
+| `NAVIGERA_FIND_MIN` | probability `--find` needs before it acts (default 0.5) |
+
+- `find "add the brass valve to the cart"` returns the chosen element's ref,
+  its line, the probability and the three runners-up. Every element with a
+  ref is an option, described by its line and the containers around it (the
+  card's heading, a dialog's name), so twelve "Add to cart" buttons are told
+  apart. Large pages are split into choices of 200 and the winners asked
+  again.
+- Element ops take `--find "<description>"` in place of a ref (`click --find
+  "accept the cookies"`, `fill --find "email field" a@b.c`): the op runs on
+  the chosen element and its result carries `found`. Below `NAVIGERA_FIND_MIN`
+  the op fails and lists the candidates, so a guess is never acted on.
+- `check "Did the order go through?"` returns the probability of yes. The
+  page goes as its text tree without refs; near 0.5 means unsure.
+
+What leaves the machine: the page's tree, with what was typed into text
+fields replaced by `(filled)` (password fields are masked by the browser
+already). MCP clients see `browser_find`, `browser_check` and a `find` target
+only when a decider is configured. `docs/multi-model.md` is the design and the
+measurements.
 
 ## Serve protocol (programs)
 

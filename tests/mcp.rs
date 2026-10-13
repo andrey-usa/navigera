@@ -30,8 +30,17 @@ struct Client {
 
 impl Client {
     fn start() -> Client {
+        Client::start_with(&[])
+    }
+
+    /// With these environment variables; a decider is configured only when
+    /// they say so.
+    fn start_with(env: &[(&str, &str)]) -> Client {
         let mut child = Command::new(tool_exe())
             .arg("mcp")
+            .env_remove("TYPESAFE_API_KEY")
+            .env_remove("NAVIGERA_DECIDER_URL")
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -191,4 +200,29 @@ fn mcp_drives_a_page() {
 
     drop(c.stdin);
     assert!(c.child.wait().unwrap().success(), "EOF shuts the server and its browser down");
+}
+
+/// The decision tools exist only when a decider is configured, so the
+/// default list stays the one agents know.
+#[test]
+fn decision_tools_appear_only_with_a_decider() {
+    let names = |env: &[(&str, &str)]| {
+        let mut c = Client::start_with(env);
+        c.request(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t"}}),
+        );
+        let tools = c.request("tools/list", json!({}))["result"]["tools"].clone();
+        let _ = c.child.kill();
+        tools
+    };
+    let plain = names(&[]);
+    let deciding = names(&[("NAVIGERA_DECIDER_URL", "http://127.0.0.1:9/v1/systemone")]);
+    let has = |tools: &Value, name: &str| tools.as_array().unwrap().iter().any(|t| t["name"] == name);
+    assert!(!has(&plain, "browser_find") && !has(&plain, "browser_check"));
+    assert!(has(&deciding, "browser_find") && has(&deciding, "browser_check"));
+    let click =
+        |tools: &Value| tools.as_array().unwrap().iter().find(|t| t["name"] == "browser_click").unwrap().clone();
+    assert!(click(&plain)["inputSchema"]["properties"].get("find").is_none());
+    assert!(click(&deciding)["inputSchema"]["properties"].get("find").is_some());
 }
