@@ -76,7 +76,7 @@ Selector and text targets auto-wait (default 5 s) for the element to appear.
 | `dialog` | `--accept [--prompt-text t]` or `--dismiss` | `{dialogs: "accept"\|"dismiss"}` |
 | `quit` (`close`) | — | `{bye: true}`; a session server and its browser exit |
 | `skill` | — | prints the agent guide (SKILL.md) |
-| `install-skill` | `[--dir <skills dir>] [--claude] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`) |
+| `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
 
 ### The `ax` tree
 
@@ -292,6 +292,9 @@ mcpServers:
 ```
 
 From a shell: `cline mcp install navigera -- navigera mcp`, `claude mcp add navigera -- navigera mcp`.
+Without a local install, use `"command": "npx", "args": ["-y", "navigera", "mcp"]`
+(the npm package carries the binary). The server is published to the MCP
+Registry as `io.github.andrey-usa/navigera` (`server.json`).
 
 ## Browsers and engines
 
