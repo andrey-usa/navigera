@@ -14,6 +14,11 @@ All notable changes to this project are documented here. The format follows
   `TYPESAFE_API_KEY` or `NAVIGERA_DECIDER_URL` is set. MCP gains
   `browser_find`, `browser_check` and a `find` target in that case only.
   Typed values are redacted from what is sent.
+- `server.json` for the MCP Registry (`io.github.andrey-usa/navigera`; the npm
+  package carries the matching `mcpName`), published by the release workflow
+  when `PUBLISH_MCP_REGISTRY` is set.
+- `install-skill --continue` (`.continue/skills`); `--global` finds the home
+  directory on Windows too.
 - `navigera mcp`: a Model Context Protocol server on stdio for IDE agents
   (Cline, Roo Code, Kilo Code, Continue, VS Code, Claude Desktop, Cursor).
   18 tools named after Playwright MCP's, `snapshot: true` on every action,

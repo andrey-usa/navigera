@@ -209,10 +209,11 @@ jobs:
           DESCRIPTION: ${{ steps.meta.outputs.description }}
           KEYWORDS: ${{ steps.meta.outputs.keywords }}
         run: |
+          mcp_name=$(python3 -c "import json; print(json.load(open('server.json'))['name'])")
           for kind in npm wheel homebrew scoop; do
             python3 packaging/package.py "$kind" --name navigera --version "$VERSION" --dist dist --out pkg \
               --repo "$GITHUB_REPOSITORY" --description "$DESCRIPTION" --keywords "$KEYWORDS" \
-              --readme release-ref/README.md --license-file release-ref/LICENSE
+              --readme release-ref/README.md --license-file release-ref/LICENSE --mcp-name "$mcp_name"
           done
           for dir in pkg/npm/*/; do (cd "$dir" && npm pack --silent); done
       - name: Install and run them
@@ -283,6 +284,43 @@ jobs:
               (cd "$dir" && npm publish --provenance --access public)
             fi
           done
+
+  # The official MCP Registry (registry.modelcontextprotocol.io), which MCP
+  # clients and directories list servers from. After npm: the registry checks
+  # that the npm package claims the server's name (mcpName).
+  mcp-registry:
+    needs: [plan, packages, npm]
+    if: needs.plan.outputs.publish == 'true' && vars.PUBLISH_MCP_REGISTRY == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PUBLISHER: v1.8.1
+      PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install mcp-publisher (pinned and checksummed)
+        run: |
+          curl -sSfL --proto '=https' -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/$PUBLISHER/mcp-publisher_linux_amd64.tar.gz"
+          echo "$PUBLISHER_SHA256  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+      - name: Publish this version
+        env:
+          VERSION: ${{ needs.packages.outputs.version }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          server = json.load(open("server.json"))
+          server["version"] = os.environ["VERSION"]
+          for package in server["packages"]:
+              package["version"] = os.environ["VERSION"]
+          json.dump(server, open("server.json", "w"), indent=2)
+          EOF
+          ./mcp-publisher validate
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
 
   pypi:
     needs: [plan, publish, packages]

@@ -541,7 +541,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("quit", "[--close-browser]", "close the browser and the session server; attached (--attach/--profile): only disconnect, unless --close-browser"),
     ("mcp", "[--headed] [--profile <name> | --attach [<where>]]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
     ("skill", "", "print the agent skill (usage guide) for this version"),
-    ("install-skill", "[--dir <skills dir>] [--claude] [--global]", "install the skill for agents (default ./.agents/skills; --claude: ./.claude/skills)"),
+    ("install-skill", "[--dir <skills dir>] [--claude | --continue] [--global]", "install the skill for agents (default ./.agents/skills, read by Cline and Kilo; --claude: ./.claude/skills; --continue: ./.continue/skills)"),
 ];
 
 /// Help text for `--help` / argument errors.
@@ -911,13 +911,22 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         "skill" => return parsed(config, None, false, Some(Local::Skill)),
         "install-skill" => {
             let claude = extract_present(&mut args, "--claude");
+            let continue_ = extract_present(&mut args, "--continue");
             let global = extract_present(&mut args, "--global");
             let dir = match str_flag(&mut args, "--dir")? {
                 Some(d) => d,
                 None => {
-                    let base = if claude { ".claude/skills" } else { ".agents/skills" };
+                    // Cline and Kilo read .agents/skills, Claude Code
+                    // .claude/skills, Continue .continue/skills.
+                    let base = match (claude, continue_) {
+                        (true, _) => ".claude/skills",
+                        (false, true) => ".continue/skills",
+                        (false, false) => ".agents/skills",
+                    };
                     if global {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                        let home = std::env::var("HOME")
+                            .or_else(|_| std::env::var("USERPROFILE"))
+                            .unwrap_or_else(|_| ".".into());
                         format!("{home}/{base}")
                     } else {
                         base.to_string()
