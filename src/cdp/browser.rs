@@ -426,10 +426,17 @@ impl Browser {
     /// the browser died (at launch or mid-session).
     pub fn death_report(&self) -> String {
         let status = self.exit_status().unwrap_or_else(|| "no exit status yet".into());
-        match self.stderr.as_ref().map(|s| s.tail()).filter(|t| !t.is_empty()) {
-            Some(tail) => format!("exited: {status}; its stderr ends with:\n{tail}"),
-            None => format!("exited: {status}"),
+        let tail = self.stderr.as_ref().map(|s| s.tail()).filter(|t| !t.is_empty());
+        let fatal = self.stderr.as_ref().and_then(|s| s.first_fatal());
+        let fatal = fatal.filter(|f| !tail.as_ref().is_some_and(|t| t.contains(f.as_str())));
+        let mut report = format!("exited: {status}");
+        if let Some(fatal) = fatal {
+            report.push_str(&format!("; it logged: {fatal}"));
         }
+        if let Some(tail) = tail {
+            report.push_str(&format!("; its stderr ends with:\n{tail}"));
+        }
+        report
     }
 
     pub fn exit_status(&self) -> Option<String> {

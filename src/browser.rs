@@ -408,7 +408,13 @@ impl BrowserSession {
                 )?;
                 // A browser that cannot start its sandbox dies before the
                 // first target: probe it here so the fallback below sees it.
-                browser.tab_targets().map_err(|e| anyhow::anyhow!("{e:#} ({})", browser.death_report()))?;
+                if let Err(e) = browser.tab_targets() {
+                    let report = browser.death_report();
+                    // Reaped and its profile deleted before any retry, so a
+                    // fallback launch leaves no zombie or directory behind.
+                    browser.close();
+                    anyhow::bail!("{e:#} ({report})");
+                }
                 Ok(browser)
             };
             let flags = chrome_flags();
