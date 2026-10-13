@@ -33,11 +33,23 @@ and confirm irreversible actions (payments, deletions, messages) against the use
 
 /// The JSON Schema fragment every element tool shares.
 fn target_props() -> Value {
-    json!({
+    let mut props = json!({
         "ref": {"type": ["integer", "string"], "description": "Element ref from browser_snapshot, e.g. 12"},
         "selector": {"type": "string", "description": "CSS selector (first match), instead of ref"},
         "text": {"type": "string", "description": "Visible text or label of the element, instead of ref"},
-    })
+    });
+    if deciding() {
+        props["find"] =
+            json!({"type": "string", "description": "Or describe it: a decision model picks it, failing when unsure"});
+    }
+    props
+}
+
+/// `browser_find`, `browser_check` and `find` targets exist only when a
+/// decision model is configured (`decide`), so the default tool list stays
+/// what every agent already knows.
+fn deciding() -> bool {
+    crate::decide::Decider::from_env().is_some()
 }
 
 fn snapshot_prop() -> Value {
@@ -71,7 +83,7 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 /// The tool list, in the order agents usually need them.
 fn tools() -> Vec<Value> {
     let action = |extra: Value| props(&[target_props(), extra, json!({"snapshot": snapshot_prop()})]);
-    vec![
+    let mut list = vec![
         tool(
             "browser_navigate",
             "Open a URL in the active tab and wait for it to load. `example.com` gets https://, `localhost:3000` http://.",
@@ -223,7 +235,25 @@ fn tools() -> Vec<Value> {
             object(Map::new(), &[]),
             false,
         ),
-    ]
+    ];
+    if deciding() {
+        list.push(tool(
+            "browser_find",
+            "Which element a description means, picked by a fast decision model from the whole page: returns its \
+             ref, the probability, and the runners-up. Cheaper than reading a snapshot to find one element.",
+            object(props(&[json!({"description": {"type": "string"}})]), &["description"]),
+            true,
+        ));
+        list.push(tool(
+            "browser_check",
+            "The probability that the answer to a yes/no question about the page is yes (\"Did the order go \
+             through?\", \"Is an error shown?\"), from a fast decision model. Cheaper than reading a snapshot \
+             to verify one thing; near 0.5 means unsure, so look.",
+            object(props(&[json!({"question": {"type": "string"}})]), &["question"]),
+            true,
+        ));
+    }
+    list
 }
 
 /// A tool call translated to serve-protocol ops: the commands to run in order,
@@ -281,6 +311,13 @@ fn plan(name: &str, arguments: &Value) -> Result<Plan, String> {
         "browser_hover" => single("hover", args),
         "browser_scroll" => single("scroll", args),
         "browser_wait_for" => single("wait", args),
+        "browser_find" => {
+            if let Some(d) = args.remove("description") {
+                args.insert("what".into(), d);
+            }
+            Plan { steps: vec![op("find", args)], snapshot: false }
+        }
+        "browser_check" => Plan { steps: vec![op("check", args)], snapshot: false },
         "browser_evaluate" => single("eval", args),
         "browser_screenshot" => single("screenshot", args),
         "browser_tabs" => {
