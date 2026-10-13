@@ -209,6 +209,16 @@ impl StderrTail {
         let start = joined.len().saturating_sub(800);
         joined[joined.ceil_char_boundary(start)..].to_string()
     }
+
+    /// The first fatal error Chrome logged (`[pid:tid:time:FATAL:file.cc:N]
+    /// message`): the reason it died, which the stack dump that follows a
+    /// crash pushes out of `tail`.
+    pub fn first_fatal(&self) -> Option<String> {
+        let b = self.0.lock().ok()?;
+        let text = String::from_utf8_lossy(&b);
+        let line = text.lines().find(|l| l.contains(":FATAL:"))?;
+        Some(line.chars().take(400).collect())
+    }
 }
 
 #[cfg(unix)]
@@ -544,6 +554,20 @@ fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_crash_keeps_its_fatal_line_past_the_stack_dump() {
+        let mut log = String::from("[1:1:1011/030707.3:FATAL:zygote_host_impl_linux.cc:130] No usable sandbox! ...\n");
+        log.push_str("Received signal 6\n");
+        for i in 0..30 {
+            log.push_str(&format!(" r{i}: 0000000000000006 r13: 0000235000148000\n"));
+        }
+        log.push_str("[end of stack trace]\n");
+        let stderr = StderrTail(Arc::new(Mutex::new(log.into_bytes())));
+        assert!(!stderr.tail().contains("No usable sandbox"));
+        assert!(stderr.first_fatal().is_some_and(|f| f.contains("No usable sandbox")));
+        assert_eq!(StderrTail(Arc::default()).first_fatal(), None);
+    }
+
     use super::*;
 
     #[test]

@@ -215,10 +215,6 @@ jobs:
           NAVIGERA_CDP_TRACE: ${{ runner.temp }}/cdp-trace.jsonl
           NAVIGERA_REQUIRE_BROWSER: "1"
           NAVIGERA_CHROME_LOG: ${{ runner.temp }}/chrome.log
-          # GitHub-hosted runners block unprivileged user namespaces (AppArmor),
-          # so Chrome cannot start its sandbox there. Ephemeral VMs: --no-sandbox
-          # is the standard, safe choice in CI only.
-          NAVIGERA_NO_SANDBOX: "1"
         run: |
           set -o pipefail
           "$CHROME_BIN" --version || true
