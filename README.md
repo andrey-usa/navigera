@@ -132,6 +132,34 @@ shell commands (Kilo, Cline CLI, Gemini CLI, Codex) can use the CLI and the
 skill directly: `navigera install-skill` writes it to `.agents/skills`, where
 they look for it.
 
+## Decisions by a fast model (optional)
+
+Two small decisions an agent otherwise spends a page tree and an LLM turn on,
+*which element* and *did it work*, can go to a System One model:
+TypeSafe's [Jev](https://docs.typesafe.ai) when `TYPESAFE_API_KEY` is set, or
+any endpoint with the same API through `NAVIGERA_DECIDER_URL`.
+
+```bash
+navigera -s work click --find "accept the cookies"   # acts on the element the model picks
+navigera -s work check "Is an error message shown?"  # {"yes":0.02,"answer":false}
+```
+
+`find` returns the ref, its probability and the runners-up; below 0.5,
+`--find` refuses and lists the candidates instead of acting. `start` reports
+`"decider"` when one is configured, and MCP clients get `browser_find` and
+`browser_check` only then. Nothing leaves the machine otherwise; typed values
+are sent as `(filled)`.
+
+**Measured (2026-10-14).** On 39 decisions with known answers, Jev picked
+25/25 elements and answered 14/14 yes/no questions (151 ms median; $0.0086
+for all 39). Gemini 3.5 Flash-Lite reading the same tree got 23/25 and 14/14
+(724 ms median) and once chose the button that text planted in the page
+pointed at. In the agent eval, Gemini CLI told to prefer `--find` on two large
+reference pages (56–95 KB trees) used about half the Gemini tokens of the runs
+that read the tree (114–119K against a median of 250K; small samples).
+Unprompted, it read the tree and never used the decider. Details and caveats:
+[docs/multi-model.md](docs/multi-model.md).
+
 ## Supported browsers
 
 CI runs the full end-to-end suite on:
@@ -289,6 +317,16 @@ the site, the success checks and the harness with known-good navigera
 command plans. Runs that die on a model quota or outage are reported as
 **⚠ infra**, not counted as a tool failure.
 
+`navigera+jev` runs navigera with the decider configured, and
+`navigera+jev-told` also asks for `--find` / `check` in the prompt; the
+TypeSafe key (`TYPESAFE_API_KEY` in `main`) stays in a local relay that the
+agent's shell never sees, and each run records the decider's calls and
+tokens. `decisions: true` adds the Jev-against-Gemini decision comparison
+above (`bench/decide/compare.py`).
+
+**0.4.1 (2026-10-14)**, Gemini 3.5 Flash-Lite, skilled: navigera passed 10/10
+runs of the five tasks (2 each), median 7 model turns and 103K tokens.
+
 **0.3.0 vs 0.2.1, same model, launched together** (purchase + account, 2
 runs each, all passed): `ax` now waits for data a page is still fetching,
 and the skill teaches chaining sure steps in one shell call. Median model
@@ -318,11 +356,14 @@ CI results, A/B benchmarks and releasing.
 - `src/cdp/`: from-scratch CDP engine: pipe/WebSocket transport, JSON-RPC client (`NAVIGERA_CDP_TRACE`), page ops, `ax.rs` (snapshot tree), `events.rs` (dialogs, popups, navigation), `procjob.rs` (Windows job object)
 - `src/session.rs`: named sessions: socket server (Unix socket; loopback TCP + token on Windows), client, detached `start`
 - `src/cdp/attach.rs`: `--attach` (your running browser) and `--profile` (persistent navigera browser)
+- `src/mcp.rs`: `navigera mcp`, the Model Context Protocol server on stdio
+- `src/decide.rs`: `find` / `check`: the decision model's client and how page elements become options
 - `src/timing.rs`: `NAVIGERA_TIMINGS=1` launch/close phase timings on stderr
 - `tests/`: browser e2e: serve protocol, sessions, and the Acme Supply scenario
 - `bench/site/server.py`: Acme Supply, a deterministic local shop (SPA, iframes, shadow DOM, dialogs, popups, login, upload)
 - `bench/ladder/`: driver ladder and agent-tool benchmark (`publish.json` per run, `gen_readme.py`)
 - `bench/agent-eval/`: Gemini CLI agent eval across navigera, playwright-cli and agent-browser
+- `bench/decide/`: decision benchmark (`compare.py`), TypeSafe relay (`relay.py`) and a stand-in for runs without a key (`mock_jev.py`)
 - `tools/`: `cdp_check.py` (protocol correctness), `protocol_dump.sh`, `cft_matrix.py` (Chrome version matrix)
 - `skills/navigera/SKILL.md`: the agent guide (compiled into the binary: `navigera skill`)
 - `.github/workflows/`: `ci.yml` (tests, Chrome matrix, protocol check), `bench.yml`, `agent-eval.yml`, `release.yml`, `chrome-bisect.yml`, `vendor.yml`
