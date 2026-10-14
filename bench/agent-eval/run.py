@@ -321,6 +321,8 @@ def run_gemini(prompt: str, work: Path, env: dict, args) -> dict:
             requests += 1
             after_tools = False
     errors = [e.get("message", "") for e in events if e.get("type") == "error"]
+    # Whether the agent saw `start` report a decider (navigera+jev runs).
+    decider_seen = any('"decider"' in str(e.get("output") or "") for e in events if e.get("type") == "tool_result")
     return {
         "exit": proc.returncode, "timed_out": timed_out, "wall_s": round(wall, 1),
         "text": text, "shell_commands": shells, "shell_steps": shell_steps, "tools_used": tool_names,
@@ -330,6 +332,7 @@ def run_gemini(prompt: str, work: Path, env: dict, args) -> dict:
         "tokens_total": stats.get("total_tokens"), "tokens_cached": stats.get("cached"),
         "tool_calls": stats.get("tool_calls"),
         "errors": errors[-3:], "stderr_tail": stderr_tail(err) if proc.returncode else "",
+        "decider_seen": decider_seen,
     }
 
 
@@ -559,11 +562,12 @@ def render(mode: str, agent: str, model: str, runs: list, tools: list, tasks: li
         lines.append(f"| {task} | " + " | ".join(cells) + " |")
     deciding = [t for t in tools if any("decider_calls" in r for r in runs if label(r) == t)]
     if deciding:
-        lines += ["", "| tool | runs that used find/check | find/check commands | decider calls | "
-                  "decider input tokens | decider errors |", "|---|---|---|---|---|---|"]
+        lines += ["", "| tool | runs that saw the decider | runs that used find/check | find/check commands | "
+                  "decider calls | decider input tokens | decider errors |", "|---|---|---|---|---|---|---|"]
         for tool in deciding:
             rs = [r for r in runs if label(r) == tool and not r.get("infra")]
-            lines.append(f"| `{tool}` | {sum(1 for r in rs if r.get('decision_commands'))}/{len(rs)} | "
+            lines.append(f"| `{tool}` | {sum(1 for r in rs if r.get('decider_seen'))}/{len(rs)} | "
+                         f"{sum(1 for r in rs if r.get('decision_commands'))}/{len(rs)} | "
                          f"{sum(r.get('decision_commands') or 0 for r in rs)} | "
                          f"{sum(r.get('decider_calls') or 0 for r in rs)} | "
                          f"{sum(r.get('decider_tokens') or 0 for r in rs)} | "
