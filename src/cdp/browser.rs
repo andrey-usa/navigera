@@ -425,6 +425,20 @@ impl Browser {
     /// Exit status plus the browser's last stderr lines, for errors when
     /// the browser died (at launch or mid-session).
     pub fn death_report(&self) -> String {
+        // The pipe closes as soon as the browser dies, often before the drain
+        // thread has read its last lines, and those say why ("No usable
+        // sandbox!", which the launch fallback looks for). Wait for the end
+        // of the stream while the browser is dying; a browser still running
+        // after 50 ms is not dying, and its error needs no stderr.
+        if let Some(stderr) = &self.stderr {
+            let started = std::time::Instant::now();
+            while !stderr.closed() && started.elapsed() < Duration::from_millis(300) {
+                if started.elapsed() > Duration::from_millis(50) && self.exit_status().is_none() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         let status = self.exit_status().unwrap_or_else(|| "no exit status yet".into());
         let tail = self.stderr.as_ref().map(|s| s.tail()).filter(|t| !t.is_empty());
         let fatal = self.stderr.as_ref().and_then(|s| s.first_fatal());

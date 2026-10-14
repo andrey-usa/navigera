@@ -75,13 +75,17 @@ for r in chrome + exp:
         f"{mem(s['browser_pss_mb'])} |"
     )
 date = doc["generated_utc"][:10]
-env = doc["env"].replace("**", "").replace("Env: ", "")
+env = doc["env"].replace("**", "").replace("Env: ", "").replace("Chrome: Google Chrome ", "Chrome ")
 lines += [
     "",
-    f"Run [{doc['run_id']}](https://github.com/andrey-usa/navigera/actions/runs/{doc['run_id']})",
-    f"({date}, GitHub-hosted `ubuntu-latest`: {env}). Every driver produced",
-    "byte-identical extracted data and counts (correctness gate); wall is best-of-N.",
-    "GitHub runners vary between runs, so compare rows within one run.",
+    # No link to the run: the ladder may run in a fork or a private mirror,
+    # where the link would not resolve for readers.
+    f"Measured {date} on GitHub-hosted `ubuntu-latest` ({env}).",
+    "Every driver produced byte-identical extracted data and counts (correctness",
+    "gate); wall is best-of-N.",
+    "The ladder reruns weekly ([`bench.yml`](.github/workflows/bench.yml)) against",
+    "the latest contender releases. GitHub runners vary between runs, so compare",
+    "rows within one run.",
     "",
     "**How driver CPU/RSS are measured.** Each driver's *own* `utime+stime`,",
     "read from its zombie's `/proc/<pid>/stat` before reaping (`waitid` with",
@@ -143,15 +147,15 @@ if shell and serve and shell.get("cold") and serve.get("cold"):
         "",
     ]
 if ws and serve and ws.get("cold") and serve.get("cold"):
+    spread = serve["session"].get("runs_wall_s") or []
     lines += [
         "**CDP transport A/B** (same build and run): `--remote-debugging-pipe` (default on Linux/macOS)",
         f"vs a DevTools WebSocket port: cold start {serve['cold']['wall_s']:.2f}s vs {ws['cold']['wall_s']:.2f}s,",
         f"session {serve['session']['wall_s']:.2f}s vs {ws['session']['wall_s']:.2f}s"
         + (". No speed difference"
            if abs(serve['session']['wall_s'] / ws['session']['wall_s'] - 1) < 0.05
-           else (f", while the previous master (WebSocket) ran {baseline['cold']['wall_s']:.2f}s / "
-                 f"{baseline['session']['wall_s']:.2f}s on the same machine, so no real speed difference" if baseline
-                 else ", within run-to-run noise"))
+           else (f", within run-to-run noise (the pipe's {len(spread)} sessions took "
+                 f"{min(spread):.2f}–{max(spread):.2f}s)" if spread else ", within run-to-run noise"))
         + ": the WebSocket handshake itself is ~10 ms. The pipe is the default for two other reasons:",
         "it opens no TCP port that another local process could attach to, and Chrome exits when",
         "navigera dies (EOF on its command pipe), so a killed agent leaks no browser",

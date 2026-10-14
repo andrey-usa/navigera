@@ -105,6 +105,28 @@ fn no_sandbox_wanted(root: bool, env: Option<&str>) -> bool {
     root || env.is_some_and(|v| !v.trim().is_empty() && v.trim() != "0")
 }
 
+const NO_SANDBOX_WARNING: &str = "navigera: this machine can't give Chrome its sandbox, so it runs without one \
+     (pages are not isolated from your account). Fix: enable unprivileged user \
+     namespaces or Chrome's setuid helper; NAVIGERA_NO_SANDBOX=1 silences this.";
+
+/// Where navigera notes that `exe` could not have a sandbox on this machine.
+///
+/// Without the note every launch pays for one that fails first (about
+/// 350 ms on a GitHub runner with Chrome for Testing). It sits in the
+/// private session directory and is keyed by the binary's path, size and
+/// modification time and by the boot, so a Chrome update or a reboot (after
+/// which the machine may allow a sandbox) brings the attempt back.
+fn no_sandbox_note(exe: &str) -> Option<std::path::PathBuf> {
+    let meta = std::fs::metadata(exe).ok()?;
+    let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    let path = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.into());
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+    let key = format!("{}\n{}\n{modified}\n{}", path.display(), meta.len(), boot.trim());
+    // FNV-1a: the same across builds, which std's hasher does not promise.
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    Some(crate::session::session_dir().ok()?.join(format!("no-sandbox-{hash:016x}")))
+}
+
 /// Whether a launch failed because this machine can't give Chrome a
 /// sandbox (no unprivileged user namespaces, a setuid helper that isn't
 /// set up, an AppArmor policy that blocks the namespace).
@@ -417,16 +439,21 @@ impl BrowserSession {
                 }
                 Ok(browser)
             };
-            let flags = chrome_flags();
+            let mut flags = chrome_flags();
+            let note = no_sandbox_note(&exe);
+            if !flags.iter().any(|f| f == NO_SANDBOX) && note.as_ref().is_some_and(|n| n.exists()) {
+                eprintln!("{NO_SANDBOX_WARNING}");
+                flags.push(NO_SANDBOX.into());
+            }
             let browser = match launch(flags.clone()) {
                 Ok(browser) => browser,
                 Err(e) if !flags.iter().any(|f| f == NO_SANDBOX) && sandbox_unavailable(&format!("{e:#}")) => {
-                    eprintln!(
-                        "navigera: this machine can't give Chrome its sandbox, so it runs without one \
-                         (pages are not isolated from your account). Fix: enable unprivileged user \
-                         namespaces or Chrome's setuid helper; NAVIGERA_NO_SANDBOX=1 silences this."
-                    );
-                    let mut flags = flags;
+                    eprintln!("{NO_SANDBOX_WARNING}");
+                    if let Some(note) = &note {
+                        // The session directory is ours alone (0700, checked),
+                        // so nothing else can have planted a link here.
+                        let _ = std::fs::write(note, format!("{exe}\n"));
+                    }
                     flags.push(NO_SANDBOX.into());
                     launch(flags)?
                 }
