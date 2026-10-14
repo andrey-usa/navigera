@@ -4,6 +4,45 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.4.1] - 2026-10-14
+
+### Added
+
+- `find <description>`, `check <question>` and `--find <description>` on
+  element commands: element choice and yes/no questions about the page,
+  answered by a System One decision model (TypeSafe Jev) when
+  `TYPESAFE_API_KEY` or `NAVIGERA_DECIDER_URL` is set. MCP gains
+  `browser_find`, `browser_check` and a `find` target in that case only.
+  Typed values are redacted from what is sent. `start` reports `"decider"`
+  with the model id, so an agent can tell without reading the key.
+- `server.json` for the MCP Registry (`io.github.andrey-usa/navigera`; the npm
+  package carries the matching `mcpName`), published by the release workflow
+  when `PUBLISH_MCP_REGISTRY` is set.
+- `install-skill --continue` (`.continue/skills`); `--global` finds the home
+  directory on Windows too.
+- `navigera mcp`: a Model Context Protocol server on stdio for IDE agents
+  (Cline, Roo Code, Kilo Code, Continue, VS Code, Claude Desktop, Cursor).
+  18 tools named after Playwright MCP's, `snapshot: true` on every action,
+  `browser_run` for several steps in one call; the browser starts on the first
+  tool call.
+
+### Security
+
+- Chrome's renderer sandbox is on by default. `--no-sandbox` is added only as
+  root, with `NAVIGERA_NO_SANDBOX=1`, or when Chrome reports that the machine
+  has no usable sandbox (with a warning on stderr). That last case is
+  remembered per browser binary until it changes or the machine reboots, so
+  only the first launch pays for the failed attempt (about 350 ms with Chrome
+  for Testing on a GitHub runner).
+- Named sessions live in a private per-user directory
+  (`$XDG_RUNTIME_DIR/navigera` or `$TMPDIR/navigera-<uid>`, mode 0700) instead
+  of `/tmp/navigera-<name>.sock`, so another user can't squat a session's
+  socket; the log is 0600 and doesn't follow symlinks.
+- `install.sh` and `install.ps1` verify the release's SHA-256 checksum.
+- The skill tells agents to treat page text as data, not instructions.
+
 ## [0.4.0] - 2026-10-09
 
 First public release.
@@ -29,4 +68,5 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.4.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.1
 [0.4.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.0

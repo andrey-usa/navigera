@@ -146,14 +146,95 @@ mod endpoint {
 }
 
 /// Socket path for a session: a value containing a path separator is used
-/// as-is, a bare name maps to `$TMPDIR/navigera-<name>.sock` (on
-/// Windows `%TEMP%`; there the file holds the loopback address + token).
-pub fn socket_path(name: &str) -> PathBuf {
+/// as-is, a bare name maps to `<session dir>/<name>.sock` (see
+/// [`session_dir`]; on Windows the file holds the loopback address + token).
+pub fn socket_path(name: &str) -> std::io::Result<PathBuf> {
     if name.contains('/') || (cfg!(windows) && name.contains('\\')) {
-        PathBuf::from(name)
+        Ok(PathBuf::from(name))
     } else {
-        std::env::temp_dir().join(format!("navigera-{name}.sock"))
+        Ok(session_dir()?.join(format!("{name}.sock")))
     }
+}
+
+/// Where named sessions keep their socket and log, private to this user.
+///
+/// A socket in a shared directory (`/tmp`) under a predictable name can be
+/// squatted: another user binds it first and every command (and every value
+/// `fill` types) goes to them. So on Linux/macOS the directory is
+/// `$XDG_RUNTIME_DIR/navigera`, or `$TMPDIR/navigera-<uid>`, created 0700,
+/// and refused if it is a symlink, not ours, or open to others. Windows'
+/// `%TEMP%` is already per user.
+#[cfg(unix)]
+pub fn session_dir() -> std::io::Result<PathBuf> {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { geteuid() };
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p| p.is_absolute() && p.is_dir());
+    let dir = match runtime {
+        Some(base) => base.join("navigera"),
+        None => std::env::temp_dir().join(format!("navigera-{uid}")),
+    };
+    ensure_private_dir(&dir, uid)?;
+    Ok(dir)
+}
+
+/// Create `dir` 0700, or accept an existing one only if it is a real
+/// directory owned by `uid` that no one else can enter.
+#[cfg(unix)]
+fn ensure_private_dir(dir: &std::path::Path, uid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    let refuse = |why: String| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("refusing session directory {}: {why}; remove it, or pass a socket path", dir.display()),
+        ))
+    };
+    if !meta.file_type().is_dir() {
+        return refuse("not a directory (a symlink?)".into());
+    }
+    if meta.uid() != uid {
+        return refuse(format!("owned by uid {}, not {uid}", meta.uid()));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return refuse(format!("mode {:o} lets other users in", meta.permissions().mode() & 0o777));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn session_dir() -> std::io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join("navigera");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Create (truncate) a session log without following a symlink planted at
+/// its path.
+fn create_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Linux's value differs by architecture; macOS/BSD use 0x100.
+        const O_NOFOLLOW: i32 = if !cfg!(target_os = "linux") {
+            0x100
+        } else if cfg!(any(target_arch = "aarch64", target_arch = "arm")) {
+            0o100000
+        } else {
+            0o400000
+        };
+        options.custom_flags(O_NOFOLLOW).mode(0o600);
+    }
+    options.open(path)
 }
 
 /// `$NAVIGERA_SESSION`, if set: the default session for client calls.
@@ -172,7 +253,13 @@ fn print_json(output: &mut dyn Write, value: &Value, config: &SessionConfig) {
 /// Session server: launch the browser, then serve the line protocol on the
 /// socket, one connection at a time, until `quit` or the idle timeout.
 pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
-    let path = socket_path(name);
+    let path = match socket_path(name) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("navigera: {e}");
+            return ExitCode::from(1);
+        }
+    };
     if connect(&path).is_ok() {
         eprintln!("navigera: a session is already listening on {}", path.display());
         return ExitCode::from(1);
@@ -263,7 +350,10 @@ fn spawn_idle_watchdog(path: PathBuf, last: Arc<AtomicU64>, idle_s: u64) {
 
 /// Client: send one command to the session server and print its response.
 pub fn client(config: &SessionConfig, name: &str, command: &Command, output: &mut dyn Write) -> ExitCode {
-    let path = socket_path(name);
+    let path = match socket_path(name) {
+        Ok(path) => path,
+        Err(e) => return fail(output, config, e.to_string()),
+    };
     let stream = match connect(&path) {
         Ok(stream) => stream,
         Err(e) => {
@@ -381,7 +471,10 @@ fn fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCo
 
 /// `start`: spawn a detached session server and wait until it accepts.
 pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> ExitCode {
-    let path = socket_path(name);
+    let path = match socket_path(name) {
+        Ok(path) => path,
+        Err(e) => return fail(output, config, e.to_string()),
+    };
     let log_path = path.with_extension("log");
     let (socket_str, log_str) = (path.display().to_string(), log_path.display().to_string());
     if connect(&path).is_ok() {
@@ -398,7 +491,7 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
         Ok(exe) => exe,
         Err(e) => return fail(output, config, format!("locate navigera binary: {e}")),
     };
-    let log = match std::fs::File::create(&log_path) {
+    let log = match create_log(&log_path) {
         Ok(file) => file,
         Err(e) => return fail(output, config, format!("create {}: {e}", log_path.display())),
     };
@@ -444,13 +537,14 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     let deadline = Instant::now() + Duration::from_secs(wait);
     loop {
         if connect(&path).is_ok() {
-            print_json(
-                output,
-                &json!({ "id": null, "ok": true, "result": {
-                    "session": name, "socket": socket_str, "log": log_str, "pid": child.id(),
-                }}),
-                config,
-            );
+            let mut result = json!({ "session": name, "socket": socket_str, "log": log_str, "pid": child.id() });
+            // The server inherited this environment. Saying so lets an agent
+            // know `find`/`check` work without reading a key variable (and
+            // printing the key into its own context).
+            if let Some(decider) = crate::decide::Decider::from_env() {
+                result["decider"] = json!(decider.model());
+            }
+            print_json(output, &json!({ "id": null, "ok": true, "result": result }), config);
             return ExitCode::SUCCESS;
         }
         if let Ok(Some(status)) = child.try_wait() {
@@ -467,5 +561,50 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
             );
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn session_dir_is_created_private_and_refused_when_not() {
+        let base = tempfile::tempdir().unwrap();
+        let uid = std::fs::metadata(base.path()).unwrap().uid();
+
+        let fresh = base.path().join("fresh");
+        ensure_private_dir(&fresh, uid).unwrap();
+        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o700);
+        ensure_private_dir(&fresh, uid).expect("an existing private dir is fine");
+
+        let open = base.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = ensure_private_dir(&open, uid).unwrap_err().to_string();
+        assert!(err.contains("lets other users in"), "{err}");
+
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&fresh, &link).unwrap();
+        let err = ensure_private_dir(&link, uid).unwrap_err().to_string();
+        assert!(err.contains("not a directory"), "{err}");
+
+        let err = ensure_private_dir(&fresh, uid + 1).unwrap_err().to_string();
+        assert!(err.contains("owned by uid"), "{err}");
+    }
+
+    #[test]
+    fn a_log_path_that_is_a_symlink_is_not_followed() {
+        let base = tempfile::tempdir().unwrap();
+        let victim = base.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        let log = base.path().join("s.log");
+        std::os::unix::fs::symlink(&victim, &log).unwrap();
+        assert!(create_log(&log).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        let plain = base.path().join("plain.log");
+        create_log(&plain).unwrap();
+        assert_eq!(std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }

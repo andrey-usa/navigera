@@ -38,3 +38,18 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::p
     let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
     cmd.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB).spawn().or_else(|_| cmd.creation_flags(flags).spawn())
 }
+
+/// Whether this process runs as root (Chrome refuses its sandbox then).
+#[cfg(unix)]
+pub fn running_as_root() -> bool {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+pub fn running_as_root() -> bool {
+    false
+}

@@ -20,7 +20,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 
 | global flag | meaning |
 |---|---|
-| `-s, --session <name\|path>` | named session (`$TMPDIR/navigera-<name>.sock`, `%TEMP%` on Windows; a value with a path separator is used as the path). `$NAVIGERA_SESSION` sets a default for client calls |
+| `-s, --session <name\|path>` | named session. A bare name lives in a directory only you can enter: `$XDG_RUNTIME_DIR/navigera/<name>.sock`, else `$TMPDIR/navigera-<uid>/<name>.sock` (mode 0700; navigera refuses one that is a symlink, someone else's or open to others), `%TEMP%\navigera\` on Windows; a value with a path separator is used as the path. `$NAVIGERA_SESSION` sets a default for client calls |
 | `--raw` | print only the result (strings unquoted, e.g. the `ax` tree). Errors go to stderr as `error: …`, notes (dialogs, new tabs) as `note: …` |
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
@@ -64,6 +64,8 @@ Selector and text targets auto-wait (default 5 s) for the element to appear.
 | `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--ms <n>`; `--timeout-ms` | state + `waited_ms` |
 | `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value (an arrow function is called; promises are awaited) |
 | `text` | `--selector <css>` | `textContent` or `null` |
+| `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
+| `check` | `<yes/no question>` | `{question, yes, answer}`: the probability the answer is yes |
 | `title` / `url` | — | string / state |
 | `back` / `forward` / `reload` | — | state |
 | `screenshot` | `[<path>]` or `--path`; `--full-page` | `{path, bytes}` |
@@ -74,7 +76,7 @@ Selector and text targets auto-wait (default 5 s) for the element to appear.
 | `dialog` | `--accept [--prompt-text t]` or `--dismiss` | `{dialogs: "accept"\|"dismiss"}` |
 | `quit` (`close`) | — | `{bye: true}`; a session server and its browser exit |
 | `skill` | — | prints the agent guide (SKILL.md) |
-| `install-skill` | `[--dir <skills dir>] [--claude] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`) |
+| `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
 
 ### The `ax` tree
 
@@ -150,6 +152,44 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   nothing here needs it.
 - **Logs:** launch details go to stderr only with `NAVIGERA_VERBOSE=1`.
 
+## Decisions: `find` and `check`
+
+Two small decisions an agent otherwise spends a page snapshot and an LLM turn
+on can go to a System One model instead: TypeSafe's
+[Jev](https://docs.typesafe.ai), which answers typed questions (a choice
+among options, a yes/no probability) in a few hundred milliseconds and bills
+input tokens only. Opt-in: nothing is sent anywhere unless one of these is set
+where the session (or `navigera mcp`) starts:
+
+| variable | |
+|---|---|
+| `TYPESAFE_API_KEY` | TypeSafe's API, `https://api.typesafe.ai/v1/systemone` |
+| `NAVIGERA_DECIDER_URL` | an endpoint with the same API (a LiteLLM proxy's `/typesafe/v1/systemone`, a mock); `http://` directly, `https://` through `curl` |
+| `NAVIGERA_DECIDER_MODEL` | model id (default `jev-latest`) |
+| `NAVIGERA_FIND_MIN` | probability `--find` needs before it acts (default 0.5) |
+
+`start` reports `"decider": "<model>"` when one is configured, so an agent can
+tell without looking at the variables.
+
+- `find "add the brass valve to the cart"` returns the chosen element's ref,
+  its line, the probability and the three runners-up. Every element with a
+  ref is an option, described by its line and the containers around it (the
+  card's heading, a dialog's name), so twelve "Add to cart" buttons are told
+  apart. Large pages are split into choices of 200 and the winners asked
+  again.
+- Element ops take `--find "<description>"` in place of a ref (`click --find
+  "accept the cookies"`, `fill --find "email field" a@b.c`): the op runs on
+  the chosen element and its result carries `found`. Below `NAVIGERA_FIND_MIN`
+  the op fails and lists the candidates, so a guess is never acted on.
+- `check "Did the order go through?"` returns the probability of yes. The
+  page goes as its text tree without refs; near 0.5 means unsure.
+
+What leaves the machine: the page's tree, with what was typed into text
+fields replaced by `(filled)` (password fields are masked by the browser
+already). MCP clients see `browser_find`, `browser_check` and a `find` target
+only when a decider is configured. `docs/multi-model.md` is the design and the
+measurements.
+
 ## Serve protocol (programs)
 
 `ax` without `format` returns the flat JSON list (`[{ref, role, name,
@@ -210,6 +250,54 @@ warm session: `title` 3.3 vs 0.5 ms, `ax` 14.7 vs 11.1 ms), far less than one
 model turn. A wrapper pays off only for long runs with no decision between
 steps, written by a program that already exists; a script that launches its
 own `serve` pays a browser cold start and loses cookies on every run.
+
+## MCP server (IDE agents)
+
+`navigera mcp` serves the [Model Context Protocol](https://modelcontextprotocol.io)
+on stdio, for agents that take their tools over MCP: Cline, Roo Code, Kilo
+Code, Continue, VS Code, Claude Desktop, Cursor. Each tool is one serve op, so
+it behaves exactly like the CLI. The browser starts on the first tool call.
+`--headed`, `--profile <name>` (a persistent, signed-in browser) and
+`--attach` work as they do for sessions.
+
+| tool | does |
+|---|---|
+| `browser_navigate` | `goto` |
+| `browser_snapshot` | `ax`: the tree with `[ref=N]` (optional `ref`/`selector` scope, `limit`) |
+| `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_select_option`, `browser_hover`, `browser_scroll`, `browser_file_upload` | the element ops, by `ref`, `selector` or `text` |
+| `browser_wait_for`, `browser_evaluate`, `browser_screenshot` (returns the image), `browser_tabs`, `browser_history`, `browser_handle_dialog` | as the CLI |
+| `browser_run` | several ops in one call (`[{"op":"fill","ref":21,"value":"Ada"}, {"op":"click","ref":30}]`), stopping at the first failure, ending with a snapshot |
+| `browser_close` | close the browser; the next call starts a fresh one |
+
+Every action takes `snapshot: true` to return the updated tree in the same
+call. The whole tool list is about 10 KB (~2,600 tokens), against ~20 KB for
+Playwright MCP 0.0.83 and ~26 KB for Chrome DevTools MCP 1.10.1.
+
+Client configuration (all run the same command):
+
+```jsonc
+// Cline (cline_mcp_settings.json), Roo Code (.roo/mcp.json), Claude Desktop, Cursor
+{ "mcpServers": { "navigera": { "command": "navigera", "args": ["mcp"] } } }
+
+// Kilo Code (kilo.json)
+{ "mcp": { "navigera": { "type": "local", "command": ["navigera", "mcp"] } } }
+
+// VS Code (.vscode/mcp.json)
+{ "servers": { "navigera": { "type": "stdio", "command": "navigera", "args": ["mcp"] } } }
+```
+
+```yaml
+# Continue (config.yaml)
+mcpServers:
+  - name: navigera
+    command: navigera
+    args: [mcp]
+```
+
+From a shell: `cline mcp install navigera -- navigera mcp`, `claude mcp add navigera -- navigera mcp`.
+Without a local install, use `"command": "npx", "args": ["-y", "navigera", "mcp"]`
+(the npm package carries the binary). The server is published to the MCP
+Registry as `io.github.andrey-usa/navigera` (`server.json`).
 
 ## Browsers and engines
 

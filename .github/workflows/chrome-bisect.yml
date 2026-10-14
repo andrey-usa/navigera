@@ -46,20 +46,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
         with:
           toolchain: stable
       - name: Inputs
+        env:
+          IN_MILESTONE: ${{ inputs.milestone }}
+          IN_KIND: ${{ inputs.kind || 'chrome' }}
+          IN_TEST: ${{ inputs.test || '--test serve_roundtrip' }}
+          IN_VARIANTS: ${{ inputs.variants || 'baseline' }}
+          IN_REPEAT: ${{ inputs.repeat || '3' }}
+          EVENT: ${{ github.event_name }}
         run: |
-          {
-            echo "MILESTONE=${{ inputs.milestone }}"
-            echo "KIND=${{ inputs.kind || 'chrome' }}"
-            echo "TEST=${{ inputs.test || '--test serve_roundtrip' }}"
-            echo "VARIANTS=${{ inputs.variants || 'baseline' }}"
-            echo "REPEAT=${{ inputs.repeat || '3' }}"
-          } >> "$GITHUB_ENV"
-          if [ "${{ github.event_name }}" = push ]; then grep -E '^[A-Z]+=' .github/bisect.env >> "$GITHUB_ENV"; fi
+          # Values are copied, not interpolated into the script, so an input
+          # can't inject shell; a newline would add a variable, so drop them.
+          for v in MILESTONE KIND TEST VARIANTS REPEAT; do
+            name="IN_$v"
+            printf '%s=%s\n' "$v" "$(printf '%s' "${!name}" | tr -d '\n\r')"
+          done >> "$GITHUB_ENV"
+          if [ "$EVENT" = push ]; then grep -E '^[A-Z]+=' .github/bisect.env >> "$GITHUB_ENV"; fi
       - name: Download Chrome
         run: |
           python3 - "$MILESTONE" "$KIND" > /tmp/url <<'EOF'

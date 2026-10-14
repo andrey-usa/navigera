@@ -43,6 +43,10 @@ fn run(parsed: &protocol::ParsedArgs, output: &mut dyn Write) -> ExitCode {
     if let Some(local) = &parsed.local {
         return protocol::run_local(local, config, output);
     }
+    if parsed.mcp {
+        let stdin = io::stdin();
+        return navigera::mcp::serve(config, &mut stdin.lock(), output);
+    }
     {
         use navigera::session;
         // An explicit `--session` always wins; $NAVIGERA_SESSION only

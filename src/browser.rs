@@ -32,11 +32,14 @@ fn engine_runtime() -> Result<tokio::runtime::Runtime> {
 /// background tabs. `--no-startup-window` skips Chrome's initial tab (the
 /// session opens its own), saving a renderer process per launch. Site
 /// isolation is relaxed as go-rod does, so cross-site iframes share a
-/// renderer instead of each spawning one (we already run `--no-sandbox`).
-/// Chrome honours only the last `--disable-features` / `--enable-features`
-/// flag, so each list is a single flag.
+/// renderer instead of each spawning one; the throwaway profile holds no
+/// one's cookies. Chrome honours only the last `--disable-features` /
+/// `--enable-features` flag, so each list is a single flag.
+///
+/// The renderer sandbox stays on: an agent opens pages nobody vetted, and the
+/// sandbox is what contains a renderer exploit. `--no-sandbox` is added only
+/// where Chrome cannot have one (see [`chrome_flags`]).
 const CHROME_FLAGS: &[&str] = &[
-    "--no-sandbox",
     "--disable-dev-shm-usage",
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
@@ -85,10 +88,62 @@ fn chrome_flags() -> Vec<String> {
         .filter(|f| !drop.iter().any(|d| f.starts_with(d.as_str())))
         .map(|f| f.to_string())
         .collect();
+    if no_sandbox_wanted(crate::proc::running_as_root(), std::env::var("NAVIGERA_NO_SANDBOX").ok().as_deref()) {
+        flags.push(NO_SANDBOX.into());
+    }
     if let Ok(extra) = std::env::var("NAVIGERA_EXTRA_FLAGS") {
         flags.extend(extra.split_whitespace().map(str::to_string));
     }
     flags
+}
+
+const NO_SANDBOX: &str = "--no-sandbox";
+
+/// Chrome refuses to start its sandbox as root (containers, CI images);
+/// `NAVIGERA_NO_SANDBOX=1` turns it off explicitly.
+fn no_sandbox_wanted(root: bool, env: Option<&str>) -> bool {
+    root || env.is_some_and(|v| !v.trim().is_empty() && v.trim() != "0")
+}
+
+const NO_SANDBOX_WARNING: &str = "navigera: this machine can't give Chrome its sandbox, so it runs without one \
+     (pages are not isolated from your account). Fix: enable unprivileged user \
+     namespaces or Chrome's setuid helper; NAVIGERA_NO_SANDBOX=1 silences this.";
+
+/// Where navigera notes that `exe` could not have a sandbox on this machine.
+///
+/// Without the note every launch pays for one that fails first (about
+/// 350 ms on a GitHub runner with Chrome for Testing). It sits in the
+/// private session directory and is keyed by the binary's path, size and
+/// modification time and by the boot, so a Chrome update or a reboot (after
+/// which the machine may allow a sandbox) brings the attempt back.
+fn no_sandbox_note(exe: &str) -> Option<std::path::PathBuf> {
+    let meta = std::fs::metadata(exe).ok()?;
+    let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    let path = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.into());
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+    let key = format!("{}\n{}\n{modified}\n{}", path.display(), meta.len(), boot.trim());
+    // FNV-1a: the same across builds, which std's hasher does not promise.
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    Some(crate::session::session_dir().ok()?.join(format!("no-sandbox-{hash:016x}")))
+}
+
+/// Whether a launch failed because this machine can't give Chrome a
+/// sandbox (no unprivileged user namespaces, a setuid helper that isn't
+/// set up, an AppArmor policy that blocks the namespace).
+fn sandbox_unavailable(error: &str) -> bool {
+    [
+        "No usable sandbox",
+        "Failed to move to new namespace",
+        "SUID sandbox helper binary",
+        "setuid sandbox",
+        "without --no-sandbox is not supported",
+        "zygote_host_impl_linux",
+        "unprivileged user namespaces",
+        "suid_sandbox",
+        "apparmor-userns",
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
 }
 
 /// Common Chromium/Chrome/Edge install paths used when no override is given.
@@ -362,16 +417,48 @@ impl BrowserSession {
                     "no Chrome/Chromium/Edge found — install Chrome, or `npx @puppeteer/browsers install chrome-headless-shell@stable` and pass its path via --chromium or $CHROME_BIN"
                 );
             };
-            let browser = Browser::launch(
-                &handle,
-                &LaunchOptions {
-                    exe: exe.clone(),
-                    headless,
-                    chrome_flags: chrome_flags(),
-                    debugging_port: None,
-                    pipe: transport == "pipe",
-                },
-            )?;
+            let launch = |flags: Vec<String>| -> Result<Browser> {
+                let browser = Browser::launch(
+                    &handle,
+                    &LaunchOptions {
+                        exe: exe.clone(),
+                        headless,
+                        chrome_flags: flags,
+                        debugging_port: None,
+                        pipe: transport == "pipe",
+                    },
+                )?;
+                // A browser that cannot start its sandbox dies before the
+                // first target: probe it here so the fallback below sees it.
+                if let Err(e) = browser.tab_targets() {
+                    let report = browser.death_report();
+                    // Reaped and its profile deleted before any retry, so a
+                    // fallback launch leaves no zombie or directory behind.
+                    browser.close();
+                    anyhow::bail!("{e:#} ({report})");
+                }
+                Ok(browser)
+            };
+            let mut flags = chrome_flags();
+            let note = no_sandbox_note(&exe);
+            if !flags.iter().any(|f| f == NO_SANDBOX) && note.as_ref().is_some_and(|n| n.exists()) {
+                eprintln!("{NO_SANDBOX_WARNING}");
+                flags.push(NO_SANDBOX.into());
+            }
+            let browser = match launch(flags.clone()) {
+                Ok(browser) => browser,
+                Err(e) if !flags.iter().any(|f| f == NO_SANDBOX) && sandbox_unavailable(&format!("{e:#}")) => {
+                    eprintln!("{NO_SANDBOX_WARNING}");
+                    if let Some(note) = &note {
+                        // The session directory is ours alone (0700, checked),
+                        // so nothing else can have planted a link here.
+                        let _ = std::fs::write(note, format!("{exe}\n"));
+                    }
+                    flags.push(NO_SANDBOX.into());
+                    launch(flags)?
+                }
+                Err(e) => return Err(e),
+            };
             crate::timing::log(&format!(
                 "[browser] engine=chrome launched {} via {exe} (headless={headless})",
                 browser.ws_url(),
@@ -898,3 +985,21 @@ impl BrowserSession {
 
 // Re-exported for the rare caller that still names the engine explicitly.
 pub use cdp::{Browser as CdpBrowser, Page as CdpPage};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_sandbox_stays_on_unless_chrome_cannot_have_one() {
+        assert!(!CHROME_FLAGS.contains(&"--no-sandbox"));
+        assert!(!no_sandbox_wanted(false, None));
+        assert!(!no_sandbox_wanted(false, Some("0")));
+        assert!(!no_sandbox_wanted(false, Some("")));
+        assert!(no_sandbox_wanted(true, None), "root");
+        assert!(no_sandbox_wanted(false, Some("1")));
+        assert!(sandbox_unavailable("[FATAL:zygote_host_impl_linux.cc(132)] No usable sandbox! If you are running"));
+        assert!(sandbox_unavailable("distro that has disabled unprivileged user namespaces with AppArmor"));
+        assert!(!sandbox_unavailable("net::ERR_NAME_NOT_RESOLVED"));
+    }
+}

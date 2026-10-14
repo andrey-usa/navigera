@@ -124,6 +124,9 @@ def npm(args) -> None:
             "keywords": args.keywords.split(",") if args.keywords else [],
             "bin": {args.name: f"bin/{args.name}.js"}, "files": ["bin"],
             "engines": {"node": ">=16"}, "optionalDependencies": optional}
+    if args.mcp_name:
+        # The MCP Registry checks that the npm package claims the server name.
+        meta["mcpName"] = args.mcp_name
     (main / "package.json").write_text(json.dumps(meta, indent=2) + "\n")
     readme = Path(args.readme) if args.readme else None
     (main / "README.md").write_text(readme.read_text() if readme and readme.exists()
@@ -246,6 +249,7 @@ def main() -> None:
     ap.add_argument("--license-file", default="LICENSE")
     ap.add_argument("--readme", default="README.md")
     ap.add_argument("--keywords", default="")
+    ap.add_argument("--mcp-name", default="", help="npm: the server's MCP Registry name (io.github.<owner>/<name>)")
     args = ap.parse_args()
     args.version = args.version.removeprefix("v")
     {"npm": npm, "wheel": wheel, "homebrew": homebrew, "scoop": scoop}[args.kind](args)

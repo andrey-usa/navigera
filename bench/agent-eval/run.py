@@ -19,6 +19,11 @@ calls, how many shell commands used the tool, and off-tool workarounds
   run.py --tools navigera,agent-browser,playwright-cli --tasks all \
          --mode skilled --model gemini-3.5-flash-lite --out out/
 
+`navigera+jev` is navigera with a decision model (`find`, `--find`,
+`check`): the session gets `--decider-url` (bench/decide/relay.py in front
+of TypeSafe's API, holding the key), and each run records the decider's
+calls and input tokens from the relay's `--decider-log`.
+
 `--agent scripted` replays known-good navigera command plans instead of
 calling a model: it validates the site, the checks and this harness without
 an API key (CI runs it on every eval, and locally).
@@ -54,6 +59,19 @@ TOOLS = {
         "cmd": "navigera", "skill": "navigera",
         "repo": "https://github.com/andrey-usa/navigera",
     },
+    "navigera+jev": {
+        "cmd": "navigera", "skill": "navigera", "decider": True,
+        "repo": "https://github.com/andrey-usa/navigera",
+    },
+    # The same, with the prompt asking for the decider: what Jev saves when
+    # the agent uses it, apart from whether the skill alone gets it used.
+    "navigera+jev-told": {
+        "cmd": "navigera", "skill": "navigera", "decider": True,
+        "repo": "https://github.com/andrey-usa/navigera",
+        "hint": " A decision model is configured for this browser session: prefer `--find \"<description>\"` on"
+                " element commands and `check \"<question>\"` over reading the page with `ax`; read the page only"
+                " for text you must report, or when --find says it is unsure.",
+    },
     "agent-browser": {
         "cmd": "agent-browser", "skill": "agent-browser",
         "repo": "https://github.com/vercel-labs/agent-browser",
@@ -64,7 +82,7 @@ TOOLS = {
     },
 }
 
-SKILLED_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}". Read that skill first, then use `{cmd}` (through shell commands) for every browser interaction. Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
+SKILLED_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}". Read that skill first, then use `{cmd}` (through shell commands) for every browser interaction.{hint} Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
 
 The website is running at {base}.
 
@@ -89,6 +107,7 @@ PASS_ENV = ["CHROME_BIN", "RUSTUP_HOME", "CARGO_HOME", "NPM_CONFIG_PREFIX",
             "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS",
             "PLAYWRIGHT_MCP_EXECUTABLE_PATH", "PLAYWRIGHT_MCP_SANDBOX",
             "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "DO_NOT_TRACK", "DISABLE_TELEMETRY", "CI",
+            "NAVIGERA_DECIDER_URL",
             # Windows: what a desktop session has (npm, Node and PowerShell
             # look things up there; Gemini CLI keeps only TEMP/USERPROFILE/…).
             "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
@@ -190,6 +209,13 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
         "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1",
         "DO_NOT_TRACK": "1", "DISABLE_TELEMETRY": "1", "CI": "true",
     }
+    # Only the relay holds the TypeSafe key; only navigera+jev gets a decider.
+    env.pop("TYPESAFE_API_KEY", None)
+    env.pop("NAVIGERA_DECIDER_URL", None)
+    if TOOLS[tool].get("decider"):
+        if not args.decider_url:
+            raise RuntimeError(f"{tool} needs --decider-url")
+        env["NAVIGERA_DECIDER_URL"] = args.decider_url
     if WINDOWS:
         # A temp dir per run: tool daemons' sockets and browser profiles
         # land under the run's root, so cleanup can find them by path.
@@ -209,7 +235,7 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
 
     skills = work / ".agents" / "skills"
     skills.mkdir(parents=True)
-    if tool == "navigera":
+    if TOOLS[tool]["cmd"] == "navigera":
         if args.nv_bin_dir:
             env["PATH"] = os.pathsep.join([args.nv_bin_dir, env.get("PATH", "")])
         subprocess.run([exe("navigera", env), "install-skill", "--dir", str(skills)], env=env, check=True,
@@ -304,6 +330,8 @@ def run_gemini(prompt: str, work: Path, env: dict, args) -> dict:
             requests += 1
             after_tools = False
     errors = [e.get("message", "") for e in events if e.get("type") == "error"]
+    # Whether the agent saw `start` report a decider (navigera+jev runs).
+    decider_seen = any('"decider"' in str(e.get("output") or "") for e in events if e.get("type") == "tool_result")
     return {
         "exit": proc.returncode, "timed_out": timed_out, "wall_s": round(wall, 1),
         "text": text, "shell_commands": shells, "shell_steps": shell_steps, "tools_used": tool_names,
@@ -313,6 +341,7 @@ def run_gemini(prompt: str, work: Path, env: dict, args) -> dict:
         "tokens_total": stats.get("total_tokens"), "tokens_cached": stats.get("cached"),
         "tool_calls": stats.get("tool_calls"),
         "errors": errors[-3:], "stderr_tail": stderr_tail(err) if proc.returncode else "",
+        "decider_seen": decider_seen,
     }
 
 
@@ -462,6 +491,21 @@ def check(task: dict, answer: str, site) -> tuple[bool, list[str]]:
     return not why, why
 
 
+# A find/check op (after any options), or --find on an element op.
+DECISION = re.compile(r"navigera(\s+(-s|--session)\s+\S+|\s+--?[\w-]+)*\s+(find|check)\s|\bnavigera\b.*\s--find\b")
+
+
+def read_log(path: str | None) -> list:
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(l) for l in f if l.strip()]
+
+
+def log_lines(path: str | None) -> int:
+    return len(read_log(path))
+
+
 OFF_TOOL = re.compile(r"\b(curl|wget|httpie)\b.*127\.0\.0\.1|require\(['\"](playwright|puppeteer)|"
                       r"from playwright|import (playwright|puppeteer)|chromedp|selenium", re.I)
 
@@ -525,6 +569,18 @@ def render(mode: str, agent: str, model: str, runs: list, tools: list, tasks: li
                 + (f" {r['tokens_total'] // 1000}K" if r.get("tokens_total") else "")
                 for r in rs) or "—")
         lines.append(f"| {task} | " + " | ".join(cells) + " |")
+    deciding = [t for t in tools if any("decider_calls" in r for r in runs if label(r) == t)]
+    if deciding:
+        lines += ["", "| tool | runs that saw the decider | runs that used find/check | find/check commands | "
+                  "decider calls | decider input tokens | decider errors |", "|---|---|---|---|---|---|---|"]
+        for tool in deciding:
+            rs = [r for r in runs if label(r) == tool and not r.get("infra")]
+            lines.append(f"| `{tool}` | {sum(1 for r in rs if r.get('decider_seen'))}/{len(rs)} | "
+                         f"{sum(1 for r in rs if r.get('decision_commands'))}/{len(rs)} | "
+                         f"{sum(r.get('decision_commands') or 0 for r in rs)} | "
+                         f"{sum(r.get('decider_calls') or 0 for r in rs)} | "
+                         f"{sum(r.get('decider_tokens') or 0 for r in rs)} | "
+                         f"{sum(r.get('decider_errors') or 0 for r in rs)} |")
     fails = [r for r in runs if not r["ok"]]
     if fails:
         lines += ["", "Failures:"]
@@ -574,6 +630,8 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--merge", nargs="*", help="combine these summary-<mode>.json files into --out and exit")
     ap.add_argument("--require-pass", action="store_true", help="exit 1 unless every run passed (CI checks)")
+    ap.add_argument("--decider-url", help="decision-model endpoint for navigera+jev (bench/decide/relay.py)")
+    ap.add_argument("--decider-log", help="the relay's request log, to count each run's decider calls")
     ap.add_argument("--smoke", action="store_true",
                     help="one 'reply OK' call with exactly the runs' settings; prints the models used")
     args = ap.parse_args()
@@ -610,9 +668,16 @@ def main() -> int:
                     spec = TOOLS[tool]
                     template = SKILLED_PROMPT if args.mode == "skilled" else ONBOARD_PROMPT
                     prompt = template.format(workdir=work, cmd=spec["cmd"], skill=spec["skill"], name=tool,
-                                             repo=spec["repo"], base=site.base, task=task["prompt"])
+                                             repo=spec["repo"], base=site.base, task=task["prompt"],
+                                             hint=spec.get("hint", ""))
+                    before = log_lines(args.decider_log)
                     res = run_gemini(prompt, work, env, args) if args.agent == "gemini" \
                         else run_scripted(task["id"], site.base, work, env)
+                    if spec.get("decider"):
+                        calls = read_log(args.decider_log)[before:]
+                        res["decider_calls"] = len(calls)
+                        res["decider_tokens"] = sum((c.get("usage") or {}).get("input_tokens") or 0 for c in calls)
+                        res["decider_errors"] = sum(1 for c in calls if c.get("status") != 200)
                     answer = final_answer(res["text"])
                     ok, why = check(task, answer, site)
                     shells = res["shell_commands"]
@@ -639,6 +704,7 @@ def main() -> int:
                         "tool_commands": sum(1 for c in shells if spec["cmd"] in c),
                         "off_tool_commands": [c[:200] for c in shells if OFF_TOOL.search(c)],
                         "shell_count": len(shells),
+                        "decision_commands": sum(1 for c in shells if DECISION.search(c)),
                     })
                 except Exception as e:  # harness/setup problem: record, keep going
                     rec.update({"ok": False, "why": [f"harness: {e}"]})

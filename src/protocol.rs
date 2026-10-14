@@ -90,6 +90,10 @@ pub struct TargetArgs {
     /// Visible text / label of the element (best match, actionable first).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// A description of the element, resolved to a ref by the decision
+    /// model before the op runs (see `decide`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub find: Option<String>,
 }
 
 impl TargetArgs {
@@ -102,10 +106,15 @@ impl TargetArgs {
     }
 
     fn optional(&self, op: &str) -> anyhow::Result<Option<Target>> {
-        let given =
-            [self.selector.is_some(), self.node_ref.is_some(), self.text.is_some()].iter().filter(|b| **b).count();
+        let given = [self.selector.is_some(), self.node_ref.is_some(), self.text.is_some(), self.find.is_some()]
+            .iter()
+            .filter(|b| **b)
+            .count();
         if given > 1 {
-            anyhow::bail!("{op}: give only one of ref, --selector, --text");
+            anyhow::bail!("{op}: give only one of ref, --selector, --text, --find");
+        }
+        if self.find.is_some() {
+            anyhow::bail!("{op}: --find was not resolved to an element");
         }
         Ok(if let Some(r) = self.node_ref {
             Some(Target::Ref(r))
@@ -118,7 +127,7 @@ impl TargetArgs {
 }
 
 /// One command from the model, either a CLI subcommand or a serve-mode line.
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
 #[serde(tag = "op")]
 pub enum Command {
     /// Open the browser (serve mode only; one-shots launch implicitly).
@@ -253,6 +262,20 @@ pub enum Command {
     #[serde(rename = "text")]
     Text {
         selector: String,
+        #[serde(default)]
+        timeout_ms: Option<f64>,
+    },
+    /// The element a description means, chosen by the decision model.
+    #[serde(rename = "find")]
+    Find {
+        what: String,
+        #[serde(default)]
+        timeout_ms: Option<f64>,
+    },
+    /// The probability that a yes/no question about the page is yes.
+    #[serde(rename = "check")]
+    Check {
+        question: String,
         #[serde(default)]
         timeout_ms: Option<f64>,
     },
@@ -431,7 +454,7 @@ const DEFAULT_ATTACH: &str = "chrome";
 
 /// True when `word` is a command name (so it can't be `--attach`'s value).
 fn is_command_word(word: &str) -> bool {
-    matches!(word, "serve" | "skill" | "install-skill" | "help") || OPS.iter().any(|(name, _, _)| *name == word)
+    matches!(word, "serve" | "mcp" | "skill" | "install-skill" | "help") || OPS.iter().any(|(name, _, _)| *name == word)
 }
 
 /// Pull `--attach [value]` out of argv; a bare `--attach` means `chrome`.
@@ -482,6 +505,8 @@ pub struct ParsedArgs {
     pub start: bool,
     /// A command that runs without a browser.
     pub local: Option<Local>,
+    /// `mcp`: serve the Model Context Protocol on stdin/stdout.
+    pub mcp: bool,
 }
 
 /// One op's CLI documentation: (name, synopsis, what it does).
@@ -500,6 +525,8 @@ const OPS: &[(&str, &str, &str)] = &[
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms)"),
     ("eval", "<js> | --file <path.js> | -", "evaluate JS (arrow functions are called); prints the JSON result; `-` reads the script from stdin"),
     ("text", "--selector <css>", "textContent of the first match"),
+    ("find", "<description>", "the element a description means, chosen by a decision model (TYPESAFE_API_KEY); element ops also take --find <description>"),
+    ("check", "<yes/no question>", "probability that the answer about the page is yes, from a decision model (TYPESAFE_API_KEY)"),
     ("title", "", "page title"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
     ("back", "", "history back"),
@@ -512,8 +539,9 @@ const OPS: &[(&str, &str, &str)] = &[
     ("tab-close", "[<index>]", "close a tab (default: active)"),
     ("dialog", "--accept [--prompt-text <t>] | --dismiss", "how alert/confirm/prompt are answered (default: accept; every dialog is reported)"),
     ("quit", "[--close-browser]", "close the browser and the session server; attached (--attach/--profile): only disconnect, unless --close-browser"),
+    ("mcp", "[--headed] [--profile <name> | --attach [<where>]]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
     ("skill", "", "print the agent skill (usage guide) for this version"),
-    ("install-skill", "[--dir <skills dir>] [--claude] [--global]", "install the skill for agents (default ./.agents/skills; --claude: ./.claude/skills)"),
+    ("install-skill", "[--dir <skills dir>] [--claude | --continue] [--global]", "install the skill for agents (default ./.agents/skills, read by Cline and Kilo; --claude: ./.claude/skills; --continue: ./.continue/skills)"),
 ];
 
 /// Help text for `--help` / argument errors.
@@ -741,6 +769,7 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
             None => None,
         },
         text: str_flag(args, "--text")?,
+        find: str_flag(args, "--find")?,
     };
     if positional_target && t == TargetArgs::default() {
         if let Some(first) = args.front().filter(|a| !a.starts_with("--")).cloned() {
@@ -752,6 +781,16 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
         }
     }
     Ok(t)
+}
+
+/// The remaining positional words as one string (`find add to cart` works
+/// unquoted).
+fn rest_words(args: &mut Args) -> Option<String> {
+    let mut words = Vec::new();
+    while let Some(w) = positional(args) {
+        words.push(w);
+    }
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 fn positional(args: &mut Args) -> Option<String> {
@@ -821,7 +860,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                     .map_err(|_| ArgsError::Invalid(format!("--idle-timeout-s must be whole seconds, got {raw:?}")))?;
             }
             "-V" | "--version" => {
-                return Ok(ParsedArgs { config, command: None, start: false, local: Some(Local::Version) })
+                return Ok(ParsedArgs { config, command: None, start: false, local: Some(Local::Version), mcp: false })
             }
             "-h" | "--help" => return Err(ArgsError::Help(usage(&program))),
             other => {
@@ -848,7 +887,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         }
     }
     consume_globals(&mut args, &mut config).map_err(ArgsError::Invalid)?;
-    let parsed = |config, command, start, local| Ok(ParsedArgs { config, command, start, local });
+    let parsed = |config, command, start, local| Ok(ParsedArgs { config, command, start, local, mcp: false });
 
     match op.as_str() {
         "serve" | "start" => {
@@ -860,16 +899,34 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
             return parsed(config, None, op == "start", None);
         }
+        "mcp" => {
+            if let Some(raw) = str_flag(&mut args, "--timeout-ms")? {
+                config.timeout_ms = parse_f64(&raw, "--timeout-ms").map_err(ArgsError::Invalid)?;
+            }
+            if let Some(extra) = args.front() {
+                return invalid(format!("unexpected argument {extra:?} after mcp"));
+            }
+            return Ok(ParsedArgs { config, command: None, start: false, local: None, mcp: true });
+        }
         "skill" => return parsed(config, None, false, Some(Local::Skill)),
         "install-skill" => {
             let claude = extract_present(&mut args, "--claude");
+            let continue_ = extract_present(&mut args, "--continue");
             let global = extract_present(&mut args, "--global");
             let dir = match str_flag(&mut args, "--dir")? {
                 Some(d) => d,
                 None => {
-                    let base = if claude { ".claude/skills" } else { ".agents/skills" };
+                    // Cline and Kilo read .agents/skills, Claude Code
+                    // .claude/skills, Continue .continue/skills.
+                    let base = match (claude, continue_) {
+                        (true, _) => ".claude/skills",
+                        (false, true) => ".continue/skills",
+                        (false, false) => ".agents/skills",
+                    };
                     if global {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                        let home = std::env::var("HOME")
+                            .or_else(|_| std::env::var("USERPROFILE"))
+                            .unwrap_or_else(|_| ".".into());
                         format!("{home}/{base}")
                     } else {
                         base.to_string()
@@ -994,6 +1051,14 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 Some(s) => s,
                 None => positional(&mut args).ok_or_else(|| need("text", "--selector <css>"))?,
             },
+            timeout_ms,
+        },
+        "find" => Command::Find {
+            what: rest_words(&mut args).ok_or_else(|| need("find", "a description of the element"))?,
+            timeout_ms,
+        },
+        "check" => Command::Check {
+            question: rest_words(&mut args).ok_or_else(|| need("check", "a yes/no question about the page"))?,
             timeout_ms,
         },
         "eval" | "evaluate" => {
@@ -1201,10 +1266,39 @@ impl Driver {
             // Snapshots read what the page shows: give data it is still
             // fetching (an SPA's "Loading…" list) a moment to land, so the
             // agent doesn't spend a turn on a placeholder.
-            if matches!(command, Command::Ax { .. } | Command::Screenshot { .. }) {
+            if matches!(
+                command,
+                Command::Ax { .. } | Command::Screenshot { .. } | Command::Find { .. } | Command::Check { .. }
+            ) || command.find_target().is_some()
+            {
                 self.session.network_quiet(NETWORK_QUIET, budget.min(NETWORK_QUIET_MAX));
             }
         }
+        // `--find <description>`: the decision model picks the element and the
+        // op runs on its ref; the result says which one it was.
+        let mut found = None;
+        let resolved;
+        let command = match command.find_target() {
+            Some(what) => {
+                let f = self.find(&what, op_timeout_ms(command))?;
+                let min = find_min();
+                if f.p < min {
+                    anyhow::bail!(
+                        "--find {what:?}: not sure which element that is (best p={:.2} < {min}): {}; pass a ref instead",
+                        f.p,
+                        std::iter::once((&f.chosen, f.p))
+                            .chain(f.others.iter().map(|(c, p)| (c, *p)))
+                            .map(|(c, p)| format!("[ref={}] {} ({p:.2})", c.node_ref, c.line))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                resolved = command.with_ref(f.chosen.node_ref);
+                found = Some(f);
+                &resolved
+            }
+            None => command,
+        };
         let result = self.dispatch(command).map_err(|e| {
             let msg = format!("{e:#}");
             if msg.contains("CDP connection closed") || msg.contains("CDP client is shut down") {
@@ -1225,17 +1319,51 @@ impl Driver {
         }
         new_tabs.extend(opened);
         let dialogs = self.session.take_dialogs();
-        let result = match (result, new_tabs.is_empty()) {
+        let mut result = match (result, new_tabs.is_empty()) {
             // A click that opened a tab: report the state of the new tab.
             (Ok(r), false) if r.get("tab").is_some() => Ok(self.state_json()),
             (r, _) => r,
         }?;
+        if let (Some(f), Some(obj)) = (found, result.as_object_mut()) {
+            obj.insert("found".into(), json!({ "ref": f.chosen.node_ref, "element": f.chosen.line, "p": f.p }));
+        }
         Ok(Outcome { result, dialogs, new_tabs })
+    }
+
+    /// The page as `find` and `check` see it: the whole text tree.
+    fn page_tree(&self, timeout_ms: Option<f64>) -> anyhow::Result<String> {
+        let opts = AxOptions { max_depth: None, json: false, all: false, all_refs: false, limit: 20_000, scope: None };
+        match self.session.ax(&opts, timeout_ms).map_err(|e| anyhow::anyhow!("ax: {e:#}"))? {
+            Value::String(tree) => Ok(tree),
+            other => Ok(other.to_string()),
+        }
+    }
+
+    fn find(&self, what: &str, timeout_ms: Option<f64>) -> anyhow::Result<crate::decide::Found> {
+        let decider = crate::decide::Decider::from_env().ok_or_else(|| crate::decide::Decider::missing("find"))?;
+        let tree = self.page_tree(timeout_ms)?;
+        let page = tree.lines().next().unwrap_or("").to_string();
+        crate::decide::find(&decider, what, &page, &crate::decide::candidates(&tree))
+            .map_err(|e| anyhow::anyhow!("find {what:?}: {e:#}"))
     }
 
     fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
         let s = &self.session;
         match command {
+            Command::Find { what, timeout_ms } => {
+                let f = self.find(what, *timeout_ms)?;
+                let mut out = f.to_json();
+                out["sure"] = json!(f.p >= find_min());
+                Ok(out)
+            }
+            Command::Check { question, timeout_ms } => {
+                let decider =
+                    crate::decide::Decider::from_env().ok_or_else(|| crate::decide::Decider::missing("check"))?;
+                let tree = self.page_tree(*timeout_ms)?;
+                let yes = crate::decide::check(&decider, question, &tree)
+                    .map_err(|e| anyhow::anyhow!("check {question:?}: {e:#}"))?;
+                Ok(json!({ "question": question, "yes": (yes * 1000.0).round() / 1000.0, "answer": yes >= 0.5 }))
+            }
             Command::Open { url } => {
                 if let Some(url) = url {
                     self.goto(url, None, None)?;
@@ -1474,6 +1602,44 @@ impl Driver {
 /// `example.com` -> `https://example.com`; `localhost:3000` -> `http://…`.
 /// Anything with a scheme (http:, file:, data:, about:) is left alone.
 /// The op's own `timeout_ms`, if it carries one.
+/// The probability `--find` needs before it acts (`NAVIGERA_FIND_MIN`,
+/// default 0.5); below it the op fails and lists the candidates.
+fn find_min() -> f64 {
+    std::env::var("NAVIGERA_FIND_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5)
+}
+
+impl Command {
+    fn target_mut(&mut self) -> Option<&mut TargetArgs> {
+        match self {
+            Command::Click { target, .. }
+            | Command::Fill { target, .. }
+            | Command::Hover { target, .. }
+            | Command::Select { target, .. }
+            | Command::Press { target, .. }
+            | Command::Type { target, .. }
+            | Command::Scroll { target, .. }
+            | Command::Upload { target, .. } => Some(target),
+            Command::Ax { scope, .. } => Some(scope),
+            _ => None,
+        }
+    }
+
+    /// The description given with `--find`, if any.
+    fn find_target(&self) -> Option<String> {
+        self.clone().target_mut().and_then(|t| t.find.clone())
+    }
+
+    /// This command with its `--find` replaced by a ref.
+    fn with_ref(&self, node_ref: u64) -> Command {
+        let mut c = self.clone();
+        if let Some(t) = c.target_mut() {
+            t.find = None;
+            t.node_ref = Some(node_ref);
+        }
+        c
+    }
+}
+
 fn op_timeout_ms(command: &Command) -> Option<f64> {
     let v = serde_json::to_value(command).ok()?;
     v.get("timeout_ms").and_then(Value::as_f64)

@@ -10,8 +10,10 @@ Your own browser: `navigera -s me start --attach` connects to the user's running
 
 ## Docs
 
+- [MCP server](https://raw.githubusercontent.com/andrey-usa/navigera/master/docs/navigera.md): `navigera mcp` for Cline, Roo Code, Kilo Code, Continue, VS Code, Claude Desktop and Cursor; client configuration snippets
 - [Agent skill (usage guide)](https://raw.githubusercontent.com/andrey-usa/navigera/master/skills/navigera/SKILL.md): the loop, reading `ax`, every command, error recovery
 - [Command and protocol reference](https://raw.githubusercontent.com/andrey-usa/navigera/master/docs/navigera.md): CLI flags, JSON-lines serve protocol, sessions, engines
+- [Decisions by a fast model](https://raw.githubusercontent.com/andrey-usa/navigera/master/docs/multi-model.md): `find`, `check` and `--find` with TypeSafe Jev (opt-in: `TYPESAFE_API_KEY` or `NAVIGERA_DECIDER_URL`; `start` reports `"decider"`), the design and the measurements
 - [README](https://raw.githubusercontent.com/andrey-usa/navigera/master/README.md): install, supported browsers, benchmarks, agent eval
 
 ## Working on the code

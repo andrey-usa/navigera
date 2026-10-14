@@ -55,7 +55,7 @@ jobs:
       KEY_SLOT: ${{ secrets[matrix.key] != '' && matrix.key || 'GEMINI_API_KEY' }}
       MODEL: gemini-3.5-flash-lite
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: No key
         if: env.HAS_KEY != 'true'
         run: echo "::notice title=agent check::no Gemini key available to this run (fork PR or unset); skipped."

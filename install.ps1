@@ -8,6 +8,10 @@
 # NAVIGERA_NO_MODIFY_PATH=1 (don't add the directory to the user PATH),
 # NAVIGERA_GIT_REV (commit for the source build; default: master).
 #
+# The archive is checked against the SHA-256 the release publishes next to
+# it; a mismatch or a missing checksum stops the install
+# (NAVIGERA_NO_VERIFY=1 skips the check).
+#
 # Runs in the caller's session (`| iex`), so everything stays inside one
 # script block and errors are thrown, never `exit`.
 
@@ -36,6 +40,17 @@
             Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmp $asset) -UseBasicParsing
             $downloaded = $true
         } catch { }
+        if ($downloaded -and $env:NAVIGERA_NO_VERIFY -ne '1') {
+            try {
+                $sums = (Invoke-WebRequest -Uri "$url.sha256" -UseBasicParsing).Content
+            } catch {
+                throw "no checksum published at $url.sha256 (set NAVIGERA_NO_VERIFY=1 to install anyway)"
+            }
+            if ($sums -is [byte[]]) { $sums = [Text.Encoding]::ASCII.GetString($sums) }
+            $want = ($sums.Trim() -split '\s+')[0].ToLower()
+            $got = (Get-FileHash -Algorithm SHA256 (Join-Path $tmp $asset)).Hash.ToLower()
+            if ($want -ne $got) { throw "checksum mismatch for $url (want $want, got $got)" }
+        }
         if ($downloaded) {
             Expand-Archive -Path (Join-Path $tmp $asset) -DestinationPath $tmp -Force
             Copy-Item (Join-Path $tmp 'navigera.exe') $exe -Force
