@@ -1,5 +1,7 @@
 //! On a machine that can't give Chrome a sandbox, the launch falls back to
 //! `--no-sandbox`, and later launches skip the attempt that is bound to fail.
+//! Linux and macOS only: the fake browser is a shell script.
+#![cfg(unix)]
 
 use std::process::Command;
 
@@ -31,7 +33,6 @@ fn run(args: &[&str], runtime_dir: &std::path::Path) -> Value {
     })
 }
 
-#[cfg(unix)]
 #[test]
 fn a_machine_without_a_sandbox_pays_the_failed_launch_once() {
     use std::os::unix::fs::PermissionsExt;
