@@ -196,9 +196,21 @@ pub struct LaunchedPipe {
 /// (Only the Unix pipe launch fills one.)
 #[derive(Clone)]
 #[cfg_attr(not(unix), allow(dead_code))]
-pub struct StderrTail(Arc<Mutex<Vec<u8>>>);
+pub struct StderrTail(Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>);
 
 impl StderrTail {
+    /// A tail of `text` whose stream has already ended.
+    #[cfg(test)]
+    fn of(text: &str) -> Self {
+        StderrTail(Arc::new(Mutex::new(text.as_bytes().to_vec())), Arc::new(AtomicBool::new(true)))
+    }
+
+    /// Whether the stream has ended: the browser and every helper that
+    /// shared its stderr are gone, and every line they wrote is in the tail.
+    pub fn closed(&self) -> bool {
+        self.1.load(Ordering::Acquire)
+    }
+
     /// The last lines of stderr, minus known harmless noise (DBus, fonts).
     pub fn tail(&self) -> String {
         let b = self.0.lock().map(|b| b.clone()).unwrap_or_default();
@@ -273,8 +285,11 @@ pub fn launch_chrome_pipe(exe: &str, headless: bool, chrome_flags: &[String]) ->
     // The child's ends live on in Chrome; close ours so EOF propagates.
     drop(cmd_read);
     drop(reply_write);
-    let stderr =
-        child.stderr.take().map(|e| StderrTail(Capture::start(e).buf)).unwrap_or_else(|| StderrTail(Arc::default()));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|e| Capture::start(e).tail_handle())
+        .unwrap_or_else(|| StderrTail(Arc::default(), Arc::new(AtomicBool::new(true))));
     Ok(LaunchedPipe {
         child,
         profile_dir,
@@ -321,6 +336,8 @@ struct Capture {
     url: std::sync::mpsc::Receiver<String>,
     buf: Arc<Mutex<Vec<u8>>>,
     capturing: Arc<AtomicBool>,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    closed: Arc<AtomicBool>,
 }
 
 impl Capture {
@@ -328,8 +345,10 @@ impl Capture {
         let (url_tx, url) = std::sync::mpsc::channel();
         let buf = Arc::new(Mutex::new(Vec::new()));
         let capturing = Arc::new(AtomicBool::new(true));
+        let closed = Arc::new(AtomicBool::new(false));
         let buf_clone = Arc::clone(&buf);
         let capturing_clone = Arc::clone(&capturing);
+        let closed_clone = Arc::clone(&closed);
 
         thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr).lines();
@@ -359,9 +378,16 @@ impl Capture {
                     }
                 }
             }
+            closed_clone.store(true, Ordering::Release);
         });
 
-        Self { url, buf, capturing }
+        Self { url, buf, capturing, closed }
+    }
+
+    /// The tail as a browser keeps it, with the end-of-stream flag.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn tail_handle(&self) -> StderrTail {
+        StderrTail(Arc::clone(&self.buf), Arc::clone(&self.closed))
     }
 
     /// Wait up to `timeout` for Chrome to announce its DevTools URL.
@@ -562,10 +588,10 @@ mod tests {
             log.push_str(&format!(" r{i}: 0000000000000006 r13: 0000235000148000\n"));
         }
         log.push_str("[end of stack trace]\n");
-        let stderr = StderrTail(Arc::new(Mutex::new(log.into_bytes())));
+        let stderr = StderrTail::of(&log);
         assert!(!stderr.tail().contains("No usable sandbox"));
         assert!(stderr.first_fatal().is_some_and(|f| f.contains("No usable sandbox")));
-        assert_eq!(StderrTail(Arc::default()).first_fatal(), None);
+        assert_eq!(StderrTail::of("").first_fatal(), None);
     }
 
     use super::*;
