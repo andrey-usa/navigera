@@ -99,6 +99,7 @@ fn find_check_and_find_targets_ask_the_decision_model() {
     // environment, as it would from the agent's.
     let started = s.run(&["start"], &[("NAVIGERA_DECIDER_URL", &jev.url), ("TYPESAFE_API_KEY", "test-key")]);
     assert_eq!(started["ok"], true, "{started}");
+    assert_eq!(started["result"]["decider"], "jev-latest", "{started}");
     s.ok(&["goto", &format!("{}/shop", site.url)]);
 
     // find: one of twelve "Add to cart" buttons, told apart by its card.
@@ -146,6 +147,7 @@ fn without_a_decision_model_find_says_how_to_get_one() {
     let s = Session { name: format!("nv-nodecide-{}", std::process::id()) };
     let started = s.run(&["start"], &[("NAVIGERA_DECIDER_URL", ""), ("TYPESAFE_API_KEY", "")]);
     assert_eq!(started["ok"], true, "{started}");
+    assert!(started["result"].get("decider").is_none(), "{started}");
     s.ok(&["goto", &format!("{}/shop", site.url)]);
     let r = s.run(&["click", "--find", "the cart link"], &[]);
     assert_eq!(r["ok"], false);

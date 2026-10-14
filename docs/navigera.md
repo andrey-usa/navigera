@@ -168,6 +168,9 @@ where the session (or `navigera mcp`) starts:
 | `NAVIGERA_DECIDER_MODEL` | model id (default `jev-latest`) |
 | `NAVIGERA_FIND_MIN` | probability `--find` needs before it acts (default 0.5) |
 
+`start` reports `"decider": "<model>"` when one is configured, so an agent can
+tell without looking at the variables.
+
 - `find "add the brass valve to the cart"` returns the chosen element's ref,
   its line, the probability and the three runners-up. Every element with a
   ref is an option, described by its line and the containers around it (the

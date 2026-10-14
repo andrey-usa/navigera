@@ -135,9 +135,8 @@ page "Checkout — Acme" http://shop.test/checkout
 Element commands wait up to 5 s for the element to appear. Pass
 `--timeout-ms <ms>` to wait longer.
 
-When the session was started with `TYPESAFE_API_KEY` set, a fast decision
-model can pick elements and answer yes/no questions without you reading the
-tree: `find "<what you want>"` returns a ref, any element command takes
+When `start` reports a `"decider"`, a fast decision model can pick elements
+and answer yes/no questions without you reading the tree: `find "<what you want>"` returns a ref, any element command takes
 `--find "<description>"` instead of a ref, and `check "<question>"` returns the
 probability of yes (look yourself when it is near 0.5, or when `--find` says
 it is unsure).

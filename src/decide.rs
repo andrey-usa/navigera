@@ -59,6 +59,11 @@ impl Decider {
         })
     }
 
+    /// The model id decisions go to.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     /// The error for `find`/`check` when no decider is configured.
     pub fn missing(op: &str) -> anyhow::Error {
         anyhow::anyhow!(
