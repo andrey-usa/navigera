@@ -32,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       tools:
-        description: "comma-separated: navigera,navigera+jev,agent-browser,playwright-cli (none: no agent runs)"
+        description: "comma-separated: navigera,navigera+jev,navigera+jev-told,agent-browser,playwright-cli (none: no agent runs)"
         default: "navigera,agent-browser,playwright-cli"
       tasks:
         description: "comma-separated task ids (lookup,purchase,account,docs,support,purchase-live) or all (local tasks)"
@@ -79,7 +79,7 @@ jobs:
         run: |
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
-          slot = {"navigera": "GEMINI_API_KEY", "navigera+jev": "GEMINI_API_KEY_2",
+          slot = {"navigera": "GEMINI_API_KEY", "navigera+jev": "GEMINI_API_KEY_2", "navigera+jev-told": "GEMINI_API_KEY_3",
                   "agent-browser": "GEMINI_API_KEY_2", "playwright-cli": "GEMINI_API_KEY_3"}
           # Windows legs take the next slot over, so `os: both` spreads the
           # load over the keys instead of doubling it on each.
@@ -153,7 +153,7 @@ jobs:
           fi
           cat "$log"
       - name: Decider relay (TypeSafe Jev)
-        if: "!cancelled() && matrix.run.tool == 'navigera+jev' && env.HAS_KEY == 'true' && env.MODE != 'scripted' && steps.smoke.outcome == 'success'"
+        if: "!cancelled() && startsWith(matrix.run.tool, 'navigera+jev') && env.HAS_KEY == 'true' && env.MODE != 'scripted' && steps.smoke.outcome == 'success'"
         uses: ./.github/actions/jev-relay
         with:
           key: ${{ secrets.TYPESAFE_API_KEY }}
@@ -187,7 +187,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: eval-${{ matrix.run.tool == 'navigera+jev' && 'navigera-jev' || matrix.run.tool }}-${{ matrix.run.os }}
+          name: eval-${{ matrix.run.tool }}-${{ matrix.run.os }}
           path: |
             out/gemini/summary-*.json
             ${{ runner.temp }}/jev.jsonl

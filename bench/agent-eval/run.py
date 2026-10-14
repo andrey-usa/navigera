@@ -63,6 +63,15 @@ TOOLS = {
         "cmd": "navigera", "skill": "navigera", "decider": True,
         "repo": "https://github.com/andrey-usa/navigera",
     },
+    # The same, with the prompt asking for the decider: what Jev saves when
+    # the agent uses it, apart from whether the skill alone gets it used.
+    "navigera+jev-told": {
+        "cmd": "navigera", "skill": "navigera", "decider": True,
+        "repo": "https://github.com/andrey-usa/navigera",
+        "hint": " A decision model is configured for this browser session: prefer `--find \"<description>\"` on"
+                " element commands and `check \"<question>\"` over reading the page with `ax`; read the page only"
+                " for text you must report, or when --find says it is unsure.",
+    },
     "agent-browser": {
         "cmd": "agent-browser", "skill": "agent-browser",
         "repo": "https://github.com/vercel-labs/agent-browser",
@@ -73,7 +82,7 @@ TOOLS = {
     },
 }
 
-SKILLED_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}". Read that skill first, then use `{cmd}` (through shell commands) for every browser interaction. Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
+SKILLED_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}". Read that skill first, then use `{cmd}` (through shell commands) for every browser interaction.{hint} Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
 
 The website is running at {base}.
 
@@ -659,7 +668,8 @@ def main() -> int:
                     spec = TOOLS[tool]
                     template = SKILLED_PROMPT if args.mode == "skilled" else ONBOARD_PROMPT
                     prompt = template.format(workdir=work, cmd=spec["cmd"], skill=spec["skill"], name=tool,
-                                             repo=spec["repo"], base=site.base, task=task["prompt"])
+                                             repo=spec["repo"], base=site.base, task=task["prompt"],
+                                             hint=spec.get("hint", ""))
                     before = log_lines(args.decider_log)
                     res = run_gemini(prompt, work, env, args) if args.agent == "gemini" \
                         else run_scripted(task["id"], site.base, work, env)
