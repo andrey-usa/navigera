@@ -15,6 +15,13 @@ name: agent-eval
 # playwright-cli -> GEMINI_API_KEY). Without any key only the scripted
 # baseline runs.
 #
+# `navigera+jev` is navigera with TypeSafe's Jev deciding (`find`, `--find`,
+# `check`), next to plain `navigera` as the Gemini-only baseline; it needs
+# TYPESAFE_API_KEY in the main environment, held by a local relay
+# (bench/decide/relay.py) that the agent's shell never sees. `decisions: true`
+# adds a job asking Jev and Gemini the same element choices and yes/no
+# questions with known answers (bench/decide/compare.py).
+#
 # `os: windows` (or `both`) runs the same jobs on windows-latest: the agent's
 # shell is PowerShell there, and rows read `<tool> (windows)`.
 #
@@ -25,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       tools:
-        description: "comma-separated: navigera,agent-browser,playwright-cli"
+        description: "comma-separated: navigera,navigera+jev,navigera+jev-told,agent-browser,playwright-cli (none: no agent runs)"
         default: "navigera,agent-browser,playwright-cli"
       tasks:
         description: "comma-separated task ids (lookup,purchase,account,docs,support,purchase-live) or all (local tasks)"
@@ -42,6 +49,17 @@ on:
       os:
         description: "linux, windows or both"
         default: "linux"
+      decisions:
+        description: "also ask Jev and Gemini the same decisions (bench/decide/compare.py)"
+        type: boolean
+        default: false
+      decide_models:
+        description: "Gemini model ids for the decisions baseline, comma-separated"
+        default: "gemini-3.5-flash-lite"
+      live:
+        description: "decisions: include the public-web cases"
+        type: boolean
+        default: true
   schedule:
     - cron: "41 9 * * 2"   # after the free quota resets (midnight Pacific)
 
@@ -61,8 +79,8 @@ jobs:
         run: |
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
-          slot = {"navigera": "GEMINI_API_KEY", "agent-browser": "GEMINI_API_KEY_2",
-                  "playwright-cli": "GEMINI_API_KEY_3"}
+          slot = {"navigera": "GEMINI_API_KEY", "navigera+jev": "GEMINI_API_KEY_2", "navigera+jev-told": "GEMINI_API_KEY_3",
+                  "agent-browser": "GEMINI_API_KEY_2", "playwright-cli": "GEMINI_API_KEY_3"}
           # Windows legs take the next slot over, so `os: both` spreads the
           # load over the keys instead of doubling it on each.
           rotate = {"GEMINI_API_KEY": "GEMINI_API_KEY_2", "GEMINI_API_KEY_2": "GEMINI_API_KEY_3",
@@ -77,6 +95,7 @@ jobs:
 
   eval:
     needs: plan
+    if: needs.plan.outputs.matrix != '[]'
     name: ${{ matrix.run.tool }} (${{ matrix.run.os }})
     strategy:
       fail-fast: false
@@ -133,6 +152,11 @@ jobs:
             exit 1
           fi
           cat "$log"
+      - name: Decider relay (TypeSafe Jev)
+        if: "!cancelled() && startsWith(matrix.run.tool, 'navigera+jev') && env.HAS_KEY == 'true' && env.MODE != 'scripted' && steps.smoke.outcome == 'success'"
+        uses: ./.github/actions/jev-relay
+        with:
+          key: ${{ secrets.TYPESAFE_API_KEY }}
       - name: Onboarding (the agent installs the tool from its own docs)
         if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'onboard' || env.MODE == 'both') && steps.smoke.outcome == 'success'"
         env:
@@ -140,9 +164,10 @@ jobs:
         run: |
           bash bench/agent-eval/logged.sh "agent run log (onboard, $TOOL, ${{ matrix.run.os }})" \
             python bench/agent-eval/run.py --mode onboard --tools "$TOOL" --model "$MODEL" \
-            --gemini "$GEMINI_BIN" --reps 1 --out out/gemini
+            --gemini "$GEMINI_BIN" --reps 1 --out out/gemini \
+            ${DECIDER_URL:+--decider-url "$DECIDER_URL" --decider-log "$DECIDER_LOG"}
       - name: Install the tool (for skilled runs)
-        if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'skilled' || env.MODE == 'both') && env.TOOL != 'navigera' && steps.smoke.outcome == 'success'"
+        if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'skilled' || env.MODE == 'both') && !startsWith(env.TOOL, 'navigera') && steps.smoke.outcome == 'success'"
         run: |
           case "$TOOL" in
             agent-browser) npm install -g agent-browser@0.38.2 ;;
@@ -156,13 +181,50 @@ jobs:
         run: |
           bash bench/agent-eval/logged.sh "agent run log (skilled, $TOOL, ${{ matrix.run.os }})" \
             python bench/agent-eval/run.py --mode skilled --tools "$TOOL" --tasks "$TASKS" \
-            --model "$MODEL" --gemini "$GEMINI_BIN" --reps "$REPS" --out out/gemini
+            --model "$MODEL" --gemini "$GEMINI_BIN" --reps "$REPS" --out out/gemini \
+            ${DECIDER_URL:+--decider-url "$DECIDER_URL" --decider-log "$DECIDER_LOG"}
       - name: Upload this tool's results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: eval-${{ matrix.run.tool }}-${{ matrix.run.os }}
-          path: out/gemini/summary-*.json
+          path: |
+            out/gemini/summary-*.json
+            ${{ runner.temp }}/jev.jsonl
+          if-no-files-found: ignore
+
+  decisions:
+    if: inputs.decisions
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/agent-setup
+      - uses: ./.github/actions/jev-relay
+        with:
+          key: ${{ secrets.TYPESAFE_API_KEY }}
+      - name: Jev and Gemini on the same decisions
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODELS: ${{ inputs.decide_models }}
+          REPS: ${{ inputs.reps }}
+          LIVE: ${{ inputs.live && '--live' || '' }}
+        run: |
+          python bench/decide/compare.py --navigera target/release/navigera \
+            --decider-url "$DECIDER_URL" --decider-log "$DECIDER_LOG" \
+            --models "$MODELS" --reps "$REPS" $LIVE --out out/decide
+      - name: Decisions table
+        if: always()
+        run: python bench/ladder/annotate.py out/decide/decide-compare.md "decide compare"
+      - name: Upload the decisions
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: decide-compare
+          path: |
+            out/decide/
+            ${{ runner.temp }}/jev.jsonl
           if-no-files-found: ignore
 
   report:

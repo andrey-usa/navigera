@@ -71,6 +71,30 @@
           "32.39"
         ]
       }
+    },
+    {
+      "id": "python-docs-live",
+      "title": "Live web: navigate a large docs index to one parameter's default",
+      "live": true,
+      "url": "https://docs.python.org/3/library/index.html",
+      "prompt": "Starting from that page, open the documentation of Python's json module by clicking links (do not type or edit URLs), and find the default value of the indent parameter of json.dumps. Answer in the form: indent=<value>",
+      "check": {
+        "answer_contains": [
+          "indent=None"
+        ]
+      }
+    },
+    {
+      "id": "mdn-live",
+      "title": "Live web: navigate MDN's element index to one API method",
+      "live": true,
+      "url": "https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements",
+      "prompt": "Starting from that page, open MDN's reference page for the <dialog> element by clicking links (do not type or edit URLs), and find the name of the method that opens a dialog as a modal. Answer in the form: method=<name>",
+      "check": {
+        "answer_contains": [
+          "showModal"
+        ]
+      }
     }
   ]
 }

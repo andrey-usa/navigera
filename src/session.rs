@@ -537,13 +537,14 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     let deadline = Instant::now() + Duration::from_secs(wait);
     loop {
         if connect(&path).is_ok() {
-            print_json(
-                output,
-                &json!({ "id": null, "ok": true, "result": {
-                    "session": name, "socket": socket_str, "log": log_str, "pid": child.id(),
-                }}),
-                config,
-            );
+            let mut result = json!({ "session": name, "socket": socket_str, "log": log_str, "pid": child.id() });
+            // The server inherited this environment. Saying so lets an agent
+            // know `find`/`check` work without reading a key variable (and
+            // printing the key into its own context).
+            if let Some(decider) = crate::decide::Decider::from_env() {
+                result["decider"] = json!(decider.model());
+            }
+            print_json(output, &json!({ "id": null, "ok": true, "result": result }), config);
             return ExitCode::SUCCESS;
         }
         if let Ok(Some(status)) = child.try_wait() {

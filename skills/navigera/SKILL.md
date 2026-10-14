@@ -49,6 +49,25 @@ navigera -s work quit                     # done
   session. `-s <name>` is short for `--session <name>`. `$NAVIGERA_SESSION`
   sets a default session. An idle session shuts down after 30 min.
 
+### When `start` prints `"decider"`: act without reading the tree
+
+A fast decision model then picks elements and answers yes/no questions, so
+most steps need no `ax`:
+
+```bash
+navigera -s work click --find "accept the cookies"
+navigera -s work fill --find "the email field" "ada@example.com"
+navigera -s work check "Is an error message shown?"   # {"yes":0.02,"answer":false}
+```
+
+- `--find "<description>"` works on every element command, in place of a
+  ref; the result says which element it chose (`found`). When it is unsure
+  it refuses and lists the candidates: then read `ax`.
+- `find "<description>"` returns the ref without acting. `check` returns the
+  probability of yes; near 0.5, look yourself.
+- Still read the page (`ax`, `eval`) for its text: a price, an order number,
+  anything you must report.
+
 ## Shell commands, not a wrapper script
 
 Drive the session with one shell command per step. Do not write a
@@ -134,13 +153,6 @@ page "Checkout — Acme" http://shop.test/checkout
 
 Element commands wait up to 5 s for the element to appear. Pass
 `--timeout-ms <ms>` to wait longer.
-
-When the session was started with `TYPESAFE_API_KEY` set, a fast decision
-model can pick elements and answer yes/no questions without you reading the
-tree: `find "<what you want>"` returns a ref, any element command takes
-`--find "<description>"` instead of a ref, and `check "<question>"` returns the
-probability of yes (look yourself when it is near 0.5, or when `--find` says
-it is unsure).
 
 ## What the tool handles for you
 
