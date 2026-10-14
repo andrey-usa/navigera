@@ -10,7 +10,7 @@ navigera runs a real browser for an agent that opens pages nobody vetted.
 
 | boundary | protection |
 |---|---|
-| a malicious page vs. your account | Chrome's renderer sandbox stays on. navigera adds `--no-sandbox` only when Chrome can't have one: as root (containers, CI), with `NAVIGERA_NO_SANDBOX=1`, or after Chrome reports at launch that the machine has no usable sandbox, in which case it says so on stderr |
+| a malicious page vs. your account | Chrome's renderer sandbox stays on. navigera adds `--no-sandbox` only when Chrome can't have one: as root (containers, CI), with `NAVIGERA_NO_SANDBOX=1`, or after Chrome reports at launch that the machine has no usable sandbox, in which case it says so on stderr. It remembers that for that browser binary in the private session directory, until the binary changes or the machine reboots, so later launches skip the attempt; deleting `no-sandbox-*` there brings it back |
 | other local users vs. your session | Unix: the session socket and log live in `$XDG_RUNTIME_DIR/navigera` or `$TMPDIR/navigera-<uid>`, mode 0700, refused if it is a symlink, someone else's or open to others; the log is 0600 and never follows a symlink. Windows: a loopback port that drops any client whose first line isn't the 128-bit token from your own `%TEMP%` |
 | a web page vs. the CDP connection | the default transport is a private pipe (Linux/macOS): no port at all. Chrome rejects DevTools WebSocket connections from web origins |
 | the downloaded binary | `install.sh` / `install.ps1` verify the SHA-256 published with each release; release builds carry GitHub build-provenance attestations (`gh attestation verify <file> -R andrey-usa/navigera`) |
