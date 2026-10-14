@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-14
+
 ### Added
 
 - `find <description>`, `check <question>` and `--find <description>` on
@@ -13,7 +15,8 @@ All notable changes to this project are documented here. The format follows
   answered by a System One decision model (TypeSafe Jev) when
   `TYPESAFE_API_KEY` or `NAVIGERA_DECIDER_URL` is set. MCP gains
   `browser_find`, `browser_check` and a `find` target in that case only.
-  Typed values are redacted from what is sent.
+  Typed values are redacted from what is sent. `start` reports `"decider"`
+  with the model id, so an agent can tell without reading the key.
 - `server.json` for the MCP Registry (`io.github.andrey-usa/navigera`; the npm
   package carries the matching `mcpName`), published by the release workflow
   when `PUBLISH_MCP_REGISTRY` is set.
@@ -62,4 +65,5 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.4.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.1
 [0.4.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.0
