@@ -35,8 +35,7 @@ pub struct Browser {
     client: CdpClient,
     child: Mutex<Option<Child>>,
     /// The child leads its own process group (every browser we launch on
-    /// Unix; lightpanda possibly under xvfb-run): close kills the whole
-    /// group, not just the browser process or the wrapper.
+    /// Unix): close kills the whole group, not just the browser process.
     kill_group: bool,
     /// Kept alive for the session; the temp profile is deleted by `close`
     /// (or on drop). `None` for engines that need no profile (Lightpanda).
@@ -60,35 +59,14 @@ impl Browser {
     /// WebSocket URL is discovered via its `/json/version` endpoint.
     pub fn launch_lightpanda(handle: &tokio::runtime::Handle, bin: &str) -> Result<Self> {
         let port = free_port().context("pick a free port for lightpanda serve")?;
-        // The lightpanda nightly currently requires an X server even for
-        // `serve` (upstream bug — it is supposed to be headless). Wrap with
-        // `xvfb-run` when there is no display and xvfb is available.
-        let (program, args) = if std::env::var_os("DISPLAY").is_none() && xvfb_available() {
-            eprintln!("[browser] no $DISPLAY — launching lightpanda serve under xvfb-run");
-            (
-                "xvfb-run".to_string(),
-                vec![
-                    "-a".to_string(),
-                    bin.to_string(),
-                    "serve".to_string(),
-                    "--host".to_string(),
-                    "127.0.0.1".to_string(),
-                    "--port".to_string(),
-                    port.to_string(),
-                ],
-            )
-        } else {
-            (
-                bin.to_string(),
-                vec![
-                    "serve".to_string(),
-                    "--host".to_string(),
-                    "127.0.0.1".to_string(),
-                    "--port".to_string(),
-                    port.to_string(),
-                ],
-            )
-        };
+        let program = bin.to_string();
+        let args = vec![
+            "serve".to_string(),
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+        ];
         // Write child output to a temp file for diagnostics (not piped to avoid
         // the pipe-buffer deadlock). The file is read only on poll failure.
         let log_path = std::env::temp_dir().join(format!("lightpanda-serve-{port}.log"));
@@ -518,15 +496,6 @@ impl Browser {
         drop(profile);
         crate::timing::record("close", started);
     }
-}
-
-/// True when `xvfb-run` is on PATH.
-fn xvfb_available() -> bool {
-    std::env::var_os("PATH")
-        .map(|p| {
-            std::env::split_paths(&p).any(|d| d.join(if cfg!(windows) { "xvfb-run.exe" } else { "xvfb-run" }).is_file())
-        })
-        .unwrap_or(false)
 }
 
 /// Pick a free localhost TCP port by binding to port 0 and releasing it.
