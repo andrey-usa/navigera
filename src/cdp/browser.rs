@@ -82,6 +82,7 @@ impl Browser {
         }
         let mut child = cmd
             .args(&args)
+            .env("LIGHTPANDA_DISABLE_TELEMETRY", "1")
             .stdin(std::process::Stdio::null())
             .stdout(log_file.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
             .stderr(log_file_err.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
