@@ -749,20 +749,12 @@ impl BrowserSession {
     /// Navigate the active tab; `wait` is `load`, `domcontentloaded` or
     /// `commit`. Retries benign aborts (third-party trackers can abort the
     /// main-frame load mid-flight).
-    ///
-    /// Lightpanda sessions use a `commit` wait: Lightpanda emits no
-    /// `Page.loadEventFired`, so a full wait would just burn the navigation
-    /// timeout. Callers confirm content by polling the DOM.
     pub fn goto_wait(&self, url: &str, wait: &str, timeout_ms: Option<f64>) -> Result<()> {
         if !matches!(wait, "load" | "domcontentloaded" | "commit") {
             bail!("--wait takes load|domcontentloaded|commit, got {wait:?}");
         }
-        let (wait, timeout) = if self.lightpanda {
-            ("commit", Duration::from_millis(500))
-        } else {
-            // Honors --timeout-ms (was a hard-coded 40 s per attempt).
-            (wait, self.timeout(timeout_ms))
-        };
+        // Honors --timeout-ms (was a hard-coded 40 s per attempt).
+        let timeout = self.timeout(timeout_ms);
         let max_attempts = 3;
         let mut attempt = 0;
         loop {
@@ -770,9 +762,6 @@ impl BrowserSession {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     let msg = format!("{e:#}");
-                    if self.lightpanda && msg.contains("timed out") {
-                        return Ok(());
-                    }
                     attempt += 1;
                     let transient = msg.contains("ERR_ABORTED") || msg.contains("ERR_CONNECTION_RESET");
                     if transient && attempt <= max_attempts {
