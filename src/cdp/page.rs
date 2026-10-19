@@ -868,7 +868,7 @@ impl Page {
             }
         }
         if !self.mouse_click(&point, timeout)? {
-            // Engine without the Input domain (e.g. Lightpanda): DOM events.
+            // Engine without the Input domain: DOM events.
             return self.on_element(target, "click", CLICK_PREP, &[json!(true), settle], wait, timeout);
         }
         let check = point.get("check").and_then(Value::as_bool) == Some(true)
