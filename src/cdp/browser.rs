@@ -66,6 +66,8 @@ impl Browser {
             "127.0.0.1".to_string(),
             "--port".to_string(),
             port.to_string(),
+            "--load-resources".to_string(),
+            "iframe".to_string(),
         ];
         // Write child output to a temp file for diagnostics (not piped to avoid
         // the pipe-buffer deadlock). The file is read only on poll failure.
