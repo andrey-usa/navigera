@@ -24,6 +24,19 @@ calls, how many shell commands used the tool, and off-tool workarounds
 of TypeSafe's API, holding the key), and each run records the decider's
 calls and input tokens from the relay's `--decider-log`.
 
+Measuring the decider takes three arms on the same tasks, model and reps,
+each on its own model key so a spent quota cannot fall on one arm only:
+`navigera` (no decider), `navigera+jev` (the decider is on and the agent
+learns it only as a user would: `start`'s note, a note on a long `ax`, the
+skill) and `navigera+jev-told` (the prompt asks for it too). The first pair
+measures adoption, the second what a used decider saves. Tasks where
+deciding pays are the ones where reading the page costs more than naming
+the element: `preferences` (a 170-line form, four named changes and a
+confirmation to check) and the live docs tasks; on the small pages of the
+others one `ax` is cheaper, and an agent that skips the decider there is
+right to. Compare success first, then agent tokens plus decider tokens,
+turns and wall time, per task.
+
 `--agent scripted` replays known-good navigera command plans instead of
 calling a model: it validates the site, the checks and this harness without
 an API key (CI runs it on every eval, and locally).
@@ -426,6 +439,13 @@ def scripted_plan(tool: str, task: str, base: str) -> list[list[str]]:
                              " d.getElementById('send').click(); return true; }"],
                     ["wait", "--ms", "500"],
                     ["--raw", "eval", "document.querySelector('iframe').contentDocument.body.innerText"]],
+        "preferences": [["start"], ["goto", f"{base}/preferences"], ["click", "--text", "Accept all"],
+                        ["click", "--selector", "input[name=price_drop]"],
+                        ["click", "--selector", "input[name=newsletter]"],
+                        ["select", "--selector", "select[name=currency]", "EUR"],
+                        ["select", "--selector", "select[name=history_page_size]", "50"],
+                        ["click", "--text", "Save preferences"], ["wait", "--text", "Preferences saved."],
+                        ["--raw", "text", "--selector", "#saved"]],
     }
     return [s + p for p in plans[task]] + [s + ["quit"]]
 
@@ -529,6 +549,18 @@ def check(task: dict, answer: str, site, tool: str = "") -> tuple[bool, list[str
                     why.append(f"{k}={o.get(k)!r}")
             if o["id"] not in answer:
                 why.append(f"order id {o['id']} not in answer")
+    if "preferences" in c:
+        saved = list(state.get("preferences", {}).values())
+        if not saved:
+            why.append("preferences never saved")
+        else:
+            got, defaults = saved[-1], site.get("/__defaults")
+            for k, v in c["preferences"].items():
+                if got.get(k) != v:
+                    why.append(f"{k}={got.get(k)!r} (want {v!r})")
+            changed = sorted(k for k, v in got.items() if k not in c["preferences"] and v != defaults.get(k))
+            if changed:
+                why.append(f"also changed {', '.join(changed)}")
     if "ticket" in c:
         want = c["ticket"]
         tickets = state["tickets"]

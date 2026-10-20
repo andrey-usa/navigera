@@ -481,6 +481,12 @@ fn fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCo
     ExitCode::from(1)
 }
 
+/// What `start` tells an agent when a decision model is on.
+pub const DECIDER_NOTE: &str = "a decision model is on: act with `click --find \"<what>\"` or \
+     `fill --find \"<what>\" <value>` (any element command takes --find) and verify with \
+     `check \"<yes/no question>\"`, instead of reading `ax` for refs; read `ax` only for text you must report, \
+     or when --find says it is unsure.";
+
 /// `start`: spawn a detached session server and wait until it accepts.
 pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> ExitCode {
     let path = match socket_path(name) {
@@ -563,14 +569,18 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     let deadline = Instant::now() + Duration::from_secs(wait);
     loop {
         if connect(&path).is_ok() {
-            let mut result = json!({ "session": name, "socket": socket_str, "log": log_str, "pid": child.id() });
+            let result = json!({ "session": name, "socket": socket_str, "log": log_str, "pid": child.id() });
             // The server inherited this environment. Saying so lets an agent
             // know `find`/`check` work without reading a key variable (and
             // printing the key into its own context).
+            let mut response = json!({ "id": null, "ok": true, "result": result });
             if let Some(decider) = crate::decide::Decider::from_env() {
-                result["decider"] = json!(decider.model());
+                response["result"]["decider"] = json!(decider.model());
+                // The contract, where the agent decides how to proceed: a
+                // skill section further down is read once, if at all.
+                response["notes"] = json!([DECIDER_NOTE]);
             }
-            print_json(output, &json!({ "id": null, "ok": true, "result": result }), config);
+            print_json(output, &response, config);
             return ExitCode::SUCCESS;
         }
         if let Ok(Some(status)) = child.try_wait() {

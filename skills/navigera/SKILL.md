@@ -36,6 +36,17 @@ navigera -s work --raw ax                 # look again to verify
 navigera -s work quit                     # done
 ```
 
+**If `start` prints `"decider"`** (a decision model is on; its note says so),
+describe instead of looking. Each step is one call with no tree to read:
+
+```bash
+navigera -s work click --find "the Sign in link"
+navigera -s work fill --find "the email field" "ada@example.com"
+navigera -s work click --find "the Sign in button"
+navigera -s work check "Is the user signed in?"     # {"yes":0.97,"answer":true}
+navigera -s work --raw ax --selector main           # read only text you must report
+```
+
 - Chain steps you are sure of in one shell call and end with a look:
   `navigera -s work fill 21 "Ada" && navigera -s work click 30 && navigera -s work --raw ax`.
   A failing step stops the chain. Fewer calls = fewer tokens.
@@ -49,10 +60,10 @@ navigera -s work quit                     # done
   session. `-s <name>` is short for `--session <name>`. `$NAVIGERA_SESSION`
   sets a default session. An idle session shuts down after 30 min.
 
-### When `start` prints `"decider"`: act without reading the tree
+### The decision model in detail
 
-A fast decision model then picks elements and answers yes/no questions, so
-most steps need no `ax`:
+When `start` prints `"decider"`, a fast decision model picks elements and
+answers yes/no questions, so most steps need no `ax`:
 
 ```bash
 navigera -s work click --find "accept the cookies"
