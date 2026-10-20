@@ -541,6 +541,44 @@ pub fn render(header: &str, nodes: &[Value], frames: &[Frame], opts: &Options) -
     Rendered { lines: lines.len(), text: lines.join("\n"), truncated }
 }
 
+/// Lines for what [`crate::cdp::page`]'s `SHADOW_AX` found inside shadow
+/// roots, appended to a Lightpanda snapshot: one heading per root, then its
+/// elements as the tree would show them, but with no refs -- the engine gives
+/// those nodes no id -- and the targeting that does reach them said once.
+pub fn render_shadow(found: &[Value]) -> String {
+    let mut out = String::new();
+    let mut host = 0;
+    for e in found {
+        let h = e.get("host").and_then(Value::as_u64).unwrap_or(0);
+        let role = e.get("role").and_then(Value::as_str).unwrap_or("generic");
+        let name = e.get("name").and_then(Value::as_str).unwrap_or("");
+        if h != host {
+            host = h;
+            let tag = e.get("tag").and_then(Value::as_str).unwrap_or("element");
+            out.push_str(&format!(
+                "- shadow root of <{tag}> (Lightpanda leaves it out of the tree and gives it no refs; \
+                 target it with --text \"<name>\"):\n"
+            ));
+        }
+        let mut line = format!("  - {role}");
+        if !name.is_empty() {
+            line.push_str(&format!(" {}", serde_json::to_string(name).unwrap_or_default()));
+        }
+        if let Some(level) = e.get("level").and_then(Value::as_u64) {
+            line.push_str(&format!(" [level={level}]"));
+        }
+        if let Some(v) = e.get("value").and_then(Value::as_str) {
+            line.push_str(&format!(" value={}", serde_json::to_string(v).unwrap_or_default()));
+        }
+        if let Some(c) = e.get("checked").and_then(Value::as_bool) {
+            line.push_str(if c { " [checked]" } else { " [unchecked]" });
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,5 +656,23 @@ mod tests {
             "- Iframe \"Pay\":\n  - document \"Card form\":\n    - button \"Pay now\" [ref=71]\n\
              - combobox \"Color\" [ref=4] value=\"Blue\" options: \"Red\", \"Blue (selected)\""
         );
+    }
+
+    #[test]
+    fn shadow_content_renders_under_its_root_without_refs() {
+        let found = vec![
+            json!({"host": 1, "tag": "acme-coupon", "role": "textbox", "name": "Coupon code", "value": "SAVE10"}),
+            json!({"host": 1, "tag": "acme-coupon", "role": "button", "name": "Apply coupon"}),
+            json!({"host": 2, "tag": "x-prefs", "role": "checkbox", "name": "Email me", "checked": false}),
+            json!({"host": 2, "tag": "x-prefs", "role": "heading", "name": "Prefs", "level": 3}),
+        ];
+        let text = render_shadow(&found);
+        assert_eq!(text.matches("- shadow root of <").count(), 2, "{text}");
+        assert!(text.contains("<acme-coupon>"), "{text}");
+        assert!(text.contains("  - textbox \"Coupon code\" value=\"SAVE10\"\n"), "{text}");
+        assert!(text.contains("  - checkbox \"Email me\" [unchecked]\n"), "{text}");
+        assert!(text.contains("  - heading \"Prefs\" [level=3]\n"), "{text}");
+        assert!(!text.contains("[ref="), "{text}");
+        assert_eq!(render_shadow(&[]), "");
     }
 }

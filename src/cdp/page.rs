@@ -548,6 +548,87 @@ fn shifted_char(c: char) -> char {
 
 /// Does Enter on the focused element (through open shadow roots and
 /// same-origin frames) possibly navigate? Form controls, links, buttons.
+/// What open shadow roots hold, for an engine whose accessibility tree leaves
+/// them out (Lightpanda: neither its AX tree nor `DOM.getDocument` with
+/// `pierce` reaches inside one, and `DOM.describeNode` refuses a node there,
+/// so no ref can point at it either). One entry per actionable element or
+/// live region: `{host, tag, role, name, value?, checked?, level?}`, `host`
+/// numbering the shadow roots in document order. `scope` limits it to roots
+/// under the element a selector names.
+const SHADOW_AX: &str = r#"(scope) => {
+  const top = scope ? document.querySelector(scope) : document;
+  if (!top) return [];
+  const out = [];
+  const squash = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const bare = (node) => {
+    const copy = node.cloneNode(true);
+    for (const c of copy.querySelectorAll('input, select, textarea, button')) c.remove();
+    return squash(copy.textContent);
+  };
+  const nameOf = (el) => {
+    const aria = el.getAttribute('aria-label');
+    if (aria && squash(aria)) return squash(aria);
+    const by = el.getAttribute('aria-labelledby');
+    if (by) {
+      const root = el.getRootNode();
+      const t = by.split(/\s+/).map((id) => root.getElementById && root.getElementById(id)).filter(Boolean).map((n) => n.textContent).join(' ');
+      if (squash(t)) return squash(t);
+    }
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) {
+      const label = (el.labels && el.labels[0]) || el.closest('label');
+      if (label && bare(label)) return bare(label);
+      for (const a of ['placeholder', 'title']) if (el.getAttribute(a)) return squash(el.getAttribute(a));
+      if (el.tagName === 'INPUT' && /^(submit|button|reset)$/i.test(el.type)) return squash(el.value);
+      return '';
+    }
+    return squash(el.getAttribute('title') || el.textContent).slice(0, 100);
+  };
+  const roleOf = (el) => {
+    const explicit = el.getAttribute('role');
+    if (explicit) return explicit;
+    const t = el.tagName;
+    if (t === 'A' && el.hasAttribute('href')) return 'link';
+    if (t === 'BUTTON' || t === 'SUMMARY') return 'button';
+    if (t === 'SELECT') return el.multiple ? 'listbox' : 'combobox';
+    if (t === 'TEXTAREA') return 'textbox';
+    if (t === 'OUTPUT') return 'status';
+    if (/^H[1-6]$/.test(t)) return 'heading';
+    if (t === 'INPUT') {
+      const ty = (el.getAttribute('type') || 'text').toLowerCase();
+      if (ty === 'hidden') return null;
+      return { checkbox: 'checkbox', radio: 'radio', number: 'spinbutton', range: 'slider', search: 'searchbox',
+               submit: 'button', button: 'button', reset: 'button', image: 'button', file: 'button' }[ty] || 'textbox';
+    }
+    if (el.isContentEditable && el.hasAttribute('contenteditable')) return 'textbox';
+    return null;
+  };
+  const hidden = (el) => {
+    if (el.hidden || el.closest('[hidden], [aria-hidden="true"]')) return true;
+    try { return getComputedStyle(el).display === 'none'; } catch (e) { return false; }
+  };
+  let hosts = 0;
+  const visit = (root, host, tag) => {
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) visit(el.shadowRoot, ++hosts, el.localName);
+      if (host === 0 || out.length >= 200) continue;
+      try {
+        const role = roleOf(el);
+        if (!role || hidden(el)) continue;
+        const name = nameOf(el);
+        const live = /^(status|alert|log)$/.test(role);
+        if (live && !name) continue;
+        const entry = { host, tag, role, name };
+        if (/^(textbox|searchbox|spinbutton|combobox|slider)$/.test(role) && el.value) entry.value = String(el.value);
+        if (role === 'checkbox' || role === 'radio') entry.checked = !!el.checked;
+        if (role === 'heading') entry.level = +el.tagName.slice(1) || 2;
+        out.push(entry);
+      } catch (e) {}
+    }
+  };
+  visit(top, 0, '');
+  return out;
+}"#;
+
 const ENTER_MAY_NAVIGATE: &str = r#"(() => {
     let e = document.activeElement;
     for (;;) {
@@ -944,6 +1025,18 @@ impl Page {
 
     /// True while a navigation is requested or the document is still being
     /// parsed (before DOMContentLoaded).
+    /// One round trip that runs nothing, on Lightpanda only. That engine
+    /// reports a navigation a script scheduled -- `location.href = ...` in a
+    /// click handler -- when it handles the next CDP message, so the events
+    /// trail the click's own reply, and a settle that looked right then found
+    /// nothing to wait for: the op returned the old page with `loading: true`.
+    /// This is that next message. Chrome reports them before the reply.
+    pub fn flush_events(&self, timeout: Duration) {
+        if self.shared.is_single_target() {
+            let _ = self.send("Runtime.evaluate", json!({ "expression": "0", "returnByValue": true }), timeout);
+        }
+    }
+
     pub fn is_loading(&self) -> bool {
         let state = self.shared.nav_state(&self.session_id);
         state.requested_at.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) || (state.loading && !state.dom_ready)
@@ -1542,6 +1635,40 @@ impl Page {
             .ok_or_else(|| anyhow::anyhow!("ax: no backend node id for scope"))
     }
 
+    /// Lightpanda gives every password field the value `*****`, typed into or
+    /// not, so an empty one read as filled. Each such field is asked what it
+    /// holds instead, and shows Chrome's form: a dot per character, or no
+    /// value when it is empty. A field that cannot be asked keeps the stars.
+    fn unmask_passwords(&self, nodes: &mut [Value], timeout: Duration) {
+        for node in nodes.iter_mut() {
+            let masked = node.get("value").and_then(|v| v.get("value")).and_then(Value::as_str) == Some("*****");
+            let Some(id) = node.get("backendDOMNodeId").and_then(Value::as_u64) else {
+                continue;
+            };
+            if !masked {
+                continue;
+            }
+            let Ok((len, _)) = self.call_on_ref(
+                id,
+                "function () { return this.type === 'password' ? String(this.value).length : -1; }",
+                &[],
+                true,
+                timeout,
+            ) else {
+                continue;
+            };
+            match len.as_i64() {
+                Some(0) => {
+                    if let Some(o) = node.as_object_mut() {
+                        o.remove("value");
+                    }
+                }
+                Some(n) if n > 0 => node["value"] = json!({ "type": "string", "value": "•".repeat(n as usize) }),
+                _ => {}
+            }
+        }
+    }
+
     /// Accessibility snapshot for agents (see [`ax`]): an indented text
     /// tree with `[ref=N]` on actionable nodes, iframes included. `json`
     /// keeps the older flat `[{ref, role, name, value?}]` list.
@@ -1551,7 +1678,10 @@ impl Page {
             params["depth"] = json!(d);
         }
         let res = self.send("Accessibility.getFullAXTree", params, timeout)?;
-        let nodes = res.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut nodes = res.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+        if self.shared.is_single_target() {
+            self.unmask_passwords(&mut nodes, timeout);
+        }
         if opts.json {
             return Ok(flat_ax(&nodes, opts.all));
         }
@@ -1578,7 +1708,26 @@ impl Page {
             &frames,
             &ax::Options { all_refs: opts.all_refs, limit: opts.limit, root_backend_id, origin },
         );
-        Ok(Value::String(rendered.text))
+        let mut text = rendered.text;
+        // Lightpanda's tree stops at a shadow root; what is inside is read
+        // from the page instead, without refs (see SHADOW_AX).
+        let scope = match &opts.scope {
+            None => Some(Value::Null),
+            Some(Target::Selector(sel)) => Some(json!(sel)),
+            Some(_) => None,
+        };
+        if let (true, Some(scope)) = (self.shared.is_single_target(), scope) {
+            if let Ok(Value::Array(found)) = self.evaluate_raw(&format!("({SHADOW_AX})({scope})"), timeout) {
+                let shadow = ax::render_shadow(&found);
+                if !shadow.is_empty() {
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(shadow.trim_end());
+                }
+            }
+        }
+        Ok(Value::String(text))
     }
 
     /// Close this tab's target.
