@@ -59,7 +59,28 @@ TOOLS = {
         "cmd": "navigera", "skill": "navigera",
         "repo": "https://github.com/andrey-usa/navigera",
     },
+    # navigera on Lightpanda ($NAVIGERA_ENGINE, so the agent's commands are
+    # the same as on Chrome) and on chrome-headless-shell (the job points
+    # $CHROME_BIN at it); each also with the decider.
+    "navigera-lightpanda": {
+        "cmd": "navigera", "skill": "navigera",
+        "repo": "https://github.com/andrey-usa/navigera",
+        "engine": "lightpanda",
+    },
+    "navigera-shell": {
+        "cmd": "navigera", "skill": "navigera",
+        "repo": "https://github.com/andrey-usa/navigera",
+    },
     "navigera+jev": {
+        "cmd": "navigera", "skill": "navigera", "decider": True,
+        "repo": "https://github.com/andrey-usa/navigera",
+    },
+    "navigera-lightpanda+jev": {
+        "cmd": "navigera", "skill": "navigera", "decider": True,
+        "repo": "https://github.com/andrey-usa/navigera",
+        "engine": "lightpanda",
+    },
+    "navigera-shell+jev": {
         "cmd": "navigera", "skill": "navigera", "decider": True,
         "repo": "https://github.com/andrey-usa/navigera",
     },
@@ -75,6 +96,13 @@ TOOLS = {
     "agent-browser": {
         "cmd": "agent-browser", "skill": "agent-browser",
         "repo": "https://github.com/vercel-labs/agent-browser",
+    },
+    # agent-browser's own Lightpanda engine: does it hit the same engine
+    # differences (dialogs, popups, iframes) navigera had to handle?
+    "agent-browser-lightpanda": {
+        "cmd": "agent-browser", "skill": "agent-browser",
+        "repo": "https://github.com/vercel-labs/agent-browser",
+        "env": {"AGENT_BROWSER_ENGINE": "lightpanda", "AGENT_BROWSER_EXECUTABLE_PATH": "$LIGHTPANDA_BIN"},
     },
     "playwright-cli": {
         "cmd": "playwright-cli", "skill": "playwright-cli",
@@ -107,7 +135,8 @@ PASS_ENV = ["CHROME_BIN", "RUSTUP_HOME", "CARGO_HOME", "NPM_CONFIG_PREFIX",
             "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS",
             "PLAYWRIGHT_MCP_EXECUTABLE_PATH", "PLAYWRIGHT_MCP_SANDBOX",
             "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "DO_NOT_TRACK", "DISABLE_TELEMETRY", "CI",
-            "NAVIGERA_DECIDER_URL",
+            "NAVIGERA_DECIDER_URL", "LIGHTPANDA_BIN", "NAVIGERA_ENGINE", "LIGHTPANDA_DISABLE_TELEMETRY",
+            "AGENT_BROWSER_ENGINE",
             # Windows: what a desktop session has (npm, Node and PowerShell
             # look things up there; Gemini CLI keeps only TEMP/USERPROFILE/…).
             "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
@@ -207,8 +236,15 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
         "AGENT_BROWSER_EXECUTABLE_PATH": chrome, "AGENT_BROWSER_ARGS": "--no-sandbox",
         "PLAYWRIGHT_MCP_EXECUTABLE_PATH": chrome, "PLAYWRIGHT_MCP_SANDBOX": "false",
         "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1",
-        "DO_NOT_TRACK": "1", "DISABLE_TELEMETRY": "1", "CI": "true",
+        "DO_NOT_TRACK": "1", "DISABLE_TELEMETRY": "1", "LIGHTPANDA_DISABLE_TELEMETRY": "1", "CI": "true",
     }
+    if os.environ.get("LIGHTPANDA_BIN"):
+        env["LIGHTPANDA_BIN"] = os.environ["LIGHTPANDA_BIN"]
+    env.pop("NAVIGERA_ENGINE", None)
+    if TOOLS[tool].get("engine"):
+        env["NAVIGERA_ENGINE"] = TOOLS[tool]["engine"]
+    for key, value in TOOLS[tool].get("env", {}).items():
+        env[key] = os.path.expandvars(value)
     # Only the relay holds the TypeSafe key; only navigera+jev gets a decider.
     env.pop("TYPESAFE_API_KEY", None)
     env.pop("NAVIGERA_DECIDER_URL", None)
@@ -240,7 +276,7 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
             env["PATH"] = os.pathsep.join([args.nv_bin_dir, env.get("PATH", "")])
         subprocess.run([exe("navigera", env), "install-skill", "--dir", str(skills)], env=env, check=True,
                        capture_output=True)
-    elif tool == "agent-browser":
+    elif TOOLS[tool]["cmd"] == "agent-browser":
         src = Path(npm_root()) / "agent-browser" / "skills" / "agent-browser"
         shutil.copytree(src, skills / "agent-browser")
     elif tool == "playwright-cli":
@@ -352,9 +388,11 @@ def stderr_tail(err: str, limit: int = 1500) -> str:
     return "\n".join(lines)[-limit:]
 
 
-def scripted_plan(task: str, base: str) -> list[list[str]]:
+def scripted_plan(tool: str, task: str, base: str) -> list[list[str]]:
     """Known-good navigera plans (refs found by --text / selectors)."""
     s = ["-s", "eval"]
+    if TOOLS[tool].get("engine"):
+        s += ["--engine", TOOLS[tool]["engine"]]
     plans = {
         "lookup": [["start"], ["goto", f"{base}/shop/p/103"], ["wait", "--selector", "#stock"],
                    ["--raw", "ax", "--selector", "#detail"]],
@@ -392,15 +430,19 @@ def scripted_plan(task: str, base: str) -> list[list[str]]:
     return [s + p for p in plans[task]] + [s + ["quit"]]
 
 
-def run_scripted(task: str, base: str, work: Path, env: dict) -> dict:
+def run_scripted(tool: str, task: str, base: str, work: Path, env: dict) -> dict:
     started = time.time()
     shells, outputs = [], []
-    for argv in scripted_plan(task, base):
+    plan = scripted_plan(tool, task, base)
+    for argv in plan:
         p = subprocess.run([exe("navigera", env), *argv], cwd=work, env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=120)
         shells.append("navigera " + " ".join(argv))
         outputs.append(p.stdout)
         if p.returncode != 0:
+            # The session must not outlive a failed plan: the next run would
+            # find it and drive the wrong browser.
+            subprocess.run([exe("navigera", env), *plan[-1]], cwd=work, env=env, capture_output=True, timeout=60)
             return {"exit": p.returncode, "timed_out": False, "wall_s": round(time.time() - started, 1),
                     "text": "", "shell_commands": shells, "tools_used": [], "requests": 0,
                     "errors": [p.stdout[-500:] + p.stderr[-500:]], "stderr_tail": p.stderr[-800:]}
@@ -617,7 +659,7 @@ def merge(paths: list[str], out: Path) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tools", default="navigera,agent-browser,playwright-cli")
+    ap.add_argument("--tools", default="navigera,navigera-lightpanda,agent-browser,playwright-cli")
     ap.add_argument("--tasks", default="all")
     ap.add_argument("--mode", choices=["skilled", "onboard"], default="skilled")
     ap.add_argument("--agent", choices=["gemini", "scripted"], default="gemini")
@@ -652,6 +694,11 @@ def main() -> int:
     tools = [t for t in args.tools.split(",") if t]
     if args.agent == "scripted":
         tools = ["navigera"]
+        if os.environ.get("LIGHTPANDA_BIN"):
+            tools.append("navigera-lightpanda")
+        # An explicit --tools narrows the scripted set (e.g. lightpanda-only
+        # on a box with no Chrome).
+        tools = [t for t in tools if t in args.tools.split(",")]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     runs = []
@@ -672,7 +719,7 @@ def main() -> int:
                                              hint=spec.get("hint", ""))
                     before = log_lines(args.decider_log)
                     res = run_gemini(prompt, work, env, args) if args.agent == "gemini" \
-                        else run_scripted(task["id"], site.base, work, env)
+                        else run_scripted(tool, task["id"], site.base, work, env)
                     if spec.get("decider"):
                         calls = read_log(args.decider_log)[before:]
                         res["decider_calls"] = len(calls)

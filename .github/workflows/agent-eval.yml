@@ -15,6 +15,10 @@ name: agent-eval
 # playwright-cli -> GEMINI_API_KEY). Without any key only the scripted
 # baseline runs.
 #
+# `navigera-lightpanda` and `navigera-shell` run navigera on Lightpanda
+# (NAVIGERA_ENGINE=lightpanda) and on chrome-headless-shell ($CHROME_BIN);
+# `+jev` adds the decider to either.
+#
 # `navigera+jev` is navigera with TypeSafe's Jev deciding (`find`, `--find`,
 # `check`), next to plain `navigera` as the Gemini-only baseline; it needs
 # TYPESAFE_API_KEY in the main environment, held by a local relay
@@ -32,8 +36,11 @@ on:
   workflow_dispatch:
     inputs:
       tools:
-        description: "comma-separated: navigera,navigera+jev,navigera+jev-told,agent-browser,playwright-cli (none: no agent runs)"
-        default: "navigera,agent-browser,playwright-cli"
+        description: "comma-separated: navigera,navigera-lightpanda,navigera-shell,navigera+jev,navigera-lightpanda+jev,navigera-shell+jev,navigera+jev-told,agent-browser,agent-browser-lightpanda,playwright-cli (none: no agent runs)"
+        default: "navigera,navigera-lightpanda,agent-browser,playwright-cli"
+      lightpanda:
+        description: "Lightpanda release tag for the navigera-lightpanda tools (e.g. 1.0.1, nightly)"
+        default: "1.0.1"
       tasks:
         description: "comma-separated task ids (lookup,purchase,account,docs,support,purchase-live) or all (local tasks)"
         default: "all"
@@ -74,13 +81,16 @@ jobs:
     steps:
       - id: m
         env:
-          TOOLS: ${{ inputs.tools || 'navigera,agent-browser,playwright-cli' }}
+          TOOLS: ${{ inputs.tools || 'navigera,navigera-lightpanda,agent-browser,playwright-cli' }}
           OSES: ${{ inputs.os || 'linux' }}
         run: |
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
-          slot = {"navigera": "GEMINI_API_KEY", "navigera+jev": "GEMINI_API_KEY_2", "navigera+jev-told": "GEMINI_API_KEY_3",
-                  "agent-browser": "GEMINI_API_KEY_2", "playwright-cli": "GEMINI_API_KEY_3"}
+          slot = {"navigera": "GEMINI_API_KEY", "navigera-lightpanda": "GEMINI_API_KEY_2", "navigera-shell": "GEMINI_API_KEY_3",
+                  "navigera+jev": "GEMINI_API_KEY_2", "navigera-lightpanda+jev": "GEMINI_API_KEY_3",
+                  "navigera-shell+jev": "GEMINI_API_KEY", "navigera+jev-told": "GEMINI_API_KEY_3",
+                  "agent-browser": "GEMINI_API_KEY_2", "agent-browser-lightpanda": "GEMINI_API_KEY",
+                  "playwright-cli": "GEMINI_API_KEY_3"}
           # Windows legs take the next slot over, so `os: both` spreads the
           # load over the keys instead of doubling it on each.
           rotate = {"GEMINI_API_KEY": "GEMINI_API_KEY_2", "GEMINI_API_KEY_2": "GEMINI_API_KEY_3",
@@ -118,8 +128,30 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/agent-setup
+      - name: Lightpanda binary (navigera-lightpanda tools)
+        if: contains(matrix.run.tool, 'lightpanda')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.lightpanda || '1.0.1' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/lightpanda-bin"
+          gh release download "$RELEASE" --repo lightpanda-io/browser --pattern 'lightpanda-x86_64-linux' \
+            --dir "$RUNNER_TEMP/lightpanda-bin"
+          chmod +x "$RUNNER_TEMP/lightpanda-bin"/lightpanda*
+          echo "LIGHTPANDA_BIN=$RUNNER_TEMP/lightpanda-bin/lightpanda-x86_64-linux" >> "$GITHUB_ENV"
+          echo "::notice title=agent eval lightpanda::$("$RUNNER_TEMP/lightpanda-bin/lightpanda-x86_64-linux" version)"
+      - name: chrome-headless-shell (navigera-shell tools)
+        if: contains(matrix.run.tool, 'shell')
+        run: |
+          url=$(python3 tools/cft_matrix.py --no-beta | sed -n 's/^matrix=//p' \
+            | python3 -c 'import json,sys; print(next(e["url"] for e in json.load(sys.stdin) if e["kind"] == "chrome-headless-shell"))')
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/chs.zip" "$url"
+          unzip -q "$RUNNER_TEMP/chs.zip" -d "$RUNNER_TEMP/chs"
+          bin="$RUNNER_TEMP/chs/chrome-headless-shell-linux64/chrome-headless-shell"
+          echo "CHROME_BIN=$bin" >> "$GITHUB_ENV"
+          echo "::notice title=agent eval chrome::$("$bin" --version)"
       - name: Scripted baseline (site + checks + harness, no model)
-        if: matrix.run.tool == 'navigera'
+        if: matrix.run.tool == 'navigera' || matrix.run.tool == 'navigera-lightpanda' || matrix.run.tool == 'navigera-shell'
         run: |
           rc=0
           python bench/agent-eval/run.py --agent scripted --reps "$REPS" --out out/scripted --require-pass || rc=$?
@@ -153,7 +185,7 @@ jobs:
           fi
           cat "$log"
       - name: Decider relay (TypeSafe Jev)
-        if: "!cancelled() && startsWith(matrix.run.tool, 'navigera+jev') && env.HAS_KEY == 'true' && env.MODE != 'scripted' && steps.smoke.outcome == 'success'"
+        if: "!cancelled() && contains(matrix.run.tool, '+jev') && env.HAS_KEY == 'true' && env.MODE != 'scripted' && steps.smoke.outcome == 'success'"
         uses: ./.github/actions/jev-relay
         with:
           key: ${{ secrets.TYPESAFE_API_KEY }}
@@ -170,7 +202,7 @@ jobs:
         if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'skilled' || env.MODE == 'both') && !startsWith(env.TOOL, 'navigera') && steps.smoke.outcome == 'success'"
         run: |
           case "$TOOL" in
-            agent-browser) npm install -g agent-browser@0.38.2 ;;
+            agent-browser*) npm install -g agent-browser@0.39.1 ;;
             playwright-cli) npm install -g @playwright/cli@0.1.22 ;;
           esac
           npm ls -g --depth=0
