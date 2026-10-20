@@ -25,7 +25,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
 | `--chromium <path>` | browser binary (also `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`) |
-| `--engine chrome\|lightpanda`, `--headed` | engine; visible window |
+| `--engine chrome\|lightpanda` (`$NAVIGERA_ENGINE`), `--headed` | engine; visible window |
 | `--idle-timeout-s <s>` | a session server shuts down after this idle time (default 1800, 0 = never) |
 | `-V, --version`, `-h, --help`, `help <command>` | info |
 

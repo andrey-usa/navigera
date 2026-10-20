@@ -574,7 +574,7 @@ pub fn usage(program: &str) -> String {
          --session <name>       warm browser behind a local socket ($NAVIGERA_SESSION)\n  \
          --raw                  print only the result (strings unquoted); errors on stderr\n  \
          --timeout-ms <ms>      navigation/command timeout (default {DEFAULT_TIMEOUT_MS}); per op: element wait (default 5000)\n  \
-         --chromium <path>      browser binary ($CHROME_BIN); --engine lightpanda; --headed\n  \
+         --chromium <path>      browser binary ($CHROME_BIN); --engine lightpanda ($NAVIGERA_ENGINE); --headed\n  \
          --transport ws         CDP over a DevTools port instead of a private pipe (to attach DevTools; Windows default)\n  \
          --idle-timeout-s <s>   session server idle shutdown (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never)\n  \
          --attach [chrome|edge|<dir>|<port>]  with `start`: use your running browser (Chrome 144+: chrome://inspect/#remote-debugging); never closes it\n  \
@@ -821,6 +821,11 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         std::path::Path::new(&program).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or(program);
     let mut args: Args = argv.collect();
     let mut config = SessionConfig::default();
+    // `--engine` wins; the variable sets it for every command of a shell
+    // (an agent never has to repeat the flag).
+    if let Some(engine) = std::env::var("NAVIGERA_ENGINE").ok().filter(|e| !e.trim().is_empty()) {
+        config.engine = engine.trim().to_string();
+    }
 
     // Leading globals (the only place --timeout-ms is global; after a
     // command it is that op's own timeout).
