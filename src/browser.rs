@@ -353,9 +353,8 @@ pub struct BrowserSession {
     /// Executable that was launched (browser binary or `lightpanda`); kept so
     /// [`BrowserSession::close`] can run engine-specific cleanup.
     exe: String,
-    /// True when the underlying engine is Lightpanda, which does not emit the
-    /// CDP `Page.loadEventFired` event — those sessions navigate with a
-    /// `commit` wait instead.
+    /// True when the underlying engine is Lightpanda (one tab; popups are
+    /// followed in place).
     lightpanda: bool,
     timeout_ms: f64,
     /// (tab target, navigation generation) whose load we stopped waiting
@@ -664,6 +663,25 @@ impl BrowserSession {
             }
         }
         adopted
+    }
+
+    /// Lightpanda keeps one tab: a page it opened with `target=_blank` or
+    /// `window.open` is loaded in the active tab instead, as if the agent had
+    /// followed it to the new tab. Returns a note per page followed.
+    pub fn follow_popups(&self, timeout_ms: Option<f64>) -> Vec<String> {
+        let shared = self.browser.shared();
+        let urls: Vec<String> =
+            shared.take_popups().into_iter().filter(|u| !u.is_empty() && u != "about:blank").collect();
+        let Some(url) = urls.last() else { return Vec::new() };
+        let note = match self.goto_wait(url, "load", timeout_ms) {
+            Ok(()) => {
+                format!("the page opened {url} in a new tab; the lightpanda engine has one tab, so it was loaded here")
+            }
+            Err(e) => format!("the page opened {url} in a new tab; loading it here failed: {e:#}"),
+        };
+        // The navigation we just made is not a popup.
+        shared.take_popups();
+        vec![note]
     }
 
     /// Dialogs answered since the last call (`{type, message, accepted}`).

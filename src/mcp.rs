@@ -390,8 +390,8 @@ fn describe(result: &Value) -> String {
     }
 }
 
-fn notes(outcome_dialogs: &[Value], new_tabs: &[usize]) -> Vec<String> {
-    let mut out = Vec::new();
+fn notes(outcome_dialogs: &[Value], new_tabs: &[usize], engine_notes: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = engine_notes.iter().map(|n| format!("Note: {n}")).collect();
     for d in outcome_dialogs {
         out.push(format!(
             "Dialog ({}) {:?} was {}",
@@ -433,7 +433,12 @@ impl Server<'_> {
             if let Some(driver) = self.driver.take() {
                 driver.session().close();
             }
-            return Ok(Outcome { result: json!("browser closed"), dialogs: Vec::new(), new_tabs: Vec::new() });
+            return Ok(Outcome {
+                result: json!("browser closed"),
+                dialogs: Vec::new(),
+                new_tabs: Vec::new(),
+                notes: Vec::new(),
+            });
         }
         let command = match command {
             // MCP returns the image itself; the file is only a hand-off.
@@ -467,7 +472,7 @@ impl Server<'_> {
                             line
                         });
                     }
-                    text.extend(notes(&outcome.dialogs, &outcome.new_tabs));
+                    text.extend(notes(&outcome.dialogs, &outcome.new_tabs, &outcome.notes));
                 }
                 Err(e) => {
                     let at = if total > 1 {

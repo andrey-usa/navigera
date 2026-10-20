@@ -333,6 +333,15 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                 params.get("frameId").or_else(|| params.get("frame").and_then(|f| f.get("id"))).and_then(Value::as_str);
             if let Some(frame) = frame {
                 if frame != main_frame {
+                    // Lightpanda opens `target=_blank` / `window.open` pages
+                    // as top-level frames inside the opener's session, not
+                    // as targets: a frame without a parent is such a page.
+                    let top_level = params.pointer("/frame/parentId").is_none();
+                    if method == "Page.frameNavigated" && top_level && shared.is_single_target() {
+                        if let Some(url) = params.pointer("/frame/url").and_then(Value::as_str) {
+                            shared.popups.lock().unwrap().push(url.to_string());
+                        }
+                    }
                     return;
                 }
             }

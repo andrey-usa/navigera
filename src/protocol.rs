@@ -371,6 +371,9 @@ pub struct Response {
     /// one is active).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_tabs: Option<Vec<usize>>,
+    /// Things the engine did differently from what the agent asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<String>>,
     /// Server-side time for the op, in milliseconds with µs resolution.
     pub elapsed_ms: f64,
 }
@@ -1171,6 +1174,7 @@ pub struct Outcome {
     pub result: Value,
     pub dialogs: Vec<Value>,
     pub new_tabs: Vec<usize>,
+    pub notes: Vec<String>,
 }
 
 impl Driver {
@@ -1308,6 +1312,7 @@ impl Driver {
                 e
             }
         });
+        let notes = if result.is_ok() { self.session.follow_popups(op_timeout_ms(command)) } else { Vec::new() };
         let opened = self.session.sync_tabs();
         if !opened.is_empty() {
             // The op opened a tab and the session switched to it: let its
@@ -1319,7 +1324,7 @@ impl Driver {
         }
         new_tabs.extend(opened);
         let dialogs = self.session.take_dialogs();
-        let mut result = match (result, new_tabs.is_empty()) {
+        let mut result = match (result, new_tabs.is_empty() && notes.is_empty()) {
             // A click that opened a tab: report the state of the new tab.
             (Ok(r), false) if r.get("tab").is_some() => Ok(self.state_json()),
             (r, _) => r,
@@ -1327,7 +1332,7 @@ impl Driver {
         if let (Some(f), Some(obj)) = (found, result.as_object_mut()) {
             obj.insert("found".into(), json!({ "ref": f.chosen.node_ref, "element": f.chosen.line, "p": f.p }));
         }
-        Ok(Outcome { result, dialogs, new_tabs })
+        Ok(Outcome { result, dialogs, new_tabs, notes })
     }
 
     /// The page as `find` and `check` see it: the whole text tree.
@@ -1757,6 +1762,9 @@ pub fn print_cli_response(output: &mut dyn Write, response: &Value, config: &Ses
             if d.get("accepted").and_then(Value::as_bool) == Some(true) { "accepted" } else { "dismissed" }
         );
     }
+    for n in response.get("notes").and_then(Value::as_array).into_iter().flatten() {
+        eprintln!("note: {}", n.as_str().unwrap_or_default());
+    }
     if let Some(tabs) = response.get("new_tabs").and_then(Value::as_array) {
         eprintln!(
             "note: the page opened {} new tab(s); now on tab {}",
@@ -1797,6 +1805,9 @@ fn outcome_response(id: Value, outcome: Outcome, started: Instant) -> Response {
     if !outcome.new_tabs.is_empty() {
         r.new_tabs = Some(outcome.new_tabs);
     }
+    if !outcome.notes.is_empty() {
+        r.notes = Some(outcome.notes);
+    }
     r
 }
 
@@ -1808,6 +1819,7 @@ fn ok_response(id: Value, result: Value, started: Instant) -> Response {
         error: None,
         dialogs: None,
         new_tabs: None,
+        notes: None,
         elapsed_ms: elapsed_ms(started),
     }
 }
@@ -1825,6 +1837,7 @@ fn err_response(id: Value, error: String, started: Instant) -> Response {
         error: Some(error),
         dialogs: None,
         new_tabs: None,
+        notes: None,
         elapsed_ms: elapsed_ms(started),
     }
 }
