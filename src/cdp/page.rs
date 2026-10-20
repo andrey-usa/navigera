@@ -1402,7 +1402,7 @@ impl Page {
             return Ok(json!({ "html5": true, "dropped": dropped }));
         }
         let settle = json!(self.hit_settle_ms(wait));
-        let a = self.on_element(from, "drag", HOVER_PREP, &[settle.clone()], wait, timeout)?;
+        let a = self.on_element(from, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout)?;
         let b = self.on_element(to, "drag", HOVER_PREP, &[settle], wait, timeout)?;
         let point = |p: &Value| Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?));
         let (Some((ax, ay)), Some((bx, by))) = (point(&a), point(&b)) else {
