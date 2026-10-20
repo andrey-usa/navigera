@@ -96,7 +96,7 @@ jobs:
         run: |
           set -o pipefail
           unset DISPLAY
-          if ! cargo test --locked --test lightpanda 2>&1 | tee /tmp/test.log; then
+          if ! cargo test --locked --test lightpanda --test commands 2>&1 | tee /tmp/test.log; then
             sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
             python3 bench/ladder/annotate.py /tmp/test-tail.log "lightpanda ${{ matrix.release }} test failure"
             exit 1

@@ -10,6 +10,20 @@ All notable changes to this project are documented here. The format follows
 
 - `status`: the session's engine, browser executable, CDP endpoint and tab
   state.
+- `console`, `errors`, `network` (one request in full with `network <n>`,
+  HAR with `--har`): what the page logged and fetched; an uncaught exception
+  during a command is reported in its `notes`.
+- `cookies` (list/set/delete/clear), `storage` (local/session), `pdf`.
+- `set viewport|device|media|geo|offline|headers|ua|locale|timezone|credentials`:
+  emulation for every tab, replayed on new tabs.
+- `route` / `unroute`: fail or answer requests by URL glob.
+- `init-script`: code that runs before the page's own in every document.
+- Locators on every element command: `--role/--name`, `--label`,
+  `--placeholder`, `--testid`, `--nth`.
+- `get`, `is`, `dblclick`, `focus`, `check`/`uncheck <target>`,
+  `keydown`/`keyup`, `insert-text`, `wait --idle`.
+- MCP: `browser_console_messages`, `browser_network_requests`,
+  `browser_resize`.
 - `notes` in responses: what the engine did differently from what was asked
   (e.g. a Lightpanda popup loaded in the current tab).
 

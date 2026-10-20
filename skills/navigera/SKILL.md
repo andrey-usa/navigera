@@ -152,7 +152,24 @@ page "Checkout — Acme" http://shop.test/checkout
 | `dialog --accept\|--dismiss [--prompt-text t]` | how future `alert`/`confirm`/`prompt` dialogs are answered |
 
 Element commands wait up to 5 s for the element to appear. Pass
-`--timeout-ms <ms>` to wait longer.
+`--timeout-ms <ms>` to wait longer. Besides a ref, `--selector` and
+`--text`, they take `--role button --name "Save"`, `--label "Email"`,
+`--placeholder …`, `--testid …`, and `--nth <i>` (`-1` = last).
+
+## Inspecting, state, emulation
+
+| command | what it does |
+|---|---|
+| `get text\|value\|html\|box <ref>`, `get attr <name> <ref>`, `get count <css>` | read one thing without a whole `ax` |
+| `is visible\|enabled\|checked <ref>` | `true`/`false` |
+| `check <ref>` / `uncheck <ref>` | set a checkbox or switch (clicks only if needed) |
+| `dblclick`, `focus`, `keydown Shift`/`keyup Shift`, `insert-text "…"` | the rest of the keyboard and mouse |
+| `errors`, `console [--level warn]` | what the page logged; an action whose handler threw says so in `notes` |
+| `network [--failed] [--filter api]`, `network <n>` | requests one line each; one request with its body |
+| `cookies`, `cookies set <name> <value>`, `storage [get\|set k v]` | cookies and localStorage |
+| `set device "iPhone 15"`, `set viewport 1280 720`, `set media dark`, `set geo <lat> <lon>`, `set offline on`, `set credentials <user> <pass>` | emulate (`off` resets) |
+| `route "*/api/*" --body '{…}'`, `route "*.png"` (fail), `unroute` | mock or block requests |
+| `pdf [file.pdf]`, `init-script "<js>"`, `wait --idle` | print, run code before the page's, wait for the network |
 
 ## What the tool handles for you
 

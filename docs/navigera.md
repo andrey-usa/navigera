@@ -21,7 +21,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | global flag | meaning |
 |---|---|
 | `-s, --session <name\|path>` | named session. A bare name lives in a directory only you can enter: `$XDG_RUNTIME_DIR/navigera/<name>.sock`, else `$TMPDIR/navigera-<uid>/<name>.sock` (mode 0700; navigera refuses one that is a symlink, someone else's or open to others), `%TEMP%\navigera\` on Windows; a value with a path separator is used as the path. `$NAVIGERA_SESSION` sets a default for client calls |
-| `--raw` | print only the result (strings unquoted, e.g. the `ax` tree). Errors go to stderr as `error: …`, notes (dialogs, new tabs) as `note: …` |
+| `--raw` | print only the result (strings unquoted, e.g. the `ax` tree). Errors go to stderr as `error: …`, notes (dialogs, new tabs, an exception the page threw, an engine difference) as `note: …` |
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
 | `--chromium <path>` | browser binary (also `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`) |
@@ -44,7 +44,14 @@ and `new_tabs` (tabs the page opened, now in the tab list). The exit code is
   value. An exact match beats a partial one, actionable elements beat plain
   ones, and a `<label>` stands for its control.
 
-Selector and text targets auto-wait (default 5 s) for the element to appear.
+- `--role <role> [--name <accessible name>]`, `--label <form label>`,
+  `--placeholder <text>`, `--testid <data-testid>`: semantic locators
+  (case-insensitive, exact before contains, visible first, open shadow
+  roots included); `--nth <i>` picks among their matches or `--selector`'s
+  (0-based, `-1` = the last).
+
+Selector, text and locator targets auto-wait (default 5 s) for the element
+to appear.
 
 ## Commands
 
@@ -61,11 +68,29 @@ Selector and text targets auto-wait (default 5 s) for the element to appear.
 | `hover` | target | state; `synthetic_hover` note if the element could not be hovered |
 | `scroll` | `--by <px>` (default 800) or `--to top\|bottom`; or a target to scroll into view (`--by` scrolls inside it) | `{scrollY, scrollHeight, viewport}` |
 | `upload` | target, file path(s) (positional or `--file`) | `{files}` |
-| `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--ms <n>`; `--timeout-ms` | state + `waited_ms` |
+| `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--idle` (no fetch/XHR for 500 ms; also `--load networkidle`), `--ms <n>`; `--timeout-ms` | state + `waited_ms` |
 | `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value (an arrow function is called; promises are awaited) |
 | `text` | `--selector <css>` | `textContent` or `null` |
 | `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
-| `check` | `<yes/no question>` | `{question, yes, answer}`: the probability the answer is yes |
+| `check` | `<yes/no question>` (no target given) | `{question, yes, answer}`: the probability the answer is yes |
+| `check` / `uncheck` | target (a ref or a targeting flag) | state + `checked`, `changed`: clicks a checkbox/radio/switch only when its state differs, fails if the click didn't change it |
+| `get` | `text\|value\|html\|outer\|box\|checked` target; `attr <name>` / `style <prop>` target; `count <css>`; `title`; `url` | the value |
+| `is` | `visible\|hidden\|enabled\|disabled\|checked\|editable\|focused` target | `true`/`false` (a missing element is not visible, after 500 ms) |
+| `dblclick` / `focus` | target | state / `{focused}` |
+| `keydown` / `keyup` | `<key>` | holds / releases a key; held modifiers apply to later `press`es |
+| `insert-text` | `<text>`, optional target to focus first | state: text inserted at the caret in one go (paste, IME), no key events |
+| `console` | `--level error\|warn\|info\|log\|debug`, `--limit <n>` (200), `--clear`, `--json` | `[level] text  (url:line)` per line: console calls, uncaught exceptions (`[exception]`), failed loads and CSP reports |
+| `errors` | `--limit`, `--clear`, `--json` | `console --level error` |
+| `network` | `--filter <text>`, `--type fetch\|xhr\|document\|…`, `--failed`, `--limit <n>` (100), `--clear`; `--har <file>` | `#n METHOD STATUS type url size time` per line (same-origin URLs as paths); `--har` writes HAR 1.2 |
+| `network <n>` | `--body-file <file>` | one request in full: headers, post data, response body (8 KB shown; the file gets all of it) |
+| `cookies` | `[--all] [--url <u>] [--json]`; `set <name> <value> [--url <u> \| --domain <d>] [--path] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax\|Strict\|None]`; `delete <name>`; `clear` | one cookie per line (`--all`: every cookie in the browser) |
+| `storage` | `[local\|session] [get [<key>] \| set <key> <value> \| remove <key> \| clear]` | the value, or the whole store as an object |
+| `pdf` | `[<path>]` or `--path`; `--landscape`; `--background` | `{path, bytes}` |
+| `set` | `viewport <w> <h> [--scale <dpr>] [--mobile]`, `device <name>` (iPhone 15, iPhone 15 Pro Max, iPhone SE, Pixel 8, Galaxy S24, iPad Mini, iPad Pro 11, Laptop, Desktop), `media dark\|light\|print\|reduced-motion\|forced-colors`, `geo <lat> <lon> [--accuracy <m>]`, `offline on\|off`, `headers 'Name: value'…` (or a JSON object), `ua <string>`, `locale <tag>`, `timezone <zone>`, `credentials <user> <password>`; `off` resets one | what was set. Applies to every tab and to tabs opened later |
+| `route` | `<url glob>` (`*`, `?` over the whole URL), then `--abort` (default) or `--status <n> [--body <text> \| --body-file <f>] [--content-type <t>] [--header 'Name: value']…`; no argument lists the rules with their hit counts | `{route, action}`. Only matching URLs are intercepted |
+| `unroute` | `[<url glob>]` | `{removed}` (all rules without a glob) |
+| `init-script` | `<js>`, `--file <path.js>`, `--clear`; no argument lists them | runs before the page's own scripts in every document of every tab |
+| `status` | — | `{engine, executable, endpoint, attached, version}` + state |
 | `title` / `url` | — | string / state |
 | `back` / `forward` / `reload` | — | state |
 | `screenshot` | `[<path>]` or `--path`; `--full-page` | `{path, bytes}` |
@@ -134,6 +159,11 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     (`synthetic_click`).
   - If the click starts a navigation, the command returns once the new
     document is parsed.
+- **Page errors are reported.** An uncaught exception while a command ran
+  adds one line to its `notes` (`the page threw TypeError: …; \`errors\`
+  lists them`), so a click whose handler crashed doesn't look like a click
+  that did nothing. `console`, `errors` and `network` keep the last 1000
+  entries per tab.
 - **Navigation settling:** every command that reads or acts on the page
   first waits for any navigation an earlier action started, such as a JS
   redirect, so it never reads the previous page. The wait is bounded by the
@@ -266,12 +296,14 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_snapshot` | `ax`: the tree with `[ref=N]` (optional `ref`/`selector` scope, `limit`) |
 | `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_select_option`, `browser_hover`, `browser_scroll`, `browser_file_upload` | the element ops, by `ref`, `selector` or `text` |
 | `browser_wait_for`, `browser_evaluate`, `browser_screenshot` (returns the image), `browser_tabs`, `browser_history`, `browser_handle_dialog` | as the CLI |
+| `browser_console_messages`, `browser_network_requests` | `console`, `network` |
+| `browser_resize` | `set viewport` |
 | `browser_run` | several ops in one call (`[{"op":"fill","ref":21,"value":"Ada"}, {"op":"click","ref":30}]`), stopping at the first failure, ending with a snapshot |
 | `browser_close` | close the browser; the next call starts a fresh one |
 
 Every action takes `snapshot: true` to return the updated tree in the same
-call. The whole tool list is about 10 KB (~2,600 tokens), against ~20 KB for
-Playwright MCP 0.0.83 and ~26 KB for Chrome DevTools MCP 1.10.1.
+call. The whole tool list (21 tools) is about 11.6 KB (~2,900 tokens), against
+~20 KB for Playwright MCP 0.0.83 and ~26 KB for Chrome DevTools MCP 1.10.1.
 
 Client configuration (all run the same command):
 
