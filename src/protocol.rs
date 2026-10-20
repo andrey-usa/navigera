@@ -363,6 +363,63 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body_file: Option<String>,
     },
+    /// Cookies of the current page (or all of them), or set / delete / clear.
+    #[serde(rename = "cookies")]
+    Cookies {
+        /// `list` (default), `set`, `delete`, `clear`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        /// The URL the cookie belongs to (default: the current page).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Unix time in seconds; none = a session cookie.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires: Option<f64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        http_only: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        secure: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        same_site: Option<String>,
+        /// `list`: every cookie in the browser, not just the page's.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
+    /// The page as a PDF file.
+    #[serde(rename = "pdf")]
+    Pdf {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        landscape: bool,
+        /// Print background colors and images.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        background: bool,
+    },
+    /// localStorage / sessionStorage of the current page.
+    #[serde(rename = "storage")]
+    Storage {
+        /// `local` (default) or `session`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        area: Option<String>,
+        /// `get` (default), `set`, `remove`, `clear`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
     /// Current page URL and tab state.
     #[serde(rename = "url")]
     Url {},
@@ -590,6 +647,9 @@ const OPS: &[(&str, &str, &str)] = &[
     ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
     ("errors", "[--limit <n>] [--clear] [--json]", "only the errors: exceptions, console.error, failed loads"),
     ("network", "[<n>] [--filter <text>] [--type fetch|xhr|document|…] [--failed] [--limit <n>] [--clear] [--har <file>] [--body-file <file>]", "the active tab's requests, one line each (#n METHOD STATUS type url size time); `network <n>` shows one in full with its response body"),
+    ("cookies", "[set <name> <value> [--url <u> | --domain <d>] [--path <p>] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax|Strict|None] | delete <name> [--url <u>] | clear] [--all] [--json]", "the current page's cookies (--all: every cookie), or set, delete or clear them"),
+    ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
+    ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
     ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
     ("back", "", "history back"),
@@ -1190,6 +1250,65 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 None => None,
             },
         },
+        "cookies" | "cookie" => {
+            let action = match args.front().map(String::as_str) {
+                Some("set" | "delete" | "clear" | "list" | "get") => args.pop_front(),
+                _ => None,
+            };
+            let mut cmd = Command::Cookies {
+                action: action.map(|a| if a == "get" { "list".into() } else { a }),
+                name: None,
+                value: None,
+                url: str_flag(&mut args, "--url")?,
+                domain: str_flag(&mut args, "--domain")?,
+                path: str_flag(&mut args, "--path")?,
+                expires: num_flag(&mut args, "--expires")?,
+                http_only: extract_present(&mut args, "--http-only"),
+                secure: extract_present(&mut args, "--secure"),
+                same_site: str_flag(&mut args, "--same-site")?,
+                all: extract_present(&mut args, "--all"),
+                format: extract_present(&mut args, "--json").then(|| "json".to_string()),
+            };
+            if let Command::Cookies { action, name, value, .. } = &mut cmd {
+                match action.as_deref() {
+                    Some("set") => {
+                        *name = Some(positional(&mut args).ok_or_else(|| need("cookies", "a cookie name"))?);
+                        *value = Some(positional(&mut args).ok_or_else(|| need("cookies", "a cookie value"))?);
+                    }
+                    Some("delete") => {
+                        *name = Some(positional(&mut args).ok_or_else(|| need("cookies", "a cookie name"))?);
+                    }
+                    _ => {}
+                }
+            }
+            cmd
+        }
+        "pdf" => Command::Pdf {
+            path: match str_flag(&mut args, "--path")? {
+                Some(p) => Some(p),
+                None => positional(&mut args),
+            },
+            landscape: extract_present(&mut args, "--landscape"),
+            background: extract_present(&mut args, "--background"),
+        },
+        "storage" => {
+            let area = match args.front().map(String::as_str) {
+                Some("local" | "session") => args.pop_front(),
+                _ => None,
+            };
+            let action = match args.front().map(String::as_str) {
+                Some("get" | "set" | "remove" | "clear") => args.pop_front(),
+                _ => None,
+            };
+            let key = positional(&mut args);
+            let value = positional(&mut args);
+            match (action.as_deref(), &key, &value) {
+                (Some("set"), Some(_), Some(_)) | (Some("remove"), Some(_), None) | (Some("clear"), None, None) => {}
+                (None | Some("get"), _, None) => {}
+                _ => return Err(need("storage", "`get [<key>]`, `set <key> <value>`, `remove <key>` or `clear`")),
+            }
+            Command::Storage { area, action, key, value }
+        }
         "url" => Command::Url {},
         "status" => Command::Status {},
         // Mostly for sessions (`--session s quit` stops the server); as a
@@ -1456,6 +1575,7 @@ impl Driver {
                 | Command::Console { .. }
                 | Command::Errors { .. }
                 | Command::Network { .. }
+                | Command::Cookies { .. }
                 | Command::TabNew { .. }
                 | Command::TabSelect { .. }
                 | Command::TabClose { .. }
@@ -1787,6 +1907,107 @@ impl Driver {
                 har.as_deref(),
                 body_file.as_deref(),
             ),
+            Command::Cookies {
+                action,
+                name,
+                value,
+                url,
+                domain,
+                path,
+                expires,
+                http_only,
+                secure,
+                same_site,
+                all,
+                format,
+            } => match action.as_deref().unwrap_or("list") {
+                "list" => {
+                    let cookies = s.cookies(*all, url.as_deref())?;
+                    if format.as_deref() == Some("json") {
+                        return Ok(cookies);
+                    }
+                    Ok(json!(cookies_text(&cookies)))
+                }
+                "set" => {
+                    let mut c = json!({ "name": name, "value": value });
+                    match (url, domain) {
+                        (_, Some(d)) => c["domain"] = json!(d),
+                        (Some(u), None) => c["url"] = json!(u),
+                        (None, None) => c["url"] = json!(s.url()),
+                    }
+                    if let Some(p) = path {
+                        c["path"] = json!(p);
+                    } else if domain.is_some() {
+                        c["path"] = json!("/");
+                    }
+                    if let Some(e) = expires {
+                        c["expires"] = json!(e);
+                    }
+                    if *http_only {
+                        c["httpOnly"] = json!(true);
+                    }
+                    if *secure {
+                        c["secure"] = json!(true);
+                    }
+                    if let Some(ss) = same_site {
+                        let ss = match ss.to_ascii_lowercase().as_str() {
+                            "lax" => "Lax",
+                            "strict" => "Strict",
+                            "none" => "None",
+                            other => anyhow::bail!("cookies --same-site takes Lax|Strict|None, got {other:?}"),
+                        };
+                        c["sameSite"] = json!(ss);
+                    }
+                    s.set_cookie(c)?;
+                    Ok(json!({ "set": name }))
+                }
+                "delete" => {
+                    let mut p = json!({ "name": name });
+                    match (url, domain) {
+                        (_, Some(d)) => p["domain"] = json!(d),
+                        (Some(u), None) => p["url"] = json!(u),
+                        (None, None) => p["url"] = json!(s.url()),
+                    }
+                    s.delete_cookies(p)?;
+                    Ok(json!({ "deleted": name }))
+                }
+                "clear" => {
+                    s.clear_cookies()?;
+                    Ok(json!({ "cleared": true }))
+                }
+                other => anyhow::bail!("cookies: unknown action {other:?} (list|set|delete|clear)"),
+            },
+            Command::Pdf { path, landscape, background } => {
+                let path = path.clone().unwrap_or_else(|| {
+                    format!(
+                        "page-{}.pdf",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)
+                    )
+                });
+                let bytes = s.pdf(*landscape, *background).map_err(|e| anyhow::anyhow!("pdf: {e:#}"))?;
+                std::fs::write(&path, &bytes).map_err(|e| anyhow::anyhow!("pdf: writing {path}: {e:#}"))?;
+                let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
+                Ok(json!({ "path": path, "bytes": bytes.len() }))
+            }
+            Command::Storage { area, action, key, value } => {
+                let area = match area.as_deref().unwrap_or("local") {
+                    "local" => "localStorage",
+                    "session" => "sessionStorage",
+                    other => anyhow::bail!("storage takes local|session, got {other:?}"),
+                };
+                let js = match (action.as_deref().unwrap_or("get"), key, value) {
+                    ("get", Some(k), _) => format!("{area}.getItem({})", json!(k)),
+                    ("get", None, _) => format!("Object.fromEntries(Object.entries({area}))"),
+                    ("set", Some(k), Some(v)) => format!("({area}.setItem({}, {}), true)", json!(k), json!(v)),
+                    ("remove", Some(k), _) => format!("({area}.removeItem({}), true)", json!(k)),
+                    ("clear", _, _) => format!("({area}.clear(), true)"),
+                    (other, ..) => anyhow::bail!("storage: {other} needs a key (set: and a value)"),
+                };
+                s.evaluate_with_timeout::<Value>(&js, None).map_err(|e| anyhow::anyhow!("storage: {e:#}"))
+            }
             Command::Url {} => Ok(self.state_json()),
             Command::Status {} => {
                 let mut state = self.state_json();
@@ -2043,6 +2264,38 @@ pub fn print_cli_response(output: &mut dyn Write, response: &Value, config: &Ses
     }
     let _ = output.flush();
     ok
+}
+
+/// One line per cookie: `name=value; domain=…; path=/; expires=…; HttpOnly; Secure; SameSite=Lax`.
+fn cookies_text(cookies: &Value) -> String {
+    let lines: Vec<String> = cookies
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let get = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("");
+            let value: String = get("value").chars().take(120).collect();
+            let mut line = format!("{}={value}; domain={}; path={}", get("name"), get("domain"), get("path"));
+            match c.get("expires").and_then(Value::as_f64) {
+                Some(e) if e > 0.0 => line.push_str(&format!("; expires={}", e as i64)),
+                _ => line.push_str("; session"),
+            }
+            for (flag, label) in [("httpOnly", "HttpOnly"), ("secure", "Secure")] {
+                if c.get(flag).and_then(Value::as_bool) == Some(true) {
+                    line.push_str(&format!("; {label}"));
+                }
+            }
+            if !get("sameSite").is_empty() {
+                line.push_str(&format!("; SameSite={}", get("sameSite")));
+            }
+            line
+        })
+        .collect();
+    if lines.is_empty() {
+        "(no cookies)".into()
+    } else {
+        lines.join("\n")
+    }
 }
 
 /// `scheme://host[:port]` of a URL ("" when it has none).

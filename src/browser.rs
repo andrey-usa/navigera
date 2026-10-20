@@ -734,6 +734,49 @@ impl BrowserSession {
         Ok(r.get("postData").and_then(|b| b.as_str()).unwrap_or_default().to_string())
     }
 
+    /// Cookies the current page sends (`url`: that URL's), or every cookie.
+    pub fn cookies(&self, all: bool, url: Option<&str>) -> Result<serde_json::Value> {
+        let tab = self.active_tab();
+        let r = if all {
+            tab.send_cdp("Storage.getCookies", serde_json::json!({}), self.timeout(None))
+                .or_else(|_| tab.send_cdp("Network.getAllCookies", serde_json::json!({}), self.timeout(None)))?
+        } else {
+            let urls = vec![url.map(str::to_string).unwrap_or_else(|| self.url())];
+            tab.send_cdp("Network.getCookies", serde_json::json!({ "urls": urls }), self.timeout(None))?
+        };
+        Ok(r.get("cookies").cloned().unwrap_or_else(|| serde_json::json!([])))
+    }
+
+    /// `Network.setCookie` with these parameters.
+    pub fn set_cookie(&self, cookie: serde_json::Value) -> Result<()> {
+        let r = self.active_tab().send_cdp("Network.setCookie", cookie, self.timeout(None))?;
+        if r.get("success").and_then(|v| v.as_bool()) == Some(false) {
+            bail!("the browser refused the cookie (check the domain/url, and Secure for SameSite=None)");
+        }
+        Ok(())
+    }
+
+    pub fn delete_cookies(&self, params: serde_json::Value) -> Result<()> {
+        self.active_tab().send_cdp("Network.deleteCookies", params, self.timeout(None)).map(|_| ())
+    }
+
+    pub fn clear_cookies(&self) -> Result<()> {
+        self.active_tab().send_cdp("Network.clearBrowserCookies", serde_json::json!({}), self.timeout(None)).map(|_| ())
+    }
+
+    /// The active tab printed to PDF.
+    pub fn pdf(&self, landscape: bool, background: bool) -> Result<Vec<u8>> {
+        use base64::Engine as _;
+        let r = self.active_tab().send_cdp(
+            "Page.printToPDF",
+            serde_json::json!({ "landscape": landscape, "printBackground": background }),
+            self.timeout(None).max(Duration::from_secs(60)),
+        )?;
+        let data =
+            r.get("data").and_then(|d| d.as_str()).ok_or_else(|| anyhow::anyhow!("printToPDF returned no data"))?;
+        Ok(base64::engine::general_purpose::STANDARD.decode(data)?)
+    }
+
     /// Uncaught exceptions in the active tab not reported yet.
     pub fn take_exceptions(&self) -> Vec<String> {
         self.browser.caught_up();
