@@ -97,9 +97,13 @@ pub struct Shared {
     pub single_target: AtomicBool,
     /// session id -> the dialog response armed there (Lightpanda).
     pub armed: Mutex<HashMap<String, DialogPolicy>>,
-    /// URLs of top-level frames a page opened that are not targets
-    /// (Lightpanda's `target=_blank` / `window.open`), in order.
-    pub popups: Mutex<Vec<String>>,
+    /// Top-level frames a page opened that are not targets (Lightpanda's
+    /// `target=_blank` / `window.open`), in order: (frame id, url).
+    pub popups: Mutex<Vec<(String, String)>>,
+    /// Frames announced by `Page.frameAttached` (iframes): not popups.
+    pub child_frames: Mutex<std::collections::HashSet<String>>,
+    /// Events the watcher has handled (see [`Shared::caught_up`]).
+    pub processed: std::sync::atomic::AtomicU64,
 }
 
 impl Shared {
@@ -176,8 +180,25 @@ impl Shared {
         std::mem::take(&mut *self.destroyed.lock().unwrap())
     }
 
+    /// URLs of the popups opened since the last call.
     pub fn take_popups(&self) -> Vec<String> {
-        std::mem::take(&mut *self.popups.lock().unwrap())
+        std::mem::take(&mut *self.popups.lock().unwrap()).into_iter().map(|(_, url)| url).collect()
+    }
+
+    /// Wait (at most `max`) until the watcher has handled every event that
+    /// arrived before now. An engine that reports a dialog or a popup just
+    /// before its command's response (Lightpanda) would otherwise have the
+    /// op return before the watcher logged it.
+    pub fn caught_up(&self, client: &CdpClient, max: Duration) -> bool {
+        let target = client.events_sent();
+        let deadline = std::time::Instant::now() + max;
+        while self.processed.load(Ordering::SeqCst) < target {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        true
     }
 
     pub fn is_single_target(&self) -> bool {
@@ -205,6 +226,42 @@ pub async fn arm_dialog(client: &CdpClient, shared: &Shared, session: &str) {
     };
 }
 
+/// Lightpanda opens `target=_blank` / `window.open` pages as top-level
+/// frames inside the opener's session, not as targets. Such a frame starts
+/// navigating (before the response of the click that opened it) without
+/// ever being attached as a child frame, which is what tells it apart from
+/// an iframe.
+fn note_popup(shared: &Shared, method: &str, params: &Value, session: &str) {
+    let frame = || params.get("frameId").or_else(|| params.pointer("/frame/id")).and_then(Value::as_str);
+    match method {
+        "Page.frameAttached" => {
+            if let Some(id) = frame() {
+                shared.child_frames.lock().unwrap().insert(id.to_string());
+            }
+        }
+        "Page.frameStartedNavigating" | "Page.frameNavigated" => {
+            let (Some(id), Some(url)) =
+                (frame(), params.get("url").or_else(|| params.pointer("/frame/url")).and_then(Value::as_str))
+            else {
+                return;
+            };
+            let main = shared.sessions.lock().unwrap().get(session).cloned();
+            if main.as_deref() == Some(id)
+                || params.pointer("/frame/parentId").is_some()
+                || shared.child_frames.lock().unwrap().contains(id)
+            {
+                return;
+            }
+            let mut popups = shared.popups.lock().unwrap();
+            match popups.iter_mut().find(|(f, _)| f == id) {
+                Some(entry) => entry.1 = url.to_string(),
+                None => popups.push((id.to_string(), url.to_string())),
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Spawn the watcher on the engine runtime. It lives as long as the runtime.
 pub fn spawn(handle: &tokio::runtime::Handle, client: &CdpClient, shared: Arc<Shared>) {
     let mut rx = client.subscribe();
@@ -212,8 +269,14 @@ pub fn spawn(handle: &tokio::runtime::Handle, client: &CdpClient, shared: Arc<Sh
     handle.spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(event) => on_event(&client, &shared, &event),
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Ok(event) => {
+                    on_event(&client, &shared, &event);
+                    shared.processed.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    shared.processed.fetch_add(missed, Ordering::SeqCst);
+                    continue;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -226,6 +289,9 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
     };
     let params = event.get("params").cloned().unwrap_or(Value::Null);
     let session = event.get("sessionId").and_then(Value::as_str).unwrap_or("");
+    if shared.is_single_target() {
+        note_popup(shared, method, &params, session);
+    }
     match method {
         "Page.javascriptDialogOpening" if shared.is_single_target() => {
             // Already answered by the page's engine: report what it got (the
@@ -333,15 +399,6 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                 params.get("frameId").or_else(|| params.get("frame").and_then(|f| f.get("id"))).and_then(Value::as_str);
             if let Some(frame) = frame {
                 if frame != main_frame {
-                    // Lightpanda opens `target=_blank` / `window.open` pages
-                    // as top-level frames inside the opener's session, not
-                    // as targets: a frame without a parent is such a page.
-                    let top_level = params.pointer("/frame/parentId").is_none();
-                    if method == "Page.frameNavigated" && top_level && shared.is_single_target() {
-                        if let Some(url) = params.pointer("/frame/url").and_then(Value::as_str) {
-                            shared.popups.lock().unwrap().push(url.to_string());
-                        }
-                    }
                     return;
                 }
             }

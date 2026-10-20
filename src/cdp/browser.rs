@@ -271,6 +271,12 @@ impl Browser {
         })
     }
 
+    /// Wait (briefly) until the event watcher has handled every event that
+    /// arrived so far (see [`Shared::caught_up`]).
+    pub fn caught_up(&self) -> bool {
+        self.shared.caught_up(&self.client, Duration::from_millis(250))
+    }
+
     /// The watcher's shared state (dialog log, popups, navigation).
     pub fn shared(&self) -> &Arc<Shared> {
         &self.shared

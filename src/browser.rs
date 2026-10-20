@@ -628,6 +628,7 @@ impl BrowserSession {
     /// becomes active, as it would in a visible browser. Returns the
     /// indices of adopted tabs.
     pub fn sync_tabs(&mut self) -> Vec<usize> {
+        self.browser.caught_up();
         let shared = std::sync::Arc::clone(self.browser.shared());
         let mut adopted = Vec::new();
         for (target_id, opener) in shared.take_opened() {
@@ -669,6 +670,10 @@ impl BrowserSession {
     /// `window.open` is loaded in the active tab instead, as if the agent had
     /// followed it to the new tab. Returns a note per page followed.
     pub fn follow_popups(&self, timeout_ms: Option<f64>) -> Vec<String> {
+        if !self.lightpanda {
+            return Vec::new();
+        }
+        self.browser.caught_up();
         let shared = self.browser.shared();
         let urls: Vec<String> =
             shared.take_popups().into_iter().filter(|u| !u.is_empty() && u != "about:blank").collect();
@@ -686,6 +691,7 @@ impl BrowserSession {
 
     /// Dialogs answered since the last call (`{type, message, accepted}`).
     pub fn take_dialogs(&self) -> Vec<serde_json::Value> {
+        self.browser.caught_up();
         self.browser.shared().take_dialogs()
     }
 
@@ -706,6 +712,10 @@ impl BrowserSession {
     /// timeout). Only a wait that used the whole navigation timeout marks
     /// the load abandoned; a shorter op budget leaves it for the next op.
     pub fn settle_within(&self, budget: Duration) -> bool {
+        // A navigation the last command started may already be reported
+        // (Lightpanda sends it before the command's response): let the
+        // watcher record it before deciding there is nothing to wait for.
+        self.browser.caught_up();
         let tab = self.active_tab();
         let key = (tab.target_id().to_string(), tab.nav_generation());
         if self.abandoned.lock().ok().is_some_and(|a| a.as_ref() == Some(&key)) {
