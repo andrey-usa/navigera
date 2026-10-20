@@ -219,6 +219,41 @@ fn cookies_storage_pdf_init_scripts_and_routes() {
     }
 }
 
+/// `state save` in one session and `state load` in a fresh one: the cookies
+/// (HttpOnly included) and the page's localStorage come back, in the file
+/// format Playwright's storageState uses.
+#[test]
+fn state_saved_in_one_session_loads_in_another() {
+    let Some(site) = edge_site() else { return };
+    let base = &site.base;
+    for (engine, bin) in engines() {
+        let file = std::env::temp_dir().join(format!("nv-state-{engine}-{}.json", std::process::id()));
+        let file = file.to_str().unwrap();
+        {
+            let a = Agent::new("save", engine, bin.clone());
+            a.ok(&["goto", &format!("{base}/form")]);
+            a.ok(&["cookies", "set", "sid", "s3cret", "--http-only"]);
+            a.ok(&["storage", "set", "cart", "[1,2]"]);
+            let r = a.ok(&["state", "save", file]);
+            assert_eq!(r["origins"], 1, "[{engine}] {r}");
+            let saved: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+            let sid = saved["cookies"].as_array().unwrap().iter().find(|c| c["name"] == "sid").cloned();
+            let sid = sid.unwrap_or_else(|| panic!("[{engine}] {saved}"));
+            assert_eq!(sid["httpOnly"], true, "[{engine}] {saved}");
+            assert_eq!(saved["origins"][0]["origin"], base.as_str(), "[{engine}] {saved}");
+            assert_eq!(saved["origins"][0]["localStorage"][0]["name"], "cart", "[{engine}] {saved}");
+        }
+        let b = Agent::new("load", engine, bin);
+        let r = b.ok(&["state", "load", file]);
+        assert_eq!((r["cookies"].as_u64(), r["origins"].as_u64()), (Some(1), Some(1)), "[{engine}] {r}");
+        b.ok(&["goto", &format!("{base}/form")]);
+        assert!(b.text(&["cookies"]).contains("sid=s3cret"), "[{engine}]");
+        assert_eq!(b.ok(&["storage", "get", "cart"]), "[1,2]", "[{engine}]");
+        assert!(b.err(&["state", "load", "/nonexistent/state.json"]).contains("state load"), "[{engine}]");
+        let _ = std::fs::remove_file(file);
+    }
+}
+
 #[test]
 fn emulation() {
     let Some(site) = edge_site() else { return };

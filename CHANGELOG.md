@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `state save|load <file>`: every cookie and the open tabs' localStorage to
+  a file and back, in Playwright's `storageState` format, so a signed-in
+  session can be reused, by navigera or Playwright.
 - `status`: the session's engine, browser executable, CDP endpoint and tab
   state.
 - `console`, `errors`, `network` (one request in full with `network <n>`,

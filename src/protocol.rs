@@ -444,6 +444,14 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<String>,
     },
+    /// Cookies and localStorage to a file, or back from one, in Playwright's
+    /// `storageState` format: sign in once, save, and load in a new session.
+    #[serde(rename = "state")]
+    State {
+        /// `save` or `load`.
+        action: String,
+        path: String,
+    },
     /// The page as a PDF file.
     #[serde(rename = "pdf")]
     Pdf {
@@ -814,6 +822,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("cookies", "[set <name> <value> [--url <u> | --domain <d>] [--path <p>] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax|Strict|None] | delete <name> [--url <u>] | clear] [--all] [--json]", "the current page's cookies (--all: every cookie), or set, delete or clear them"),
     ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
+    ("state", "save|load <file.json>", "every cookie and the open tabs' localStorage to a file, or back (Playwright storageState format): sign in once, reuse it in later sessions"),
     ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password>  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value']]]", "fail or answer requests whose URL matches (* and ? globs); no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
@@ -1556,6 +1565,14 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
             cmd
         }
+        "state" => {
+            let action = positional(&mut args).ok_or_else(|| need("state", "save or load"))?;
+            if action != "save" && action != "load" {
+                return Err(ArgsError::Invalid(format!("state takes save|load, got {action:?}")));
+            }
+            let path = positional(&mut args).ok_or_else(|| need("state", "a file"))?;
+            Command::State { action, path }
+        }
         "pdf" => Command::Pdf {
             path: match str_flag(&mut args, "--path")? {
                 Some(p) => Some(p),
@@ -1884,6 +1901,7 @@ impl Driver {
                 | Command::Errors { .. }
                 | Command::Network { .. }
                 | Command::Cookies { .. }
+                | Command::State { .. }
                 | Command::Route { .. }
                 | Command::InitScript { .. }
                 | Command::Unroute { .. }
@@ -2312,6 +2330,21 @@ impl Driver {
                 }
                 other => anyhow::bail!("cookies: unknown action {other:?} (list|set|delete|clear)"),
             },
+            Command::State { action, path } if action == "save" => {
+                let state = self.session.storage_state()?;
+                let (cookies, origins) =
+                    (state["cookies"].as_array().map_or(0, Vec::len), state["origins"].as_array().map_or(0, Vec::len));
+                std::fs::write(path, serde_json::to_string_pretty(&state)? + "\n")
+                    .map_err(|e| anyhow::anyhow!("state save {path}: {e}"))?;
+                Ok(json!({ "saved": path, "cookies": cookies, "origins": origins }))
+            }
+            Command::State { path, .. } => {
+                let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("state load {path}: {e}"))?;
+                let state: Value =
+                    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("state load {path}: not JSON ({e})"))?;
+                let (cookies, origins) = self.session.load_storage_state(&state)?;
+                Ok(json!({ "loaded": path, "cookies": cookies, "origins": origins }))
+            }
             Command::Pdf { path, landscape, background } => {
                 let path = path.clone().unwrap_or_else(|| {
                     format!(

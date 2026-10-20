@@ -167,6 +167,7 @@ Element commands wait up to 5 s for the element to appear. Pass
 | `errors`, `console [--level warn]` | what the page logged; an action whose handler threw says so in `notes` |
 | `network [--failed] [--filter api]`, `network <n>` | requests one line each; one request with its body |
 | `cookies`, `cookies set <name> <value>`, `storage [get\|set k v]` | cookies and localStorage |
+| `state save auth.json` … `state load auth.json` | sign in once, reuse the session later (Playwright storageState format) |
 | `set device "iPhone 15"`, `set viewport 1280 720`, `set media dark`, `set geo <lat> <lon>`, `set offline on`, `set credentials <user> <pass>` | emulate (`off` resets) |
 | `route "*/api/*" --body '{…}'`, `route "*.png"` (fail), `unroute` | mock or block requests |
 | `pdf [file.pdf]`, `init-script "<js>"`, `wait --idle` | print, run code before the page's, wait for the network |

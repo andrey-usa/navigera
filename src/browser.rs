@@ -899,6 +899,85 @@ impl BrowserSession {
         Ok(self.init_scripts.len())
     }
 
+    /// Every cookie, and the localStorage of each origin open in a tab, as
+    /// Playwright's `storageState` writes them, so a file from either tool
+    /// loads in the other.
+    pub fn storage_state(&self) -> Result<serde_json::Value> {
+        let cookies = self.cookies(true, None)?;
+        let cookies: Vec<serde_json::Value> = cookies
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c["name"],
+                    "value": c["value"],
+                    "domain": c["domain"],
+                    "path": c["path"],
+                    "expires": c.get("expires").cloned().unwrap_or(serde_json::json!(-1)),
+                    "httpOnly": c.get("httpOnly").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "secure": c.get("secure").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "sameSite": c.get("sameSite").and_then(|v| v.as_str()).unwrap_or("Lax"),
+                })
+            })
+            .collect();
+        let mut origins: Vec<serde_json::Value> = Vec::new();
+        for page in &self.pages {
+            let Ok(here) = page.evaluate(
+                "() => { try { return { origin: location.origin, \
+                 localStorage: Object.entries(localStorage).map(([name, value]) => ({ name, value })) }; } \
+                 catch (e) { return null; } }",
+                self.timeout(None),
+            ) else {
+                continue;
+            };
+            let origin = here.get("origin").and_then(|o| o.as_str()).unwrap_or("null");
+            let empty = here.get("localStorage").and_then(|l| l.as_array()).is_none_or(Vec::is_empty);
+            if origin == "null" || empty || origins.iter().any(|o| o["origin"] == origin) {
+                continue;
+            }
+            origins.push(here);
+        }
+        Ok(serde_json::json!({ "cookies": cookies, "origins": origins }))
+    }
+
+    /// Put a [`BrowserSession::storage_state`] file back: its cookies now, and
+    /// each origin's localStorage into the tab already on that origin and,
+    /// through an init script, into any document of that origin that does
+    /// not have the key yet. Returns how many cookies and origins it read.
+    pub fn load_storage_state(&mut self, state: &serde_json::Value) -> Result<(usize, usize)> {
+        let cookies = state.get("cookies").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+        for c in &cookies {
+            let mut p = serde_json::json!({
+                "name": c["name"],
+                "value": c["value"],
+                "domain": c["domain"],
+                "path": c.get("path").cloned().unwrap_or(serde_json::json!("/")),
+            });
+            for key in ["httpOnly", "secure", "sameSite"] {
+                if let Some(v) = c.get(key) {
+                    p[key] = v.clone();
+                }
+            }
+            if let Some(e) = c.get("expires").and_then(|e| e.as_f64()).filter(|e| *e > 0.0) {
+                p["expires"] = serde_json::json!(e);
+            }
+            self.set_cookie(p).with_context(|| format!("state load: cookie {}", c["name"]))?;
+        }
+        let origins = state.get("origins").and_then(|o| o.as_array()).cloned().unwrap_or_default();
+        if !origins.is_empty() {
+            let data = serde_json::to_string(&origins)?;
+            // Set-if-absent: what the page itself stores later is kept.
+            let script = format!(
+                "(() => {{ for (const o of {data}) {{ if (o.origin !== location.origin) continue; \
+                 try {{ for (const {{ name, value }} of o.localStorage || []) \
+                 if (localStorage.getItem(name) === null) localStorage.setItem(name, value); }} catch (e) {{}} }} }})()"
+            );
+            self.add_init_script(&script)?;
+        }
+        Ok((cookies.len(), origins.len()))
+    }
+
     /// Remove every `init-script`; returns how many there were.
     pub fn clear_init_scripts(&mut self) -> usize {
         let timeout = self.timeout(None);
