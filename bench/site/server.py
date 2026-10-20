@@ -25,6 +25,7 @@ import argparse
 import html
 import json
 import random
+import re
 import secrets
 import sys
 import threading
@@ -96,6 +97,7 @@ class State:
         self.events = []
         self.next_order = 2001
         self.next_ticket = 501
+        self.browsers = {}       # browser product token -> page loads
 
     def log(self, kind, **data):
         self.events.append({"t": round(time.time(), 3), "kind": kind, **data})
@@ -108,6 +110,7 @@ class State:
                 "carts": {sid: {str(k): v for k, v in c.items()} for sid, c in self.carts.items()},
                 "logins": sorted(set(self.users.values())),
                 "events": self.events[-200:],
+                "browsers": dict(self.browsers),
             }
 
 
@@ -541,10 +544,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def note_browser(self):
+        """Which browser loads the pages (the agent eval checks that a tool
+        on one engine didn't switch to another)."""
+        ua = self.headers.get("User-Agent", "")
+        m = re.search(r"(Lightpanda|HeadlessChrome|Chrome|Firefox|Safari)/[\d.]+", ua)
+        token = m.group(1) if m else (ua.split("/")[0] or "unknown")
+        with STATE.lock:
+            STATE.browsers[token] = STATE.browsers.get(token, 0) + 1
+
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         path, qs = url.path, urllib.parse.parse_qs(url.query)
         sid = self.sid()
+        if not path.startswith("/__") and (self.headers.get("Accept") or "").startswith("text/html"):
+            self.note_browser()
         if path == "/":
             return self.redirect("/shop")
         if path == "/shop" or path.startswith("/shop/p/"):

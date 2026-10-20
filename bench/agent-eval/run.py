@@ -487,9 +487,22 @@ def final_answer(text: str) -> str:
     return m[-1].strip() if m else text.strip()[-400:]
 
 
-def check(task: dict, answer: str, site) -> tuple[bool, list[str]]:
+def expected_browser(tool: str) -> str | None:
+    """The browser a tool must stay on, as the site sees it (User-Agent)."""
+    spec = TOOLS.get(tool, {})
+    if spec.get("engine") == "lightpanda" or spec.get("env", {}).get("AGENT_BROWSER_ENGINE") == "lightpanda":
+        return "Lightpanda"
+    return None
+
+
+def check(task: dict, answer: str, site, tool: str = "") -> tuple[bool, list[str]]:
     c, why = task["check"], []
     state = {} if task.get("live") else site.get("/__state")
+    want = expected_browser(tool)
+    if want and state.get("browsers"):
+        others = {b: n for b, n in state["browsers"].items() if b != want}
+        if others:
+            why.append(f"left the {want} engine: pages loaded by {others}")
     if "answer_product" in c:
         item = site.get("/api/products?q=" + urllib.request.quote(c["answer_product"].lower()))["items"][0]
         if f"{item['price']:.2f}" not in answer:
@@ -726,7 +739,7 @@ def main() -> int:
                         res["decider_tokens"] = sum((c.get("usage") or {}).get("input_tokens") or 0 for c in calls)
                         res["decider_errors"] = sum(1 for c in calls if c.get("status") != 200)
                     answer = final_answer(res["text"])
-                    ok, why = check(task, answer, site)
+                    ok, why = check(task, answer, site, tool)
                     shells = res["shell_commands"]
                     rec.update(res)
                     # Model quota or outage, not the tool: reported apart and
