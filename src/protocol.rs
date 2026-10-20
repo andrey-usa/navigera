@@ -314,6 +314,10 @@ pub enum Command {
     /// Current page URL and tab state.
     #[serde(rename = "url")]
     Url {},
+    /// What this session runs: engine, browser executable, CDP endpoint,
+    /// tabs, active URL.
+    #[serde(rename = "status")]
+    Status {},
     /// PNG screenshot to disk; result is the written path + byte length.
     #[serde(rename = "screenshot")]
     Screenshot {
@@ -532,6 +536,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("check", "<yes/no question>", "probability that the answer about the page is yes, from a decision model (TYPESAFE_API_KEY)"),
     ("title", "", "page title"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
+    ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
@@ -1098,6 +1103,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             timeout_ms,
         },
         "url" => Command::Url {},
+        "status" => Command::Status {},
         // Mostly for sessions (`--session s quit` stops the server); as a
         // one-shot it just launches and closes.
         "quit" | "close" => Command::Quit { close_browser: extract_present(&mut args, "--close-browser") },
@@ -1251,6 +1257,7 @@ impl Driver {
             Command::Quit { .. }
                 | Command::Dialog { .. }
                 | Command::TabList {}
+                | Command::Status {}
                 | Command::TabNew { .. }
                 | Command::TabSelect { .. }
                 | Command::TabClose { .. }
@@ -1551,6 +1558,15 @@ impl Driver {
                 }
             }
             Command::Url {} => Ok(self.state_json()),
+            Command::Status {} => {
+                let mut state = self.state_json();
+                state["engine"] = json!(if self.session.is_lightpanda() { "lightpanda" } else { "chrome" });
+                state["executable"] = json!(self.session.executable());
+                state["endpoint"] = json!(self.session.endpoint());
+                state["attached"] = json!(self.session.is_attached());
+                state["version"] = json!(env!("CARGO_PKG_VERSION"));
+                Ok(state)
+            }
             Command::TabList {} => Ok(self.tabs_json()),
             Command::TabNew { url } => {
                 self.session.new_page().map_err(|e| anyhow::anyhow!("tab-new: {e:#}"))?;

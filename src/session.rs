@@ -464,6 +464,18 @@ fn log_tail(path: &std::path::Path, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
+/// The engine a running session server reports (`status`), if it answers.
+fn running_engine(stream: Stream) -> Option<String> {
+    let mut writer = &stream;
+    writer.write_all(b"{\"id\":1,\"op\":\"status\"}\n").ok()?;
+    writer.flush().ok()?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut line = String::new();
+    BufReader::new(&stream).read_line(&mut line).ok()?;
+    let response: Value = serde_json::from_str(line.trim()).ok()?;
+    response.pointer("/result/engine").and_then(Value::as_str).map(str::to_string)
+}
+
 fn fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCode {
     print_json(output, &json!({ "id": null, "ok": false, "error": error }), config);
     ExitCode::from(1)
@@ -477,7 +489,21 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     };
     let log_path = path.with_extension("log");
     let (socket_str, log_str) = (path.display().to_string(), log_path.display().to_string());
-    if connect(&path).is_ok() {
+    if let Ok(stream) = connect(&path) {
+        // The running session must be the browser this `start` asks for: a
+        // Chrome command sent to a Lightpanda session left over from another
+        // run would quietly test the wrong engine.
+        let running = running_engine(stream);
+        let wanted = if crate::browser::is_lightpanda(&config.engine) { "lightpanda" } else { "chrome" };
+        if let Some(running) = running.filter(|r| r != wanted) {
+            return fail(
+                output,
+                config,
+                format!(
+                    "session {name} is already running the {running} engine, not {wanted}; `navigera --session {name} quit` first, or pick another --session"
+                ),
+            );
+        }
         print_json(
             output,
             &json!({ "id": null, "ok": true, "result": {
