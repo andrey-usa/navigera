@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `status`: the session's engine, browser executable, CDP endpoint and tab
+  state.
+- `notes` in responses: what the engine did differently from what was asked
+  (e.g. a Lightpanda popup loaded in the current tab).
+
+### Fixed
+
+- Lightpanda 1.0.x (`--engine lightpanda`): `goto` waits for the load event
+  (it returned at commit and gave up after 500 ms); confirm()/prompt() get
+  the dialog policy (they returned false/null while reported accepted);
+  `target=_blank` pages are followed in the one tab; iframes and stylesheets
+  load; table cells keep their text in `ax`; shadow-DOM clicks no longer wait
+  3 s; no `xvfb-run` wrapper; telemetry off through
+  `LIGHTPANDA_DISABLE_TELEMETRY`.
+- `start` on a running session with a different engine fails instead of
+  silently reusing it.
+- Dialogs, popups and JS navigations reported just before a command's
+  response are no longer missed by the op that caused them.
+
 ## [0.4.1] - 2026-10-14
 
 ### Added

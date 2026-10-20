@@ -328,9 +328,22 @@ Registry as `io.github.andrey-usa/navigera` (`server.json`).
   quotes the end of its server's log (`<socket>.log`, kept after the server
   exits), which says why it stopped: `idle for 1800s`, a browser crash, or
   `quit`.
-- **`--engine lightpanda`** (experimental) starts `lightpanda serve`. The
-  binary comes from `$LIGHTPANDA_BIN` or `PATH`, or from `--chromium`. It
-  supports a single tab and fires no load events, so `goto` waits for commit.
+- **`--engine lightpanda`** (experimental; tested on Lightpanda 1.0.1 and the
+  nightly) starts `lightpanda serve` with iframes and stylesheets loaded and
+  telemetry off (`LIGHTPANDA_DISABLE_TELEMETRY`). The binary comes from
+  `$LIGHTPANDA_BIN` or `PATH`, or from `--chromium`; no X server is needed.
+  `goto` waits for load as on Chrome. Differences from Chrome:
+  - one tab: a page opened with `target=_blank` or `window.open` is loaded in
+    the current tab, and the response says so in `notes`; `tab-new` fails.
+  - dialogs are answered from a response armed before they open: one per
+    dialog, re-armed after each, so a script that opens two dialogs in a row
+    gets the policy for the first and a dismissal for the second (`dialogs`
+    in the response reports what the page got).
+  - no layout: clicks go straight to DOM events where the hit test can't
+    work (inside shadow roots), without the settle wait and without the
+    "covered" warning.
+  - `status` reports the engine of a running session; `start` on a session
+    that runs the other engine fails instead of reusing it.
 
 **Your own browser: `--attach` and `--profile`** (with `start`, or `serve`):
 
