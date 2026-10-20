@@ -19,6 +19,7 @@ pub mod ax;
 mod browser;
 mod client;
 mod events;
+pub mod logs;
 mod page;
 mod procjob;
 mod profile;

@@ -452,6 +452,12 @@ fn localize_request(request: &mut Value, config: &SessionConfig) {
         }
         _ => {}
     }
+    // Files the server writes for the caller: relative to the caller.
+    for key in ["har", "body_file", "path"] {
+        if let Some(p) = request.get(key).and_then(Value::as_str) {
+            request[key] = json!(absolute(p));
+        }
+    }
     if request.get("timeout_ms").is_none() && config.timeout_ms != crate::protocol::DEFAULT_TIMEOUT_MS {
         request["timeout_ms"] = json!(config.timeout_ms);
     }

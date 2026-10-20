@@ -311,6 +311,58 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<f64>,
     },
+    /// Console messages, uncaught exceptions and browser log entries of
+    /// the active tab, oldest first.
+    #[serde(rename = "console")]
+    Console {
+        /// Only this level and above: `debug`, `log`, `info`, `warn`, `error`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        /// Empty the log after reading it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear: bool,
+        /// `json`: a list of `{level, source, text, location}`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
+    /// `console --level error`: exceptions, console.error, failed loads.
+    #[serde(rename = "errors")]
+    Errors {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
+    /// The active tab's network requests, one line each; with `n`, one
+    /// request in full (headers, post data, response body).
+    #[serde(rename = "network")]
+    Network {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        n: Option<u64>,
+        /// Only URLs containing this.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<String>,
+        /// Only this resource type (`fetch`, `xhr`, `document`, `script`, …).
+        #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        /// Only failed requests and HTTP errors (status >= 400).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        failed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear: bool,
+        /// Write the (filtered) log as a HAR 1.2 file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        har: Option<String>,
+        /// With `n`: write the response body to this file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_file: Option<String>,
+    },
     /// Current page URL and tab state.
     #[serde(rename = "url")]
     Url {},
@@ -535,6 +587,9 @@ const OPS: &[(&str, &str, &str)] = &[
     ("find", "<description>", "the element a description means, chosen by a decision model (TYPESAFE_API_KEY); element ops also take --find <description>"),
     ("check", "<yes/no question>", "probability that the answer about the page is yes, from a decision model (TYPESAFE_API_KEY)"),
     ("title", "", "page title"),
+    ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
+    ("errors", "[--limit <n>] [--clear] [--json]", "only the errors: exceptions, console.error, failed loads"),
+    ("network", "[<n>] [--filter <text>] [--type fetch|xhr|document|…] [--failed] [--limit <n>] [--clear] [--har <file>] [--body-file <file>]", "the active tab's requests, one line each (#n METHOD STATUS type url size time); `network <n>` shows one in full with its response body"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
     ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
     ("back", "", "history back"),
@@ -1107,6 +1162,34 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             scope: target_args(&mut args, true)?,
             timeout_ms,
         },
+        "console" => Command::Console {
+            level: str_flag(&mut args, "--level")?,
+            limit: num_flag(&mut args, "--limit")?.map(|v| v as usize),
+            clear: extract_present(&mut args, "--clear"),
+            format: extract_present(&mut args, "--json").then(|| "json".to_string()),
+        },
+        "errors" => Command::Errors {
+            limit: num_flag(&mut args, "--limit")?.map(|v| v as usize),
+            clear: extract_present(&mut args, "--clear"),
+            format: extract_present(&mut args, "--json").then(|| "json".to_string()),
+        },
+        "network" => Command::Network {
+            filter: str_flag(&mut args, "--filter")?,
+            kind: str_flag(&mut args, "--type")?,
+            failed: extract_present(&mut args, "--failed"),
+            limit: num_flag(&mut args, "--limit")?.map(|v| v as usize),
+            clear: extract_present(&mut args, "--clear"),
+            har: str_flag(&mut args, "--har")?,
+            body_file: str_flag(&mut args, "--body-file")?,
+            n: match positional(&mut args) {
+                Some(raw) => Some(
+                    raw.trim_start_matches('#')
+                        .parse::<u64>()
+                        .map_err(|_| ArgsError::Invalid(format!("network: {raw:?} is not a request number")))?,
+                ),
+                None => None,
+            },
+        },
         "url" => Command::Url {},
         "status" => Command::Status {},
         // Mostly for sessions (`--session s quit` stops the server); as a
@@ -1232,6 +1315,113 @@ impl Driver {
     }
 
     /// Tab inventory for `tab-list` / `tab-new` results.
+    /// `console` / `errors`: the active tab's log at `min` level or above.
+    fn console_result(&self, min: u8, limit: Option<usize>, clear: bool, format: Option<&str>) -> Value {
+        let rank = |level: &str| match level {
+            "debug" => 0,
+            "log" => 1,
+            "info" => 2,
+            "warn" => 3,
+            _ => 4,
+        };
+        let all = self.session.console(clear);
+        let mut picked: Vec<_> = all.into_iter().filter(|e| rank(&e.level) >= min).collect();
+        let limit = limit.unwrap_or(200);
+        if picked.len() > limit {
+            picked.drain(..picked.len() - limit);
+        }
+        if format == Some("json") {
+            return crate::cdp::logs::console_json(&picked);
+        }
+        if picked.is_empty() {
+            return json!(if min >= 4 { "(no errors)" } else { "(no console messages)" });
+        }
+        json!(crate::cdp::logs::console_text(&picked))
+    }
+
+    /// `network`: the request list, one request in full, or a HAR file.
+    #[allow(clippy::too_many_arguments)]
+    fn network(
+        &self,
+        n: Option<u64>,
+        filter: Option<&str>,
+        kind: Option<&str>,
+        failed: bool,
+        limit: Option<usize>,
+        clear: bool,
+        har: Option<&str>,
+        body_file: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        let all = self.session.requests(clear && n.is_none());
+        if let Some(n) = n {
+            let r = all
+                .iter()
+                .find(|r| r.n == n)
+                .ok_or_else(|| anyhow::anyhow!("network: no request #{n} (older ones are dropped after 1000)"))?;
+            let mut out = crate::cdp::logs::request_json(r);
+            if r.post_data.is_none() && r.has_post_data {
+                if let Ok(data) = self.session.request_post_data(&r.id) {
+                    out["post_data"] = json!(data);
+                }
+            }
+            match self.session.response_body(&r.id) {
+                Ok((body, base64)) => {
+                    let bytes = if base64 {
+                        use base64::Engine as _;
+                        base64::engine::general_purpose::STANDARD.decode(&body).unwrap_or_default()
+                    } else {
+                        body.clone().into_bytes()
+                    };
+                    if let Some(path) = body_file {
+                        std::fs::write(path, &bytes).map_err(|e| anyhow::anyhow!("network --body-file {path}: {e}"))?;
+                        out["body_file"] = json!(path);
+                        out["body_bytes"] = json!(bytes.len());
+                    } else if base64 {
+                        out["body"] =
+                            json!(format!("({} bytes of binary data; --body-file <path> saves it)", bytes.len()));
+                    } else {
+                        const MAX: usize = 8 * 1024;
+                        let text = String::from_utf8_lossy(&bytes);
+                        out["body"] = if text.len() > MAX {
+                            let cut = text
+                                .char_indices()
+                                .take_while(|(i, _)| *i < MAX)
+                                .last()
+                                .map(|(i, c)| i + c.len_utf8())
+                                .unwrap_or(0);
+                            json!(format!("{}… ({} bytes; --body-file <path> saves all)", &text[..cut], bytes.len()))
+                        } else {
+                            json!(text)
+                        };
+                    }
+                }
+                Err(e) => out["body"] = json!(format!("(unavailable: {e:#})")),
+            }
+            return Ok(out);
+        }
+        let kind = kind.map(str::to_ascii_lowercase);
+        let mut picked: Vec<_> = all
+            .into_iter()
+            .filter(|r| filter.is_none_or(|f| r.url.contains(f)))
+            .filter(|r| kind.as_ref().is_none_or(|k| r.kind.to_ascii_lowercase() == *k))
+            .filter(|r| !failed || r.failed.is_some() || r.status.is_some_and(|s| s >= 400))
+            .collect();
+        if let Some(path) = har {
+            let har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
+            std::fs::write(path, serde_json::to_vec_pretty(&har)?)
+                .map_err(|e| anyhow::anyhow!("network --har {path}: {e}"))?;
+            return Ok(json!({ "har": path, "entries": picked.len() }));
+        }
+        let limit = limit.unwrap_or(100);
+        if picked.len() > limit {
+            picked.drain(..picked.len() - limit);
+        }
+        if picked.is_empty() {
+            return Ok(json!("(no requests)"));
+        }
+        Ok(json!(crate::cdp::logs::requests_text(&picked, &origin_of(&self.session.url()))))
+    }
+
     fn tabs_json(&self) -> Value {
         let active = self.session.active_page();
         let tabs: Vec<Value> = self
@@ -1263,6 +1453,9 @@ impl Driver {
                 | Command::Dialog { .. }
                 | Command::TabList {}
                 | Command::Status {}
+                | Command::Console { .. }
+                | Command::Errors { .. }
+                | Command::Network { .. }
                 | Command::TabNew { .. }
                 | Command::TabSelect { .. }
                 | Command::TabClose { .. }
@@ -1324,7 +1517,17 @@ impl Driver {
                 e
             }
         });
-        let notes = if result.is_ok() { self.session.follow_popups(op_timeout_ms(command)) } else { Vec::new() };
+        let mut notes = if result.is_ok() { self.session.follow_popups(op_timeout_ms(command)) } else { Vec::new() };
+        // Uncaught exceptions while this op ran (a handler that crashed is
+        // why a click "did nothing"): one line, `errors` has the rest.
+        if !matches!(command, Command::Console { .. } | Command::Errors { .. }) {
+            let thrown = self.session.take_exceptions();
+            if let Some(first) = thrown.first() {
+                let more = if thrown.len() > 1 { format!(" (+{} more)", thrown.len() - 1) } else { String::new() };
+                let first: String = first.chars().take(160).collect();
+                notes.push(format!("the page threw {first}{more}; `errors` lists them"));
+            }
+        }
         let opened = self.session.sync_tabs();
         if !opened.is_empty() {
             // The op opened a tab and the session switched to it: let its
@@ -1562,6 +1765,28 @@ impl Driver {
                     other => Ok(other),
                 }
             }
+            Command::Console { level, limit, clear, format } => {
+                let min = match level.as_deref() {
+                    None | Some("debug") => 0,
+                    Some("log") => 1,
+                    Some("info") => 2,
+                    Some("warn" | "warning") => 3,
+                    Some("error") => 4,
+                    Some(other) => anyhow::bail!("console --level takes debug|log|info|warn|error, got {other:?}"),
+                };
+                Ok(self.console_result(min, *limit, *clear, format.as_deref()))
+            }
+            Command::Errors { limit, clear, format } => Ok(self.console_result(4, *limit, *clear, format.as_deref())),
+            Command::Network { n, filter, kind, failed, limit, clear, har, body_file } => self.network(
+                *n,
+                filter.as_deref(),
+                kind.as_deref(),
+                *failed,
+                *limit,
+                *clear,
+                har.as_deref(),
+                body_file.as_deref(),
+            ),
             Command::Url {} => Ok(self.state_json()),
             Command::Status {} => {
                 let mut state = self.state_json();
@@ -1818,6 +2043,13 @@ pub fn print_cli_response(output: &mut dyn Write, response: &Value, config: &Ses
     }
     let _ = output.flush();
     ok
+}
+
+/// `scheme://host[:port]` of a URL ("" when it has none).
+fn origin_of(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return String::new() };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    format!("{scheme}://{host}")
 }
 
 fn outcome_response(id: Value, outcome: Outcome, started: Instant) -> Response {

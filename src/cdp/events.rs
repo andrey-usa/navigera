@@ -104,6 +104,8 @@ pub struct Shared {
     pub child_frames: Mutex<std::collections::HashSet<String>>,
     /// Events the watcher has handled (see [`Shared::caught_up`]).
     pub processed: std::sync::atomic::AtomicU64,
+    /// Console, exceptions and network requests per tab.
+    pub logs: Mutex<super::logs::Logs>,
 }
 
 impl Shared {
@@ -292,6 +294,7 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
     if shared.is_single_target() {
         note_popup(shared, method, &params, session);
     }
+    shared.logs.lock().unwrap().on_event(method, &params, session);
     match method {
         "Page.javascriptDialogOpening" if shared.is_single_target() => {
             // Already answered by the page's engine: report what it got (the

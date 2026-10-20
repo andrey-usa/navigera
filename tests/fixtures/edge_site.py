@@ -8,6 +8,7 @@ port reached as `localhost` (a different origin) for cross-origin iframes.
 Prints `LISTENING http://127.0.0.1:<port> <other-port>` once both are up.
 """
 import http.server
+import json
 import socketserver
 import sys
 import threading
@@ -37,6 +38,13 @@ input{position:absolute;left:4px;top:4px;margin:0;width:20px;height:20px}
     "/upload": """<!doctype html><title>up</title><input type=file id=f><div id=o></div><script>f.onchange=()=>o.textContent=f.files[0].name+':'+f.files[0].size</script>""",
     # A hidden copy ahead of the visible element.
     "/twice": """<!doctype html><title>two</title><div class=t style="display:none">hidden</div><div class=t>shown</div>""",
+    # Console output of every kind, a handler that throws, a missing
+    # resource, a fetch with a JSON body.
+    "/console": """<!doctype html><title>console</title>
+<script>console.log('hello', {a: 1, b: 'x'}, [1, 2]); console.warn('careful'); console.error('bad thing');
+fetch('/api/echo?x=1', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({q: 'widget'})})
+  .then(r => r.json()).then(d => { document.title = 'echo ' + d.got; });</script>
+<button id=boom onclick="cartTotal.recompute()">boom</button><img src="/missing.png" alt="">""",
     "/keys": """<!doctype html><title>keys</title><input id=i autofocus><p id=p>no form here</p>""",
     # A single-page app: the list arrives by fetch, then renders a beat later.
     "/spa": """<!doctype html><title>spa</title><p id=s role=status>Loading items…</p><script>
@@ -64,6 +72,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(600)
             return
+        if url.path == "/missing.png":
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if url.path == "/slow":
             time.sleep(int(query.get("ms", ["1000"])[0]) / 1000)
             body = b"<!doctype html><title>slow</title><h1>slow page</h1>"
@@ -79,6 +92,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length).decode("utf-8", "replace")
+        if urllib.parse.urlparse(self.path).path == "/api/echo":
+            out = ('{"got": %s, "len": %d}' % (json.dumps(body), len(body))).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+            return
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):

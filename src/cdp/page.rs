@@ -459,13 +459,21 @@ impl Page {
     /// trip per tab plus a stream of events, and it is the best-known
     /// automation fingerprint anti-bot scripts probe for.
     pub async fn enable(&self) -> Result<()> {
-        self.client.send("Page.enable", json!({}), Some(&self.session_id), CMD_TIMEOUT).await?;
-        // fetch/XHR tracking for `network_quiet` (best effort: an engine
-        // without the Network domain just never waits for data).
-        // `NAVIGERA_NO_NETWORK=1` (diagnostic) leaves the Network domain off.
-        if std::env::var_os("NAVIGERA_NO_NETWORK").is_none() {
-            let _ = self.client.send("Network.enable", json!({}), Some(&self.session_id), CMD_TIMEOUT).await;
-        }
+        let session = Some(self.session_id.as_str());
+        let send = |method: &'static str| self.client.send(method, json!({}), session, CMD_TIMEOUT);
+        // One round trip for all of them. Page is required; the rest is best
+        // effort: Runtime and Log feed `console`/`errors` (console calls,
+        // uncaught exceptions, failed loads, CSP reports), Network feeds
+        // `network` and `network_quiet` (an engine without it just never
+        // waits for data). `NAVIGERA_NO_NETWORK=1` (diagnostic) leaves
+        // Network off.
+        let network = async {
+            if std::env::var_os("NAVIGERA_NO_NETWORK").is_none() {
+                let _ = send("Network.enable").await;
+            }
+        };
+        let (page, _, _, _) = tokio::join!(send("Page.enable"), send("Runtime.enable"), send("Log.enable"), network);
+        page?;
         Ok(())
     }
 
@@ -510,6 +518,11 @@ impl Page {
 
     fn send(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
         self.block_on(self.client.send(method, params, Some(&self.session_id), timeout))
+    }
+
+    /// Send one CDP command to this tab's session.
+    pub fn send_cdp(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
+        self.send(method, params, timeout)
     }
 
     /// Evaluate a JS expression; the result comes back by value in one round

@@ -689,6 +689,57 @@ impl BrowserSession {
         vec![note]
     }
 
+    /// The active tab's console log, oldest first (`clear` empties it).
+    pub fn console(&self, clear: bool) -> Vec<cdp::logs::ConsoleEntry> {
+        self.browser.caught_up();
+        let mut logs = self.browser.shared().logs.lock().unwrap();
+        match logs.tabs.get_mut(self.active_tab().session_id()) {
+            Some(tab) if clear => std::mem::take(&mut tab.console).into(),
+            Some(tab) => tab.console.iter().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The active tab's network requests, oldest first (`clear` empties the log).
+    pub fn requests(&self, clear: bool) -> Vec<cdp::logs::Request> {
+        self.browser.caught_up();
+        let mut logs = self.browser.shared().logs.lock().unwrap();
+        match logs.tabs.get_mut(self.active_tab().session_id()) {
+            Some(tab) if clear => std::mem::take(&mut tab.requests).into(),
+            Some(tab) => tab.requests.iter().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// A logged request's response body: (body, base64-encoded?).
+    pub fn response_body(&self, request_id: &str) -> Result<(String, bool)> {
+        let r = self.active_tab().send_cdp(
+            "Network.getResponseBody",
+            serde_json::json!({ "requestId": request_id }),
+            self.timeout(None),
+        )?;
+        Ok((
+            r.get("body").and_then(|b| b.as_str()).unwrap_or_default().to_string(),
+            r.get("base64Encoded").and_then(|b| b.as_bool()).unwrap_or(false),
+        ))
+    }
+
+    /// A logged request's body when the event didn't carry it.
+    pub fn request_post_data(&self, request_id: &str) -> Result<String> {
+        let r = self.active_tab().send_cdp(
+            "Network.getRequestPostData",
+            serde_json::json!({ "requestId": request_id }),
+            self.timeout(None),
+        )?;
+        Ok(r.get("postData").and_then(|b| b.as_str()).unwrap_or_default().to_string())
+    }
+
+    /// Uncaught exceptions in the active tab not reported yet.
+    pub fn take_exceptions(&self) -> Vec<String> {
+        self.browser.caught_up();
+        self.browser.shared().logs.lock().unwrap().take_exceptions(self.active_tab().session_id())
+    }
+
     /// Dialogs answered since the last call (`{type, message, accepted}`).
     pub fn take_dialogs(&self) -> Vec<serde_json::Value> {
         self.browser.caught_up();
