@@ -169,6 +169,48 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs) {
     return { synthetic: true, covered: !!hit && !force, covered_by: by, nav: mayNavigate(el) };
 }"#;
 
+/// The second half of a DOM-event double click (the first click's events
+/// were sent by CLICK_PREP).
+const DBLCLICK_REST: &str = r#"function (el) {
+    const view = el.ownerDocument.defaultView;
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, detail: 2, view }));
+    }
+    el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, composed: true, detail: 2, view }));
+    return true;
+}"#;
+
+/// What `get` reads from an element.
+pub const GET_EL: &str = r#"function (el, what, name) {
+    switch (what) {
+        case 'text': return (el.innerText ?? el.textContent ?? '').trim();
+        case 'value': return el.value ?? null;
+        case 'attr': return el.getAttribute(name);
+        case 'html': return el.innerHTML;
+        case 'outer': return el.outerHTML;
+        case 'box': { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }
+        case 'style': return getComputedStyle(el).getPropertyValue(name);
+        case 'checked': return !!el.checked;
+        default: throw new Error('get: unknown property ' + what);
+    }
+}"#;
+
+/// The states `is` answers.
+pub const IS_EL: &str = r#"function (el, state) {
+    const visible = () => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    const disabled = () => !!(el.disabled || el.closest('fieldset[disabled]') || el.getAttribute('aria-disabled') === 'true');
+    switch (state) {
+        case 'visible': return visible();
+        case 'hidden': return !visible();
+        case 'enabled': return !disabled();
+        case 'disabled': return disabled();
+        case 'checked': return !!(el.checked || el.getAttribute('aria-checked') === 'true');
+        case 'editable': return !disabled() && !el.readOnly && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+        case 'focused': return el === el.ownerDocument.activeElement || el.contains(el.ownerDocument.activeElement);
+        default: throw new Error('is: unknown state ' + state + ' (visible, hidden, enabled, disabled, checked, editable, focused)');
+    }
+}"#;
+
 /// Hover: like CLICK_PREP but the fallback only fires enter/over events.
 const HOVER_PREP: &str = r#"async function (el, settleMs) {
     const deadline = Date.now() + settleMs;
@@ -238,7 +280,7 @@ const SELECT_EL: &str = r#"function (el, wanted) {
 }"#;
 
 /// Focus an element (for `press`/`type` with a target).
-const FOCUS_EL: &str = r#"function (el) { el.scrollIntoView({ block: 'center', behavior: 'instant' }); el.focus(); return document.activeElement === el || el.contains(document.activeElement); }"#;
+pub const FOCUS_EL: &str = r#"function (el) { el.scrollIntoView({ block: 'center', behavior: 'instant' }); el.focus(); return document.activeElement === el || el.contains(document.activeElement); }"#;
 
 /// Scroll an element into view (or scroll inside it by `dy`).
 const SCROLL_EL: &str = r#"function (el, dy) {
@@ -920,7 +962,7 @@ impl Page {
     /// Run `function (el, ...args)` on the element `target` names, waiting
     /// up to `wait` for selector/text targets to appear. One round trip for
     /// selector/text; resolve + call + release for refs.
-    fn on_element(
+    pub(crate) fn on_element(
         &self,
         target: &Target,
         what: &str,
@@ -933,8 +975,6 @@ impl Page {
         let extra = if arg_list.is_empty() { String::new() } else { format!(", {}", arg_list.join(", ")) };
         let wait_ms = wait_budget_ms(wait.min(timeout));
         let finder = match target {
-            Target::Selector(sel) => format!("({WAIT_FOR})({}, {wait_ms}, {})", json!(sel), json!(what)),
-            Target::Text(text) => format!("({WAIT_TEXT})({}, {wait_ms}, {})", json!(text), json!(what)),
             Target::Ref(node) => {
                 let fn_on_this = format!(
                     "function (...args) {{ const el = this.nodeType === 1 ? this : this.parentElement; \
@@ -1143,6 +1183,81 @@ impl Page {
             }
         }
         Ok(true)
+    }
+
+    /// Double click: two trusted presses at the element's centre (the
+    /// browser fires click, click, dblclick), or DOM events where no trusted
+    /// click is possible.
+    pub fn dblclick(&self, target: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
+        let settle = json!(self.hit_settle_ms(wait));
+        let mut point =
+            self.on_element(target, "dblclick", CLICK_PREP, &[json!(false), settle.clone()], wait, timeout)?;
+        if point.get("xframe").and_then(Value::as_bool) == Some(true) {
+            match target {
+                Target::Ref(node) => match self.content_quad_center(*node, timeout) {
+                    Some((x, y)) => point = json!({ "x": x, "y": y }),
+                    None => bail!("dblclick: element is inside a cross-origin iframe without a box"),
+                },
+                _ => bail!("dblclick: element is inside a cross-origin iframe; target it by ref from `ax`"),
+            }
+        }
+        if point.get("synthetic").and_then(Value::as_bool) == Some(true) {
+            // CLICK_PREP already sent the first click's events.
+            self.on_element(target, "dblclick", DBLCLICK_REST, &[], wait, timeout)?;
+            return Ok(point);
+        }
+        let (Some(x), Some(y)) = (point.get("x").and_then(Value::as_f64), point.get("y").and_then(Value::as_f64))
+        else {
+            return Ok(point);
+        };
+        let steps = [
+            ("mouseMoved", "none", 0, 0),
+            ("mousePressed", "left", 1, 1),
+            ("mouseReleased", "left", 0, 1),
+            ("mousePressed", "left", 1, 2),
+            ("mouseReleased", "left", 0, 2),
+        ];
+        for (i, (kind, button, buttons, count)) in steps.into_iter().enumerate() {
+            let sent = self.send(
+                "Input.dispatchMouseEvent",
+                json!({ "type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": count }),
+                timeout,
+            );
+            match sent {
+                Ok(_) => {}
+                Err(_) if i == 0 => {
+                    self.on_element(target, "dblclick", CLICK_PREP, &[json!(true), settle.clone()], wait, timeout)?;
+                    self.on_element(target, "dblclick", DBLCLICK_REST, &[], wait, timeout)?;
+                    return Ok(json!({ "synthetic": true }));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(point)
+    }
+
+    /// Press or release one key (`down`), without the other half.
+    pub fn key_event(&self, name: &str, down: bool, timeout: Duration) -> Result<()> {
+        let (key, code, vk, text) = key_info(name).ok_or_else(|| {
+            anyhow::anyhow!("unknown key {name:?} (use Shift, Control, ArrowDown, a single character, …)")
+        })?;
+        let mut event = json!({
+            "type": if !down { "keyUp" } else if text.is_some() { "keyDown" } else { "rawKeyDown" },
+            "key": key, "code": code, "windowsVirtualKeyCode": vk,
+        });
+        if let (true, Some(t)) = (down, &text) {
+            event["text"] = json!(t);
+        }
+        self.send("Input.dispatchKeyEvent", event, timeout).map(|_| ())
+    }
+
+    /// Insert text at the caret in one go (`Input.insertText`): like a paste
+    /// or an IME commit, no per-key events.
+    pub fn insert_text(&self, target: Option<&Target>, text: &str, wait: Duration, timeout: Duration) -> Result<()> {
+        if let Some(target) = target {
+            self.on_element(target, "insert-text", FOCUS_EL, &[], wait, timeout)?;
+        }
+        self.send("Input.insertText", json!({ "text": text }), timeout).map(|_| ())
     }
 
     /// Move the mouse over the element (opens hover menus and tooltips).

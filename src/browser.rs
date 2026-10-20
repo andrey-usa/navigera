@@ -372,6 +372,9 @@ pub struct BrowserSession {
     /// remove them by.
     init_scripts: Vec<String>,
     init_ids: std::collections::HashMap<String, Vec<String>>,
+    /// Modifiers held with `keydown` (Shift, Control, Alt, Meta): later
+    /// `press`es carry them until `keyup`.
+    held: std::sync::Mutex<Vec<String>>,
     /// Owns the tokio runtime; declared LAST so it drops last, after the
     /// browser/client/pages that use it.
     _runtime: tokio::runtime::Runtime,
@@ -495,6 +498,7 @@ impl BrowserSession {
             overrides: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
+            held: Default::default(),
             _runtime: runtime,
         })
     }
@@ -537,6 +541,7 @@ impl BrowserSession {
             overrides: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
+            held: Default::default(),
             _runtime: runtime,
         })
     }
@@ -773,6 +778,102 @@ impl BrowserSession {
             self.overrides.insert(kind, calls);
         }
         Ok(())
+    }
+
+    /// Read a property of the target element (`get`): text, value, attr,
+    /// html, outer, box, style, checked.
+    pub fn get_prop(
+        &self,
+        target: &Target,
+        what: &str,
+        name: Option<&str>,
+        timeout_ms: Option<f64>,
+    ) -> Result<serde_json::Value> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        self.active_tab().on_element(
+            target,
+            "get",
+            cdp::page_js::GET_EL,
+            &[serde_json::json!(what), serde_json::json!(name)],
+            wait,
+            timeout,
+        )
+    }
+
+    /// How many elements match a CSS selector (no waiting).
+    pub fn count(&self, selector: &str) -> Result<u64> {
+        let n: serde_json::Value = self.active_tab().evaluate(
+            &format!("document.querySelectorAll({}).length", serde_json::json!(selector)),
+            self.timeout(None),
+        )?;
+        Ok(n.as_u64().unwrap_or(0))
+    }
+
+    /// An element state (`is`). A missing element is not visible, not
+    /// enabled, not checked: false (true for `hidden`), after a short wait.
+    pub fn is_state(&self, target: &Target, state: &str, timeout_ms: Option<f64>) -> Result<bool> {
+        let (_, timeout) = self.element_budget(timeout_ms);
+        let wait = timeout_ms.map(|ms| Duration::from_secs_f64(ms / 1000.0)).unwrap_or(Duration::from_millis(500));
+        match self.active_tab().on_element(
+            target,
+            "is",
+            cdp::page_js::IS_EL,
+            &[serde_json::json!(state)],
+            wait,
+            timeout,
+        ) {
+            Ok(v) => Ok(v.as_bool().unwrap_or(false)),
+            Err(e) if format!("{e:#}").contains("no element") => Ok(state == "hidden"),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn dblclick(&self, target: &Target, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let point = self.active_tab().dblclick(target, wait, timeout)?;
+        self.settle_for(timeout_ms);
+        Ok(point)
+    }
+
+    pub fn focus(&self, target: &Target, timeout_ms: Option<f64>) -> Result<bool> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let v = self.active_tab().on_element(target, "focus", cdp::page_js::FOCUS_EL, &[], wait, timeout)?;
+        Ok(v.as_bool().unwrap_or(false))
+    }
+
+    /// Make a checkbox/radio/switch checked (`want`) by clicking it when it
+    /// isn't; fails when the click didn't change it.
+    pub fn set_checked(&self, target: &Target, want: bool, timeout_ms: Option<f64>) -> Result<bool> {
+        let checked = |s: &Self| -> Result<bool> {
+            Ok(s.get_prop(target, "checked", None, timeout_ms)?.as_bool().unwrap_or(false)
+                || s.is_state(target, "checked", timeout_ms)?)
+        };
+        if checked(self)? == want {
+            return Ok(false);
+        }
+        self.click_target(target, timeout_ms)?;
+        if checked(self)? != want {
+            bail!("clicking it did not {} it", if want { "check" } else { "uncheck" });
+        }
+        Ok(true)
+    }
+
+    pub fn key_event(&self, key: &str, down: bool) -> Result<()> {
+        self.active_tab().key_event(key, down, self.timeout(None))?;
+        let modifier = ["Shift", "Control", "Alt", "Meta"].into_iter().find(|m| m.eq_ignore_ascii_case(key));
+        if let Some(m) = modifier {
+            let mut held = self.held.lock().unwrap();
+            held.retain(|h| h != m);
+            if down {
+                held.push(m.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn insert_text(&self, target: Option<&Target>, text: &str, timeout_ms: Option<f64>) -> Result<()> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        self.active_tab().insert_text(target, text, wait, timeout)
     }
 
     /// Run `source` before the page's own scripts in every new document of
@@ -1130,7 +1231,16 @@ impl BrowserSession {
     pub fn press(&self, target: Option<&Target>, key: &str, timeout_ms: Option<f64>) -> Result<()> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let generation = self.active_tab().nav_generation();
-        let may_navigate = self.active_tab().press(target, key, wait, timeout)?;
+        // Modifiers held with `keydown` apply, as on a real keyboard.
+        let held = self.held.lock().unwrap().clone();
+        let chord = held
+            .iter()
+            .filter(|m| !key.split('+').any(|k| k.eq_ignore_ascii_case(m)))
+            .map(String::as_str)
+            .chain(std::iter::once(key))
+            .collect::<Vec<_>>()
+            .join("+");
+        let may_navigate = self.active_tab().press(target, &chord, wait, timeout)?;
         if may_navigate {
             // Enter in a form submits it (implicit submission); on a link
             // it follows it.

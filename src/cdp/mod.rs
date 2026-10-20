@@ -28,3 +28,8 @@ pub(crate) mod transport;
 pub use browser::{Browser, LaunchOptions};
 pub use events::{DialogPolicy, Route, RouteAction};
 pub use page::{AxOptions, Locator, Page, Target, DEFAULT_ELEMENT_WAIT};
+
+/// Element functions shared with the session layer.
+pub(crate) mod page_js {
+    pub(crate) use super::page::{FOCUS_EL, GET_EL, IS_EL};
+}

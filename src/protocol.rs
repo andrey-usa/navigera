@@ -293,6 +293,9 @@ pub enum Command {
         /// Just sleep this long.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ms: Option<f64>,
+        /// No fetch/XHR in flight for 500 ms (network idle).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        idle: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<f64>,
     },
@@ -520,6 +523,67 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         clear: bool,
     },
+    /// A property of an element: `text`, `value`, `attr <name>`, `html`,
+    /// `outer`, `box`, `style <property>`; `count` of a selector's matches.
+    #[serde(rename = "get")]
+    Get {
+        what: String,
+        /// `attr`: the attribute; `style`: the CSS property.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_of: Option<String>,
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    /// Whether an element is `visible`, `hidden`, `enabled`, `disabled`,
+    /// `checked`, `editable` or `focused` (a missing element: not visible).
+    #[serde(rename = "is")]
+    Is {
+        state: String,
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    #[serde(rename = "dblclick")]
+    Dblclick {
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    #[serde(rename = "focus")]
+    Focus {
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    /// Check (or uncheck) a checkbox, radio or switch: clicks it only when
+    /// its state differs.
+    #[serde(rename = "set-checked")]
+    SetChecked {
+        checked: bool,
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    /// Hold a key down (`Shift`, `Control`, a character) without releasing it.
+    #[serde(rename = "keydown")]
+    KeyDown { key: String },
+    #[serde(rename = "keyup")]
+    KeyUp { key: String },
+    /// Insert text at the caret in one go (paste / IME commit): no key events.
+    #[serde(rename = "insert-text")]
+    InsertText {
+        value: String,
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
     /// Current page URL and tab state.
     #[serde(rename = "url")]
     Url {},
@@ -738,7 +802,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("hover", "<ref> | --selector <css> | --text <t>", "move the mouse over an element (hover menus)"),
     ("scroll", "[--by <px> | --to top|bottom] [<ref> | --selector <css>]", "scroll the page, or an element into view"),
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
-    ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms)"),
+    ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--idle] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms"),
     ("eval", "<js> | --file <path.js> | -", "evaluate JS (arrow functions are called); prints the JSON result; `-` reads the script from stdin"),
     ("text", "--selector <css>", "textContent of the first match"),
     ("find", "<description>", "the element a description means, chosen by a decision model (TYPESAFE_API_KEY); element ops also take --find <description>"),
@@ -754,6 +818,15 @@ const OPS: &[(&str, &str, &str)] = &[
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value']]]", "fail or answer requests whose URL matches (* and ? globs); no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
+    ("get", "text|value|html|outer|box|attr <name>|style <prop> <target> | count <css>", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --nth)"),
+    ("is", "visible|hidden|enabled|disabled|checked|editable|focused <target>", "true/false; a missing element is not visible"),
+    ("dblclick", "<target>", "trusted double click"),
+    ("focus", "<target>", "focus an element"),
+    ("check", "<target> | <yes/no question>", "check a checkbox/radio/switch (clicks only if needed); with a question instead of a target, the decision model's yes/no"),
+    ("uncheck", "<target>", "uncheck a checkbox/switch"),
+    ("keydown", "<key>", "hold a key (Shift, Control, a character) until keyup"),
+    ("keyup", "<key>", "release a held key"),
+    ("insert-text", "<text> [<target>]", "insert text at the caret in one go (paste/IME), no key events"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
     ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
     ("back", "", "history back"),
@@ -1265,6 +1338,12 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 gone: str_flag(&mut args, "--gone")?,
                 js: str_flag(&mut args, "--js")?,
                 ms: num_flag(&mut args, "--ms")?,
+                idle: extract_present(&mut args, "--idle")
+                    || match str_flag(&mut args, "--load")?.as_deref() {
+                        None => false,
+                        Some("networkidle" | "idle") => true,
+                        Some(other) => return invalid(format!("wait --load takes networkidle, got {other:?}")),
+                    },
                 timeout_ms,
             };
             if let (Some(p), Command::Wait { selector, ms, .. }) = (positional(&mut args), &mut cmd) {
@@ -1275,7 +1354,16 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
             if matches!(
                 &cmd,
-                Command::Wait { selector: None, text: None, url: None, gone: None, js: None, ms: None, .. }
+                Command::Wait {
+                    selector: None,
+                    text: None,
+                    url: None,
+                    gone: None,
+                    js: None,
+                    ms: None,
+                    idle: false,
+                    ..
+                }
             ) {
                 return Err(need("wait", "a condition"));
             }
@@ -1300,10 +1388,80 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             what: rest_words(&mut args).ok_or_else(|| need("find", "a description of the element"))?,
             timeout_ms,
         },
+        // `check <target>` checks a checkbox; `check <question>` asks the
+        // decision model. A target is a ref or a targeting flag.
+        "check" | "uncheck"
+            if op == "uncheck"
+                || args.iter().any(|a| {
+                    matches!(
+                        a.as_str(),
+                        "--selector"
+                            | "--ref"
+                            | "--text"
+                            | "--find"
+                            | "--role"
+                            | "--name"
+                            | "--label"
+                            | "--placeholder"
+                            | "--testid"
+                            | "--nth"
+                    )
+                })
+                || (args.len() == 1 && parse_ref(&args[0]).is_some()) =>
+        {
+            Command::SetChecked { checked: op == "check", target: target_args(&mut args, true)?, timeout_ms }
+        }
         "check" => Command::Check {
             question: rest_words(&mut args).ok_or_else(|| need("check", "a yes/no question about the page"))?,
             timeout_ms,
         },
+        "get" => {
+            let what = positional(&mut args).ok_or_else(|| need("get", "what to read"))?;
+            match what.as_str() {
+                "count" => Command::Get {
+                    what,
+                    name_of: None,
+                    target: TargetArgs {
+                        selector: Some(match str_flag(&mut args, "--selector")? {
+                            Some(s) => s,
+                            None => positional(&mut args).ok_or_else(|| need("get", "a CSS selector to count"))?,
+                        }),
+                        ..TargetArgs::default()
+                    },
+                    timeout_ms,
+                },
+                "title" => Command::Title {},
+                "url" => Command::Url {},
+                "attr" | "style" => {
+                    let name_of =
+                        Some(positional(&mut args).ok_or_else(|| need("get", "the attribute or CSS property name"))?);
+                    Command::Get { what, name_of, target: target_args(&mut args, true)?, timeout_ms }
+                }
+                _ => Command::Get { what, name_of: None, target: target_args(&mut args, true)?, timeout_ms },
+            }
+        }
+        "is" => Command::Is {
+            state: positional(&mut args).ok_or_else(|| need("is", "a state (visible, enabled, checked, …)"))?,
+            target: target_args(&mut args, true)?,
+            timeout_ms,
+        },
+        "dblclick" => Command::Dblclick { target: target_args(&mut args, true)?, timeout_ms },
+        "focus" => Command::Focus { target: target_args(&mut args, true)?, timeout_ms },
+        "keydown" | "keyup" => {
+            let key = positional(&mut args).ok_or_else(|| need(&op, "a key"))?;
+            if op == "keydown" {
+                Command::KeyDown { key }
+            } else {
+                Command::KeyUp { key }
+            }
+        }
+        "insert-text" => {
+            let value = match str_flag(&mut args, "--value")? {
+                Some(v) => v,
+                None => positional(&mut args).ok_or_else(|| need("insert-text", "the text"))?,
+            };
+            Command::InsertText { value, target: target_args(&mut args, true)?, timeout_ms }
+        }
         "eval" | "evaluate" => {
             // `--file <path>` and `-` (stdin) keep the script away from the
             // shell's quoting rules (PowerShell mangles quotes and backslashes).
@@ -1739,7 +1897,16 @@ impl Driver {
                 | Command::Reload {}
                 | Command::Back {}
                 | Command::Forward {}
-                | Command::Wait { ms: Some(_), selector: None, text: None, url: None, gone: None, js: None, .. }
+                | Command::Wait {
+                    ms: Some(_),
+                    selector: None,
+                    text: None,
+                    url: None,
+                    gone: None,
+                    js: None,
+                    idle: false,
+                    ..
+                }
         );
         if reads_page {
             let budget = op_timeout_ms(command)
@@ -1946,9 +2113,23 @@ impl Driver {
                 s.upload(&t, files, *timeout_ms).map_err(|e| anyhow::anyhow!("upload {}: {e:#}", t.label()))?;
                 Ok(json!({ "files": files.len() }))
             }
-            Command::Wait { selector, text, url, gone, js, ms, timeout_ms } => {
+            Command::Wait { selector, text, url, gone, js, ms, idle, timeout_ms } => {
                 if let Some(ms) = ms {
                     std::thread::sleep(std::time::Duration::from_secs_f64(ms.max(0.0) / 1000.0));
+                }
+                if *idle {
+                    let max = timeout_ms
+                        .map(|ms| std::time::Duration::from_secs_f64(ms / 1000.0))
+                        .unwrap_or(std::time::Duration::from_secs(10));
+                    let started = std::time::Instant::now();
+                    if !s.network_quiet(NETWORK_QUIET, max) {
+                        anyhow::bail!("wait: the network was not idle within {} ms", max.as_millis());
+                    }
+                    if [selector, text, url, gone, js].iter().all(|c| c.is_none()) {
+                        let mut state = self.state_json();
+                        state["waited_ms"] = json!(started.elapsed().as_millis() as u64);
+                        return Ok(state);
+                    }
                 }
                 let mut checks = Vec::new();
                 let mut what = Vec::new();
@@ -2282,6 +2463,58 @@ impl Driver {
                     .map_err(|e| anyhow::anyhow!("set {what}: {e:#}"))?;
                 Ok(plan.result)
             }
+            Command::Get { what, name_of, target, timeout_ms } => {
+                if what == "count" {
+                    let sel = target.selector.as_deref().unwrap_or("*");
+                    return Ok(json!(s.count(sel).map_err(|e| anyhow::anyhow!("get count {sel:?}: {e:#}"))?));
+                }
+                if !matches!(what.as_str(), "text" | "value" | "attr" | "html" | "outer" | "box" | "style" | "checked")
+                {
+                    anyhow::bail!("get takes text, value, attr <name>, html, outer, box, style <prop>, checked, count <css>, title or url; got {what:?}");
+                }
+                let t = target.target("get")?;
+                s.get_prop(&t, what, name_of.as_deref(), *timeout_ms)
+                    .map_err(|e| anyhow::anyhow!("get {what} {}: {e:#}", t.label()))
+            }
+            Command::Is { state, target, timeout_ms } => {
+                let t = target.target("is")?;
+                Ok(json!(s
+                    .is_state(&t, state, *timeout_ms)
+                    .map_err(|e| anyhow::anyhow!("is {state} {}: {e:#}", t.label()))?))
+            }
+            Command::Dblclick { target, timeout_ms } => {
+                let t = target.target("dblclick")?;
+                s.dblclick(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("dblclick {}: {e:#}", t.label()))?;
+                Ok(self.state_json())
+            }
+            Command::Focus { target, timeout_ms } => {
+                let t = target.target("focus")?;
+                let focused = s.focus(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("focus {}: {e:#}", t.label()))?;
+                Ok(json!({ "focused": focused }))
+            }
+            Command::SetChecked { checked, target, timeout_ms } => {
+                let t = target.target(if *checked { "check" } else { "uncheck" })?;
+                let changed = s.set_checked(&t, *checked, *timeout_ms).map_err(|e| {
+                    anyhow::anyhow!("{} {}: {e:#}", if *checked { "check" } else { "uncheck" }, t.label())
+                })?;
+                let mut state = self.state_json();
+                state["checked"] = json!(checked);
+                state["changed"] = json!(changed);
+                Ok(state)
+            }
+            Command::KeyDown { key } => {
+                s.key_event(key, true).map_err(|e| anyhow::anyhow!("keydown: {e:#}"))?;
+                Ok(json!({ "down": key }))
+            }
+            Command::KeyUp { key } => {
+                s.key_event(key, false).map_err(|e| anyhow::anyhow!("keyup: {e:#}"))?;
+                Ok(json!({ "up": key }))
+            }
+            Command::InsertText { value, target, timeout_ms } => {
+                let t = target.optional("insert-text")?;
+                s.insert_text(t.as_ref(), value, *timeout_ms).map_err(|e| anyhow::anyhow!("insert-text: {e:#}"))?;
+                Ok(self.state_json())
+            }
             Command::Url {} => Ok(self.state_json()),
             Command::Status {} => {
                 let mut state = self.state_json();
@@ -2366,7 +2599,13 @@ impl Command {
             | Command::Press { target, .. }
             | Command::Type { target, .. }
             | Command::Scroll { target, .. }
-            | Command::Upload { target, .. } => Some(target),
+            | Command::Upload { target, .. }
+            | Command::Get { target, .. }
+            | Command::Is { target, .. }
+            | Command::Dblclick { target, .. }
+            | Command::Focus { target, .. }
+            | Command::SetChecked { target, .. }
+            | Command::InsertText { target, .. } => Some(target),
             Command::Ax { scope, .. } => Some(scope),
             _ => None,
         }
@@ -2864,6 +3103,7 @@ mod tests {
                 gone: None,
                 js: None,
                 ms: None,
+                idle: false,
                 timeout_ms: None
             }
         );
@@ -2876,6 +3116,7 @@ mod tests {
                 gone: None,
                 js: None,
                 ms: Some(250.0),
+                idle: false,
                 timeout_ms: None
             }
         );
@@ -3011,6 +3252,7 @@ mod tests {
                 gone: None,
                 js: None,
                 ms: None,
+                idle: false,
                 timeout_ms: None,
             },
             Command::Quit { close_browser: false },

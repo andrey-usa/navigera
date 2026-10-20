@@ -45,6 +45,20 @@ input{position:absolute;left:4px;top:4px;margin:0;width:20px;height:20px}
 fetch('/api/echo?x=1', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({q: 'widget'})})
   .then(r => r.json()).then(d => { document.title = 'echo ' + d.got; });</script>
 <button id=boom onclick="cartTotal.recompute()">boom</button><img src="/missing.png" alt="">""",
+    # Elements found by role, label, placeholder and test id; states.
+    "/form": """<!doctype html><title>form</title>
+<form><label for=em>Email address</label><input id=em type=email placeholder="you@example.com">
+<label><input type=checkbox id=terms> I accept the terms</label>
+<label><input type=checkbox id=news checked> Newsletter</label>
+<input id=ro value="fixed" readonly><input id=off disabled value="no">
+<button type=button data-testid=save-btn onclick="out.textContent='saved'">Save</button>
+<button type=button onclick="out.textContent='cancel'">Cancel</button>
+<ul><li>one</li><li>two</li><li>three</li></ul>
+<div id=dbl ondblclick="this.textContent='double ' + event.isTrusted" style="width:80px;height:30px;background:#eee">dbl me</div>
+<div id=hide style="display:none">hidden</div><a href="#x" title="Go" style="color:rgb(255, 0, 0)">link</a></form>
+<p id=out></p><p id=keys></p>
+<script>document.addEventListener('keydown', e => keys.textContent += 'd:' + e.key + (e.shiftKey ? '(shift)' : '') + ' ');
+document.addEventListener('keyup', e => keys.textContent += 'u:' + e.key + ' ');</script>""",
     "/keys": """<!doctype html><title>keys</title><input id=i autofocus><p id=p>no form here</p>""",
     # A single-page app: the list arrives by fetch, then renders a beat later.
     "/spa": """<!doctype html><title>spa</title><p id=s role=status>Loading items…</p><script>
