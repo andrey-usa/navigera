@@ -464,6 +464,16 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pattern: Option<String>,
     },
+    /// A script that runs before the page's own scripts in every document
+    /// of every tab (auth shims, feature flags, mocks of `Date`/`fetch`).
+    /// Without a source: list them; `clear`: remove them.
+    #[serde(rename = "init-script")]
+    InitScript {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear: bool,
+    },
     /// Current page URL and tab state.
     #[serde(rename = "url")]
     Url {},
@@ -697,6 +707,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password>  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value']]]", "fail or answer requests whose URL matches (* and ? globs); no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
+    ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
     ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
     ("back", "", "history back"),
@@ -1377,6 +1388,20 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             pattern: positional(&mut args),
         },
         "unroute" => Command::Unroute { pattern: positional(&mut args) },
+        "init-script" | "addinitscript" => {
+            let clear = extract_present(&mut args, "--clear");
+            let source = match str_flag(&mut args, "--file")? {
+                Some(path) => Some(
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| ArgsError::Invalid(format!("init-script --file {path}: {e}")))?,
+                ),
+                None => positional(&mut args),
+            };
+            if clear && source.is_some() {
+                return invalid("init-script takes a script or --clear, not both");
+            }
+            Command::InitScript { source, clear }
+        }
         "url" => Command::Url {},
         "status" => Command::Status {},
         // Mostly for sessions (`--session s quit` stops the server); as a
@@ -1645,6 +1670,7 @@ impl Driver {
                 | Command::Network { .. }
                 | Command::Cookies { .. }
                 | Command::Route { .. }
+                | Command::InitScript { .. }
                 | Command::Unroute { .. }
                 | Command::Set { .. }
                 | Command::TabNew { .. }
@@ -2150,6 +2176,29 @@ impl Driver {
                     .add_route(crate::cdp::Route { pattern: pattern.clone(), action, hits: 0 })
                     .map_err(|e| anyhow::anyhow!("route: {e:#}"))?;
                 Ok(json!({ "route": pattern, "action": what }))
+            }
+            Command::InitScript { source: Some(source), .. } => {
+                let n = self.session.add_init_script(source).map_err(|e| anyhow::anyhow!("init-script: {e:#}"))?;
+                Ok(json!({ "init_scripts": n }))
+            }
+            Command::InitScript { source: None, clear: true } => {
+                Ok(json!({ "removed": self.session.clear_init_scripts() }))
+            }
+            Command::InitScript { source: None, clear: false } => {
+                let scripts = self.session.init_scripts();
+                if scripts.is_empty() {
+                    return Ok(json!("(no init scripts)"));
+                }
+                Ok(json!(scripts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, src)| format!(
+                        "{}: {}",
+                        i + 1,
+                        src.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect::<String>()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n")))
             }
             Command::Unroute { pattern } => {
                 let removed =

@@ -367,6 +367,11 @@ pub struct BrowserSession {
     /// `set …` overrides (keyed by what they set): applied to every open
     /// tab and replayed on tabs opened later.
     overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
+    /// `init-script` sources, run before the page's own scripts in every
+    /// document of every tab; and per tab (target id) the identifiers to
+    /// remove them by.
+    init_scripts: Vec<String>,
+    init_ids: std::collections::HashMap<String, Vec<String>>,
     /// Owns the tokio runtime; declared LAST so it drops last, after the
     /// browser/client/pages that use it.
     _runtime: tokio::runtime::Runtime,
@@ -488,6 +493,8 @@ impl BrowserSession {
             abandoned: std::sync::Mutex::new(None),
             attached: false,
             overrides: Default::default(),
+            init_scripts: Vec::new(),
+            init_ids: Default::default(),
             _runtime: runtime,
         })
     }
@@ -528,6 +535,8 @@ impl BrowserSession {
             abandoned: std::sync::Mutex::new(None),
             attached: true,
             overrides: Default::default(),
+            init_scripts: Vec::new(),
+            init_ids: Default::default(),
             _runtime: runtime,
         })
     }
@@ -586,6 +595,7 @@ impl BrowserSession {
         }
         let page = self.browser.new_page(Some("about:blank"))?;
         self.apply_overrides(&page);
+        self.apply_init_scripts(&page);
         self.pages.push(page);
         self.active = self.pages.len() - 1;
         Ok(self.active)
@@ -649,6 +659,7 @@ impl BrowserSession {
             match self.browser.attach_page(&target_id) {
                 Ok(page) => {
                     self.apply_overrides(&page);
+                    self.apply_init_scripts(&page);
                     self.pages.push(page);
                     self.active = self.pages.len() - 1;
                     adopted.push(self.active);
@@ -762,6 +773,67 @@ impl BrowserSession {
             self.overrides.insert(kind, calls);
         }
         Ok(())
+    }
+
+    /// Run `source` before the page's own scripts in every new document of
+    /// every tab (and in the current document right away). Returns how
+    /// many scripts are installed.
+    pub fn add_init_script(&mut self, source: &str) -> Result<usize> {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            let r = page
+                .send_cdp(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    serde_json::json!({ "source": source, "runImmediately": true }),
+                    timeout,
+                )
+                .map_err(|e| anyhow::anyhow!("Page.addScriptToEvaluateOnNewDocument: {e:#}"))?;
+            if let Some(id) =
+                r.get("identifier").map(|i| i.as_str().map(str::to_string).unwrap_or_else(|| i.to_string()))
+            {
+                self.init_ids.entry(page.target_id().to_string()).or_default().push(id);
+            }
+        }
+        self.init_scripts.push(source.to_string());
+        Ok(self.init_scripts.len())
+    }
+
+    /// Remove every `init-script`; returns how many there were.
+    pub fn clear_init_scripts(&mut self) -> usize {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            for id in self.init_ids.remove(page.target_id()).unwrap_or_default() {
+                let _ = page.send_cdp(
+                    "Page.removeScriptToEvaluateOnNewDocument",
+                    serde_json::json!({ "identifier": id }),
+                    timeout,
+                );
+            }
+        }
+        self.init_ids.clear();
+        std::mem::take(&mut self.init_scripts).len()
+    }
+
+    pub fn init_scripts(&self) -> &[String] {
+        &self.init_scripts
+    }
+
+    fn apply_init_scripts(&mut self, page: &Page) {
+        let timeout = self.timeout(None);
+        for source in &self.init_scripts {
+            match page.send_cdp(
+                "Page.addScriptToEvaluateOnNewDocument",
+                serde_json::json!({ "source": source, "runImmediately": true }),
+                timeout,
+            ) {
+                Ok(r) => {
+                    if let Some(id) = r.get("identifier").and_then(|i| i.as_str()) {
+                        self.init_ids.entry(page.target_id().to_string()).or_default().push(id.to_string());
+                    }
+                }
+                Err(e) => eprintln!("[browser] init-script on a new tab: {e:#}"),
+            }
+        }
     }
 
     /// Add a `route` rule (a rule with the same pattern is replaced).
