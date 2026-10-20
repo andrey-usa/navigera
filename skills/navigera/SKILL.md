@@ -164,6 +164,7 @@ Element commands wait up to 5 s for the element to appear. Pass
 | `is visible\|enabled\|checked <ref>` | `true`/`false` |
 | `check <ref>` / `uncheck <ref>` | set a checkbox or switch (clicks only if needed) |
 | `dblclick`, `focus`, `keydown Shift`/`keyup Shift`, `insert-text "…"` | the rest of the keyboard and mouse |
+| `drag 12 15`, `drag --from-text "Task 1" --to-text "Done"` | drag and drop, sliders, sortable lists |
 | `errors`, `console [--level warn]` | what the page logged; an action whose handler threw says so in `notes` |
 | `network [--failed] [--filter api]`, `network <n>` | requests one line each; one request with its body |
 | `cookies`, `cookies set <name> <value>`, `storage [get\|set k v]` | cookies and localStorage |

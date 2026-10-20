@@ -554,6 +554,15 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<f64>,
     },
+    /// Drag one element onto another: HTML5 drag and drop for a
+    /// `draggable` source, a held mouse moved across for anything else.
+    #[serde(rename = "drag")]
+    Drag {
+        from: TargetArgs,
+        to: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
     #[serde(rename = "dblclick")]
     Dblclick {
         #[serde(flatten)]
@@ -830,6 +839,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("get", "text|value|html|outer|box|attr <name>|style <prop> <target> | count <css>", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --nth)"),
     ("is", "visible|hidden|enabled|disabled|checked|editable|focused <target>", "true/false; a missing element is not visible"),
     ("dblclick", "<target>", "trusted double click"),
+    ("drag", "<from> <to> | --from-text <t> --to-text <t>", "drag one element onto another (each a ref or CSS selector): HTML5 drag and drop for a draggable source, a held mouse moved across otherwise"),
     ("focus", "<target>", "focus an element"),
     ("check", "<target> | <yes/no question>", "check a checkbox/radio/switch (clicks only if needed); with a question instead of a target, the decision model's yes/no"),
     ("uncheck", "<target>", "uncheck a checkbox/switch"),
@@ -1455,6 +1465,22 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             timeout_ms,
         },
         "dblclick" => Command::Dblclick { target: target_args(&mut args, true)?, timeout_ms },
+        "drag" | "drag-drop" => {
+            let side = |text: Option<String>, args: &mut Args| -> Result<TargetArgs, ArgsError> {
+                if text.is_some() {
+                    return Ok(TargetArgs { text, ..TargetArgs::default() });
+                }
+                let raw = positional(args).ok_or_else(|| need("drag", "<from> <to> (refs or selectors)"))?;
+                Ok(match parse_ref(&raw) {
+                    Some(r) => TargetArgs { node_ref: Some(r), ..TargetArgs::default() },
+                    None => TargetArgs { selector: Some(raw), ..TargetArgs::default() },
+                })
+            };
+            let (from_text, to_text) = (str_flag(&mut args, "--from-text")?, str_flag(&mut args, "--to-text")?);
+            let from = side(from_text, &mut args)?;
+            let to = side(to_text, &mut args)?;
+            Command::Drag { from, to, timeout_ms }
+        }
         "focus" => Command::Focus { target: target_args(&mut args, true)?, timeout_ms },
         "keydown" | "keyup" => {
             let key = positional(&mut args).ok_or_else(|| need(&op, "a key"))?;
@@ -2514,6 +2540,15 @@ impl Driver {
                 Ok(json!(s
                     .is_state(&t, state, *timeout_ms)
                     .map_err(|e| anyhow::anyhow!("is {state} {}: {e:#}", t.label()))?))
+            }
+            Command::Drag { from, to, timeout_ms } => {
+                let (f, t) = (from.target("drag")?, to.target("drag")?);
+                let r = s
+                    .drag(&f, &t, *timeout_ms)
+                    .map_err(|e| anyhow::anyhow!("drag {} to {}: {e:#}", f.label(), t.label()))?;
+                let mut out = self.state_json();
+                out["drag"] = r;
+                Ok(out)
             }
             Command::Dblclick { target, timeout_ms } => {
                 let t = target.target("dblclick")?;

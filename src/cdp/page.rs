@@ -290,6 +290,62 @@ const SCROLL_EL: &str = r#"function (el, dy) {
 }"#;
 
 /// The element itself (for ops that need its remote object, like upload).
+/// Is the element (or an ancestor) an HTML5 drag source?
+const DRAG_IS_HTML5: &str = "function (el) { return !!el.closest('[draggable=true]'); }";
+
+/// dragstart on the drag source, with a DataTransfer kept for the drop.
+const DRAG_START: &str = r#"function (el) {
+  const fire = (t, type, dt) => {
+    const r = t.getBoundingClientRect();
+    const o = { bubbles: true, cancelable: true, composed: true, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
+    const real = typeof DataTransfer !== 'undefined' && dt instanceof DataTransfer;
+    let ev = null;
+    try { ev = new DragEvent(type, Object.assign({ dataTransfer: real ? dt : null }, o)); } catch (e) {}
+    if (!ev || ev.dataTransfer !== dt) {
+      ev = ev || new Event(type, o);
+      Object.defineProperty(ev, 'dataTransfer', { value: dt });
+    }
+    return t.dispatchEvent(ev);
+  };
+  const src = el.closest('[draggable=true]') || el;
+  let dt;
+  try { dt = new DataTransfer(); } catch (e) {
+    const data = {};
+    dt = { dropEffect: 'move', effectAllowed: 'all', files: [], items: [], types: [],
+           setData(k, v) { data[k] = String(v); if (!this.types.includes(k)) this.types.push(k); },
+           getData(k) { return data[k] ?? ''; }, clearData(k) { if (k) delete data[k]; else for (const x in data) delete data[x]; },
+           setDragImage() {} };
+  }
+  window.__nvDrag = { src, dt };
+  fire(src, 'dragstart', dt);
+  return true;
+}"#;
+
+/// dragenter, dragover and (when the page allows it) drop on the target,
+/// then dragend on the source. True when the drop happened.
+const DRAG_DROP: &str = r#"function (el) {
+  const fire = (t, type, dt) => {
+    const r = t.getBoundingClientRect();
+    const o = { bubbles: true, cancelable: true, composed: true, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
+    const real = typeof DataTransfer !== 'undefined' && dt instanceof DataTransfer;
+    let ev = null;
+    try { ev = new DragEvent(type, Object.assign({ dataTransfer: real ? dt : null }, o)); } catch (e) {}
+    if (!ev || ev.dataTransfer !== dt) {
+      ev = ev || new Event(type, o);
+      Object.defineProperty(ev, 'dataTransfer', { value: dt });
+    }
+    return t.dispatchEvent(ev);
+  };
+  const d = window.__nvDrag;
+  if (!d) throw new Error('drag: the drag did not start');
+  delete window.__nvDrag;
+  fire(el, 'dragenter', d.dt);
+  const allowed = !fire(el, 'dragover', d.dt);
+  if (allowed) fire(el, 'drop', d.dt);
+  fire(d.src, 'dragend', d.dt);
+  return allowed;
+}"#;
+
 const IDENTITY: &str = "function (el) { return el; }";
 
 /// Auto-wait: resolve the first match for `sel`, polling every 50 ms for up
@@ -1327,6 +1383,45 @@ impl Page {
             }
         }
         Ok(point)
+    }
+
+    /// Drag `from` onto `to`.
+    ///
+    /// A `draggable` element is HTML5 drag and drop, which headless Chrome
+    /// does not start from synthetic mouse input: it gets the events a
+    /// browser fires, dragstart through dragend, with one DataTransfer shared
+    /// from start to drop (a stand-in where the engine has no DataTransfer).
+    /// Anything else gets a trusted press over `from`, a move in steps and a
+    /// release over `to`, which sliders and pointer-driven sortable lists
+    /// follow. Returns `{html5, dropped?}` or the two points.
+    pub fn drag(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
+        let html5 = self.on_element(from, "drag", DRAG_IS_HTML5, &[], wait, timeout)?;
+        if html5 == Value::Bool(true) {
+            self.on_element(from, "drag", DRAG_START, &[], wait, timeout)?;
+            let dropped = self.on_element(to, "drag", DRAG_DROP, &[], wait, timeout)?;
+            return Ok(json!({ "html5": true, "dropped": dropped }));
+        }
+        let settle = json!(self.hit_settle_ms(wait));
+        let a = self.on_element(from, "drag", HOVER_PREP, &[settle.clone()], wait, timeout)?;
+        let b = self.on_element(to, "drag", HOVER_PREP, &[settle], wait, timeout)?;
+        let point = |p: &Value| Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?));
+        let (Some((ax, ay)), Some((bx, by))) = (point(&a), point(&b)) else {
+            bail!("drag: no on-screen point for both elements (inside a cross-origin iframe?)");
+        };
+        let mut events = vec![("mouseMoved", ax, ay, "none", 0), ("mousePressed", ax, ay, "left", 1)];
+        for i in 1..=8 {
+            let t = i as f64 / 8.0;
+            events.push(("mouseMoved", ax + (bx - ax) * t, ay + (by - ay) * t, "left", 1));
+        }
+        events.push(("mouseReleased", bx, by, "left", 0));
+        for (kind, x, y, button, buttons) in events {
+            self.send(
+                "Input.dispatchMouseEvent",
+                json!({ "type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1 }),
+                timeout,
+            )?;
+        }
+        Ok(json!({ "from": { "x": ax, "y": ay }, "to": { "x": bx, "y": by } }))
     }
 
     /// Press or release one key (`down`), without the other half.

@@ -828,6 +828,15 @@ impl BrowserSession {
         }
     }
 
+    /// Drag `from` onto `to` (see [`cdp::Page::drag`]); waits for any
+    /// navigation the drop starts.
+    pub fn drag(&self, from: &Target, to: &Target, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let r = self.active_tab().drag(from, to, wait, timeout)?;
+        self.settle_for(timeout_ms);
+        Ok(r)
+    }
+
     pub fn dblclick(&self, target: &Target, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let point = self.active_tab().dblclick(target, wait, timeout)?;

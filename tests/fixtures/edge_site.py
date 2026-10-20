@@ -25,6 +25,21 @@ input{position:absolute;left:4px;top:4px;margin:0;width:20px;height:20px}
 .box{position:relative;display:inline-block;width:20px;height:20px;background:#ccc}
 </style><label><input type=checkbox id=agree><span class=box></span> I agree</label>
 <div id=out></div><script>agree.addEventListener('click',e=>out.textContent='trusted='+e.isTrusted+' checked='+agree.checked)</script>""",
+    # HTML5 drag and drop (a draggable card onto a column), and a slider
+    # that follows the mouse while the button is held.
+    "/drag": """<!doctype html><title>drag</title><style>
+#card{width:80px;height:30px;background:#9cf} .col{width:120px;height:80px;border:1px solid #888;margin:8px;display:inline-block}
+#track{position:relative;width:300px;height:20px;background:#ddd;margin-top:20px} #knob{position:absolute;left:0;top:0;width:20px;height:20px;background:#333}
+</style><div id=todo class=col><div id=card draggable=true>Task 1</div></div><div id=done class=col>Done</div>
+<div id=track><div id=knob></div></div><div id=out></div><script>
+card.addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', 'card'));
+done.addEventListener('dragover', e => e.preventDefault());
+done.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.getData('text/plain') === 'card') done.appendChild(card); out.textContent = 'dropped'; });
+let held = false;
+knob.addEventListener('mousedown', () => held = true);
+document.addEventListener('mousemove', e => { if (held) knob.style.left = Math.max(0, Math.min(280, e.clientX - track.getBoundingClientRect().left - 10)) + 'px'; });
+document.addEventListener('mouseup', () => { if (held) out.textContent = 'knob ' + knob.style.left; held = false; });
+</script>""",
     # The <title> repeats a link's text exactly.
     "/title": """<!doctype html><title>Products</title><nav><a href="/landed">All products</a></nav>""",
     "/landed": """<!doctype html><title>Landed</title><h1>landed</h1>""",

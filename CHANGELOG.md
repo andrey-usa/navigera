@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `drag <from> <to>`: HTML5 drag and drop for a `draggable` source (the drag
+  events with one DataTransfer, since headless Chrome will not start a native
+  drag from synthetic input, and on Lightpanda too), a held mouse moved
+  across for anything else; the result says whether the drop was accepted.
 - `state save|load <file>`: every cookie and the open tabs' localStorage to
   a file and back, in Playwright's `storageState` format, so a signed-in
   session can be reused, by navigera or Playwright.

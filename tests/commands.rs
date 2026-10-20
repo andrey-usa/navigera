@@ -254,6 +254,30 @@ fn state_saved_in_one_session_loads_in_another() {
     }
 }
 
+/// HTML5 drag and drop onto a drop zone, and a slider dragged with the
+/// button held, on both engines.
+#[test]
+fn drag_drops_a_card_and_moves_a_slider() {
+    let Some(site) = edge_site() else { return };
+    let base = &site.base;
+    for (engine, bin) in engines() {
+        let a = Agent::new("drag", engine, bin);
+        a.ok(&["goto", &format!("{base}/drag")]);
+        let r = a.ok(&["drag", "#card", "#done"]);
+        assert_eq!(r["drag"]["html5"], true, "[{engine}] {r}");
+        assert_eq!(r["drag"]["dropped"], true, "[{engine}] {r}");
+        assert_eq!(a.ok(&["eval", "done.contains(card)"]), true, "[{engine}]");
+        // Dropped back where nothing accepts it: reported, not an error.
+        let r = a.ok(&["drag", "--from-text", "Task 1", "--to-text", "Done"]);
+        assert_eq!(r["drag"]["dropped"], true, "[{engine}] {r}");
+        let r = a.ok(&["drag", "#card", "#out"]);
+        assert_eq!(r["drag"]["dropped"], false, "[{engine}] {r}");
+        a.ok(&["drag", "#knob", "#track"]);
+        assert_eq!(a.ok(&["eval", "out.textContent"]), "knob 140px", "[{engine}]");
+        assert!(a.err(&["drag", "#card", "#nowhere", "--timeout-ms", "300"]).contains("drag"), "[{engine}]");
+    }
+}
+
 #[test]
 fn emulation() {
     let Some(site) = edge_site() else { return };

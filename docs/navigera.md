@@ -77,6 +77,7 @@ to appear.
 | `get` | `text\|value\|html\|outer\|box\|checked` target; `attr <name>` / `style <prop>` target; `count <css>`; `title`; `url` | the value |
 | `is` | `visible\|hidden\|enabled\|disabled\|checked\|editable\|focused` target | `true`/`false` (a missing element is not visible, after 500 ms) |
 | `dblclick` / `focus` | target | state / `{focused}` |
+| `drag` | `<from> <to>` (each a ref or CSS selector), or `--from-text <t> --to-text <t>` | state and `drag`: `{html5: true, dropped}` for a `draggable` source (the drag events with one DataTransfer, which headless Chrome will not start from synthetic input; `dropped` is false when the target does not accept it), else the two points a held mouse moved between (sliders, pointer-driven sortable lists) |
 | `keydown` / `keyup` | `<key>` | holds / releases a key; held modifiers apply to later `press`es |
 | `insert-text` | `<text>`, optional target to focus first | state: text inserted at the caret in one go (paste, IME), no key events |
 | `console` | `--level error\|warn\|info\|log\|debug`, `--limit <n>` (200), `--clear`, `--json` | `[level] text  (url:line)` per line: console calls, uncaught exceptions (`[exception]`), failed loads and CSP reports |
