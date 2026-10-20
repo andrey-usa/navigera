@@ -67,6 +67,35 @@ const WRAPPERS: &[&str] = &[
 /// Roles never printed (their text is carried by the parent).
 const SILENT: &[&str] = &["InlineTextBox", "LineBreak"];
 
+/// Roles whose accessible name may come from their content (ARIA "name
+/// from content", plus Chrome's text and disclosure roles). Any other role
+/// is named by its author (aria-label, a caption, a legend) or not at all.
+const NAME_FROM_CONTENT: &[&str] = &[
+    "button",
+    "cell",
+    "checkbox",
+    "columnheader",
+    "gridcell",
+    "heading",
+    "link",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "option",
+    "radio",
+    "row",
+    "rowheader",
+    "sectionhead",
+    "switch",
+    "tab",
+    "tooltip",
+    "treeitem",
+    "term",
+    "StaticText",
+    "LabelText",
+    "DisclosureTriangle",
+];
+
 /// Rendering options.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
@@ -171,6 +200,39 @@ impl<'a> Tree<'a> {
         field(node, "role").as_str().unwrap_or("")
     }
 
+    /// The node's name as the agent should read it. Some engines (Lightpanda)
+    /// name a table, list or `<b>` with all of its text: that is content,
+    /// not a label, and as a name it would hide the very text it repeats.
+    fn name(&self, node: &Value) -> String {
+        let name = text_of(node, "name");
+        let role = Self::role(node);
+        if name.is_empty() || NAME_FROM_CONTENT.contains(&role) || INTERACTIVE.contains(&role) {
+            return name;
+        }
+        let mut text = Vec::new();
+        self.descendant_text(node, &mut text, 0);
+        if !text.is_empty() && squash(&text.join(" ")) == name {
+            return String::new();
+        }
+        name
+    }
+
+    fn descendant_text(&self, node: &'a Value, out: &mut Vec<String>, depth: usize) {
+        if depth > 64 {
+            return;
+        }
+        for child in self.children(node) {
+            if Self::role(child) == "StaticText" {
+                let t = text_of(child, "name");
+                if !t.is_empty() {
+                    out.push(t);
+                }
+            } else {
+                self.descendant_text(child, out, depth + 1);
+            }
+        }
+    }
+
     fn is_transparent(&self, node: &Value) -> bool {
         if node.get("ignored").and_then(Value::as_bool).unwrap_or(false) {
             return true;
@@ -179,7 +241,7 @@ impl<'a> Tree<'a> {
         if role == "RootWebArea" && !self.is_frame_root(node) {
             return true;
         }
-        WRAPPERS.contains(&role) && text_of(node, "name").is_empty() && !truthy(prop(node, "focusable"))
+        WRAPPERS.contains(&role) && self.name(node).is_empty() && !truthy(prop(node, "focusable"))
     }
 
     fn is_frame_root(&self, node: &Value) -> bool {
@@ -266,7 +328,7 @@ impl<'a> Tree<'a> {
             return;
         }
         let indent = "  ".repeat(depth);
-        let name = text_of(node, "name");
+        let name = self.name(node);
 
         if role == "StaticText" {
             if name.is_empty() || (!covered.is_empty() && covered.contains(&name)) {
