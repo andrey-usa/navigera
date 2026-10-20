@@ -7,6 +7,12 @@
 //! dialog the moment Chrome announces it, per the session's policy, and
 //! logs it so the next response can tell the agent what happened.
 //!
+//! Lightpanda answers a dialog the moment the page opens it, with whatever
+//! response was armed beforehand (`LP.handleJavaScriptDialog`); the CDP
+//! event only reports it. There the watcher arms the session's policy ahead
+//! of time and re-arms it after each dialog, and reports what the page
+//! actually got.
+//!
 //! Navigation state lets ops wait for a navigation that an earlier action
 //! started (a link click, a JS redirect) instead of reading the old page:
 //! Chrome reports `Page.frameStartedLoading` for a link click *before* the
@@ -15,6 +21,7 @@
 //! navigates (no fixed grace sleep per click).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -85,6 +92,14 @@ pub struct Shared {
     pub sessions: Mutex<HashMap<String, String>>,
     pub nav: Mutex<HashMap<String, NavState>>,
     pub net: Mutex<HashMap<String, NetState>>,
+    /// Lightpanda: one page target per process, dialogs answered from an
+    /// armed response, popups opened as frames that are not targets.
+    pub single_target: AtomicBool,
+    /// session id -> the dialog response armed there (Lightpanda).
+    pub armed: Mutex<HashMap<String, DialogPolicy>>,
+    /// URLs of top-level frames a page opened that are not targets
+    /// (Lightpanda's `target=_blank` / `window.open`), in order.
+    pub popups: Mutex<Vec<String>>,
 }
 
 impl Shared {
@@ -160,6 +175,34 @@ impl Shared {
     pub fn take_destroyed(&self) -> Vec<String> {
         std::mem::take(&mut *self.destroyed.lock().unwrap())
     }
+
+    pub fn take_popups(&self) -> Vec<String> {
+        std::mem::take(&mut *self.popups.lock().unwrap())
+    }
+
+    pub fn is_single_target(&self) -> bool {
+        self.single_target.load(Ordering::Relaxed)
+    }
+}
+
+/// Arm the session's dialog policy on Lightpanda, where a dialog takes the
+/// response armed before it opens. One armed response covers one dialog.
+pub async fn arm_dialog(client: &CdpClient, shared: &Shared, session: &str) {
+    if !shared.is_single_target() {
+        return; // Chrome waits for the answer: the watcher sends it then.
+    }
+    let policy = shared.policy.lock().unwrap().clone();
+    let mut params = json!({ "accept": policy.accept });
+    if let Some(text) = &policy.prompt_text {
+        params["promptText"] = json!(text);
+    }
+    let armed = client.send("LP.handleJavaScriptDialog", params, Some(session), Duration::from_secs(10)).await;
+    let mut map = shared.armed.lock().unwrap();
+    match armed {
+        Ok(_) => map.insert(session.to_string(), policy),
+        // An engine without the LP domain dismisses every dialog.
+        Err(_) => map.remove(session),
+    };
 }
 
 /// Spawn the watcher on the engine runtime. It lives as long as the runtime.
@@ -177,13 +220,30 @@ pub fn spawn(handle: &tokio::runtime::Handle, client: &CdpClient, shared: Arc<Sh
     });
 }
 
-fn on_event(client: &CdpClient, shared: &Shared, event: &Value) {
+fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
     let Some(method) = event.get("method").and_then(Value::as_str) else {
         return;
     };
     let params = event.get("params").cloned().unwrap_or(Value::Null);
     let session = event.get("sessionId").and_then(Value::as_str).unwrap_or("");
     match method {
+        "Page.javascriptDialogOpening" if shared.is_single_target() => {
+            // Already answered by the page's engine: report what it got (the
+            // armed response, else a dismissal) and arm the next one.
+            let kind = params.get("type").and_then(Value::as_str).unwrap_or("alert");
+            let armed = shared.armed.lock().unwrap().remove(session);
+            shared.dialogs.lock().unwrap().push(json!({
+                "type": kind,
+                "message": params.get("message").and_then(Value::as_str).unwrap_or(""),
+                "accepted": armed.as_ref().is_some_and(|p| p.accept),
+            }));
+            if !session.is_empty() {
+                let client = client.clone();
+                let session = session.to_string();
+                let shared = Arc::clone(shared);
+                tokio::spawn(async move { arm_dialog(&client, &shared, &session).await });
+            }
+        }
         "Page.javascriptDialogOpening" => {
             let policy = shared.policy.lock().unwrap().clone();
             let kind = params.get("type").and_then(Value::as_str).unwrap_or("alert");

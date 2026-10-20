@@ -109,6 +109,7 @@ impl Browser {
         crate::timing::log(&format!("[browser] lightpanda serve on 127.0.0.1:{port} -> {ws_url}"));
         let client = handle.block_on(CdpClient::connect(&ws_url)).context("CDP connect to lightpanda")?;
         let shared = Arc::new(Shared::default());
+        shared.single_target.store(true, std::sync::atomic::Ordering::Relaxed);
         events::spawn(handle, &client, Arc::clone(&shared));
         Ok(Self {
             handle: handle.clone(),
@@ -252,9 +253,15 @@ impl Browser {
                 .ok_or_else(|| anyhow::anyhow!("attachToTarget: no sessionId"))?
                 .to_string();
             self.shared.register(&session_id, &target_id);
-            let page =
-                Page::new(self.handle.clone(), self.client.clone(), session_id, target_id, Arc::clone(&self.shared));
+            let page = Page::new(
+                self.handle.clone(),
+                self.client.clone(),
+                session_id.clone(),
+                target_id,
+                Arc::clone(&self.shared),
+            );
             page.enable().await?;
+            events::arm_dialog(&self.client, &self.shared, &session_id).await;
             Ok(page)
         })
     }
@@ -267,6 +274,12 @@ impl Browser {
     /// How dialogs are answered from now on.
     pub fn set_dialog_policy(&self, policy: DialogPolicy) {
         *self.shared.policy.lock().unwrap() = policy;
+        if self.shared.is_single_target() {
+            let sessions: Vec<String> = self.shared.sessions.lock().unwrap().keys().cloned().collect();
+            for session in sessions {
+                self.block_on(events::arm_dialog(&self.client, &self.shared, &session));
+            }
+        }
     }
 
     /// Attach to a page target the browser opened on its own (a popup) and
@@ -355,9 +368,15 @@ impl Browser {
                 .ok_or_else(|| anyhow::anyhow!("attachToTarget: no sessionId"))?
                 .to_string();
             self.shared.register(&session_id, &target_id);
-            let page =
-                Page::new(self.handle.clone(), self.client.clone(), session_id, target_id, Arc::clone(&self.shared));
+            let page = Page::new(
+                self.handle.clone(),
+                self.client.clone(),
+                session_id.clone(),
+                target_id,
+                Arc::clone(&self.shared),
+            );
             page.enable().await?;
+            events::arm_dialog(&self.client, &self.shared, &session_id).await;
             Ok(page)
         })
     }
