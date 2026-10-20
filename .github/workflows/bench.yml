@@ -111,7 +111,7 @@ jobs:
         # ladder; a missing binary shows up under "Skipped" in the table.
         continue-on-error: true
         run: |
-          curl -fsSL --retry 4 --retry-all-errors -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/download/1.0.0/lightpanda-x86_64-linux
+          curl -fsSL --retry 4 --retry-all-errors -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/download/1.0.1/lightpanda-x86_64-linux
           chmod a+x /usr/local/bin/lightpanda
           lightpanda version || true
 
