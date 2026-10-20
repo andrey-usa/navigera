@@ -1360,6 +1360,40 @@ impl Page {
             .ok_or_else(|| anyhow::anyhow!("ax: no backend node id for scope"))
     }
 
+    /// Lightpanda gives every password field the value `*****`, typed into or
+    /// not, so an empty one read as filled. Each such field is asked what it
+    /// holds instead, and shows Chrome's form: a dot per character, or no
+    /// value when it is empty. A field that cannot be asked keeps the stars.
+    fn unmask_passwords(&self, nodes: &mut [Value], timeout: Duration) {
+        for node in nodes.iter_mut() {
+            let masked = node.get("value").and_then(|v| v.get("value")).and_then(Value::as_str) == Some("*****");
+            let Some(id) = node.get("backendDOMNodeId").and_then(Value::as_u64) else {
+                continue;
+            };
+            if !masked {
+                continue;
+            }
+            let Ok((len, _)) = self.call_on_ref(
+                id,
+                "function () { return this.type === 'password' ? String(this.value).length : -1; }",
+                &[],
+                true,
+                timeout,
+            ) else {
+                continue;
+            };
+            match len.as_i64() {
+                Some(0) => {
+                    if let Some(o) = node.as_object_mut() {
+                        o.remove("value");
+                    }
+                }
+                Some(n) if n > 0 => node["value"] = json!({ "type": "string", "value": "•".repeat(n as usize) }),
+                _ => {}
+            }
+        }
+    }
+
     /// Accessibility snapshot for agents (see [`ax`]): an indented text
     /// tree with `[ref=N]` on actionable nodes, iframes included. `json`
     /// keeps the older flat `[{ref, role, name, value?}]` list.
@@ -1369,7 +1403,10 @@ impl Page {
             params["depth"] = json!(d);
         }
         let res = self.send("Accessibility.getFullAXTree", params, timeout)?;
-        let nodes = res.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut nodes = res.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+        if self.shared.is_single_target() {
+            self.unmask_passwords(&mut nodes, timeout);
+        }
         if opts.json {
             return Ok(flat_ax(&nodes, opts.all));
         }

@@ -35,6 +35,9 @@ All notable changes to this project are documented here. The format follows
   field in a web component was invisible to an agent reading the snapshot;
   it is now listed under the root, without refs, with `--text` as the way to
   target it.
+- Lightpanda: an empty password field no longer reads as filled in `ax`.
+  The engine gives every password field the value `*****`; the snapshot now
+  asks the field and shows a dot per character, or nothing, as on Chrome.
 
 ## [0.4.1] - 2026-10-14
 

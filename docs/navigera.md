@@ -346,6 +346,12 @@ Registry as `io.github.andrey-usa/navigera` (`server.json`).
     nodes inside no ids, so `ax` lists what an open shadow root holds after
     the tree, under `- shadow root of <tag>`, without refs; target those
     elements with `--text`.
+  - password fields: the engine reports `*****` for every one, filled or
+    not; `ax` shows a dot per character, as on Chrome, and no value for an
+    empty field.
+  - infinite scroll: with no layout, an `IntersectionObserver` sees every
+    target as on screen, so a page that loads more as you scroll loads all
+    of it (60 products where Chrome shows 12), and `ax` is that much longer.
   - `status` reports the engine of a running session; `start` on a session
     that runs the other engine fails instead of reusing it.
 

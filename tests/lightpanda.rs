@@ -170,8 +170,15 @@ fn acme_supply_on_lightpanda() {
     // Orders table: every cell readable (Lightpanda names the table with
     // all of its text and leaves the cells unnamed).
     agent.ok(&["goto", &url("/account")]);
+    // Lightpanda says `*****` for every password field; the snapshot says
+    // what the field holds, as Chrome's does.
+    let login = agent.ax(&[]);
+    assert!(login.contains("textbox \"Password\" [required, ref="), "{login}");
+    assert!(!login.contains("*****"), "an empty password field reads as filled:\n{login}");
     agent.ok(&["fill", "--selector", "#email", "demo@acme.test"]);
     agent.ok(&["fill", "--selector", "#password", "hunter2"]);
+    let login = agent.ax(&[]);
+    assert!(login.contains("value=\"•••••••\""), "{login}");
     agent.ok(&["press", "Enter", "--selector", "#password"]);
     agent.ok(&["click", "--text", "Next page"]);
     let table = agent.ax(&["--selector", "table"]);
