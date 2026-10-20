@@ -764,6 +764,60 @@ impl BrowserSession {
         Ok(())
     }
 
+    /// Add a `route` rule (a rule with the same pattern is replaced).
+    pub fn add_route(&mut self, route: cdp::Route) -> Result<()> {
+        {
+            let mut routes = self.browser.shared().routes.lock().unwrap();
+            routes.retain(|r| r.pattern != route.pattern);
+            routes.push(route);
+        }
+        self.sync_fetch()
+    }
+
+    /// Remove the rule for `pattern`, or every rule; returns how many went.
+    pub fn remove_routes(&mut self, pattern: Option<&str>) -> Result<usize> {
+        let removed = {
+            let mut routes = self.browser.shared().routes.lock().unwrap();
+            let before = routes.len();
+            routes.retain(|r| pattern.is_some_and(|p| r.pattern != p));
+            before - routes.len()
+        };
+        self.sync_fetch()?;
+        Ok(removed)
+    }
+
+    pub fn routes(&self) -> Vec<cdp::Route> {
+        self.browser.shared().routes.lock().unwrap().clone()
+    }
+
+    /// HTTP auth credentials for every origin (`None`: answer challenges
+    /// the browser's way, i.e. fail them).
+    pub fn set_credentials(&mut self, credentials: Option<(String, String)>) -> Result<()> {
+        *self.browser.shared().credentials.lock().unwrap() = credentials;
+        self.sync_fetch()
+    }
+
+    /// Fetch interception on every tab, for exactly the URLs a rule names
+    /// (all of them once credentials are set): unrouted requests never wait
+    /// on navigera.
+    fn sync_fetch(&mut self) -> Result<()> {
+        let shared = self.browser.shared();
+        let auth = shared.credentials.lock().unwrap().is_some();
+        let patterns: Vec<serde_json::Value> = if auth {
+            vec![serde_json::json!({ "urlPattern": "*" })]
+        } else {
+            shared.routes.lock().unwrap().iter().map(|r| serde_json::json!({ "urlPattern": r.pattern })).collect()
+        };
+        if patterns.is_empty() {
+            return self.set_override("fetch", vec![], vec![("Fetch.disable", serde_json::json!({}))]);
+        }
+        self.set_override(
+            "fetch",
+            vec![("Fetch.enable", serde_json::json!({ "patterns": patterns, "handleAuthRequests": auth }))],
+            vec![],
+        )
+    }
+
     /// Browser-wide permission for the pages' origins (geolocation).
     pub fn grant(&self, permission: &str) {
         let _ = self.browser.grant_permission(permission);

@@ -106,6 +106,74 @@ pub struct Shared {
     pub processed: std::sync::atomic::AtomicU64,
     /// Console, exceptions and network requests per tab.
     pub logs: Mutex<super::logs::Logs>,
+    /// `route` rules, first match wins; requests matching none continue.
+    pub routes: Mutex<Vec<Route>>,
+    /// `set credentials`: answers HTTP auth challenges.
+    pub credentials: Mutex<Option<(String, String)>>,
+}
+
+/// What a `route` does with the requests its pattern matches.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RouteAction {
+    Abort,
+    Fulfill { status: u16, headers: Vec<(String, String)>, body_base64: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Route {
+    /// Glob over the full URL: `*` any run, `?` one character.
+    pub pattern: String,
+    pub action: RouteAction,
+    pub hits: u64,
+}
+
+/// `*`/`?` glob match (the syntax of CDP's `Fetch` url patterns).
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// The answer to a paused request: (method, params) for the CDP call.
+fn route_answer(shared: &Shared, request_id: &str, url: &str) -> (&'static str, Value) {
+    let mut routes = shared.routes.lock().unwrap();
+    let Some(route) = routes.iter_mut().find(|r| glob_match(&r.pattern, url)) else {
+        return ("Fetch.continueRequest", json!({ "requestId": request_id }));
+    };
+    route.hits += 1;
+    match &route.action {
+        RouteAction::Abort => {
+            ("Fetch.failRequest", json!({ "requestId": request_id, "errorReason": "BlockedByClient" }))
+        }
+        RouteAction::Fulfill { status, headers, body_base64 } => (
+            "Fetch.fulfillRequest",
+            json!({
+                "requestId": request_id,
+                "responseCode": status,
+                "responseHeaders": headers.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
+                "body": body_base64,
+            }),
+        ),
+    }
 }
 
 impl Shared {
@@ -347,6 +415,44 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                     .await;
             });
         }
+        "Fetch.requestPaused" => {
+            let id = params.get("requestId").and_then(Value::as_str).unwrap_or("").to_string();
+            let url = params.pointer("/request/url").and_then(Value::as_str).unwrap_or("");
+            let (method, answer) = route_answer(shared, &id, url);
+            let client = client.clone();
+            let session = session.to_string();
+            tokio::spawn(async move {
+                let s = Some(session.as_str()).filter(|s| !s.is_empty());
+                if client.send(method, answer, s, Duration::from_secs(10)).await.is_err()
+                    && method != "Fetch.continueRequest"
+                {
+                    // A rule the engine can't apply must not hang the request.
+                    let _ = client
+                        .send("Fetch.continueRequest", json!({ "requestId": id }), s, Duration::from_secs(10))
+                        .await;
+                }
+            });
+        }
+        "Fetch.authRequired" => {
+            let id = params.get("requestId").and_then(Value::as_str).unwrap_or("").to_string();
+            let response = match shared.credentials.lock().unwrap().clone() {
+                Some((user, pass)) => json!({ "response": "ProvideCredentials", "username": user, "password": pass }),
+                None => json!({ "response": "Default" }),
+            };
+            let client = client.clone();
+            let session = session.to_string();
+            tokio::spawn(async move {
+                let s = Some(session.as_str()).filter(|s| !s.is_empty());
+                let _ = client
+                    .send(
+                        "Fetch.continueWithAuth",
+                        json!({ "requestId": id, "authChallengeResponse": response }),
+                        s,
+                        Duration::from_secs(10),
+                    )
+                    .await;
+            });
+        }
         "Network.requestWillBeSent" => {
             let kind = params.get("type").and_then(Value::as_str).unwrap_or("");
             if session.is_empty() || !matches!(kind, "XHR" | "Fetch") {
@@ -441,5 +547,41 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn globs() {
+        assert!(glob_match("*", "http://a/b"));
+        assert!(glob_match("*/api/*", "http://h:1/api/cart?x=1"));
+        assert!(glob_match("*.png", "http://h/i/logo.png"));
+        assert!(!glob_match("*.png", "http://h/i/logo.png?v=2"));
+        assert!(glob_match("http://h/?", "http://h/a"));
+        assert!(!glob_match("http://h/?", "http://h/ab"));
+        assert!(glob_match("*doubleclick*", "https://ad.doubleclick.net/x"));
+    }
+
+    #[test]
+    fn first_matching_route_answers() {
+        let shared = Shared::default();
+        shared.routes.lock().unwrap().push(Route { pattern: "*.png".into(), action: RouteAction::Abort, hits: 0 });
+        shared.routes.lock().unwrap().push(Route {
+            pattern: "*/api/*".into(),
+            action: RouteAction::Fulfill {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body_base64: "e30=".into(),
+            },
+            hits: 0,
+        });
+        assert_eq!(route_answer(&shared, "1", "http://h/a.png").0, "Fetch.failRequest");
+        let (m, p) = route_answer(&shared, "2", "http://h/api/x");
+        assert_eq!((m, p["responseCode"].as_u64()), ("Fetch.fulfillRequest", Some(200)));
+        assert_eq!(route_answer(&shared, "3", "http://h/").0, "Fetch.continueRequest");
+        assert_eq!(shared.routes.lock().unwrap()[0].hits, 1);
     }
 }

@@ -438,6 +438,32 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         accuracy: Option<f64>,
     },
+    /// Intercept requests whose URL matches `pattern` (`*` and `?` globs):
+    /// fail them, or answer with `status`/`body`. Without a pattern: list
+    /// the rules.
+    #[serde(rename = "route")]
+    Route {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        abort: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        headers: Vec<String>,
+    },
+    /// Remove the rule for `pattern`, or all rules.
+    #[serde(rename = "unroute")]
+    Unroute {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+    },
     /// Current page URL and tab state.
     #[serde(rename = "url")]
     Url {},
@@ -668,7 +694,9 @@ const OPS: &[(&str, &str, &str)] = &[
     ("cookies", "[set <name> <value> [--url <u> | --domain <d>] [--path <p>] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax|Strict|None] | delete <name> [--url <u>] | clear] [--all] [--json]", "the current page's cookies (--all: every cookie), or set, delete or clear them"),
     ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
-    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone>  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
+    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password>  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
+    ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value']]]", "fail or answer requests whose URL matches (* and ? globs); no flags = fail; no pattern = list the rules"),
+    ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
     ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
     ("back", "", "history back"),
@@ -1339,6 +1367,16 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
             Command::Set { what, values, scale, mobile, accuracy }
         }
+        "route" => Command::Route {
+            abort: extract_present(&mut args, "--abort"),
+            status: num_flag(&mut args, "--status")?.map(|v| v as u16),
+            body: str_flag(&mut args, "--body")?,
+            body_file: str_flag(&mut args, "--body-file")?,
+            content_type: str_flag(&mut args, "--content-type")?,
+            headers: extract_values(&mut args, "--header").map_err(ArgsError::Invalid)?,
+            pattern: positional(&mut args),
+        },
+        "unroute" => Command::Unroute { pattern: positional(&mut args) },
         "url" => Command::Url {},
         "status" => Command::Status {},
         // Mostly for sessions (`--session s quit` stops the server); as a
@@ -1606,6 +1644,9 @@ impl Driver {
                 | Command::Errors { .. }
                 | Command::Network { .. }
                 | Command::Cookies { .. }
+                | Command::Route { .. }
+                | Command::Unroute { .. }
+                | Command::Set { .. }
                 | Command::TabNew { .. }
                 | Command::TabSelect { .. }
                 | Command::TabClose { .. }
@@ -2037,6 +2078,93 @@ impl Driver {
                     (other, ..) => anyhow::bail!("storage: {other} needs a key (set: and a value)"),
                 };
                 s.evaluate_with_timeout::<Value>(&js, None).map_err(|e| anyhow::anyhow!("storage: {e:#}"))
+            }
+            Command::Route { pattern: None, .. } => {
+                let routes = self.session.routes();
+                if routes.is_empty() {
+                    return Ok(json!("(no routes)"));
+                }
+                Ok(json!(routes
+                    .iter()
+                    .map(|r| {
+                        let what = match &r.action {
+                            crate::cdp::RouteAction::Abort => "abort".to_string(),
+                            crate::cdp::RouteAction::Fulfill { status, .. } => format!("fulfill {status}"),
+                        };
+                        format!("{} -> {what} ({} hits)", r.pattern, r.hits)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")))
+            }
+            Command::Route { pattern: Some(pattern), abort, status, body, body_file, content_type, headers } => {
+                let fulfill = status.is_some() || body.is_some() || body_file.is_some();
+                if *abort && fulfill {
+                    anyhow::bail!("route: --abort or a response (--status/--body), not both");
+                }
+                let action = if fulfill {
+                    use base64::Engine as _;
+                    let bytes = match (body, body_file) {
+                        (Some(_), Some(_)) => anyhow::bail!("route: --body or --body-file, not both"),
+                        (Some(b), None) => b.clone().into_bytes(),
+                        (None, Some(f)) => {
+                            std::fs::read(f).map_err(|e| anyhow::anyhow!("route --body-file {f}: {e}"))?
+                        }
+                        (None, None) => Vec::new(),
+                    };
+                    let mut hs: Vec<(String, String)> = headers
+                        .iter()
+                        .map(|h| {
+                            h.split_once(':')
+                                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                                .ok_or_else(|| anyhow::anyhow!("route --header {h:?}: use 'Name: value'"))
+                        })
+                        .collect::<anyhow::Result<_>>()?;
+                    let ctype = content_type.clone().unwrap_or_else(|| {
+                        let t = String::from_utf8_lossy(&bytes);
+                        let t = t.trim_start();
+                        if t.starts_with('{') || t.starts_with('[') {
+                            "application/json"
+                        } else if t.starts_with('<') {
+                            "text/html"
+                        } else {
+                            "text/plain"
+                        }
+                        .to_string()
+                    });
+                    if !hs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+                        hs.push(("Content-Type".into(), ctype));
+                    }
+                    crate::cdp::RouteAction::Fulfill {
+                        status: status.unwrap_or(200),
+                        headers: hs,
+                        body_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    }
+                } else {
+                    crate::cdp::RouteAction::Abort
+                };
+                let what = match &action {
+                    crate::cdp::RouteAction::Abort => "abort".to_string(),
+                    crate::cdp::RouteAction::Fulfill { status, .. } => format!("fulfill {status}"),
+                };
+                self.session
+                    .add_route(crate::cdp::Route { pattern: pattern.clone(), action, hits: 0 })
+                    .map_err(|e| anyhow::anyhow!("route: {e:#}"))?;
+                Ok(json!({ "route": pattern, "action": what }))
+            }
+            Command::Unroute { pattern } => {
+                let removed =
+                    self.session.remove_routes(pattern.as_deref()).map_err(|e| anyhow::anyhow!("unroute: {e:#}"))?;
+                Ok(json!({ "removed": removed }))
+            }
+            Command::Set { what, values, .. } if what == "credentials" || what == "auth" => {
+                let creds = match values.as_slice() {
+                    [off] if matches!(off.as_str(), "off" | "reset" | "none" | "clear") => None,
+                    [user, pass] => Some((user.clone(), pass.clone())),
+                    _ => anyhow::bail!("set credentials <user> <password> (or `off`)"),
+                };
+                let on = creds.is_some();
+                self.session.set_credentials(creds).map_err(|e| anyhow::anyhow!("set credentials: {e:#}"))?;
+                Ok(json!({ "credentials": if on { "set" } else { "off" } }))
             }
             Command::Set { what, values, scale, mobile, accuracy } => {
                 let plan = crate::emulate::plan(what, values, *scale, *mobile, *accuracy, s.is_lightpanda())?;

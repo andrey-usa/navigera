@@ -72,6 +72,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(600)
             return
+        if url.path == "/auth":
+            # HTTP basic auth: ada / lovelace.
+            if self.headers.get("Authorization") != "Basic YWRhOmxvdmVsYWNl":
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="edge"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = b"<!doctype html><title>members</title><h1>welcome ada</h1>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if url.path == "/missing.png":
             self.send_response(404)
             self.send_header("Content-Length", "0")

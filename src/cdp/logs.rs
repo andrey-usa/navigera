@@ -293,7 +293,8 @@ impl Logs {
                     params
                         .get("blockedReason")
                         .and_then(Value::as_str)
-                        .map(|b| format!("blocked: {b}"))
+                        // `inspector`: a `route` rule failed it.
+                        .map(|b| if b == "inspector" { "route".to_string() } else { format!("blocked: {b}") })
                         .or_else(|| params.get("errorText").and_then(Value::as_str).map(str::to_string))
                         .unwrap_or_else(|| "failed".into())
                 };
