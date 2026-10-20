@@ -39,6 +39,52 @@ pub enum Target {
     Ref(u64),
     /// The best element whose visible text / label / value matches (auto-waits).
     Text(String),
+    /// By role and accessible name, label, placeholder, test id, and/or
+    /// CSS, optionally the nth match (auto-waits).
+    Locator(Locator),
+}
+
+/// `--role/--name/--label/--placeholder/--testid/--nth` (and `--selector`
+/// with `--nth`). Text matches are case-insensitive, exact before contains.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct Locator {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub testid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub css: Option<String>,
+    /// 0-based; negative counts from the end (-1: the last).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nth: Option<i64>,
+}
+
+impl Locator {
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        for (k, v) in [
+            ("role", &self.role),
+            ("name", &self.name),
+            ("label", &self.label),
+            ("placeholder", &self.placeholder),
+            ("testid", &self.testid),
+            ("selector", &self.css),
+        ] {
+            if let Some(v) = v {
+                parts.push(format!("{k}={v:?}"));
+            }
+        }
+        if let Some(n) = self.nth {
+            parts.push(format!("nth={n}"));
+        }
+        parts.join(" ")
+    }
 }
 
 impl Target {
@@ -47,6 +93,7 @@ impl Target {
             Target::Selector(s) => format!("selector {s:?}"),
             Target::Ref(r) => format!("ref {r}"),
             Target::Text(t) => format!("text {t:?}"),
+            Target::Locator(l) => l.describe(),
         }
     }
 }
@@ -211,6 +258,104 @@ const WAIT_FOR: &str = r#"async function (sel, ms, what) {
         const el = document.querySelector(sel);
         if (el) return el;
         if (Date.now() >= end) throw new Error(what + ': no element matches selector ' + JSON.stringify(sel) + ' within ' + ms + ' ms (run `ax` to see the page and act by --ref)');
+        await new Promise((r) => setTimeout(r, 50));
+    }
+}"#;
+
+/// Auto-wait by role / accessible name / label / placeholder / test id /
+/// CSS, then pick the nth match. Visible elements come first; text matches
+/// are case-insensitive, exact before contains. Walks open shadow roots.
+const WAIT_LOCATOR: &str = r#"async function (spec, ms, what) {
+    const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const all = (root, out = []) => {
+        for (const el of root.querySelectorAll('*')) { out.push(el); if (el.shadowRoot) all(el.shadowRoot, out); }
+        return out;
+    };
+    const implicitRole = (el) => {
+        const t = el.tagName, type = (el.getAttribute('type') || '').toLowerCase();
+        switch (t) {
+            case 'A': case 'AREA': return el.hasAttribute('href') ? 'link' : null;
+            case 'BUTTON': case 'SUMMARY': return 'button';
+            case 'INPUT':
+                if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
+                if (type === 'checkbox') return 'checkbox';
+                if (type === 'radio') return 'radio';
+                if (type === 'range') return 'slider';
+                if (type === 'number') return 'spinbutton';
+                if (type === 'search') return 'searchbox';
+                if (type === 'hidden' || type === 'file') return null;
+                return el.hasAttribute('list') ? 'combobox' : 'textbox';
+            case 'TEXTAREA': return 'textbox';
+            case 'SELECT': return (el.multiple || el.size > 1) ? 'listbox' : 'combobox';
+            case 'OPTION': return 'option';
+            case 'H1': case 'H2': case 'H3': case 'H4': case 'H5': case 'H6': return 'heading';
+            case 'IMG': return el.getAttribute('alt') === '' ? 'presentation' : 'img';
+            case 'UL': case 'OL': return 'list';
+            case 'LI': return 'listitem';
+            case 'NAV': return 'navigation';
+            case 'MAIN': return 'main';
+            case 'ASIDE': return 'complementary';
+            case 'FORM': return 'form';
+            case 'TABLE': return 'table';
+            case 'TR': return 'row';
+            case 'TD': return 'cell';
+            case 'TH': return 'columnheader';
+            case 'DIALOG': return 'dialog';
+            case 'FIELDSET': case 'DETAILS': return 'group';
+            case 'PROGRESS': return 'progressbar';
+            case 'ARTICLE': return 'article';
+            case 'SECTION': return (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby')) ? 'region' : null;
+            case 'HEADER': return el.closest('article,aside,main,nav,section') ? null : 'banner';
+            case 'FOOTER': return el.closest('article,aside,main,nav,section') ? null : 'contentinfo';
+        }
+        return null;
+    };
+    const role = (el) => (el.getAttribute('role') || '').split(' ')[0] || implicitRole(el);
+    const byIds = (el, attr) => (el.getAttribute(attr) || '').split(/\s+/).filter(Boolean)
+        .map((id) => (el.getRootNode().getElementById ? el.getRootNode().getElementById(id) : document.getElementById(id)))
+        .filter(Boolean).map((n) => n.textContent).join(' ');
+    const labelText = (el) => {
+        const own = el.getAttribute('aria-label') || byIds(el, 'aria-labelledby');
+        if (own) return own;
+        if (el.labels && el.labels.length) return [...el.labels].map((l) => l.textContent).join(' ');
+        return '';
+    };
+    const FROM_CONTENT = new Set(['button', 'link', 'heading', 'cell', 'columnheader', 'rowheader', 'option', 'tab',
+        'menuitem', 'menuitemcheckbox', 'menuitemradio', 'treeitem', 'listitem', 'checkbox', 'radio', 'switch', 'row', 'tooltip']);
+    const accName = (el) => {
+        const l = labelText(el);
+        if (l) return l;
+        if (el.tagName === 'IMG' || el.tagName === 'AREA' || (el.tagName === 'INPUT' && el.type === 'image')) return el.getAttribute('alt') || el.title || '';
+        if (el.tagName === 'INPUT' && ['button', 'submit', 'reset'].includes(el.type)) return el.value || el.type;
+        if (FROM_CONTENT.has(role(el))) return el.innerText || el.textContent || el.title || '';
+        return el.title || el.getAttribute('placeholder') || '';
+    };
+    const matches = (got, want) => { const g = norm(got), w = norm(want); return g === w ? 2 : (w && g.includes(w) ? 1 : 0); };
+    const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    const end = Date.now() + ms;
+    for (;;) {
+        let found = [];
+        for (const el of (spec.css ? [...document.querySelectorAll(spec.css)] : all(document))) {
+            let score = 0, ok = true;
+            const need = (s) => { if (!s) ok = false; else score += s; };
+            if (spec.testid) need(['data-testid', 'data-test-id', 'data-test', 'data-qa'].some((a) => el.getAttribute(a) === spec.testid) ? 2 : 0);
+            if (ok && spec.role) need(role(el) === spec.role.toLowerCase() ? 2 : 0);
+            if (ok && spec.name) need(matches(accName(el), spec.name));
+            if (ok && spec.label) need(matches(labelText(el), spec.label));
+            if (ok && spec.placeholder) need(matches(el.getAttribute('placeholder') || el.getAttribute('aria-placeholder'), spec.placeholder));
+            if (ok) found.push({ el, score: score + (visible(el) ? 10 : 0) });
+        }
+        // Best score first; document order among equals.
+        found = found.sort((a, b) => b.score - a.score).map((f) => f.el);
+        if (spec.nth !== undefined && spec.nth !== null) {
+            const top = found.length ? found : [];
+            const i = spec.nth < 0 ? top.length + spec.nth : spec.nth;
+            if (i >= 0 && i < top.length) return top[i];
+        } else if (found.length) return found[0];
+        if (Date.now() >= end) {
+            const desc = Object.entries(spec).map(([k, v]) => k + '=' + JSON.stringify(v)).join(' ');
+            throw new Error(what + ': no element with ' + desc + ' within ' + ms + ' ms (' + found.length + ' matched; run `ax` to see the page)');
+        }
         await new Promise((r) => setTimeout(r, 50));
     }
 }"#;
@@ -388,6 +533,17 @@ fn modifier_bit(name: &str) -> Option<u32> {
 
 /// JS-side wait budget: a bit under the CDP command timeout, so the page's
 /// own "not found" error wins the race against the transport timeout.
+/// A JS expression awaiting the element `target` names (not for refs,
+/// which resolve through CDP).
+fn finder_expr(target: &Target, wait_ms: u128, what: &str) -> String {
+    match target {
+        Target::Selector(sel) => format!("({WAIT_FOR})({}, {wait_ms}, {})", json!(sel), json!(what)),
+        Target::Text(text) => format!("({WAIT_TEXT})({}, {wait_ms}, {})", json!(text), json!(what)),
+        Target::Locator(loc) => format!("({WAIT_LOCATOR})({}, {wait_ms}, {})", json!(loc), json!(what)),
+        Target::Ref(node) => format!("Promise.reject(new Error('{what}: ref {node} must be resolved through CDP'))"),
+    }
+}
+
 fn wait_budget_ms(timeout: Duration) -> u128 {
     timeout.as_millis().saturating_sub(250).max(1)
 }
@@ -787,6 +943,7 @@ impl Page {
                 );
                 return self.call_on_ref(*node, &fn_on_this, args, true, timeout).map(|(v, _)| v);
             }
+            other => finder_expr(other, wait_ms, what),
         };
         let expr = format!("(async () => {{ const el = await {finder}; return ({function})(el{extra}); }})()");
         self.evaluate_raw(&expr, timeout)
@@ -1159,13 +1316,7 @@ impl Page {
             Target::Ref(node) => params["backendNodeId"] = json!(node),
             _ => {
                 // Find the element (auto-wait), keep it as a remote object.
-                let finder = match target {
-                    Target::Selector(sel) => {
-                        format!("({WAIT_FOR})({}, {}, 'upload')", json!(sel), wait_budget_ms(wait))
-                    }
-                    Target::Text(t) => format!("({WAIT_TEXT})({}, {}, 'upload')", json!(t), wait_budget_ms(wait)),
-                    Target::Ref(_) => unreachable!(),
-                };
+                let finder = finder_expr(target, wait_budget_ms(wait), "upload");
                 let res = self.send(
                     "Runtime.evaluate",
                     json!({ "expression": format!("(async () => {{ const el = await {finder}; return ({IDENTITY})(el); }})()"),
@@ -1252,11 +1403,7 @@ impl Page {
         if let Target::Ref(node) = target {
             return Ok(*node);
         }
-        let finder = match target {
-            Target::Selector(sel) => format!("({WAIT_FOR})({}, {}, 'ax')", json!(sel), wait_budget_ms(wait)),
-            Target::Text(t) => format!("({WAIT_TEXT})({}, {}, 'ax')", json!(t), wait_budget_ms(wait)),
-            Target::Ref(_) => unreachable!(),
-        };
+        let finder = finder_expr(target, wait_budget_ms(wait), "ax");
         let res = self.send(
             "Runtime.evaluate",
             json!({ "expression": format!("(async () => await {finder})()"), "awaitPromise": true, "objectGroup": "nv-ax" }),

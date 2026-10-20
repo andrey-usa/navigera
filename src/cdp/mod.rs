@@ -27,4 +27,4 @@ pub(crate) mod transport;
 
 pub use browser::{Browser, LaunchOptions};
 pub use events::{DialogPolicy, Route, RouteAction};
-pub use page::{AxOptions, Page, Target, DEFAULT_ELEMENT_WAIT};
+pub use page::{AxOptions, Locator, Page, Target, DEFAULT_ELEMENT_WAIT};

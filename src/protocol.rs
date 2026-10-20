@@ -94,6 +94,23 @@ pub struct TargetArgs {
     /// model before the op runs (see `decide`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub find: Option<String>,
+    /// ARIA role (`button`, `link`, `textbox`, `checkbox`, …), with `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Accessible name (with `role`, or alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A form control's label text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    /// `data-testid` (or `data-test-id`, `data-test`, `data-qa`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub testid: Option<String>,
+    /// Which match (0-based; -1 = the last), with any of the above or `selector`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth: Option<i64>,
 }
 
 impl TargetArgs {
@@ -105,16 +122,45 @@ impl TargetArgs {
         })
     }
 
+    fn locator(&self) -> bool {
+        self.role.is_some()
+            || self.name.is_some()
+            || self.label.is_some()
+            || self.placeholder.is_some()
+            || self.testid.is_some()
+    }
+
     fn optional(&self, op: &str) -> anyhow::Result<Option<Target>> {
-        let given = [self.selector.is_some(), self.node_ref.is_some(), self.text.is_some(), self.find.is_some()]
-            .iter()
-            .filter(|b| **b)
-            .count();
+        let given = [
+            self.node_ref.is_some(),
+            self.text.is_some(),
+            self.find.is_some(),
+            self.selector.is_some() || self.locator(),
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count();
         if given > 1 {
-            anyhow::bail!("{op}: give only one of ref, --selector, --text, --find");
+            anyhow::bail!("{op}: give only one of ref, --text, --find, or --selector/--role/--name/--label/--placeholder/--testid");
         }
         if self.find.is_some() {
             anyhow::bail!("{op}: --find was not resolved to an element");
+        }
+        if self.locator() || self.nth.is_some() {
+            if self.nth.is_some() && !self.locator() && self.selector.is_none() {
+                anyhow::bail!(
+                    "{op}: --nth picks among the matches of --selector, --role, --label, --placeholder or --testid"
+                );
+            }
+            return Ok(Some(Target::Locator(crate::cdp::Locator {
+                role: self.role.clone(),
+                name: self.name.clone(),
+                label: self.label.clone(),
+                placeholder: self.placeholder.clone(),
+                testid: self.testid.clone(),
+                css: self.selector.clone(),
+                nth: self.nth,
+            })));
         }
         Ok(if let Some(r) = self.node_ref {
             Some(Target::Ref(r))
@@ -951,6 +997,17 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
         },
         text: str_flag(args, "--text")?,
         find: str_flag(args, "--find")?,
+        role: str_flag(args, "--role")?,
+        name: str_flag(args, "--name")?,
+        label: str_flag(args, "--label")?,
+        placeholder: str_flag(args, "--placeholder")?,
+        testid: str_flag(args, "--testid")?,
+        nth: match str_flag(args, "--nth")? {
+            Some(raw) => Some(raw.parse::<i64>().map_err(|_| {
+                ArgsError::Invalid(format!("--nth takes an index (0, 1, -1 for the last), got {raw:?}"))
+            })?),
+            None => None,
+        },
     };
     if positional_target && t == TargetArgs::default() {
         if let Some(first) = args.front().filter(|a| !a.starts_with("--")).cloned() {
