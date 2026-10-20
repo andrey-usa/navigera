@@ -1729,6 +1729,10 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
 ///
 /// Construct once per session; every [`Command`] runs against the same warm
 /// Chrome (no relaunch between ops).
+/// A tree longer than this, read while a decision model is on, gets a note
+/// that acting does not need it.
+const AX_DECIDER_LINES: usize = 60;
+
 pub struct Driver {
     session: BrowserSession,
 }
@@ -2031,6 +2035,18 @@ impl Driver {
         }?;
         if let (Some(f), Some(obj)) = (found, result.as_object_mut()) {
             obj.insert("found".into(), json!({ "ref": f.chosen.node_ref, "element": f.chosen.line, "p": f.p }));
+        }
+        // A long tree read while a decision model is on: say, where the
+        // choice to read it again is made, that acting needs no reading.
+        if let (Command::Ax { .. }, Value::String(tree)) = (command, &result) {
+            let lines = tree.lines().count();
+            if lines > AX_DECIDER_LINES && crate::decide::Decider::from_env().is_some() {
+                notes.push(format!(
+                    "this tree is {lines} lines; with the decision model on, `click --find \"<what>\"`, \
+                     `fill --find \"<what>\" <value>` and `check \"<yes/no question>\"` act and verify \
+                     without reading it. Read it for text you must report."
+                ));
+            }
         }
         Ok(Outcome { result, dialogs, new_tabs, notes })
     }

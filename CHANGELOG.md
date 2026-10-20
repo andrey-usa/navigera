@@ -34,6 +34,20 @@ All notable changes to this project are documented here. The format follows
 - `notes` in responses: what the engine did differently from what was asked
   (e.g. a Lightpanda popup loaded in the current tab).
 
+### Changed
+
+- With a decision model on, the agent is told how to use it where it
+  decides what to do next: `start` adds a note (act with `--find`, verify
+  with `check`, read `ax` only for text to report), a tree over 60 lines
+  ends with a one-line note that acting needs no reading, and the skill's
+  main loop shows the decider form next to the ax form. Before, `start` said
+  only `"decider": "<model>"` and the usage sat in a later skill section: in
+  eval run 39437548538 the agent saw the decider in 8 of 10 runs and used
+  it in none.
+- Agent eval: a `preferences` task (a 170-line settings form, four named
+  changes, a confirmation to check; the rest must stay as it was), the task
+  the decider is measured on, and the three-arm protocol for measuring it.
+
 ### Fixed
 
 - Lightpanda 1.0.x (`--engine lightpanda`): `goto` waits for the load event
