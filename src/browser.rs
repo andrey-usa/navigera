@@ -364,6 +364,9 @@ pub struct BrowserSession {
     /// Connected to a browser navigera doesn't own (`--attach`,
     /// `--profile`): closing only disconnects.
     attached: bool,
+    /// `set …` overrides (keyed by what they set): applied to every open
+    /// tab and replayed on tabs opened later.
+    overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
     /// Owns the tokio runtime; declared LAST so it drops last, after the
     /// browser/client/pages that use it.
     _runtime: tokio::runtime::Runtime,
@@ -484,6 +487,7 @@ impl BrowserSession {
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             attached: false,
+            overrides: Default::default(),
             _runtime: runtime,
         })
     }
@@ -523,6 +527,7 @@ impl BrowserSession {
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             attached: true,
+            overrides: Default::default(),
             _runtime: runtime,
         })
     }
@@ -580,6 +585,7 @@ impl BrowserSession {
             bail!("the lightpanda engine supports one tab only; use the chrome engine for tabs");
         }
         let page = self.browser.new_page(Some("about:blank"))?;
+        self.apply_overrides(&page);
         self.pages.push(page);
         self.active = self.pages.len() - 1;
         Ok(self.active)
@@ -642,6 +648,7 @@ impl BrowserSession {
             }
             match self.browser.attach_page(&target_id) {
                 Ok(page) => {
+                    self.apply_overrides(&page);
                     self.pages.push(page);
                     self.active = self.pages.len() - 1;
                     adopted.push(self.active);
@@ -732,6 +739,45 @@ impl BrowserSession {
             self.timeout(None),
         )?;
         Ok(r.get("postData").and_then(|b| b.as_str()).unwrap_or_default().to_string())
+    }
+
+    /// Replace one kind of override (`viewport`, `media`, …) on every tab,
+    /// and for tabs opened later. `calls` are CDP (method, params) sent to
+    /// each tab; `reset` undoes the previous ones first.
+    pub fn set_override(
+        &mut self,
+        kind: &'static str,
+        calls: Vec<(&'static str, serde_json::Value)>,
+        reset: Vec<(&'static str, serde_json::Value)>,
+    ) -> Result<()> {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            for (method, params) in reset.iter().chain(calls.iter()) {
+                page.send_cdp(method, params.clone(), timeout).map_err(|e| anyhow::anyhow!("{method}: {e:#}"))?;
+            }
+        }
+        if calls.is_empty() {
+            self.overrides.remove(kind);
+        } else {
+            self.overrides.insert(kind, calls);
+        }
+        Ok(())
+    }
+
+    /// Browser-wide permission for the pages' origins (geolocation).
+    pub fn grant(&self, permission: &str) {
+        let _ = self.browser.grant_permission(permission);
+    }
+
+    fn apply_overrides(&self, page: &Page) {
+        let timeout = self.timeout(None);
+        for calls in self.overrides.values() {
+            for (method, params) in calls {
+                if let Err(e) = page.send_cdp(method, params.clone(), timeout) {
+                    eprintln!("[browser] {method} on a new tab: {e:#}");
+                }
+            }
+        }
     }
 
     /// Cookies the current page sends (`url`: that URL's), or every cookie.

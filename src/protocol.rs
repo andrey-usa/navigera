@@ -420,6 +420,24 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value: Option<String>,
     },
+    /// Emulate a device or network condition for every tab: `viewport`,
+    /// `device`, `media`, `geo`, `offline`, `headers`, `ua`, `locale`,
+    /// `timezone` (`off` resets one).
+    #[serde(rename = "set")]
+    Set {
+        what: String,
+        #[serde(default, alias = "value", deserialize_with = "de_values")]
+        values: Vec<String>,
+        /// `viewport`: device pixel ratio.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f64>,
+        /// `viewport`: a mobile viewport (meta viewport, overlay scrollbars).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mobile: bool,
+        /// `geo`: accuracy in meters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accuracy: Option<f64>,
+    },
     /// Current page URL and tab state.
     #[serde(rename = "url")]
     Url {},
@@ -650,6 +668,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("cookies", "[set <name> <value> [--url <u> | --domain <d>] [--path <p>] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax|Strict|None] | delete <name> [--url <u>] | clear] [--all] [--json]", "the current page's cookies (--all: every cookie), or set, delete or clear them"),
     ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
+    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone>  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
     ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
     ("back", "", "history back"),
@@ -1308,6 +1327,17 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 _ => return Err(need("storage", "`get [<key>]`, `set <key> <value>`, `remove <key>` or `clear`")),
             }
             Command::Storage { area, action, key, value }
+        }
+        "set" | "emulate" => {
+            let what = positional(&mut args).ok_or_else(|| need("set", "what to set"))?;
+            let scale = num_flag(&mut args, "--scale")?;
+            let mobile = extract_present(&mut args, "--mobile");
+            let accuracy = num_flag(&mut args, "--accuracy")?;
+            let mut values = Vec::new();
+            while let Some(v) = positional(&mut args) {
+                values.push(v);
+            }
+            Command::Set { what, values, scale, mobile, accuracy }
         }
         "url" => Command::Url {},
         "status" => Command::Status {},
@@ -2007,6 +2037,16 @@ impl Driver {
                     (other, ..) => anyhow::bail!("storage: {other} needs a key (set: and a value)"),
                 };
                 s.evaluate_with_timeout::<Value>(&js, None).map_err(|e| anyhow::anyhow!("storage: {e:#}"))
+            }
+            Command::Set { what, values, scale, mobile, accuracy } => {
+                let plan = crate::emulate::plan(what, values, *scale, *mobile, *accuracy, s.is_lightpanda())?;
+                if let Some(permission) = plan.grant {
+                    self.session.grant(permission);
+                }
+                self.session
+                    .set_override(plan.kind, plan.calls, plan.reset)
+                    .map_err(|e| anyhow::anyhow!("set {what}: {e:#}"))?;
+                Ok(plan.result)
             }
             Command::Url {} => Ok(self.state_json()),
             Command::Status {} => {

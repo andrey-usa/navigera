@@ -264,6 +264,17 @@ impl Browser {
         self.shared.caught_up(&self.client, Duration::from_millis(250))
     }
 
+    /// Grant a permission (e.g. `geolocation`) to every origin.
+    pub fn grant_permission(&self, permission: &str) -> Result<()> {
+        self.block_on(self.client.send(
+            "Browser.grantPermissions",
+            json!({ "permissions": [permission] }),
+            None,
+            CMD_TIMEOUT,
+        ))
+        .map(|_| ())
+    }
+
     /// The watcher's shared state (dialog log, popups, navigation).
     pub fn shared(&self) -> &Arc<Shared> {
         &self.shared
