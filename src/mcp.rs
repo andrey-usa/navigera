@@ -230,6 +230,38 @@ fn tools() -> Vec<Value> {
             false,
         ),
         tool(
+            "browser_console_messages",
+            "The page's console messages, uncaught exceptions and failed loads, oldest first.",
+            object(
+                props(&[json!({
+                    "level": {"type": "string", "enum": ["debug", "log", "info", "warn", "error"], "description": "This level and above"},
+                    "clear": {"type": "boolean", "description": "Empty the log after reading"},
+                })]),
+                &[],
+            ),
+            true,
+        ),
+        tool(
+            "browser_network_requests",
+            "The page's requests, one line each (#n METHOD STATUS type url size time); with n, one request in \
+             full with headers, post data and response body.",
+            object(
+                props(&[json!({
+                    "n": {"type": "integer"},
+                    "filter": {"type": "string", "description": "Only URLs containing this"},
+                    "failed": {"type": "boolean", "description": "Only failures and HTTP errors"},
+                })]),
+                &[],
+            ),
+            true,
+        ),
+        tool(
+            "browser_resize",
+            "Set the viewport size of every tab.",
+            object(props(&[json!({"width": {"type": "integer"}, "height": {"type": "integer"}})]), &["width", "height"]),
+            false,
+        ),
+        tool(
             "browser_close",
             "Close the browser. The next tool call starts a fresh one.",
             object(Map::new(), &[]),
@@ -339,6 +371,15 @@ fn plan(name: &str, arguments: &Value) -> Result<Plan, String> {
             single(&action, args)
         }
         "browser_handle_dialog" => single("dialog", args),
+        "browser_console_messages" => single("console", args),
+        "browser_network_requests" => single("network", args),
+        "browser_resize" => {
+            let dim = |k: &str| {
+                args.get(k).and_then(Value::as_u64).map(|v| v.to_string()).ok_or(format!("browser_resize needs {k}"))
+            };
+            let values = vec![dim("width")?, dim("height")?];
+            Plan { steps: vec![json!({"op": "set", "what": "viewport", "values": values})], snapshot: false }
+        }
         "browser_file_upload" => {
             if let Some(paths) = args.remove("paths") {
                 args.insert("files".into(), paths);
@@ -635,6 +676,7 @@ mod tests {
                 "browser_tabs" => json!({"action": "list"}),
                 "browser_history" => json!({"action": "back"}),
                 "browser_run" => json!({"steps": [{"op": "click", "ref": 3}]}),
+                "browser_resize" => json!({"width": 800, "height": 600}),
                 _ => json!({}),
             };
             assert!(plan(name, &args).is_ok(), "{name}");
@@ -655,6 +697,10 @@ mod tests {
         assert!(plan("browser_run", &json!({"steps": [{"ref": 1}]})).is_err());
         assert!(plan("browser_run", &json!({"steps": [{"op": "quit"}]})).is_err());
         assert!(plan("nope", &json!({})).is_err());
+        let p = plan("browser_resize", &json!({"width": 390, "height": 844})).unwrap();
+        assert_eq!(p.steps[0], json!({"op": "set", "what": "viewport", "values": ["390", "844"]}));
+        assert!(plan("browser_resize", &json!({"width": 390})).is_err());
+        assert_eq!(plan("browser_console_messages", &json!({"level": "error"})).unwrap().steps[0]["op"], "console");
     }
 
     #[test]
