@@ -851,7 +851,7 @@ impl Page {
     /// DOM-dispatched events when it has no hittable box (see [`CLICK_PREP`]).
     /// Returns `{synthetic: true}` when the fallback was used.
     pub fn click(&self, target: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
-        let settle = json!(wait.as_millis().min(3000) as u64);
+        let settle = json!(self.hit_settle_ms(wait));
         let mut point = self.on_element(target, "click", CLICK_PREP, &[json!(false), settle.clone()], wait, timeout)?;
         if point.get("xframe").and_then(Value::as_bool) == Some(true) {
             // Inside a cross-origin iframe the page can't see its frame's
@@ -894,6 +894,19 @@ impl Page {
             point["redelivered"] = json!(true);
         }
         Ok(point)
+    }
+
+    /// How long a click/hover waits for its element to become hittable
+    /// (covered by a closing overlay, not laid out yet) before it falls back
+    /// to DOM events. Lightpanda has no layout that could change: its boxes
+    /// are synthetic, and inside shadow roots its hit test never matches,
+    /// so waiting there only delays the same DOM-event click.
+    fn hit_settle_ms(&self, wait: Duration) -> u64 {
+        if self.shared.is_single_target() {
+            0
+        } else {
+            wait.as_millis().min(3000) as u64
+        }
     }
 
     /// Did the click's press reach the page (`__nvSeen`, set by CLICK_PREP)?
@@ -965,7 +978,7 @@ impl Page {
     /// Move the mouse over the element (opens hover menus and tooltips).
     /// Returns `{synthetic: true}` when only DOM events could be sent.
     pub fn hover(&self, target: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
-        let settle = json!(wait.as_millis().min(3000) as u64);
+        let settle = json!(self.hit_settle_ms(wait));
         let mut point = self.on_element(target, "hover", HOVER_PREP, &[settle], wait, timeout)?;
         if point.get("xframe").and_then(Value::as_bool) == Some(true) {
             let center = match target {

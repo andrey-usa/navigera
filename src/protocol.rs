@@ -1396,7 +1396,9 @@ impl Driver {
                 let point =
                     s.click_target(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("click {}: {e:#}", t.label()))?;
                 let mut state = self.state_json();
-                if point.get("synthetic").and_then(Value::as_bool) == Some(true) {
+                // Lightpanda lays nothing out, so a DOM-event click there is
+                // the normal case, not a sign of an overlay.
+                if point.get("synthetic").and_then(Value::as_bool) == Some(true) && !s.is_lightpanda() {
                     // The agent should know the click was not a real one.
                     state["synthetic_click"] = json!(if point.get("dropped").and_then(Value::as_bool) == Some(true) {
                         "the browser did not deliver the mouse events (twice); dispatched DOM events instead"
