@@ -60,20 +60,7 @@ impl Browser {
     pub fn launch_lightpanda(handle: &tokio::runtime::Handle, bin: &str) -> Result<Self> {
         let port = free_port().context("pick a free port for lightpanda serve")?;
         let program = bin.to_string();
-        let args = vec![
-            "serve".to_string(),
-            "--host".to_string(),
-            "127.0.0.1".to_string(),
-            "--port".to_string(),
-            port.to_string(),
-            // `serve` loads no sub-resources by default: iframes (card and
-            // support widgets) would be empty documents, and without
-            // stylesheets `display:none` content would count as visible.
-            "--load-resources".to_string(),
-            "iframe".to_string(),
-            "--load-resources".to_string(),
-            "stylesheet".to_string(),
-        ];
+        let args = lightpanda_serve_args(port);
         // Write child output to a temp file for diagnostics (not piped to avoid
         // the pipe-buffer deadlock). The file is read only on poll failure.
         let log_path = std::env::temp_dir().join(format!("lightpanda-serve-{port}.log"));
@@ -87,7 +74,7 @@ impl Browser {
         }
         let mut child = cmd
             .args(&args)
-            .env("LIGHTPANDA_DISABLE_TELEMETRY", "1")
+            .envs(LIGHTPANDA_ENV.iter().copied())
             .stdin(std::process::Stdio::null())
             .stdout(log_file.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
             .stderr(log_file_err.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
@@ -531,8 +518,37 @@ impl Browser {
     }
 }
 
+/// Environment for `lightpanda serve`: no usage telemetry.
+const LIGHTPANDA_ENV: &[(&str, &str)] = &[("LIGHTPANDA_DISABLE_TELEMETRY", "1")];
+
+/// `lightpanda serve` arguments. `serve` loads no sub-resources by default:
+/// iframes (card and support widgets) would be empty documents, and without
+/// stylesheets `display:none` content would count as visible.
+fn lightpanda_serve_args(port: u16) -> Vec<String> {
+    let port = port.to_string();
+    ["serve", "--host", "127.0.0.1", "--port", &port, "--load-resources", "iframe", "--load-resources", "stylesheet"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// Pick a free localhost TCP port by binding to port 0 and releasing it.
 fn free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind 127.0.0.1:0 for a free port")?;
     Ok(listener.local_addr()?.port())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lightpanda_serve_loads_iframes_and_stylesheets_without_telemetry() {
+        let args = lightpanda_serve_args(9333);
+        assert_eq!(&args[..5], ["serve", "--host", "127.0.0.1", "--port", "9333"]);
+        let loads: Vec<&str> = args.windows(2).filter(|w| w[0] == "--load-resources").map(|w| w[1].as_str()).collect();
+        assert_eq!(loads, ["iframe", "stylesheet"]);
+        assert!(!args.iter().any(|a| a.contains("xvfb")), "serve is headless: {args:?}");
+        assert_eq!(LIGHTPANDA_ENV, [("LIGHTPANDA_DISABLE_TELEMETRY", "1")]);
+    }
 }
