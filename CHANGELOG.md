@@ -26,6 +26,15 @@ All notable changes to this project are documented here. The format follows
   silently reusing it.
 - Dialogs, popups and JS navigations reported just before a command's
   response are no longer missed by the op that caused them.
+- Lightpanda: a navigation a click handler starts (`location.href = ...`)
+  is waited for. The engine reports it only after the click's reply, so the
+  click returned the old page with `loading: true`; it now returns the page
+  the click led to.
+- Lightpanda: `ax` shows what open shadow roots hold. The engine's tree
+  stops at a shadow root and gives the nodes inside no ids, so a coupon
+  field in a web component was invisible to an agent reading the snapshot;
+  it is now listed under the root, without refs, with `--text` as the way to
+  target it.
 
 ## [0.4.1] - 2026-10-14
 

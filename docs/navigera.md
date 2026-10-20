@@ -342,6 +342,10 @@ Registry as `io.github.andrey-usa/navigera` (`server.json`).
   - no layout: clicks go straight to DOM events where the hit test can't
     work (inside shadow roots), without the settle wait and without the
     "covered" warning.
+  - shadow roots: the engine's accessibility tree stops at one and gives the
+    nodes inside no ids, so `ax` lists what an open shadow root holds after
+    the tree, under `- shadow root of <tag>`, without refs; target those
+    elements with `--text`.
   - `status` reports the engine of a running session; `start` on a session
     that runs the other engine fails instead of reusing it.
 

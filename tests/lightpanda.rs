@@ -197,6 +197,13 @@ fn acme_supply_on_lightpanda() {
     agent.ok(&["click", "--text", "Add Brass Sprocket to cart"]);
     agent.ok(&["wait", "--js", "document.querySelector('#cart-count').textContent === '1'"]);
     agent.ok(&["goto", &url("/cart")]);
+    // Lightpanda's tree stops at the shadow root; the snapshot still shows
+    // what is inside it, and how to reach it.
+    let cart = agent.ax(&[]);
+    assert!(cart.contains("- shadow root of <acme-coupon>"), "{cart}");
+    assert!(cart.contains("  - textbox \"Coupon code\"\n"), "{cart}");
+    assert!(cart.contains("  - button \"Apply coupon\""), "{cart}");
+    assert!(!agent.ax(&["--selector", "table"]).contains("shadow root"), "a scope leaves it out");
     agent.ok(&["fill", "--text", "Coupon code", "SAVE10"]);
     let started = std::time::Instant::now();
     let r = agent.ok_response(&["click", "--text", "Apply coupon"]);
@@ -207,7 +214,12 @@ fn acme_supply_on_lightpanda() {
     // Checkout: card fields live in an iframe (loaded only with
     // --load-resources iframe); Place order asks confirm(), which must
     // return true for the order to be placed.
-    agent.ok(&["click", "--text", "Proceed to checkout"]);
+    // The button's click handler sets location.href: Lightpanda reports
+    // that navigation only after the click's reply, and the click still
+    // returns the page it leads to rather than the cart, `loading`.
+    let r = agent.ok_response(&["click", "--text", "Proceed to checkout"]);
+    assert!(r["result"]["url"].as_str().unwrap().ends_with("/checkout"), "{r}");
+    assert!(r["result"].get("loading").is_none(), "{r}");
     agent.ok(&["fill", "--selector", "#name", "Ada Lovelace"]);
     agent.ok(&["select", "--selector", "#country", "Canada"]);
     agent.ok(&["click", "--selector", "input[value=express]"]);

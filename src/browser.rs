@@ -713,8 +713,11 @@ impl BrowserSession {
     /// the load abandoned; a shorter op budget leaves it for the next op.
     pub fn settle_within(&self, budget: Duration) -> bool {
         // A navigation the last command started may already be reported
-        // (Lightpanda sends it before the command's response): let the
-        // watcher record it before deciding there is nothing to wait for.
+        // (Lightpanda sends it before the command's response), or be
+        // reported only once the engine handles another message (one a
+        // script scheduled): ask for that message, then let the watcher
+        // record what came before deciding there is nothing to wait for.
+        self.active_tab().flush_events(Duration::from_millis(500));
         self.browser.caught_up();
         let tab = self.active_tab();
         let key = (tab.target_id().to_string(), tab.nav_generation());
