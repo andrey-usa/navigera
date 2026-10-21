@@ -253,6 +253,16 @@ fn acme_supply_on_lightpanda() {
     agent.ok(&["dialog", "--accept", "--prompt-text", "Ada"]);
     assert_eq!(agent.ok(&["eval", "() => prompt('Name?')"]), "Ada");
 
+    // A long settings form reads as on Chrome: checkboxes without the
+    // default value "on" that looks like a state, a select named by its
+    // label alone, one line per table cell.
+    agent.ok(&["goto", &url("/preferences")]);
+    let prefs = agent.ax(&[]);
+    assert!(!prefs.contains("value=\"on\""), "{prefs}");
+    assert!(prefs.contains("- combobox \"Currency\" [ref="), "{prefs}");
+    assert!(prefs.contains("- cell: checkbox \"Email alerts for Drive\" [checked, ref="), "{prefs}");
+    assert!(prefs.lines().count() < 190, "{} lines", prefs.lines().count());
+
     // Support form inside an iframe: in the tree, with refs.
     agent.ok(&["goto", &url("/support")]);
     let support = agent.ax(&[]);
