@@ -49,6 +49,13 @@ All notable changes to this project are documented here. The format follows
   field in a web component was invisible to an agent reading the snapshot;
   it is now listed under the root, without refs, with `--text` as the way to
   target it.
+- Lightpanda: a settings form reads in `ax` as it does on Chrome. A
+  checkbox showed its default value `"on"`, which reads like a state (in the
+  DeepSeek eval, run 39530836547, both Lightpanda runs of the preferences
+  task left a box unticked and failed); a `<select>` inside a `<label>` was
+  named with every option ("Currency USD EUR GBP …") next to a copy of the
+  label; an unnamed table cell took two lines per checkbox. The preferences
+  page is 177 lines on Lightpanda now, 243 before, 169 on Chrome.
 - Lightpanda: an empty password field no longer reads as filled in `ax`.
   The engine gives every password field the value `*****`; the snapshot now
   asks the field and shows a dot per character, or nothing, as on Chrome.

@@ -338,6 +338,15 @@ impl<'a> Tree<'a> {
             return;
         }
 
+        // A <select>'s options go on its line. Lightpanda names a select
+        // inside a <label> with the label's whole text, options included
+        // ("Currency USD EUR GBP …"): those words come off the name.
+        let mut options = Vec::new();
+        if role == "combobox" || role == "listbox" {
+            collect_options(self, node, &mut options);
+        }
+        let name = without_options(name, &options);
+
         let shown_role = if self.is_frame_root(node) { "document" } else { role.as_str() };
         let mut line = format!("{indent}- {shown_role}");
         if !name.is_empty() {
@@ -353,7 +362,9 @@ impl<'a> Tree<'a> {
         if !tags.is_empty() {
             line.push_str(&format!(" [{}]", tags.join(", ")));
         }
-        let value = text_of(node, "value");
+        // A checkbox's or radio's state is [checked]; its value attribute
+        // ("on" unless set, which Lightpanda reports) reads like a state.
+        let value = if CHECKABLE.contains(&role.as_str()) { String::new() } else { text_of(node, "value") };
         if !value.is_empty() && value != name {
             line.push_str(&format!(" value={}", quote(&clip(&value, 150))));
         }
@@ -369,18 +380,14 @@ impl<'a> Tree<'a> {
         self.effective_children(node, &mut kids);
 
         // <select>: list the options on the combobox line, not as a subtree.
-        if role == "combobox" || role == "listbox" {
-            let mut options = Vec::new();
-            collect_options(self, node, &mut options);
-            if !options.is_empty() {
-                let shown: Vec<String> = options.iter().take(25).map(|o| quote(&clip(o, 60))).collect();
-                line.push_str(&format!(" options: {}", shown.join(", ")));
-                if options.len() > 25 {
-                    line.push_str(&format!(", …(+{})", options.len() - 25));
-                }
-                self.lines.push(line);
-                return;
+        if (role == "combobox" || role == "listbox") && !options.is_empty() {
+            let shown: Vec<String> = options.iter().take(25).map(|o| quote(&clip(o, 60))).collect();
+            line.push_str(&format!(" options: {}", shown.join(", ")));
+            if options.len() > 25 {
+                line.push_str(&format!(", …(+{})", options.len() - 25));
             }
+            self.lines.push(line);
+            return;
         }
 
         // Unnamed node holding only text: inline it (`- paragraph: …`).
@@ -414,6 +421,32 @@ impl<'a> Tree<'a> {
                 }
             }
         }
+        // An unnamed table cell or list item around one control: one line
+        // (Lightpanda leaves cells unnamed, so each checkbox in a table
+        // took two lines where Chrome's tree takes one).
+        let controls: Vec<&Value> = kids.iter().copied().filter(|k| Self::role(k) != "StaticText").collect();
+        let echoes_only = controls.len() == 1 && {
+            let control_name = self.name(controls[0]);
+            kids.iter()
+                .filter(|k| Self::role(k) == "StaticText")
+                .all(|k| text_of(k, "name").trim().trim_end_matches(':') == control_name.trim())
+        };
+        if echoes_only && name.is_empty() && matches!(role.as_str(), "cell" | "gridcell" | "listitem") {
+            let only = controls[0];
+            let only_role = Self::role(only).to_string();
+            let mut grand = Vec::new();
+            self.effective_children(only, &mut grand);
+            if INTERACTIVE.contains(&only_role.as_str()) && grand.iter().all(|k| Self::role(k) == "StaticText") {
+                let only_name = self.name(only);
+                let mut inner = self.describe(only, &only_role);
+                if !only_name.is_empty() {
+                    inner.insert_str(only_role.len(), &format!(" {}", quote(&clip(&only_name, 150))));
+                }
+                line.push_str(&format!(": {inner}"));
+                self.lines.push(line);
+                return;
+            }
+        }
         let has_ref = line.contains("ref=");
         if kids.is_empty()
             && name.is_empty()
@@ -441,7 +474,13 @@ impl<'a> Tree<'a> {
         let sibling_names: Vec<String> = kids
             .iter()
             .filter(|k| Self::role(k) != "StaticText")
-            .map(|k| bare(&text_of(k, "name")))
+            .map(|k| {
+                let mut options = Vec::new();
+                if matches!(Self::role(k), "combobox" | "listbox") {
+                    collect_options(self, k, &mut options);
+                }
+                bare(&without_options(text_of(k, "name"), &options))
+            })
             .filter(|n| !n.is_empty())
             .collect();
         for child in kids {
@@ -477,6 +516,21 @@ impl<'a> Tree<'a> {
         line
     }
 }
+
+/// `name` without the option texts a `<select>`'s name can end with:
+/// Lightpanda names a select inside a `<label>` with all of the label's
+/// text, options included ("Currency USD EUR GBP …").
+fn without_options(name: String, options: &[String]) -> String {
+    let words: Vec<&str> = options.iter().map(|o| o.strip_suffix(" (selected)").unwrap_or(o).trim()).collect();
+    let tail = words.join(" ");
+    match name.strip_suffix(tail.as_str()) {
+        Some(head) if !tail.is_empty() => head.trim_end().to_string(),
+        _ => name,
+    }
+}
+
+/// Roles whose state is checked or not, shown as `[checked]`.
+const CHECKABLE: &[&str] = &["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"];
 
 fn collect_options(tree: &Tree<'_>, node: &Value, out: &mut Vec<String>) {
     for child in tree.children(node) {
@@ -655,6 +709,38 @@ mod tests {
             out.text,
             "- Iframe \"Pay\":\n  - document \"Card form\":\n    - button \"Pay now\" [ref=71]\n\
              - combobox \"Color\" [ref=4] value=\"Blue\" options: \"Red\", \"Blue (selected)\""
+        );
+    }
+
+    /// What Lightpanda's tree says about a form, rendered as Chrome's reads:
+    /// a select named with its label's whole text (options included) and
+    /// the label text beside it, a checkbox with the default value "on",
+    /// and an unnamed table cell around one checkbox and its label text.
+    #[test]
+    fn lightpanda_form_quirks_render_as_chrome_reads() {
+        let mut combo = node("4", Some("2"), "combobox", "Currency USD EUR", &["5"], 4);
+        combo["value"] = json!({"type": "string", "value": "USD"});
+        let mut usd = node("6", Some("5"), "option", "USD", &[], 6);
+        usd["properties"] = json!([{"name": "selected", "value": {"type": "boolean", "value": true}}]);
+        let mut cb = node("9", Some("8"), "checkbox", "Email alerts for Drive", &[], 9);
+        cb["value"] = json!({"type": "string", "value": "on"});
+        let nodes = vec![
+            node("1", None, "RootWebArea", "Prefs", &["2", "8"], 1),
+            node("2", Some("1"), "group", "", &["3", "4"], 2),
+            node("3", Some("2"), "StaticText", "Currency", &[], 3),
+            combo,
+            node("5", Some("4"), "MenuListPopup", "", &["6", "7"], 5),
+            usd,
+            node("7", Some("5"), "option", "EUR", &[], 7),
+            node("8", Some("1"), "cell", "", &["9", "10"], 8),
+            cb,
+            node("10", Some("8"), "StaticText", "Email alerts for Drive", &[], 10),
+        ];
+        let out = render("", &nodes, &[], &Options::default());
+        assert_eq!(
+            out.text,
+            "- group:\n  - combobox \"Currency\" [ref=4] value=\"USD\" options: \"USD (selected)\", \"EUR\"\n\
+             - cell: checkbox \"Email alerts for Drive\" [ref=9]"
         );
     }
 
