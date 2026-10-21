@@ -26,6 +26,13 @@ name: agent-eval
 # adds a job asking Jev and Gemini the same element choices and yes/no
 # questions with known answers (bench/decide/compare.py).
 #
+# `agent: openai` drives the same eval from an OpenAI-compatible endpoint
+# instead of Gemini CLI (run.py --agent openai): the model is any id the
+# endpoint serves (e.g. DeepSeek V4.1 Flash via SiliconFlow, whose key is
+# SILICONFLOW_API_KEY in the main environment; one key for every tool job).
+# The decisions baseline follows the model id the same way: `gemini-*`
+# ids use GEMINI_API_KEY, other ids the OpenAI-compatible endpoint.
+#
 # `os: windows` (or `both`) runs the same jobs on windows-latest: the agent's
 # shell is PowerShell there, and rows read `<tool> (windows)`.
 #
@@ -47,8 +54,11 @@ on:
       mode:
         description: "skilled (skill preinstalled), onboard (agent installs the tool from its docs), both, or scripted (no model: the scripted baseline only)"
         default: "both"
+      agent:
+        description: "gemini (Gemini CLI) or openai (OpenAI-compatible endpoint, e.g. DeepSeek via SiliconFlow)"
+        default: "gemini"
       model:
-        description: "Gemini model id (free tier: a Flash-Lite model has the largest daily quota)"
+        description: "model id for the chosen agent (Gemini free tier: a Flash-Lite model has the largest daily quota)"
         default: "gemini-3.5-flash-lite"
       reps:
         description: "repetitions per tool x task"
@@ -57,11 +67,11 @@ on:
         description: "linux, windows or both"
         default: "linux"
       decisions:
-        description: "also ask Jev and Gemini the same decisions (bench/decide/compare.py)"
+        description: "also ask Jev and the baseline model the same decisions (bench/decide/compare.py)"
         type: boolean
         default: false
       decide_models:
-        description: "Gemini model ids for the decisions baseline, comma-separated"
+        description: "model ids for the decisions baseline, comma-separated (gemini-* via Gemini, others via the OpenAI-compatible endpoint)"
         default: "gemini-3.5-flash-lite"
       live:
         description: "decisions: include the public-web cases"
@@ -119,6 +129,7 @@ jobs:
         shell: bash
     env:
       TOOL: ${{ matrix.run.tool }}
+      AGENT: ${{ inputs.agent || 'gemini' }}
       MODEL: ${{ inputs.model || 'gemini-3.5-flash-lite' }}
       TASKS: ${{ inputs.tasks || 'all' }}
       MODE: ${{ inputs.mode || 'both' }}
@@ -162,11 +173,16 @@ jobs:
           exit $rc
       - name: Key
         run: |
-          if [ "$HAS_KEY" != true ]; then
+          if [ "$AGENT" = openai ] && [ -z "$SILICONFLOW_API_KEY" ]; then
+            echo "::notice title=agent eval::no SILICONFLOW_API_KEY in the main environment; only the scripted baseline ran."
+            echo "HAS_KEY=false" >> "$GITHUB_ENV"
+          elif [ "$HAS_KEY" != true ]; then
             echo "::notice title=agent eval::no Gemini key in the main environment; only the scripted baseline ran."
           else
             echo "::notice title=agent eval key::$TOOL (${{ matrix.run.os }}) used $KEY_SLOT"
           fi
+        env:
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
       - name: Model smoke test
         id: smoke
         # Model steps still run when the scripted baseline failed (its own
@@ -175,12 +191,13 @@ jobs:
         if: "!cancelled() && env.HAS_KEY == 'true' && env.MODE != 'scripted'"
         env:
           GEMINI_API_KEY: ${{ secrets[matrix.run.key] || secrets.GEMINI_API_KEY }}
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
         run: |
           log="$RUNNER_TEMP/smoke.txt"
-          if ! python bench/agent-eval/run.py --smoke --run-timeout 300 --model "$MODEL" --gemini "$GEMINI_BIN" \
+          if ! python bench/agent-eval/run.py --smoke --agent "$AGENT" --run-timeout 300 --model "$MODEL" --gemini "$GEMINI_BIN" \
                --out out/smoke > "$log" 2>&1; then
             tail -c 3000 "$log" > "$RUNNER_TEMP/smoke-tail.txt"
-            python bench/ladder/annotate.py "$RUNNER_TEMP/smoke-tail.txt" "gemini smoke failure ($TOOL, ${{ matrix.run.os }}, $KEY_SLOT)"
+            python bench/ladder/annotate.py "$RUNNER_TEMP/smoke-tail.txt" "model smoke failure ($TOOL, ${{ matrix.run.os }}, $KEY_SLOT)"
             exit 1
           fi
           cat "$log"
@@ -193,9 +210,10 @@ jobs:
         if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'onboard' || env.MODE == 'both') && steps.smoke.outcome == 'success'"
         env:
           GEMINI_API_KEY: ${{ secrets[matrix.run.key] || secrets.GEMINI_API_KEY }}
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
         run: |
           bash bench/agent-eval/logged.sh "agent run log (onboard, $TOOL, ${{ matrix.run.os }})" \
-            python bench/agent-eval/run.py --mode onboard --tools "$TOOL" --model "$MODEL" \
+            python bench/agent-eval/run.py --mode onboard --agent "$AGENT" --tools "$TOOL" --model "$MODEL" \
             --gemini "$GEMINI_BIN" --reps 1 --out out/gemini \
             ${DECIDER_URL:+--decider-url "$DECIDER_URL" --decider-log "$DECIDER_LOG"}
       - name: Install the tool (for skilled runs)
@@ -210,9 +228,10 @@ jobs:
         if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'skilled' || env.MODE == 'both') && steps.smoke.outcome == 'success'"
         env:
           GEMINI_API_KEY: ${{ secrets[matrix.run.key] || secrets.GEMINI_API_KEY }}
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
         run: |
           bash bench/agent-eval/logged.sh "agent run log (skilled, $TOOL, ${{ matrix.run.os }})" \
-            python bench/agent-eval/run.py --mode skilled --tools "$TOOL" --tasks "$TASKS" \
+            python bench/agent-eval/run.py --mode skilled --agent "$AGENT" --tools "$TOOL" --tasks "$TASKS" \
             --model "$MODEL" --gemini "$GEMINI_BIN" --reps "$REPS" --out out/gemini \
             ${DECIDER_URL:+--decider-url "$DECIDER_URL" --decider-log "$DECIDER_LOG"}
       - name: Upload this tool's results
@@ -236,9 +255,10 @@ jobs:
       - uses: ./.github/actions/jev-relay
         with:
           key: ${{ secrets.TYPESAFE_API_KEY }}
-      - name: Jev and Gemini on the same decisions
+      - name: Jev and the model on the same decisions
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
           MODELS: ${{ inputs.decide_models }}
           REPS: ${{ inputs.reps }}
           LIVE: ${{ inputs.live && '--live' || '' }}

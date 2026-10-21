@@ -40,6 +40,12 @@ turns and wall time, per task.
 `--agent scripted` replays known-good navigera command plans instead of
 calling a model: it validates the site, the checks and this harness without
 an API key (CI runs it on every eval, and locally).
+
+`--agent openai` drives the same tasks from any OpenAI-compatible chat
+endpoint (env `OPENAI_BASE_URL`, default SiliconFlow; the key is
+`OPENAI_API_KEY` or `SILICONFLOW_API_KEY`): the model gets one shell tool
+and the same prompt, turns and timeout as the Gemini CLI runs, so a
+DeepSeek run is measured against the Gemini runs, not beside them.
 """
 import argparse
 import json
@@ -52,6 +58,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -394,6 +401,137 @@ def run_gemini(prompt: str, work: Path, env: dict, args) -> dict:
     }
 
 
+# --- OpenAI-compatible agents ------------------------------------------------
+# The same job Gemini CLI does, without the CLI: the model is offered one
+# shell tool in the run's workspace and its calls are executed with the
+# run's env, for at most as many turns and as long overall as a Gemini run.
+
+SHELL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_shell_command",
+        "description": "Run a shell command in the workspace and return its combined stdout and stderr.",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string", "description": "The command to run, as one shell line."}},
+            "required": ["command"],
+        },
+    },
+}
+
+OPENAI_DEFAULT_BASE = "https://api.siliconflow.com/v1"
+SHELL_TIMEOUT = 240  # Gemini CLI's shell inactivity timeout, for parity
+TOOL_OUTPUT_LIMIT = 32000
+
+
+def openai_endpoint(env: dict, args) -> tuple[str, str]:
+    base = (args.base_url or env.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+            or OPENAI_DEFAULT_BASE).rstrip("/")
+    key = env.get("OPENAI_API_KEY") or env.get("SILICONFLOW_API_KEY") \
+        or os.environ.get("OPENAI_API_KEY") or os.environ.get("SILICONFLOW_API_KEY") or ""
+    return base, key
+
+
+def chat_completion(messages: list, env: dict, args, deadline: float) -> tuple[dict | None, str]:
+    """One POST /chat/completions, retried on 429/5xx. Returns (reply, error)."""
+    base, key = openai_endpoint(env, args)
+    if not key:
+        return None, "no API key: set OPENAI_API_KEY or SILICONFLOW_API_KEY"
+    body = json.dumps({"model": args.model, "messages": messages, "tools": [SHELL_TOOL]}).encode()
+    wait, last = 5.0, ""
+    for _ in range(3):
+        req = urllib.request.Request(base + "/chat/completions", data=body, method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": f"Bearer {key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=max(10, min(600, deadline - time.time()))) as r:
+                return json.load(r), ""
+        except urllib.error.HTTPError as e:
+            last = f"status: {e.code}: {e.read()[:200].decode('utf-8', 'replace')}"
+            if e.code not in (429, 500, 502, 503):
+                break
+        except OSError as e:
+            last = f"fetch failed: {e}"
+        if time.time() + wait > deadline:
+            break
+        time.sleep(wait)
+        wait *= 2
+    return None, last
+
+
+def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
+    """The run_gemini record shape, from a plain chat-completions loop."""
+    started = time.time()
+    deadline = started + args.run_timeout
+    messages = [{"role": "user", "content": prompt}]
+    shells, shell_steps, texts, errors = [], [], [], []
+    tokens_in = tokens_out = tokens_total = tokens_cached = 0
+    requests = tool_calls = 0
+    decider_seen = timed_out = False
+    exit_code = 0
+    group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
+    for _turn in range(GEMINI_SETTINGS["model"]["maxSessionTurns"]):
+        if time.time() > deadline:
+            timed_out = True
+            break
+        reply, err = chat_completion(messages, env, args, deadline)
+        if reply is None:
+            errors.append(err)
+            exit_code = 1
+            break
+        requests += 1
+        usage = reply.get("usage") or {}
+        tokens_in += usage.get("prompt_tokens") or 0
+        tokens_out += usage.get("completion_tokens") or 0
+        tokens_total += usage.get("total_tokens") or 0
+        tokens_cached += (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+        choice = (reply.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        if msg.get("content"):
+            texts.append(msg["content"])
+        calls = msg.get("tool_calls") or []
+        messages.append({"role": "assistant", "content": msg.get("content") or "",
+                         **({"tool_calls": calls} if calls else {})})
+        if not calls:
+            break
+        for call in calls:
+            tool_calls += 1
+            try:
+                command = json.loads((call.get("function") or {}).get("arguments") or "{}").get("command", "")
+            except json.JSONDecodeError:
+                command = ""
+            shells.append(command)
+            try:
+                p = subprocess.run(["bash", "-lc", command], cwd=work, env=env, capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   timeout=min(SHELL_TIMEOUT, max(10, deadline - time.time())), **group)
+                output, status = (p.stdout or "") + (p.stderr or ""), "success" if p.returncode == 0 else "error"
+            except subprocess.TimeoutExpired as e:
+                output, status = ((e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes)
+                                  else (e.stdout or "")) + "\n[command timed out]", "error"
+            if '"decider"' in output:
+                decider_seen = True
+            shell_steps.append({"cmd": command[:200], "status": status, "tail": output[-300:]})
+            if len(output) > TOOL_OUTPUT_LIMIT:
+                output = output[:2000] + "\n[output truncated]\n" + output[-TOOL_OUTPUT_LIMIT + 2000:]
+            messages.append({"role": "tool", "tool_call_id": call.get("id") or "",
+                             "content": output or "(no output)"})
+    else:
+        errors.append("turn limit reached")
+    return {
+        "exit": exit_code, "timed_out": timed_out, "wall_s": round(time.time() - started, 1),
+        "text": "".join(texts), "shell_commands": shells, "shell_steps": shell_steps,
+        "tools_used": ["run_shell_command"] * tool_calls,
+        "in_flight": [],
+        "requests": requests or None, "models": [args.model] if requests else [],
+        "tokens_in": tokens_in or None, "tokens_out": tokens_out or None,
+        "tokens_total": tokens_total or None, "tokens_cached": tokens_cached or None,
+        "tool_calls": tool_calls,
+        "errors": errors[-3:], "stderr_tail": errors[-1] if errors and exit_code else "",
+        "decider_seen": decider_seen,
+    }
+
+
 def stderr_tail(err: str, limit: int = 1500) -> str:
     """The end of Gemini CLI's stderr without JS stack frames: a 1500-char
     tail of a raw stack trace is all `at …` lines and no error message."""
@@ -602,7 +740,8 @@ def smoke(args) -> int:
     bad key, a model id or a helper-model quota shows up before any task."""
     root = Path(tempfile.mkdtemp(prefix="eval-smoke-"))
     work, env = prepare("navigera", "skilled", root, args)
-    res = run_gemini("Reply with the single word OK.", work, env, args)
+    res = run_openai("Reply with the single word OK.", work, env, args) if args.agent == "openai" \
+        else run_gemini("Reply with the single word OK.", work, env, args)
     print(json.dumps({"exit": res["exit"], "models": res["models"], "text": res["text"][:80],
                       "tokens_total": res["tokens_total"]}))
     if res["exit"] != 0 or "OK" not in res["text"].upper():
@@ -707,9 +846,11 @@ def main() -> int:
     ap.add_argument("--tools", default="navigera,navigera-lightpanda,agent-browser,playwright-cli")
     ap.add_argument("--tasks", default="all")
     ap.add_argument("--mode", choices=["skilled", "onboard"], default="skilled")
-    ap.add_argument("--agent", choices=["gemini", "scripted"], default="gemini")
+    ap.add_argument("--agent", choices=["gemini", "openai", "scripted"], default="gemini")
     ap.add_argument("--model", default="gemini-3.5-flash-lite")
     ap.add_argument("--gemini", default="gemini")
+    ap.add_argument("--base-url", default="",
+                    help="--agent openai: chat-completions base URL (default: $OPENAI_BASE_URL or SiliconFlow)")
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--run-timeout", type=int, default=900)
     ap.add_argument("--nv-bin-dir", default=str(REPO / "target" / "release"),
@@ -764,6 +905,7 @@ def main() -> int:
                                              hint=spec.get("hint", ""))
                     before = log_lines(args.decider_log)
                     res = run_gemini(prompt, work, env, args) if args.agent == "gemini" \
+                        else run_openai(prompt, work, env, args) if args.agent == "openai" \
                         else run_scripted(tool, task["id"], site.base, work, env)
                     if spec.get("decider"):
                         calls = read_log(args.decider_log)[before:]
@@ -779,7 +921,8 @@ def main() -> int:
                     # "failed sending request" / "fetch failed" / ECONN*: the
                     # model API call itself never got through.
                     infra = re.search(r"Quota exceeded|RESOURCE_EXHAUSTED|status: (429|503)|\b503\b.*UNAVAILABLE"
-                                      r"|failed sending request|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN",
+                                      r"|failed sending request|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN"
+                                      r"|[Ii]nsufficient balance",
                                       (res.get("stderr_tail") or "") + " ".join(res.get("errors") or []))
                     # On a quota error Gemini CLI silently retries on the next
                     # model of its fallback chain: such a run no longer
