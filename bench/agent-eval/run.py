@@ -24,9 +24,28 @@ calls, how many shell commands used the tool, and off-tool workarounds
 of TypeSafe's API, holding the key), and each run records the decider's
 calls and input tokens from the relay's `--decider-log`.
 
+Measuring the decider takes three arms on the same tasks, model and reps,
+each on its own model key so a spent quota cannot fall on one arm only:
+`navigera` (no decider), `navigera+jev` (the decider is on and the agent
+learns it only as a user would: `start`'s note, a note on a long `ax`, the
+skill) and `navigera+jev-told` (the prompt asks for it too). The first pair
+measures adoption, the second what a used decider saves. Tasks where
+deciding pays are the ones where reading the page costs more than naming
+the element: `preferences` (a 170-line form, four named changes and a
+confirmation to check) and the live docs tasks; on the small pages of the
+others one `ax` is cheaper, and an agent that skips the decider there is
+right to. Compare success first, then agent tokens plus decider tokens,
+turns and wall time, per task.
+
 `--agent scripted` replays known-good navigera command plans instead of
 calling a model: it validates the site, the checks and this harness without
 an API key (CI runs it on every eval, and locally).
+
+`--agent openai` drives the same tasks from any OpenAI-compatible chat
+endpoint (env `OPENAI_BASE_URL`, default SiliconFlow; the key is
+`OPENAI_API_KEY` or `SILICONFLOW_API_KEY`): the model gets one shell tool
+and the same prompt, turns and timeout as the Gemini CLI runs, so a
+DeepSeek run is measured against the Gemini runs, not beside them.
 """
 import argparse
 import json
@@ -39,6 +58,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -59,7 +79,28 @@ TOOLS = {
         "cmd": "navigera", "skill": "navigera",
         "repo": "https://github.com/andrey-usa/navigera",
     },
+    # navigera on Lightpanda ($NAVIGERA_ENGINE, so the agent's commands are
+    # the same as on Chrome) and on chrome-headless-shell (the job points
+    # $CHROME_BIN at it); each also with the decider.
+    "navigera-lightpanda": {
+        "cmd": "navigera", "skill": "navigera",
+        "repo": "https://github.com/andrey-usa/navigera",
+        "engine": "lightpanda",
+    },
+    "navigera-shell": {
+        "cmd": "navigera", "skill": "navigera",
+        "repo": "https://github.com/andrey-usa/navigera",
+    },
     "navigera+jev": {
+        "cmd": "navigera", "skill": "navigera", "decider": True,
+        "repo": "https://github.com/andrey-usa/navigera",
+    },
+    "navigera-lightpanda+jev": {
+        "cmd": "navigera", "skill": "navigera", "decider": True,
+        "repo": "https://github.com/andrey-usa/navigera",
+        "engine": "lightpanda",
+    },
+    "navigera-shell+jev": {
         "cmd": "navigera", "skill": "navigera", "decider": True,
         "repo": "https://github.com/andrey-usa/navigera",
     },
@@ -75,6 +116,13 @@ TOOLS = {
     "agent-browser": {
         "cmd": "agent-browser", "skill": "agent-browser",
         "repo": "https://github.com/vercel-labs/agent-browser",
+    },
+    # agent-browser's own Lightpanda engine: does it hit the same engine
+    # differences (dialogs, popups, iframes) navigera had to handle?
+    "agent-browser-lightpanda": {
+        "cmd": "agent-browser", "skill": "agent-browser",
+        "repo": "https://github.com/vercel-labs/agent-browser",
+        "env": {"AGENT_BROWSER_ENGINE": "lightpanda", "AGENT_BROWSER_EXECUTABLE_PATH": "$LIGHTPANDA_BIN"},
     },
     "playwright-cli": {
         "cmd": "playwright-cli", "skill": "playwright-cli",
@@ -107,7 +155,8 @@ PASS_ENV = ["CHROME_BIN", "RUSTUP_HOME", "CARGO_HOME", "NPM_CONFIG_PREFIX",
             "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS",
             "PLAYWRIGHT_MCP_EXECUTABLE_PATH", "PLAYWRIGHT_MCP_SANDBOX",
             "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "DO_NOT_TRACK", "DISABLE_TELEMETRY", "CI",
-            "NAVIGERA_DECIDER_URL",
+            "NAVIGERA_DECIDER_URL", "LIGHTPANDA_BIN", "NAVIGERA_ENGINE", "LIGHTPANDA_DISABLE_TELEMETRY",
+            "AGENT_BROWSER_ENGINE",
             # Windows: what a desktop session has (npm, Node and PowerShell
             # look things up there; Gemini CLI keeps only TEMP/USERPROFILE/…).
             "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
@@ -207,8 +256,15 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
         "AGENT_BROWSER_EXECUTABLE_PATH": chrome, "AGENT_BROWSER_ARGS": "--no-sandbox",
         "PLAYWRIGHT_MCP_EXECUTABLE_PATH": chrome, "PLAYWRIGHT_MCP_SANDBOX": "false",
         "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1",
-        "DO_NOT_TRACK": "1", "DISABLE_TELEMETRY": "1", "CI": "true",
+        "DO_NOT_TRACK": "1", "DISABLE_TELEMETRY": "1", "LIGHTPANDA_DISABLE_TELEMETRY": "1", "CI": "true",
     }
+    if os.environ.get("LIGHTPANDA_BIN"):
+        env["LIGHTPANDA_BIN"] = os.environ["LIGHTPANDA_BIN"]
+    env.pop("NAVIGERA_ENGINE", None)
+    if TOOLS[tool].get("engine"):
+        env["NAVIGERA_ENGINE"] = TOOLS[tool]["engine"]
+    for key, value in TOOLS[tool].get("env", {}).items():
+        env[key] = os.path.expandvars(value)
     # Only the relay holds the TypeSafe key; only navigera+jev gets a decider.
     env.pop("TYPESAFE_API_KEY", None)
     env.pop("NAVIGERA_DECIDER_URL", None)
@@ -240,7 +296,7 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
             env["PATH"] = os.pathsep.join([args.nv_bin_dir, env.get("PATH", "")])
         subprocess.run([exe("navigera", env), "install-skill", "--dir", str(skills)], env=env, check=True,
                        capture_output=True)
-    elif tool == "agent-browser":
+    elif TOOLS[tool]["cmd"] == "agent-browser":
         src = Path(npm_root()) / "agent-browser" / "skills" / "agent-browser"
         shutil.copytree(src, skills / "agent-browser")
     elif tool == "playwright-cli":
@@ -345,6 +401,137 @@ def run_gemini(prompt: str, work: Path, env: dict, args) -> dict:
     }
 
 
+# --- OpenAI-compatible agents ------------------------------------------------
+# The same job Gemini CLI does, without the CLI: the model is offered one
+# shell tool in the run's workspace and its calls are executed with the
+# run's env, for at most as many turns and as long overall as a Gemini run.
+
+SHELL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "run_shell_command",
+        "description": "Run a shell command in the workspace and return its combined stdout and stderr.",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string", "description": "The command to run, as one shell line."}},
+            "required": ["command"],
+        },
+    },
+}
+
+OPENAI_DEFAULT_BASE = "https://api.siliconflow.com/v1"
+SHELL_TIMEOUT = 240  # Gemini CLI's shell inactivity timeout, for parity
+TOOL_OUTPUT_LIMIT = 32000
+
+
+def openai_endpoint(env: dict, args) -> tuple[str, str]:
+    base = (args.base_url or env.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+            or OPENAI_DEFAULT_BASE).rstrip("/")
+    key = env.get("OPENAI_API_KEY") or env.get("SILICONFLOW_API_KEY") \
+        or os.environ.get("OPENAI_API_KEY") or os.environ.get("SILICONFLOW_API_KEY") or ""
+    return base, key
+
+
+def chat_completion(messages: list, env: dict, args, deadline: float) -> tuple[dict | None, str]:
+    """One POST /chat/completions, retried on 429/5xx. Returns (reply, error)."""
+    base, key = openai_endpoint(env, args)
+    if not key:
+        return None, "no API key: set OPENAI_API_KEY or SILICONFLOW_API_KEY"
+    body = json.dumps({"model": args.model, "messages": messages, "tools": [SHELL_TOOL]}).encode()
+    wait, last = 5.0, ""
+    for _ in range(3):
+        req = urllib.request.Request(base + "/chat/completions", data=body, method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": f"Bearer {key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=max(10, min(600, deadline - time.time()))) as r:
+                return json.load(r), ""
+        except urllib.error.HTTPError as e:
+            last = f"status: {e.code}: {e.read()[:200].decode('utf-8', 'replace')}"
+            if e.code not in (429, 500, 502, 503):
+                break
+        except OSError as e:
+            last = f"fetch failed: {e}"
+        if time.time() + wait > deadline:
+            break
+        time.sleep(wait)
+        wait *= 2
+    return None, last
+
+
+def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
+    """The run_gemini record shape, from a plain chat-completions loop."""
+    started = time.time()
+    deadline = started + args.run_timeout
+    messages = [{"role": "user", "content": prompt}]
+    shells, shell_steps, texts, errors = [], [], [], []
+    tokens_in = tokens_out = tokens_total = tokens_cached = 0
+    requests = tool_calls = 0
+    decider_seen = timed_out = False
+    exit_code = 0
+    group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
+    for _turn in range(GEMINI_SETTINGS["model"]["maxSessionTurns"]):
+        if time.time() > deadline:
+            timed_out = True
+            break
+        reply, err = chat_completion(messages, env, args, deadline)
+        if reply is None:
+            errors.append(err)
+            exit_code = 1
+            break
+        requests += 1
+        usage = reply.get("usage") or {}
+        tokens_in += usage.get("prompt_tokens") or 0
+        tokens_out += usage.get("completion_tokens") or 0
+        tokens_total += usage.get("total_tokens") or 0
+        tokens_cached += (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+        choice = (reply.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        if msg.get("content"):
+            texts.append(msg["content"])
+        calls = msg.get("tool_calls") or []
+        messages.append({"role": "assistant", "content": msg.get("content") or "",
+                         **({"tool_calls": calls} if calls else {})})
+        if not calls:
+            break
+        for call in calls:
+            tool_calls += 1
+            try:
+                command = json.loads((call.get("function") or {}).get("arguments") or "{}").get("command", "")
+            except json.JSONDecodeError:
+                command = ""
+            shells.append(command)
+            try:
+                p = subprocess.run(["bash", "-lc", command], cwd=work, env=env, capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   timeout=min(SHELL_TIMEOUT, max(10, deadline - time.time())), **group)
+                output, status = (p.stdout or "") + (p.stderr or ""), "success" if p.returncode == 0 else "error"
+            except subprocess.TimeoutExpired as e:
+                output, status = ((e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes)
+                                  else (e.stdout or "")) + "\n[command timed out]", "error"
+            if '"decider"' in output:
+                decider_seen = True
+            shell_steps.append({"cmd": command[:200], "status": status, "tail": output[-300:]})
+            if len(output) > TOOL_OUTPUT_LIMIT:
+                output = output[:2000] + "\n[output truncated]\n" + output[-TOOL_OUTPUT_LIMIT + 2000:]
+            messages.append({"role": "tool", "tool_call_id": call.get("id") or "",
+                             "content": output or "(no output)"})
+    else:
+        errors.append("turn limit reached")
+    return {
+        "exit": exit_code, "timed_out": timed_out, "wall_s": round(time.time() - started, 1),
+        "text": "".join(texts), "shell_commands": shells, "shell_steps": shell_steps,
+        "tools_used": ["run_shell_command"] * tool_calls,
+        "in_flight": [],
+        "requests": requests or None, "models": [args.model] if requests else [],
+        "tokens_in": tokens_in or None, "tokens_out": tokens_out or None,
+        "tokens_total": tokens_total or None, "tokens_cached": tokens_cached or None,
+        "tool_calls": tool_calls,
+        "errors": errors[-3:], "stderr_tail": errors[-1] if errors and exit_code else "",
+        "decider_seen": decider_seen,
+    }
+
+
 def stderr_tail(err: str, limit: int = 1500) -> str:
     """The end of Gemini CLI's stderr without JS stack frames: a 1500-char
     tail of a raw stack trace is all `at …` lines and no error message."""
@@ -352,9 +539,11 @@ def stderr_tail(err: str, limit: int = 1500) -> str:
     return "\n".join(lines)[-limit:]
 
 
-def scripted_plan(task: str, base: str) -> list[list[str]]:
+def scripted_plan(tool: str, task: str, base: str) -> list[list[str]]:
     """Known-good navigera plans (refs found by --text / selectors)."""
     s = ["-s", "eval"]
+    if TOOLS[tool].get("engine"):
+        s += ["--engine", TOOLS[tool]["engine"]]
     plans = {
         "lookup": [["start"], ["goto", f"{base}/shop/p/103"], ["wait", "--selector", "#stock"],
                    ["--raw", "ax", "--selector", "#detail"]],
@@ -388,19 +577,30 @@ def scripted_plan(task: str, base: str) -> list[list[str]]:
                              " d.getElementById('send').click(); return true; }"],
                     ["wait", "--ms", "500"],
                     ["--raw", "eval", "document.querySelector('iframe').contentDocument.body.innerText"]],
+        "preferences": [["start"], ["goto", f"{base}/preferences"], ["click", "--text", "Accept all"],
+                        ["click", "--selector", "input[name=price_drop]"],
+                        ["click", "--selector", "input[name=newsletter]"],
+                        ["select", "--selector", "select[name=currency]", "EUR"],
+                        ["select", "--selector", "select[name=history_page_size]", "50"],
+                        ["click", "--text", "Save preferences"], ["wait", "--text", "Preferences saved."],
+                        ["--raw", "text", "--selector", "#saved"]],
     }
     return [s + p for p in plans[task]] + [s + ["quit"]]
 
 
-def run_scripted(task: str, base: str, work: Path, env: dict) -> dict:
+def run_scripted(tool: str, task: str, base: str, work: Path, env: dict) -> dict:
     started = time.time()
     shells, outputs = [], []
-    for argv in scripted_plan(task, base):
+    plan = scripted_plan(tool, task, base)
+    for argv in plan:
         p = subprocess.run([exe("navigera", env), *argv], cwd=work, env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=120)
         shells.append("navigera " + " ".join(argv))
         outputs.append(p.stdout)
         if p.returncode != 0:
+            # The session must not outlive a failed plan: the next run would
+            # find it and drive the wrong browser.
+            subprocess.run([exe("navigera", env), *plan[-1]], cwd=work, env=env, capture_output=True, timeout=60)
             return {"exit": p.returncode, "timed_out": False, "wall_s": round(time.time() - started, 1),
                     "text": "", "shell_commands": shells, "tools_used": [], "requests": 0,
                     "errors": [p.stdout[-500:] + p.stderr[-500:]], "stderr_tail": p.stderr[-800:]}
@@ -445,9 +645,22 @@ def final_answer(text: str) -> str:
     return m[-1].strip() if m else text.strip()[-400:]
 
 
-def check(task: dict, answer: str, site) -> tuple[bool, list[str]]:
+def expected_browser(tool: str) -> str | None:
+    """The browser a tool must stay on, as the site sees it (User-Agent)."""
+    spec = TOOLS.get(tool, {})
+    if spec.get("engine") == "lightpanda" or spec.get("env", {}).get("AGENT_BROWSER_ENGINE") == "lightpanda":
+        return "Lightpanda"
+    return None
+
+
+def check(task: dict, answer: str, site, tool: str = "") -> tuple[bool, list[str]]:
     c, why = task["check"], []
     state = {} if task.get("live") else site.get("/__state")
+    want = expected_browser(tool)
+    if want and state.get("browsers"):
+        others = {b: n for b, n in state["browsers"].items() if b != want}
+        if others:
+            why.append(f"left the {want} engine: pages loaded by {others}")
     if "answer_product" in c:
         item = site.get("/api/products?q=" + urllib.request.quote(c["answer_product"].lower()))["items"][0]
         if f"{item['price']:.2f}" not in answer:
@@ -474,6 +687,18 @@ def check(task: dict, answer: str, site) -> tuple[bool, list[str]]:
                     why.append(f"{k}={o.get(k)!r}")
             if o["id"] not in answer:
                 why.append(f"order id {o['id']} not in answer")
+    if "preferences" in c:
+        saved = list(state.get("preferences", {}).values())
+        if not saved:
+            why.append("preferences never saved")
+        else:
+            got, defaults = saved[-1], site.get("/__defaults")
+            for k, v in c["preferences"].items():
+                if got.get(k) != v:
+                    why.append(f"{k}={got.get(k)!r} (want {v!r})")
+            changed = sorted(k for k, v in got.items() if k not in c["preferences"] and v != defaults.get(k))
+            if changed:
+                why.append(f"also changed {', '.join(changed)}")
     if "ticket" in c:
         want = c["ticket"]
         tickets = state["tickets"]
@@ -515,7 +740,8 @@ def smoke(args) -> int:
     bad key, a model id or a helper-model quota shows up before any task."""
     root = Path(tempfile.mkdtemp(prefix="eval-smoke-"))
     work, env = prepare("navigera", "skilled", root, args)
-    res = run_gemini("Reply with the single word OK.", work, env, args)
+    res = run_openai("Reply with the single word OK.", work, env, args) if args.agent == "openai" \
+        else run_gemini("Reply with the single word OK.", work, env, args)
     print(json.dumps({"exit": res["exit"], "models": res["models"], "text": res["text"][:80],
                       "tokens_total": res["tokens_total"]}))
     if res["exit"] != 0 or "OK" not in res["text"].upper():
@@ -617,12 +843,14 @@ def merge(paths: list[str], out: Path) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tools", default="navigera,agent-browser,playwright-cli")
+    ap.add_argument("--tools", default="navigera,navigera-lightpanda,agent-browser,playwright-cli")
     ap.add_argument("--tasks", default="all")
     ap.add_argument("--mode", choices=["skilled", "onboard"], default="skilled")
-    ap.add_argument("--agent", choices=["gemini", "scripted"], default="gemini")
+    ap.add_argument("--agent", choices=["gemini", "openai", "scripted"], default="gemini")
     ap.add_argument("--model", default="gemini-3.5-flash-lite")
     ap.add_argument("--gemini", default="gemini")
+    ap.add_argument("--base-url", default="",
+                    help="--agent openai: chat-completions base URL (default: $OPENAI_BASE_URL or SiliconFlow)")
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--run-timeout", type=int, default=900)
     ap.add_argument("--nv-bin-dir", default=str(REPO / "target" / "release"),
@@ -652,6 +880,11 @@ def main() -> int:
     tools = [t for t in args.tools.split(",") if t]
     if args.agent == "scripted":
         tools = ["navigera"]
+        if os.environ.get("LIGHTPANDA_BIN"):
+            tools.append("navigera-lightpanda")
+        # An explicit --tools narrows the scripted set (e.g. lightpanda-only
+        # on a box with no Chrome).
+        tools = [t for t in tools if t in args.tools.split(",")]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     runs = []
@@ -672,14 +905,15 @@ def main() -> int:
                                              hint=spec.get("hint", ""))
                     before = log_lines(args.decider_log)
                     res = run_gemini(prompt, work, env, args) if args.agent == "gemini" \
-                        else run_scripted(task["id"], site.base, work, env)
+                        else run_openai(prompt, work, env, args) if args.agent == "openai" \
+                        else run_scripted(tool, task["id"], site.base, work, env)
                     if spec.get("decider"):
                         calls = read_log(args.decider_log)[before:]
                         res["decider_calls"] = len(calls)
                         res["decider_tokens"] = sum((c.get("usage") or {}).get("input_tokens") or 0 for c in calls)
                         res["decider_errors"] = sum(1 for c in calls if c.get("status") != 200)
                     answer = final_answer(res["text"])
-                    ok, why = check(task, answer, site)
+                    ok, why = check(task, answer, site, tool)
                     shells = res["shell_commands"]
                     rec.update(res)
                     # Model quota or outage, not the tool: reported apart and
@@ -687,7 +921,8 @@ def main() -> int:
                     # "failed sending request" / "fetch failed" / ECONN*: the
                     # model API call itself never got through.
                     infra = re.search(r"Quota exceeded|RESOURCE_EXHAUSTED|status: (429|503)|\b503\b.*UNAVAILABLE"
-                                      r"|failed sending request|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN",
+                                      r"|failed sending request|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN"
+                                      r"|[Ii]nsufficient balance",
                                       (res.get("stderr_tail") or "") + " ".join(res.get("errors") or []))
                     # On a quota error Gemini CLI silently retries on the next
                     # model of its fallback chain: such a run no longer

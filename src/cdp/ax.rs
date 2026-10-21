@@ -67,6 +67,35 @@ const WRAPPERS: &[&str] = &[
 /// Roles never printed (their text is carried by the parent).
 const SILENT: &[&str] = &["InlineTextBox", "LineBreak"];
 
+/// Roles whose accessible name may come from their content (ARIA "name
+/// from content", plus Chrome's text and disclosure roles). Any other role
+/// is named by its author (aria-label, a caption, a legend) or not at all.
+const NAME_FROM_CONTENT: &[&str] = &[
+    "button",
+    "cell",
+    "checkbox",
+    "columnheader",
+    "gridcell",
+    "heading",
+    "link",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "option",
+    "radio",
+    "row",
+    "rowheader",
+    "sectionhead",
+    "switch",
+    "tab",
+    "tooltip",
+    "treeitem",
+    "term",
+    "StaticText",
+    "LabelText",
+    "DisclosureTriangle",
+];
+
 /// Rendering options.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
@@ -171,6 +200,39 @@ impl<'a> Tree<'a> {
         field(node, "role").as_str().unwrap_or("")
     }
 
+    /// The node's name as the agent should read it. Some engines (Lightpanda)
+    /// name a table, list or `<b>` with all of its text: that is content,
+    /// not a label, and as a name it would hide the very text it repeats.
+    fn name(&self, node: &Value) -> String {
+        let name = text_of(node, "name");
+        let role = Self::role(node);
+        if name.is_empty() || NAME_FROM_CONTENT.contains(&role) || INTERACTIVE.contains(&role) {
+            return name;
+        }
+        let mut text = Vec::new();
+        self.descendant_text(node, &mut text, 0);
+        if !text.is_empty() && squash(&text.join(" ")) == name {
+            return String::new();
+        }
+        name
+    }
+
+    fn descendant_text(&self, node: &'a Value, out: &mut Vec<String>, depth: usize) {
+        if depth > 64 {
+            return;
+        }
+        for child in self.children(node) {
+            if Self::role(child) == "StaticText" {
+                let t = text_of(child, "name");
+                if !t.is_empty() {
+                    out.push(t);
+                }
+            } else {
+                self.descendant_text(child, out, depth + 1);
+            }
+        }
+    }
+
     fn is_transparent(&self, node: &Value) -> bool {
         if node.get("ignored").and_then(Value::as_bool).unwrap_or(false) {
             return true;
@@ -179,7 +241,7 @@ impl<'a> Tree<'a> {
         if role == "RootWebArea" && !self.is_frame_root(node) {
             return true;
         }
-        WRAPPERS.contains(&role) && text_of(node, "name").is_empty() && !truthy(prop(node, "focusable"))
+        WRAPPERS.contains(&role) && self.name(node).is_empty() && !truthy(prop(node, "focusable"))
     }
 
     fn is_frame_root(&self, node: &Value) -> bool {
@@ -266,7 +328,7 @@ impl<'a> Tree<'a> {
             return;
         }
         let indent = "  ".repeat(depth);
-        let name = text_of(node, "name");
+        let name = self.name(node);
 
         if role == "StaticText" {
             if name.is_empty() || (!covered.is_empty() && covered.contains(&name)) {
@@ -275,6 +337,15 @@ impl<'a> Tree<'a> {
             self.lines.push(format!("{indent}- text: {}", clip(&name, 300)));
             return;
         }
+
+        // A <select>'s options go on its line. Lightpanda names a select
+        // inside a <label> with the label's whole text, options included
+        // ("Currency USD EUR GBP …"): those words come off the name.
+        let mut options = Vec::new();
+        if role == "combobox" || role == "listbox" {
+            collect_options(self, node, &mut options);
+        }
+        let name = without_options(name, &options);
 
         let shown_role = if self.is_frame_root(node) { "document" } else { role.as_str() };
         let mut line = format!("{indent}- {shown_role}");
@@ -291,7 +362,9 @@ impl<'a> Tree<'a> {
         if !tags.is_empty() {
             line.push_str(&format!(" [{}]", tags.join(", ")));
         }
-        let value = text_of(node, "value");
+        // A checkbox's or radio's state is [checked]; its value attribute
+        // ("on" unless set, which Lightpanda reports) reads like a state.
+        let value = if CHECKABLE.contains(&role.as_str()) { String::new() } else { text_of(node, "value") };
         if !value.is_empty() && value != name {
             line.push_str(&format!(" value={}", quote(&clip(&value, 150))));
         }
@@ -307,18 +380,14 @@ impl<'a> Tree<'a> {
         self.effective_children(node, &mut kids);
 
         // <select>: list the options on the combobox line, not as a subtree.
-        if role == "combobox" || role == "listbox" {
-            let mut options = Vec::new();
-            collect_options(self, node, &mut options);
-            if !options.is_empty() {
-                let shown: Vec<String> = options.iter().take(25).map(|o| quote(&clip(o, 60))).collect();
-                line.push_str(&format!(" options: {}", shown.join(", ")));
-                if options.len() > 25 {
-                    line.push_str(&format!(", …(+{})", options.len() - 25));
-                }
-                self.lines.push(line);
-                return;
+        if (role == "combobox" || role == "listbox") && !options.is_empty() {
+            let shown: Vec<String> = options.iter().take(25).map(|o| quote(&clip(o, 60))).collect();
+            line.push_str(&format!(" options: {}", shown.join(", ")));
+            if options.len() > 25 {
+                line.push_str(&format!(", …(+{})", options.len() - 25));
             }
+            self.lines.push(line);
+            return;
         }
 
         // Unnamed node holding only text: inline it (`- paragraph: …`).
@@ -352,6 +421,32 @@ impl<'a> Tree<'a> {
                 }
             }
         }
+        // An unnamed table cell or list item around one control: one line
+        // (Lightpanda leaves cells unnamed, so each checkbox in a table
+        // took two lines where Chrome's tree takes one).
+        let controls: Vec<&Value> = kids.iter().copied().filter(|k| Self::role(k) != "StaticText").collect();
+        let echoes_only = controls.len() == 1 && {
+            let control_name = self.name(controls[0]);
+            kids.iter()
+                .filter(|k| Self::role(k) == "StaticText")
+                .all(|k| text_of(k, "name").trim().trim_end_matches(':') == control_name.trim())
+        };
+        if echoes_only && name.is_empty() && matches!(role.as_str(), "cell" | "gridcell" | "listitem") {
+            let only = controls[0];
+            let only_role = Self::role(only).to_string();
+            let mut grand = Vec::new();
+            self.effective_children(only, &mut grand);
+            if INTERACTIVE.contains(&only_role.as_str()) && grand.iter().all(|k| Self::role(k) == "StaticText") {
+                let only_name = self.name(only);
+                let mut inner = self.describe(only, &only_role);
+                if !only_name.is_empty() {
+                    inner.insert_str(only_role.len(), &format!(" {}", quote(&clip(&only_name, 150))));
+                }
+                line.push_str(&format!(": {inner}"));
+                self.lines.push(line);
+                return;
+            }
+        }
         let has_ref = line.contains("ref=");
         if kids.is_empty()
             && name.is_empty()
@@ -379,7 +474,13 @@ impl<'a> Tree<'a> {
         let sibling_names: Vec<String> = kids
             .iter()
             .filter(|k| Self::role(k) != "StaticText")
-            .map(|k| bare(&text_of(k, "name")))
+            .map(|k| {
+                let mut options = Vec::new();
+                if matches!(Self::role(k), "combobox" | "listbox") {
+                    collect_options(self, k, &mut options);
+                }
+                bare(&without_options(text_of(k, "name"), &options))
+            })
             .filter(|n| !n.is_empty())
             .collect();
         for child in kids {
@@ -415,6 +516,21 @@ impl<'a> Tree<'a> {
         line
     }
 }
+
+/// `name` without the option texts a `<select>`'s name can end with:
+/// Lightpanda names a select inside a `<label>` with all of the label's
+/// text, options included ("Currency USD EUR GBP …").
+fn without_options(name: String, options: &[String]) -> String {
+    let words: Vec<&str> = options.iter().map(|o| o.strip_suffix(" (selected)").unwrap_or(o).trim()).collect();
+    let tail = words.join(" ");
+    match name.strip_suffix(tail.as_str()) {
+        Some(head) if !tail.is_empty() => head.trim_end().to_string(),
+        _ => name,
+    }
+}
+
+/// Roles whose state is checked or not, shown as `[checked]`.
+const CHECKABLE: &[&str] = &["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"];
 
 fn collect_options(tree: &Tree<'_>, node: &Value, out: &mut Vec<String>) {
     for child in tree.children(node) {
@@ -477,6 +593,44 @@ pub fn render(header: &str, nodes: &[Value], frames: &[Frame], opts: &Options) -
         lines.push(format!("… {truncated} more lines (scope with `ax --selector <css>`, or raise `--limit`)"));
     }
     Rendered { lines: lines.len(), text: lines.join("\n"), truncated }
+}
+
+/// Lines for what [`crate::cdp::page`]'s `SHADOW_AX` found inside shadow
+/// roots, appended to a Lightpanda snapshot: one heading per root, then its
+/// elements as the tree would show them, but with no refs -- the engine gives
+/// those nodes no id -- and the targeting that does reach them said once.
+pub fn render_shadow(found: &[Value]) -> String {
+    let mut out = String::new();
+    let mut host = 0;
+    for e in found {
+        let h = e.get("host").and_then(Value::as_u64).unwrap_or(0);
+        let role = e.get("role").and_then(Value::as_str).unwrap_or("generic");
+        let name = e.get("name").and_then(Value::as_str).unwrap_or("");
+        if h != host {
+            host = h;
+            let tag = e.get("tag").and_then(Value::as_str).unwrap_or("element");
+            out.push_str(&format!(
+                "- shadow root of <{tag}> (Lightpanda leaves it out of the tree and gives it no refs; \
+                 target it with --text \"<name>\"):\n"
+            ));
+        }
+        let mut line = format!("  - {role}");
+        if !name.is_empty() {
+            line.push_str(&format!(" {}", serde_json::to_string(name).unwrap_or_default()));
+        }
+        if let Some(level) = e.get("level").and_then(Value::as_u64) {
+            line.push_str(&format!(" [level={level}]"));
+        }
+        if let Some(v) = e.get("value").and_then(Value::as_str) {
+            line.push_str(&format!(" value={}", serde_json::to_string(v).unwrap_or_default()));
+        }
+        if let Some(c) = e.get("checked").and_then(Value::as_bool) {
+            line.push_str(if c { " [checked]" } else { " [unchecked]" });
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -556,5 +710,55 @@ mod tests {
             "- Iframe \"Pay\":\n  - document \"Card form\":\n    - button \"Pay now\" [ref=71]\n\
              - combobox \"Color\" [ref=4] value=\"Blue\" options: \"Red\", \"Blue (selected)\""
         );
+    }
+
+    /// What Lightpanda's tree says about a form, rendered as Chrome's reads:
+    /// a select named with its label's whole text (options included) and
+    /// the label text beside it, a checkbox with the default value "on",
+    /// and an unnamed table cell around one checkbox and its label text.
+    #[test]
+    fn lightpanda_form_quirks_render_as_chrome_reads() {
+        let mut combo = node("4", Some("2"), "combobox", "Currency USD EUR", &["5"], 4);
+        combo["value"] = json!({"type": "string", "value": "USD"});
+        let mut usd = node("6", Some("5"), "option", "USD", &[], 6);
+        usd["properties"] = json!([{"name": "selected", "value": {"type": "boolean", "value": true}}]);
+        let mut cb = node("9", Some("8"), "checkbox", "Email alerts for Drive", &[], 9);
+        cb["value"] = json!({"type": "string", "value": "on"});
+        let nodes = vec![
+            node("1", None, "RootWebArea", "Prefs", &["2", "8"], 1),
+            node("2", Some("1"), "group", "", &["3", "4"], 2),
+            node("3", Some("2"), "StaticText", "Currency", &[], 3),
+            combo,
+            node("5", Some("4"), "MenuListPopup", "", &["6", "7"], 5),
+            usd,
+            node("7", Some("5"), "option", "EUR", &[], 7),
+            node("8", Some("1"), "cell", "", &["9", "10"], 8),
+            cb,
+            node("10", Some("8"), "StaticText", "Email alerts for Drive", &[], 10),
+        ];
+        let out = render("", &nodes, &[], &Options::default());
+        assert_eq!(
+            out.text,
+            "- group:\n  - combobox \"Currency\" [ref=4] value=\"USD\" options: \"USD (selected)\", \"EUR\"\n\
+             - cell: checkbox \"Email alerts for Drive\" [ref=9]"
+        );
+    }
+
+    #[test]
+    fn shadow_content_renders_under_its_root_without_refs() {
+        let found = vec![
+            json!({"host": 1, "tag": "acme-coupon", "role": "textbox", "name": "Coupon code", "value": "SAVE10"}),
+            json!({"host": 1, "tag": "acme-coupon", "role": "button", "name": "Apply coupon"}),
+            json!({"host": 2, "tag": "x-prefs", "role": "checkbox", "name": "Email me", "checked": false}),
+            json!({"host": 2, "tag": "x-prefs", "role": "heading", "name": "Prefs", "level": 3}),
+        ];
+        let text = render_shadow(&found);
+        assert_eq!(text.matches("- shadow root of <").count(), 2, "{text}");
+        assert!(text.contains("<acme-coupon>"), "{text}");
+        assert!(text.contains("  - textbox \"Coupon code\" value=\"SAVE10\"\n"), "{text}");
+        assert!(text.contains("  - checkbox \"Email me\" [unchecked]\n"), "{text}");
+        assert!(text.contains("  - heading \"Prefs\" [level=3]\n"), "{text}");
+        assert!(!text.contains("[ref="), "{text}");
+        assert_eq!(render_shadow(&[]), "");
     }
 }

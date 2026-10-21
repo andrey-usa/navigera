@@ -23,4 +23,4 @@ Your own browser: `navigera -s me start --attach` connects to the user's running
 ## Optional
 
 - [Realistic test site](https://raw.githubusercontent.com/andrey-usa/navigera/master/bench/site/server.py): the local shop the e2e tests and the agent eval run against
-- [Agent eval harness](https://raw.githubusercontent.com/andrey-usa/navigera/master/bench/agent-eval/run.py): Gemini CLI doing the same tasks with navigera, playwright-cli and agent-browser
+- [Agent eval harness](https://raw.githubusercontent.com/andrey-usa/navigera/master/bench/agent-eval/run.py): Gemini CLI or an OpenAI-compatible model (e.g. DeepSeek) doing the same tasks with navigera (Chrome or Lightpanda), playwright-cli and agent-browser

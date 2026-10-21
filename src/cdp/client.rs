@@ -35,6 +35,9 @@ struct Inner {
     /// closing the websocket.
     writer: Mutex<Option<mpsc::UnboundedSender<String>>>,
     events: broadcast::Sender<Value>,
+    /// Events broadcast so far: a subscriber that has handled this many has
+    /// seen everything that arrived before the current point.
+    events_sent: Arc<AtomicU64>,
     /// Set once the transport is gone (browser exited, pipe/socket closed):
     /// `send` then fails at once instead of waiting out its timeout.
     closed: Arc<AtomicBool>,
@@ -76,6 +79,8 @@ impl CdpClient {
         let pending: Arc<Mutex<HashMap<u64, Responder>>> = Arc::new(Mutex::new(HashMap::new()));
         let pending_pump = Arc::clone(&pending);
         let event_tx_pump = event_tx.clone();
+        let events_sent = Arc::new(AtomicU64::new(0));
+        let sent_pump = Arc::clone(&events_sent);
         let closed = Arc::new(AtomicBool::new(false));
         let closed_pump = Arc::clone(&closed);
 
@@ -97,7 +102,7 @@ impl CdpClient {
                     incoming = stream.next() => {
                         match incoming {
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
-                                dispatch(&text, &pending_pump, &event_tx_pump);
+                                dispatch(&text, &pending_pump, &event_tx_pump, &sent_pump);
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
                             Some(Ok(_)) => {} // ping/pong/binary: ignore
@@ -116,6 +121,7 @@ impl CdpClient {
                 pending,
                 writer: Mutex::new(Some(tx)),
                 events: event_tx,
+                events_sent,
                 closed,
             }),
         })
@@ -151,6 +157,8 @@ impl CdpClient {
         });
         let pending_pump = Arc::clone(&pending);
         let event_tx_pump = event_tx.clone();
+        let events_sent = Arc::new(AtomicU64::new(0));
+        let sent_pump = Arc::clone(&events_sent);
         let closed_pump = Arc::clone(&closed);
         tokio::spawn(async move {
             let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
@@ -164,7 +172,7 @@ impl CdpClient {
                         while let Some(pos) = buf[scanned..].iter().position(|b| *b == 0) {
                             let end = scanned + pos;
                             if let Ok(text) = std::str::from_utf8(&buf[..end]) {
-                                dispatch(text, &pending_pump, &event_tx_pump);
+                                dispatch(text, &pending_pump, &event_tx_pump, &sent_pump);
                             }
                             buf.drain(..=end);
                             scanned = 0;
@@ -181,6 +189,7 @@ impl CdpClient {
                 pending,
                 writer: Mutex::new(Some(tx)),
                 events: event_tx,
+                events_sent,
                 closed,
             }),
         })
@@ -231,6 +240,11 @@ impl CdpClient {
             .map_err(|_| anyhow::anyhow!("CDP command timed out: {method}"))?
             .map_err(|_| anyhow::anyhow!("CDP connection closed during {method}"))?;
         response.map_err(|e| anyhow::anyhow!("CDP error in {method}: {e}"))
+    }
+
+    /// How many events have been broadcast to subscribers so far.
+    pub fn events_sent(&self) -> u64 {
+        self.inner.events_sent.load(Ordering::SeqCst)
     }
 
     /// Subscribe to CDP events (method-keyed messages without `id`).
@@ -308,7 +322,7 @@ fn shape(value: &Value, depth: usize) -> Value {
     }
 }
 
-fn dispatch(text: &str, pending: &Mutex<HashMap<u64, Responder>>, events: &broadcast::Sender<Value>) {
+fn dispatch(text: &str, pending: &Mutex<HashMap<u64, Responder>>, events: &broadcast::Sender<Value>, sent: &AtomicU64) {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return;
     };
@@ -325,6 +339,7 @@ fn dispatch(text: &str, pending: &Mutex<HashMap<u64, Responder>>, events: &broad
         return;
     }
     if value.get("method").and_then(Value::as_str).is_some() {
+        sent.fetch_add(1, Ordering::SeqCst);
         let _ = events.send(value);
     }
 }

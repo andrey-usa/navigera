@@ -7,6 +7,7 @@
 pub mod browser;
 pub mod cdp;
 pub mod decide;
+pub mod emulate;
 pub mod mcp;
 pub mod proc;
 pub mod protocol;

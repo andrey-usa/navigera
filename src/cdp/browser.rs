@@ -35,8 +35,7 @@ pub struct Browser {
     client: CdpClient,
     child: Mutex<Option<Child>>,
     /// The child leads its own process group (every browser we launch on
-    /// Unix; lightpanda possibly under xvfb-run): close kills the whole
-    /// group, not just the browser process or the wrapper.
+    /// Unix): close kills the whole group, not just the browser process.
     kill_group: bool,
     /// Kept alive for the session; the temp profile is deleted by `close`
     /// (or on drop). `None` for engines that need no profile (Lightpanda).
@@ -60,35 +59,8 @@ impl Browser {
     /// WebSocket URL is discovered via its `/json/version` endpoint.
     pub fn launch_lightpanda(handle: &tokio::runtime::Handle, bin: &str) -> Result<Self> {
         let port = free_port().context("pick a free port for lightpanda serve")?;
-        // The lightpanda nightly currently requires an X server even for
-        // `serve` (upstream bug — it is supposed to be headless). Wrap with
-        // `xvfb-run` when there is no display and xvfb is available.
-        let (program, args) = if std::env::var_os("DISPLAY").is_none() && xvfb_available() {
-            eprintln!("[browser] no $DISPLAY — launching lightpanda serve under xvfb-run");
-            (
-                "xvfb-run".to_string(),
-                vec![
-                    "-a".to_string(),
-                    bin.to_string(),
-                    "serve".to_string(),
-                    "--host".to_string(),
-                    "127.0.0.1".to_string(),
-                    "--port".to_string(),
-                    port.to_string(),
-                ],
-            )
-        } else {
-            (
-                bin.to_string(),
-                vec![
-                    "serve".to_string(),
-                    "--host".to_string(),
-                    "127.0.0.1".to_string(),
-                    "--port".to_string(),
-                    port.to_string(),
-                ],
-            )
-        };
+        let program = bin.to_string();
+        let args = lightpanda_serve_args(port);
         // Write child output to a temp file for diagnostics (not piped to avoid
         // the pipe-buffer deadlock). The file is read only on poll failure.
         let log_path = std::env::temp_dir().join(format!("lightpanda-serve-{port}.log"));
@@ -102,6 +74,7 @@ impl Browser {
         }
         let mut child = cmd
             .args(&args)
+            .envs(LIGHTPANDA_ENV.iter().copied())
             .stdin(std::process::Stdio::null())
             .stdout(log_file.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
             .stderr(log_file_err.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
@@ -128,6 +101,7 @@ impl Browser {
         crate::timing::log(&format!("[browser] lightpanda serve on 127.0.0.1:{port} -> {ws_url}"));
         let client = handle.block_on(CdpClient::connect(&ws_url)).context("CDP connect to lightpanda")?;
         let shared = Arc::new(Shared::default());
+        shared.single_target.store(true, std::sync::atomic::Ordering::Relaxed);
         events::spawn(handle, &client, Arc::clone(&shared));
         Ok(Self {
             handle: handle.clone(),
@@ -271,11 +245,34 @@ impl Browser {
                 .ok_or_else(|| anyhow::anyhow!("attachToTarget: no sessionId"))?
                 .to_string();
             self.shared.register(&session_id, &target_id);
-            let page =
-                Page::new(self.handle.clone(), self.client.clone(), session_id, target_id, Arc::clone(&self.shared));
+            let page = Page::new(
+                self.handle.clone(),
+                self.client.clone(),
+                session_id.clone(),
+                target_id,
+                Arc::clone(&self.shared),
+            );
             page.enable().await?;
+            events::arm_dialog(&self.client, &self.shared, &session_id).await;
             Ok(page)
         })
+    }
+
+    /// Wait (briefly) until the event watcher has handled every event that
+    /// arrived so far (see [`Shared::caught_up`]).
+    pub fn caught_up(&self) -> bool {
+        self.shared.caught_up(&self.client, Duration::from_millis(250))
+    }
+
+    /// Grant a permission (e.g. `geolocation`) to every origin.
+    pub fn grant_permission(&self, permission: &str) -> Result<()> {
+        self.block_on(self.client.send(
+            "Browser.grantPermissions",
+            json!({ "permissions": [permission] }),
+            None,
+            CMD_TIMEOUT,
+        ))
+        .map(|_| ())
     }
 
     /// The watcher's shared state (dialog log, popups, navigation).
@@ -286,6 +283,12 @@ impl Browser {
     /// How dialogs are answered from now on.
     pub fn set_dialog_policy(&self, policy: DialogPolicy) {
         *self.shared.policy.lock().unwrap() = policy;
+        if self.shared.is_single_target() {
+            let sessions: Vec<String> = self.shared.sessions.lock().unwrap().keys().cloned().collect();
+            for session in sessions {
+                self.block_on(events::arm_dialog(&self.client, &self.shared, &session));
+            }
+        }
     }
 
     /// Attach to a page target the browser opened on its own (a popup) and
@@ -374,9 +377,15 @@ impl Browser {
                 .ok_or_else(|| anyhow::anyhow!("attachToTarget: no sessionId"))?
                 .to_string();
             self.shared.register(&session_id, &target_id);
-            let page =
-                Page::new(self.handle.clone(), self.client.clone(), session_id, target_id, Arc::clone(&self.shared));
+            let page = Page::new(
+                self.handle.clone(),
+                self.client.clone(),
+                session_id.clone(),
+                target_id,
+                Arc::clone(&self.shared),
+            );
             page.enable().await?;
+            events::arm_dialog(&self.client, &self.shared, &session_id).await;
             Ok(page)
         })
     }
@@ -520,17 +529,37 @@ impl Browser {
     }
 }
 
-/// True when `xvfb-run` is on PATH.
-fn xvfb_available() -> bool {
-    std::env::var_os("PATH")
-        .map(|p| {
-            std::env::split_paths(&p).any(|d| d.join(if cfg!(windows) { "xvfb-run.exe" } else { "xvfb-run" }).is_file())
-        })
-        .unwrap_or(false)
+/// Environment for `lightpanda serve`: no usage telemetry.
+const LIGHTPANDA_ENV: &[(&str, &str)] = &[("LIGHTPANDA_DISABLE_TELEMETRY", "1")];
+
+/// `lightpanda serve` arguments. `serve` loads no sub-resources by default:
+/// iframes (card and support widgets) would be empty documents, and without
+/// stylesheets `display:none` content would count as visible.
+fn lightpanda_serve_args(port: u16) -> Vec<String> {
+    let port = port.to_string();
+    ["serve", "--host", "127.0.0.1", "--port", &port, "--load-resources", "iframe", "--load-resources", "stylesheet"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Pick a free localhost TCP port by binding to port 0 and releasing it.
 fn free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind 127.0.0.1:0 for a free port")?;
     Ok(listener.local_addr()?.port())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lightpanda_serve_loads_iframes_and_stylesheets_without_telemetry() {
+        let args = lightpanda_serve_args(9333);
+        assert_eq!(&args[..5], ["serve", "--host", "127.0.0.1", "--port", "9333"]);
+        let loads: Vec<&str> = args.windows(2).filter(|w| w[0] == "--load-resources").map(|w| w[1].as_str()).collect();
+        assert_eq!(loads, ["iframe", "stylesheet"]);
+        assert!(!args.iter().any(|a| a.contains("xvfb")), "serve is headless: {args:?}");
+        assert_eq!(LIGHTPANDA_ENV, [("LIGHTPANDA_DISABLE_TELEMETRY", "1")]);
+    }
 }

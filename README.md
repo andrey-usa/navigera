@@ -91,11 +91,16 @@ page "Checkout — Acme" http://shop.test/checkout
 ```
 
 The commands are `goto`, `ax`, `click`, `fill`, `type`, `press`, `select`,
-`hover`, `scroll`, `upload`, `wait`, `eval`, `back`/`forward`/`reload`,
-`screenshot`, the `tab-*` commands, `dialog` and `quit`.
+`hover`, `drag`, `scroll`, `upload`, `wait`, `eval`, `back`/`forward`/`reload`,
+`screenshot`, `pdf`, the `tab-*` commands, `dialog` and `quit`, with `get`
+and `is` for one value, `console` and `network` for what the page logged and
+fetched, `cookies`, `storage` and `state save|load` (Playwright's
+`storageState` format) for sign-ins, `set` for viewport, device, media, geo
+and the like, and `route` to fail or answer requests.
 
-- **Targets:** elements can be named by ref, `--selector <css>` or
-  `--text "<visible text>"`.
+- **Targets:** elements can be named by ref, `--selector <css>`,
+  `--text "<visible text>"`, `--role/--name`, `--label`, `--placeholder` or
+  `--testid`.
 - **Output:** every command prints one JSON line, or just the result with
   `--raw`.
 - **Help:** `navigera help <command>`.
@@ -160,6 +165,17 @@ that read the tree (114–119K against a median of 250K; small samples).
 Unprompted, it read the tree and never used the decider. Details and caveats:
 [docs/multi-model.md](docs/multi-model.md).
 
+**Measured again (2026-10-21, run 39530836547).** On 78 decisions (50
+elements, 28 yes/no questions, public pages included), Jev got 50/50 and
+27/28 at an 80 ms median, $0.017 for all of them; DeepSeek-V4.1-Flash
+reading the same tree got the same 50/50 and 27/28 at a 2.0 s median.
+Neither followed text planted in the page. Since `start` and long trees
+tell the agent how to use the decider, Gemini CLI used it unprompted in 3 of
+15 runs and in 14 of 15 when the prompt asked (run 39561380436, three runs
+of five tasks per arm); median tokens per run were 199K without the
+decider, 172K with it and 190K when told, a spread within the run-to-run
+noise at this sample size.
+
 ## Supported browsers
 
 CI runs the full end-to-end suite on:
@@ -183,7 +199,14 @@ every command it sends (`NAVIGERA_CDP_TRACE`), and
 [`tools/cdp_check.py`](tools/cdp_check.py) validates every method, parameter
 and enum value against the `/json/protocol` that *that* browser serves.
 Deprecated or unknown usage fails the build. Edge and Brave are covered by
-the benchmark. Lightpanda is experimental (single tab, no rendering).
+the benchmark.
+
+**Lightpanda** 1.0 (`--engine lightpanda`) runs the same end-to-end suite in
+CI, on 1.0.1 and the nightly. It is a different engine (one tab, no layout),
+so navigera fills in what its CDP leaves out: shadow roots and password
+fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
+The differences that remain are listed in
+[docs/navigera.md](docs/navigera.md#browsers-and-engines).
 
 ## Benchmarks
 
@@ -300,9 +323,10 @@ free-tier API key against the local Acme Supply site, with **navigera**,
 - **onboard:** the agent gets only the tool's name and repository URL and
   must install it from its docs, then do a short task.
 
-The five tasks are a price lookup, a purchase with a coupon and an iframe
+The six tasks are a price lookup, a purchase with a coupon and an iframe
 payment form, a login plus a paginated order table, docs in a new tab with a
-collapsed FAQ, and a support form inside an iframe. Success is judged from
+collapsed FAQ, a support form inside an iframe, and four named changes on a
+170-line settings form that must leave everything else as it was. Success is judged from
 the site's recorded state and the final answer, never from the agent's
 claim. Every run also records model requests, tokens, shell commands and
 off-tool workarounds (curl, ad-hoc scripts). Model, prompt template, Chrome
@@ -317,6 +341,11 @@ one slot per tool, because Gemini's free quota is per Google Cloud project:
 the site, the success checks and the harness with known-good navigera
 command plans. Runs that die on a model quota or outage are reported as
 **⚠ infra**, not counted as a tool failure.
+
+`agent: openai` runs the same tasks, prompt, turn limit and timeout with
+any OpenAI-compatible model instead of Gemini CLI (DeepSeek-V4.1-Flash
+through SiliconFlow by default; `OPENAI_BASE_URL`, `SILICONFLOW_API_KEY`), so
+a result can be checked against a second model family.
 
 `navigera+jev` runs navigera with the decider configured, and
 `navigera+jev-told` also asks for `--find` / `check` in the prompt; the
