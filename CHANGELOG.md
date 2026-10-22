@@ -90,6 +90,10 @@ reach for in Playwright, and a decision model the agent is told how to use.
   named with every option ("Currency USD EUR GBP …") next to a copy of the
   label; an unnamed table cell took two lines per checkbox. The preferences
   page is 177 lines on Lightpanda now, 243 before, 169 on Chrome.
+- Lightpanda: a checkbox or radio shows in `ax` the state a click left it
+  in. The engine's tree keeps the `checked` attribute the page loaded with,
+  so a box an agent had ticked read as unticked; in the DeepSeek eval (run
+  39691526622) an agent clicked one back that way and ran out of turns.
 - Lightpanda: an empty password field no longer reads as filled in `ax`.
   The engine gives every password field the value `*****`; the snapshot now
   asks the field and shows a dot per character, or nothing, as on Chrome.

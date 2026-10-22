@@ -1764,6 +1764,89 @@ impl Page {
         }
     }
 
+    /// Lightpanda takes a native checkbox's or radio's state in its
+    /// accessibility tree from the `checked` attribute, the state the page
+    /// loaded with, rather than from the element: after a click the tree
+    /// still showed the old state. In the DeepSeek eval (run 39691526622) an
+    /// agent on the preferences form read a box it had ticked as unticked,
+    /// clicked it again, and ran out of turns with both boxes as they began.
+    /// The states are read from the elements, in one call for all of them,
+    /// and written into the nodes.
+    fn live_checked(&self, nodes: &mut [Value], timeout: Duration) {
+        let boxes: Vec<(usize, u64)> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| {
+                let role = n.get("role").and_then(|r| r.get("value")).and_then(Value::as_str)?;
+                if role != "checkbox" && role != "radio" {
+                    return None;
+                }
+                Some((i, n.get("backendDOMNodeId").and_then(Value::as_u64)?))
+            })
+            .collect();
+        if boxes.is_empty() {
+            return;
+        }
+        let session = Some(self.session_id.as_str());
+        let states: Option<Vec<Value>> = self.block_on(async {
+            let resolved = futures_util::future::join_all(boxes.iter().map(|&(_, id)| {
+                self.client.send(
+                    "DOM.resolveNode",
+                    json!({ "backendNodeId": id, "objectGroup": "nv-live" }),
+                    session,
+                    timeout,
+                )
+            }))
+            .await;
+            let ids: Vec<Option<String>> = resolved
+                .iter()
+                .map(|r| r.as_ref().ok()?.get("object")?.get("objectId")?.as_str().map(str::to_string))
+                .collect();
+            let this = ids.iter().flatten().next()?.clone();
+            let arguments: Vec<Value> = ids
+                .iter()
+                .map(|id| match id {
+                    Some(id) => json!({ "objectId": id }),
+                    None => json!({ "value": null }),
+                })
+                .collect();
+            let res = self
+                .client
+                .send(
+                    "Runtime.callFunctionOn",
+                    json!({
+                        "objectId": this,
+                        "functionDeclaration": "function (...els) { return els.map(e => e && e.tagName === 'INPUT' \
+                            && (e.type === 'checkbox' || e.type === 'radio') ? e.checked : null); }",
+                        "arguments": arguments,
+                        "returnByValue": true,
+                    }),
+                    session,
+                    timeout,
+                )
+                .await;
+            let _ = self
+                .client
+                .send("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-live" }), session, timeout)
+                .await;
+            res.ok()?.get("result")?.get("value")?.as_array().cloned()
+        });
+        let Some(states) = states else { return };
+        for (&(i, _), state) in boxes.iter().zip(states.iter()) {
+            let Some(checked) = state.as_bool() else { continue };
+            let value = json!({ "type": "tristate", "value": if checked { "true" } else { "false" } });
+            let node = &mut nodes[i];
+            if !node.get("properties").is_some_and(Value::is_array) {
+                node["properties"] = json!([]);
+            }
+            let props = node["properties"].as_array_mut().expect("an array");
+            match props.iter_mut().find(|p| p.get("name").and_then(Value::as_str) == Some("checked")) {
+                Some(p) => p["value"] = value,
+                None => props.push(json!({ "name": "checked", "value": value })),
+            }
+        }
+    }
+
     /// Accessibility snapshot for agents (see [`ax`]): an indented text
     /// tree with `[ref=N]` on actionable nodes, iframes included. `json`
     /// keeps the older flat `[{ref, role, name, value?}]` list.
@@ -1776,6 +1859,7 @@ impl Page {
         let mut nodes = res.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
         if self.shared.is_single_target() {
             self.unmask_passwords(&mut nodes, timeout);
+            self.live_checked(&mut nodes, timeout);
         }
         if opts.json {
             return Ok(flat_ax(&nodes, opts.all));
