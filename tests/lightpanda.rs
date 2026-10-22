@@ -262,6 +262,19 @@ fn acme_supply_on_lightpanda() {
     assert!(prefs.contains("- combobox \"Currency\" [ref="), "{prefs}");
     assert!(prefs.contains("- cell: checkbox \"Email alerts for Drive\" [checked, ref="), "{prefs}");
     assert!(prefs.lines().count() < 190, "{} lines", prefs.lines().count());
+    assert!(prefs.contains("- checkbox \"Price-drop alerts\" [ref="), "{prefs}");
+    assert!(prefs.contains("- checkbox \"Weekly newsletter\" [checked, ref="), "{prefs}");
+    // A click changes the state the tree shows. Lightpanda's own tree keeps
+    // the `checked` attribute the page loaded with, so a ticked box read as
+    // unticked and an agent clicked it back.
+    agent.ok(&["click", "--text", "Price-drop alerts"]);
+    agent.ok(&["click", "--text", "Weekly newsletter"]);
+    agent.ok(&["click", "--text", "Compact"]);
+    let prefs = agent.ax(&[]);
+    assert!(prefs.contains("- checkbox \"Price-drop alerts\" [checked, ref="), "{prefs}");
+    assert!(prefs.contains("- checkbox \"Weekly newsletter\" [ref="), "{prefs}");
+    assert!(prefs.contains("- radio \"Compact\" [checked, ref="), "{prefs}");
+    assert!(prefs.contains("- radio \"Comfortable\" [ref="), "{prefs}");
 
     // Support form inside an iframe: in the tree, with refs.
     agent.ok(&["goto", &url("/support")]);
