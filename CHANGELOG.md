@@ -8,8 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- With a decision model on, a plain `ax` of a tree over 60 lines shows its
-  first 40 lines and how many more there are, with a note that `--find` and
+- With a decision model on, a plain `ax` of a tree over 16 KB
+  (`NAVIGERA_AX_PREVIEW_BYTES`) shows its first 40 lines and how many more
+  there are, with a note that `--find` and
   `check` act on the whole page without reading it and that `ax --limit
   <n>` reads it all. The note alone came after the whole tree, once the
   agent had read it: in the 0.5.0 eval the agent reached for `--find` or

@@ -1734,13 +1734,25 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
 /// does not need the rest.
 const AX_DECIDER_LINES: usize = 60;
 
-/// The lines a plain `ax` shows of a long tree while a decision model is on.
+/// The lines a plain `ax` shows of a large tree while a decision model is on.
 ///
 /// The note alone, after the whole tree, came too late: the agent had read
 /// the tree by the time it was told it need not, and in 12 runs it reached
 /// for `--find` or `check` unasked in 3. The preview makes the cheap path the
 /// default one; `ax --limit <n>` (or a scope) still reads everything.
 const AX_PREVIEW_LINES: usize = 40;
+
+/// How large a tree is before a plain `ax` shows a preview of it
+/// (`NAVIGERA_AX_PREVIEW_BYTES`, default 16 KB, `0` for never).
+///
+/// Size, not length: the pages where deciding paid were documentation
+/// indexes of 56 and 95 KB, where `--find` cut the agent's tokens by a third
+/// (eval run 39733028440). A 170-line form is 8 KB, read once for every ref
+/// it needs; previewed at a line count, the agent went around the preview and
+/// spent 63% more.
+fn ax_preview_bytes() -> usize {
+    std::env::var("NAVIGERA_AX_PREVIEW_BYTES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(16 * 1024)
+}
 
 /// The first `keep` lines of `tree`, and how many lines were left out.
 fn ax_preview(tree: &str, keep: usize) -> (String, usize) {
@@ -2062,10 +2074,13 @@ impl Driver {
         if let (Command::Ax { max_depth, all, limit, scope, .. }, Value::String(tree)) = (command, &mut result) {
             let lines = tree.lines().count();
             if lines > AX_DECIDER_LINES && crate::decide::Decider::from_env().is_some() {
+                let threshold = ax_preview_bytes();
                 let plain = max_depth.is_none()
                     && *all != Some(true)
                     && limit.is_none()
-                    && scope.optional("ax").ok().flatten().is_none();
+                    && scope.optional("ax").ok().flatten().is_none()
+                    && threshold > 0
+                    && tree.len() > threshold;
                 if plain {
                     let (shown, hidden) = ax_preview(tree, AX_PREVIEW_LINES);
                     *tree = format!("{shown}\n... {hidden} more lines not shown");
