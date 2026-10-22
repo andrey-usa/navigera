@@ -78,6 +78,9 @@ navigera -s work check "Is an error message shown?"   # {"yes":0.02,"answer":fal
   probability of yes; near 0.5, look yourself.
 - Still read the page (`ax`, `eval`) for its text: a price, an order number,
   anything you must report.
+- On a page over 60 lines, a plain `ax` shows its first 40 and how many more
+  there are. `--find` and `check` see the whole page, so act with them;
+  `ax --limit 2000` (or `ax --selector main`) when you need the text.
 
 ## Shell commands, not a wrapper script
 
