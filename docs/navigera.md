@@ -87,6 +87,7 @@ to appear.
 | `cookies` | `[--all] [--url <u>] [--json]`; `set <name> <value> [--url <u> \| --domain <d>] [--path] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax\|Strict\|None]`; `delete <name>`; `clear` | one cookie per line (`--all`: every cookie in the browser) |
 | `storage` | `[local\|session] [get [<key>] \| set <key> <value> \| remove <key> \| clear]` | the value, or the whole store as an object |
 | `state` | `save\|load <file.json>` | every cookie (HttpOnly too) and the open tabs' localStorage to a file, or back: `{saved\|loaded, cookies, origins}`. The file is Playwright's `storageState` format, so either tool reads the other's. `load` sets the cookies at once and gives each origin's keys to documents of that origin that lack them |
+| `show` / `hide` | — | the session's browser on screen, or off it, with the same tabs (the active one stays active) and sign-ins: a `--profile` browser restarts on its profile, which keeps everything; one navigera launched is replaced by one carrying its cookies and the open tabs' storage. For a step only a person can do (a login, 2FA, a CAPTCHA). `show` needs a display. Not for `--attach`, which is already on screen | state + `visible` |
 | `profiles` | — | no session needed: `{browsers: [{browser, user_data_dir, attach_ready, hand_off, profiles: [{dir, name, email, last_used}]}], navigera_profiles: [{name, dir, running}]}`: what `--attach` and `--from` can be pointed at |
 | `pdf` | `[<path>]` or `--path`; `--landscape`; `--background` | `{path, bytes}` |
 | `set` | `viewport <w> <h> [--scale <dpr>] [--mobile]`, `device <name>` (iPhone 15, iPhone 15 Pro Max, iPhone SE, Pixel 8, Galaxy S24, iPad Mini, iPad Pro 11, Laptop, Desktop), `media dark\|light\|print\|reduced-motion\|forced-colors`, `geo <lat> <lon> [--accuracy <m>]`, `offline on\|off`, `headers 'Name: value'…` (or a JSON object), `ua <string>`, `locale <tag>`, `timezone <zone>`, `credentials <user> <password>`; `off` resets one | what was set. Applies to every tab and to tabs opened later |
@@ -307,6 +308,7 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_wait_for`, `browser_evaluate`, `browser_screenshot` (returns the image), `browser_tabs`, `browser_history`, `browser_handle_dialog` | as the CLI |
 | `browser_console_messages`, `browser_network_requests` | `console`, `network` |
 | `browser_resize` | `set viewport` |
+| `browser_handoff` | `show` / `hide`: the browser on the person's screen with the same tabs and sign-ins (a login, 2FA, a CAPTCHA), and back |
 | `browser_run` | several ops in one call (`[{"op":"fill","ref":21,"value":"Ada"}, {"op":"click","ref":30}]`), stopping at the first failure, ending with a snapshot |
 | `browser_close` | close the browser; the next call starts a fresh one |
 

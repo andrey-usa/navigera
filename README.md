@@ -119,6 +119,11 @@ portable:
 | `start --profile agent --from chrome` | a browser of its own, seeded with a copy of your Chrome profile's sign-ins (cookies, site storage, saved logins); it can run `--headless` while you keep working | any Chrome; same machine and user. On Windows close Chrome for the copy (it locks its cookies) |
 | `state save` / `state load` | the cookies and site storage of a session, as a file, to any other machine or CI job | nothing; Playwright's `storageState` format |
 
+The other way round, `show` puts a headless session on the person's screen
+with the same tabs and sign-ins, for the step only they can do (a login, a
+2FA prompt, a CAPTCHA), and `hide` takes it back; MCP clients get the same as
+`browser_handoff`.
+
 `navigera profiles` lists what can be handed over: each installed browser's
 profiles (name, signed-in email), whether `--attach` reaches it right now,
 and navigera's own `--profile` browsers. `--profile work` without `--from` is

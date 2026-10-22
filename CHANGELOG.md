@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format follows
   `chromium`, `edge` or a user data directory; `--from-profile` picks a
   profile by directory, name or email. The copy replaces only a profile
   navigera made, and is refused while that profile's browser runs.
+- `show` / `hide` (MCP: `browser_handoff`): the session's browser on the
+  person's screen with the same tabs and sign-ins, for a step only they can
+  do -- a login, a 2FA prompt, a CAPTCHA -- and back off it. A `--profile`
+  browser restarts on its own profile; one navigera launched hands its
+  cookies and storage to its replacement.
 - `navigera profiles`: the browsers and profiles a session can be handed
   (name, signed-in email, whether `--attach` reaches the browser now), and
   navigera's own `--profile` browsers.
