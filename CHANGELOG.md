@@ -4,7 +4,99 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] - 2026-10-22
+
+Lightpanda 1.0 as a second engine, the inspection and state commands agents
+reach for in Playwright, and a decision model the agent is told how to use.
+
+### Added
+
+- Lightpanda 1.0 (`--engine lightpanda`, or `NAVIGERA_ENGINE=lightpanda` for
+  every command of a shell): the same commands and `ax` tree as on Chrome,
+  with the engine's gaps covered (see Fixed). CI runs the end-to-end suite
+  on Lightpanda 1.0.1 and the nightly.
+- `drag <from> <to>`: HTML5 drag and drop for a `draggable` source (the drag
+  events with one DataTransfer, since headless Chrome will not start a native
+  drag from synthetic input, and on Lightpanda too), a held mouse moved
+  across for anything else; the result says whether the drop was accepted.
+- `state save|load <file>`: every cookie and the open tabs' localStorage to
+  a file and back, in Playwright's `storageState` format, so a signed-in
+  session can be reused, by navigera or Playwright.
+- `status`: the session's engine, browser executable, CDP endpoint and tab
+  state.
+- `console`, `errors`, `network` (one request in full with `network <n>`,
+  HAR with `--har`): what the page logged and fetched; an uncaught exception
+  during a command is reported in its `notes`.
+- `cookies` (list/set/delete/clear), `storage` (local/session), `pdf`.
+- `set viewport|device|media|geo|offline|headers|ua|locale|timezone|credentials`:
+  emulation for every tab, replayed on new tabs.
+- `route` / `unroute`: fail or answer requests by URL glob.
+- `init-script`: code that runs before the page's own in every document.
+- Locators on every element command: `--role/--name`, `--label`,
+  `--placeholder`, `--testid`, `--nth`.
+- `get`, `is`, `dblclick`, `focus`, `check`/`uncheck <target>`,
+  `keydown`/`keyup`, `insert-text`, `wait --idle`.
+- MCP: `browser_console_messages`, `browser_network_requests`,
+  `browser_resize`.
+- `notes` in responses: what the engine did differently from what was asked
+  (e.g. a Lightpanda popup loaded in the current tab).
+- Agent eval: any OpenAI-compatible model as the agent (`--agent openai`,
+  e.g. DeepSeek-V4.1-Flash through SiliconFlow) on the same tasks, prompt,
+  turn limit and timeout as Gemini CLI; the decision benchmark takes such a
+  model as its baseline; an OpenRouter head-to-head of tool variants
+  (`openrouter-eval.yml`); a WebArena-Verified pilot (`bench/webarena`,
+  `webarena-eval.yml`).
+
+### Changed
+
+- With a decision model on, the agent is told how to use it where it
+  decides what to do next: `start` adds a note (act with `--find`, verify
+  with `check`, read `ax` only for text to report), a tree over 60 lines
+  ends with a one-line note that acting needs no reading, and the skill's
+  main loop shows the decider form next to the ax form. Before, `start` said
+  only `"decider": "<model>"` and the usage sat in a later skill section: in
+  eval run 39437548538 the agent saw the decider in 8 of 10 runs and used
+  it in none; in run 39561380436 it used it in 3 of 15 unprompted.
+- Agent eval: a `preferences` task (a 170-line settings form, four named
+  changes, a confirmation to check; the rest must stay as it was), the task
+  the decider is measured on, and the three-arm protocol for measuring it
+  (`navigera`, `navigera+jev`, `navigera+jev-told`, one model key each).
+- `start` on a running session with a different engine fails instead of
+  silently reusing it.
+
+### Fixed
+
+- Lightpanda 1.0.x: `goto` waits for the load event (it returned at commit
+  and gave up after 500 ms); confirm()/prompt() get the dialog policy (they
+  returned false/null while reported accepted); `target=_blank` pages are
+  followed in the one tab; iframes and stylesheets load; table cells keep
+  their text in `ax`; shadow-DOM clicks no longer wait 3 s; no `xvfb-run`
+  wrapper; telemetry off through `LIGHTPANDA_DISABLE_TELEMETRY`.
+- Dialogs, popups and JS navigations reported just before a command's
+  response are no longer missed by the op that caused them.
+- Lightpanda: a navigation a click handler starts (`location.href = ...`)
+  is waited for. The engine reports it only after the click's reply, so the
+  click returned the old page with `loading: true`; it now returns the page
+  the click led to.
+- Lightpanda: `ax` shows what open shadow roots hold. The engine's tree
+  stops at a shadow root and gives the nodes inside no ids, so a coupon
+  field in a web component was invisible to an agent reading the snapshot;
+  it is now listed under the root, without refs, with `--text` as the way to
+  target it.
+- Lightpanda: a settings form reads in `ax` as it does on Chrome. A
+  checkbox showed its default value `"on"`, which reads like a state (in the
+  DeepSeek eval, run 39530836547, both Lightpanda runs of the preferences
+  task left a box unticked and failed); a `<select>` inside a `<label>` was
+  named with every option ("Currency USD EUR GBP …") next to a copy of the
+  label; an unnamed table cell took two lines per checkbox. The preferences
+  page is 177 lines on Lightpanda now, 243 before, 169 on Chrome.
+- Lightpanda: a checkbox or radio shows in `ax` the state a click left it
+  in. The engine's tree keeps the `checked` attribute the page loaded with,
+  so a box an agent had ticked read as unticked; in the DeepSeek eval (run
+  39691526622) an agent clicked one back that way and ran out of turns.
+- Lightpanda: an empty password field no longer reads as filled in `ax`.
+  The engine gives every password field the value `*****`; the snapshot now
+  asks the field and shows a dot per character, or nothing, as on Chrome.
 
 ## [0.4.1] - 2026-10-14
 
@@ -68,5 +160,6 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.5.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.5.0
 [0.4.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.1
 [0.4.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.0

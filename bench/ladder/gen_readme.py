@@ -202,10 +202,12 @@ if agent:
     label = {
         "navigera": "`navigera` (this repo)",
         "navigera (headless shell)": "`navigera` on chrome-headless-shell",
-        "agent-browser": "`agent-browser` 0.38 (Vercel Labs, Rust)",
-        "playwright-cli": "`playwright-cli` 0.1.22 (Microsoft)",
-        "Playwright MCP": "Playwright MCP 0.0.83 (Microsoft)",
-        "Chrome DevTools MCP": "Chrome DevTools MCP 1.10.1 (Google)",
+        # bench.yml installs these @latest and the run records no version,
+        # so the table names none rather than one that may be stale.
+        "agent-browser": "`agent-browser` (Vercel Labs, Rust)",
+        "playwright-cli": "`playwright-cli` (Microsoft)",
+        "Playwright MCP": "Playwright MCP (Microsoft)",
+        "Chrome DevTools MCP": "Chrome DevTools MCP (Google)",
     }
     for a in agent:
         kind = "MCP" if "MCP" in a["name"] else "CLI"

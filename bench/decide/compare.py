@@ -8,8 +8,11 @@ LLM does without a decider). Every case has a known right answer.
         --models gemini-3.5-flash-lite [--live] --out out/decide
 
 Without --decider-url the decider is `mock_jev.py` (word overlap: the
-plumbing runs, the "Jev" column means nothing). Without GEMINI_API_KEY or
---models the Gemini column is skipped.
+plumbing runs, the "Jev" column means nothing). Without a key for a model
+or --models the model's column is skipped: `gemini-*` models read the
+tree through the Gemini API (GEMINI_API_KEY); any other model id goes to
+an OpenAI-compatible endpoint (OPENAI_BASE_URL, default SiliconFlow;
+OPENAI_API_KEY or SILICONFLOW_API_KEY).
 
 Cases: the bench site's pages, fixture pages served here (lookalike
 buttons, counting, price comparison, injected instructions, a page of 450
@@ -260,6 +263,41 @@ def gemini(model: str, prompt: str, key: str) -> dict:
     return {"infra": last}
 
 
+def openai_chat(model: str, prompt: str, key: str) -> dict:
+    """One chat-completions call, the gemini() shape; retried on quota and overload."""
+    base = (os.environ.get("OPENAI_BASE_URL") or "https://api.siliconflow.com/v1").rstrip("/")
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}]}).encode()
+    wait, last = 5.0, ""
+    for _ in range(6):
+        req = urllib.request.Request(base + "/chat/completions", data=body, method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": f"Bearer {key}"})
+        started = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                reply = json.load(r)
+            ms = round((time.time() - started) * 1000)
+            text = ((reply.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            u = reply.get("usage") or {}
+            return {"text": text.strip(), "ms": ms, "tokens_in": u.get("prompt_tokens"),
+                    "tokens_out": u.get("completion_tokens")}
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code}: {e.read()[:200].decode('utf-8', 'replace')}"
+            if e.code not in (429, 500, 503):
+                break
+        except OSError as e:
+            last = f"{e}"
+        time.sleep(wait)
+        wait *= 2
+    return {"infra": last}
+
+
+def baseline(model: str, prompt: str, gemini_key: str, openai_key: str) -> dict:
+    if model.startswith("gemini"):
+        return gemini(model, prompt, gemini_key)
+    return openai_chat(model, prompt, openai_key)
+
+
 def decider_log_since(path: str, before: int) -> list:
     if not path or not os.path.exists(path):
         return []
@@ -333,7 +371,8 @@ def main() -> int:
     ap.add_argument("--navigera", required=True)
     ap.add_argument("--decider-url", help="the relay in front of TypeSafe's API (default: the mock)")
     ap.add_argument("--decider-log", help="the relay's log (requests are attributed to cases from it)")
-    ap.add_argument("--models", default="", help="comma-separated Gemini model ids for the baseline")
+    ap.add_argument("--models", default="", help="comma-separated model ids for the baseline "
+                                                 "(gemini-* via the Gemini API, others via OPENAI_BASE_URL)")
     ap.add_argument("--live", action="store_true", help="also the public-web cases")
     ap.add_argument("--cases", default="", help="comma-separated case ids (default: all)")
     ap.add_argument("--reps", type=int, default=1)
@@ -356,9 +395,11 @@ def main() -> int:
         procs.append(p)
         env["NAVIGERA_DECIDER_URL"] = p.stdout.readline().strip().removeprefix("LISTENING ")
     key = os.environ.get("GEMINI_API_KEY", "")
-    models = [m for m in args.models.split(",") if m] if key else []
-    if args.models and not key:
-        print("no GEMINI_API_KEY: the Gemini baseline is skipped", file=sys.stderr)
+    openai_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("SILICONFLOW_API_KEY") or ""
+    models = [m for m in args.models.split(",") if m
+              and (key if m.startswith("gemini") else openai_key)]
+    if args.models and not models:
+        print("no key for any --models entry: the model baseline is skipped", file=sys.stderr)
 
     site = subprocess.Popen([sys.executable, str(SITE), "--port", "0"], stdout=subprocess.PIPE, text=True)
     procs.append(site)
@@ -413,7 +454,7 @@ def main() -> int:
                         rec = {"infra": r.get("error", "")[:300], "ms": wall, "tokens_in": tokens}
                     row["results"][decider_name] = rec
                     for model in models:
-                        g = gemini(model, FIND_PROMPT.format(tree=tree, what=case["find"]), key)
+                        g = baseline(model, FIND_PROMPT.format(tree=tree, what=case["find"]), key, openai_key)
                         if "infra" in g:
                             row["results"][model] = g
                             continue
@@ -437,7 +478,7 @@ def main() -> int:
                         rec = {"infra": r.get("error", "")[:300], "ms": wall, "tokens_in": tokens}
                     row["results"][decider_name] = rec
                     for model in models:
-                        g = gemini(model, CHECK_PROMPT.format(tree=tree, question=case["check"]), key)
+                        g = baseline(model, CHECK_PROMPT.format(tree=tree, question=case["check"]), key, openai_key)
                         if "infra" in g:
                             row["results"][model] = g
                             continue
@@ -468,7 +509,7 @@ def render(rows: list, deciders: list) -> str:
         xs = [x for x in xs if isinstance(x, (int, float))]
         return statistics.median(xs) if xs else None
 
-    lines = ["### Decisions: Jev (navigera find/check) vs Gemini reading the tree", "",
+    lines = ["### Decisions: Jev (navigera find/check) vs a model reading the tree", "",
              "| decider | find right | check right | sure but wrong | trapped by injected text | median ms | "
              "median input tokens | input tokens, all | input cost |",
              "|---|---|---|---|---|---|---|---|---|"]

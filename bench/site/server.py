@@ -25,6 +25,7 @@ import argparse
 import html
 import json
 import random
+import re
 import secrets
 import sys
 import threading
@@ -93,9 +94,11 @@ class State:
         self.users = {}          # sid -> email
         self.orders = []         # placed orders
         self.tickets = []
+        self.preferences = {}    # sid -> the last saved preferences
         self.events = []
         self.next_order = 2001
         self.next_ticket = 501
+        self.browsers = {}       # browser product token -> page loads
 
     def log(self, kind, **data):
         self.events.append({"t": round(time.time(), 3), "kind": kind, **data})
@@ -108,6 +111,8 @@ class State:
                 "carts": {sid: {str(k): v for k, v in c.items()} for sid, c in self.carts.items()},
                 "logins": sorted(set(self.users.values())),
                 "events": self.events[-200:],
+                "browsers": dict(self.browsers),
+                "preferences": dict(self.preferences),
             }
 
 
@@ -142,7 +147,7 @@ HEADER = """
   <a href="/support">Support</a>
   <a href="/cart" id="cart-link">Cart <span class="badge" id="cart-count">{count}</span></a>
   <div class="menu"><a href="#" onclick="return false" aria-haspopup="true">Account ▾</a>
-    <div class="drop"><a href="/account">Orders</a><a href="/login">Sign in</a><a href="/logout">Sign out</a></div>
+    <div class="drop"><a href="/account">Orders</a><a href="/preferences">Preferences</a><a href="/login">Sign in</a><a href="/logout">Sign out</a></div>
   </div>
 </header>
 """
@@ -483,6 +488,109 @@ document.getElementById('send').onclick = async () => {
 </script></body></html>"""
 
 
+# A long settings form: forty-odd controls in six groups, so its tree is a few
+# hundred lines and every change is one control an agent can name. The
+# preferences task changes four of them; the check holds the rest to these
+# defaults.
+PREF_CHECKS = [
+    ("notify_shipped", "Order shipped", True), ("notify_delivered", "Order delivered", True),
+    ("price_drop", "Price-drop alerts", False), ("back_in_stock", "Back-in-stock alerts", False),
+    ("newsletter", "Weekly newsletter", True), ("review_requests", "Requests to review a purchase", True),
+    ("surveys", "Survey invitations", False), ("account_changes", "Account changes", True),
+    ("promo_sms", "Promotions by text message", False), ("promo_email", "Promotions by email", True),
+    ("birthday", "Birthday offers", False), ("restock_digest", "Monthly restock digest", False),
+    ("prices_with_tax", "Show prices with tax", False), ("save_card", "Remember my card", True),
+    ("paperless", "Paperless invoices", True), ("personalized", "Personalized recommendations", True),
+    ("partners", "Share data with partners", False), ("analytics", "Analytics cookies", True),
+]
+PREF_SELECTS = [
+    ("theme", "Theme", ["System", "Light", "Dark"], "System"),
+    ("per_page", "Products per page", ["12", "24", "48", "96"], "12"),
+    ("currency", "Currency", ["USD", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF", "SEK", "NOK", "DKK",
+                              "PLN", "CZK", "HUF", "NZD", "SGD", "HKD", "MXN", "BRL", "INR", "ZAR"], "USD"),
+    ("language", "Language", ["English", "Español", "Français", "Deutsch", "Italiano", "Português",
+                              "Nederlands", "Svenska", "Norsk", "Dansk", "Suomi", "Polski", "Čeština",
+                              "Magyar", "Türkçe", "Ελληνικά", "日本語", "한국어", "中文", "Русский"], "English"),
+    ("timezone", "Time zone", ["UTC", "America/New_York", "America/Chicago", "America/Denver",
+                               "America/Los_Angeles", "America/Toronto", "America/Sao_Paulo",
+                               "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
+                               "Europe/Rome", "Europe/Warsaw", "Europe/Athens", "Africa/Johannesburg",
+                               "Asia/Dubai", "Asia/Kolkata", "Asia/Singapore", "Asia/Tokyo",
+                               "Australia/Sydney"], "UTC"),
+    ("history_page_size", "Orders per page in order history", ["10", "25", "50", "100"], "10"),
+]
+PREF_RADIOS = [
+    ("density", "Density", ["Comfortable", "Compact"], "Comfortable"),
+    ("date_format", "Date format", ["2026-10-20", "10/20/2026", "20/10/2026"], "2026-10-20"),
+    ("units", "Units", ["Metric", "Imperial"], "Metric"),
+    ("default_speed", "Default shipping speed", ["Standard", "Express"], "Standard"),
+]
+# Alerts per product category and channel: the long part of the page, as on
+# real notification settings, and none of it touched by the task.
+PREF_CATEGORIES = ["Drive", "Fasteners", "Mechanical", "Mounting", "Plumbing", "Electrical", "Hydraulics",
+                   "Pneumatics", "Bearings", "Seals", "Springs", "Hand tools", "Power tools", "Safety",
+                   "Adhesives", "Lubricants", "Fittings", "Valves", "Hoses", "Clamps"]
+PREF_CHANNELS = ["Email", "Text message", "Push"]
+PREF_MATRIX = [(f"cat_{c.lower().replace(' ', '_')}_{ch.split()[0].lower()}", f"{ch} alerts for {c}", ch == "Email")
+               for c in PREF_CATEGORIES for ch in PREF_CHANNELS]
+PREF_DEFAULTS = {**{k: d for k, _, d in PREF_CHECKS}, **{k: d for k, _, _, d in PREF_SELECTS},
+                 **{k: d for k, _, _, d in PREF_RADIOS}, **{k: d for k, _, d in PREF_MATRIX}}
+
+
+def preferences_page():
+    def checks(keys):
+        return "".join(f'<label><input type="checkbox" name="{k}"{" checked" if d else ""}> {html.escape(t)}</label><br>'
+                       for k, t, d in PREF_CHECKS if k in keys)
+
+    def select(k):
+        _, t, opts, d = next(x for x in PREF_SELECTS if x[0] == k)
+        o = "".join(f'<option{" selected" if v == d else ""}>{html.escape(v)}</option>' for v in opts)
+        return f'<label>{html.escape(t)} <select name="{k}">{o}</select></label><br>'
+
+    def radios(k):
+        _, t, opts, d = next(x for x in PREF_RADIOS if x[0] == k)
+        o = "".join(f'<label><input type="radio" name="{k}" value="{html.escape(v)}"{" checked" if v == d else ""}> '
+                    f'{html.escape(v)}</label> ' for v in opts)
+        return f'<fieldset><legend>{html.escape(t)}</legend>{o}</fieldset>'
+
+    matrix = "".join(
+        "<tr><th scope=\"row\">" + html.escape(c) + "</th>" + "".join(
+            f'<td><label><input type="checkbox" name="{k}"{" checked" if d else ""}> {html.escape(t)}</label></td>'
+            for k, t, d in PREF_MATRIX if t.endswith(" " + c)) + "</tr>"
+        for c in PREF_CATEGORIES)
+    groups = [
+        ("Alerts by category", f"<table><thead><tr><th>Category</th>"
+                               + "".join(f"<th>{ch}</th>" for ch in PREF_CHANNELS)
+                               + f"</tr></thead><tbody>{matrix}</tbody></table>"),
+        ("Notifications", checks({"notify_shipped", "notify_delivered", "price_drop", "back_in_stock", "newsletter",
+                                  "review_requests", "surveys", "account_changes", "promo_sms", "promo_email",
+                                  "birthday", "restock_digest"})),
+        ("Display", select("theme") + radios("density") + select("per_page") + checks({"prices_with_tax"})),
+        ("Regional", select("currency") + select("language") + select("timezone") + radios("date_format")
+         + radios("units")),
+        ("Orders", select("history_page_size") + radios("default_speed") + checks({"save_card", "paperless"})),
+        ("Privacy", checks({"personalized", "partners", "analytics"})),
+    ]
+    body = "".join(f'<section><h2>{g}</h2>{c}</section>' for g, c in groups)
+    return page("Preferences", f"""<h1>Preferences</h1><form id="prefs">{body}
+<p><button type="submit">Save preferences</button> <span id="saved" role="status"></span></p></form>
+<script>
+document.getElementById('prefs').addEventListener('submit', async (e) => {{
+  e.preventDefault();
+  const f = e.target, data = {{}};
+  for (const el of f.elements) {{
+    if (!el.name) continue;
+    if (el.type === 'checkbox') data[el.name] = el.checked;
+    else if (el.type === 'radio') {{ if (el.checked) data[el.name] = el.value; }}
+    else data[el.name] = el.value;
+  }}
+  const r = await fetch('/api/preferences', {{ method: 'POST', headers: {{ 'content-type': 'application/json' }},
+                                               body: JSON.stringify(data) }});
+  document.getElementById('saved').textContent = r.ok ? 'Preferences saved.' : 'Could not save.';
+}});
+</script>""")
+
+
 def support_page():
     body = """<h1>Support</h1><p>Our team answers within one business day.</p>
 <iframe title="Support request form" src="/support/widget" style="width:520px;height:460px;border:1px solid #ccc"></iframe>"""
@@ -541,10 +649,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def note_browser(self):
+        """Which browser loads the pages (the agent eval checks that a tool
+        on one engine didn't switch to another)."""
+        ua = self.headers.get("User-Agent", "")
+        m = re.search(r"(Lightpanda|HeadlessChrome|Chrome|Firefox|Safari)/[\d.]+", ua)
+        token = m.group(1) if m else (ua.split("/")[0] or "unknown")
+        with STATE.lock:
+            STATE.browsers[token] = STATE.browsers.get(token, 0) + 1
+
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         path, qs = url.path, urllib.parse.parse_qs(url.query)
         sid = self.sid()
+        if not path.startswith("/__") and (self.headers.get("Accept") or "").startswith("text/html"):
+            self.note_browser()
         if path == "/":
             return self.redirect("/shop")
         if path == "/shop" or path.startswith("/shop/p/"):
@@ -597,6 +716,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, docs_page())
         if path == "/support":
             return self.send(200, support_page())
+        if path == "/preferences":
+            return self.send(200, preferences_page())
         if path == "/support/widget":
             return self.send(200, SUPPORT_WIDGET)
         if path == "/slow":
@@ -606,6 +727,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, b"GIF89a", "image/gif")
         if path == "/__state":
             return self.json(STATE.snapshot())
+        if path == "/__defaults":
+            return self.json(PREF_DEFAULTS)
         return self.send(404, page("Not found", "<h1>Page not found</h1><p><a href=\"/shop\">Back to the shop</a></p>"))
 
     def do_POST(self):
@@ -653,6 +776,11 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.coupons.pop(sid, None)
                 STATE.log("order", sid=sid, id=oid)
                 return self.json({"ok": True, "order": order})
+            if path == "/api/preferences":
+                prefs = {k: data.get(k, v) for k, v in PREF_DEFAULTS.items()}
+                STATE.preferences[sid] = prefs
+                STATE.log("preferences", sid=sid)
+                return self.json({"ok": True})
             if path == "/api/tickets":
                 tid = f"T-{STATE.next_ticket}"
                 STATE.next_ticket += 1

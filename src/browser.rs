@@ -353,9 +353,8 @@ pub struct BrowserSession {
     /// Executable that was launched (browser binary or `lightpanda`); kept so
     /// [`BrowserSession::close`] can run engine-specific cleanup.
     exe: String,
-    /// True when the underlying engine is Lightpanda, which does not emit the
-    /// CDP `Page.loadEventFired` event — those sessions navigate with a
-    /// `commit` wait instead.
+    /// True when the underlying engine is Lightpanda (one tab; popups are
+    /// followed in place).
     lightpanda: bool,
     timeout_ms: f64,
     /// (tab target, navigation generation) whose load we stopped waiting
@@ -365,6 +364,17 @@ pub struct BrowserSession {
     /// Connected to a browser navigera doesn't own (`--attach`,
     /// `--profile`): closing only disconnects.
     attached: bool,
+    /// `set …` overrides (keyed by what they set): applied to every open
+    /// tab and replayed on tabs opened later.
+    overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
+    /// `init-script` sources, run before the page's own scripts in every
+    /// document of every tab; and per tab (target id) the identifiers to
+    /// remove them by.
+    init_scripts: Vec<String>,
+    init_ids: std::collections::HashMap<String, Vec<String>>,
+    /// Modifiers held with `keydown` (Shift, Control, Alt, Meta): later
+    /// `press`es carry them until `keyup`.
+    held: std::sync::Mutex<Vec<String>>,
     /// Owns the tokio runtime; declared LAST so it drops last, after the
     /// browser/client/pages that use it.
     _runtime: tokio::runtime::Runtime,
@@ -485,6 +495,10 @@ impl BrowserSession {
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             attached: false,
+            overrides: Default::default(),
+            init_scripts: Vec::new(),
+            init_ids: Default::default(),
+            held: Default::default(),
             _runtime: runtime,
         })
     }
@@ -524,6 +538,10 @@ impl BrowserSession {
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             attached: true,
+            overrides: Default::default(),
+            init_scripts: Vec::new(),
+            init_ids: Default::default(),
+            held: Default::default(),
             _runtime: runtime,
         })
     }
@@ -581,6 +599,8 @@ impl BrowserSession {
             bail!("the lightpanda engine supports one tab only; use the chrome engine for tabs");
         }
         let page = self.browser.new_page(Some("about:blank"))?;
+        self.apply_overrides(&page);
+        self.apply_init_scripts(&page);
         self.pages.push(page);
         self.active = self.pages.len() - 1;
         Ok(self.active)
@@ -629,6 +649,7 @@ impl BrowserSession {
     /// becomes active, as it would in a visible browser. Returns the
     /// indices of adopted tabs.
     pub fn sync_tabs(&mut self) -> Vec<usize> {
+        self.browser.caught_up();
         let shared = std::sync::Arc::clone(self.browser.shared());
         let mut adopted = Vec::new();
         for (target_id, opener) in shared.take_opened() {
@@ -642,6 +663,8 @@ impl BrowserSession {
             }
             match self.browser.attach_page(&target_id) {
                 Ok(page) => {
+                    self.apply_overrides(&page);
+                    self.apply_init_scripts(&page);
                     self.pages.push(page);
                     self.active = self.pages.len() - 1;
                     adopted.push(self.active);
@@ -666,8 +689,463 @@ impl BrowserSession {
         adopted
     }
 
+    /// Lightpanda keeps one tab: a page it opened with `target=_blank` or
+    /// `window.open` is loaded in the active tab instead, as if the agent had
+    /// followed it to the new tab. Returns a note per page followed.
+    pub fn follow_popups(&self, timeout_ms: Option<f64>) -> Vec<String> {
+        if !self.lightpanda {
+            return Vec::new();
+        }
+        self.browser.caught_up();
+        let shared = self.browser.shared();
+        let urls: Vec<String> =
+            shared.take_popups().into_iter().filter(|u| !u.is_empty() && u != "about:blank").collect();
+        let Some(url) = urls.last() else { return Vec::new() };
+        let note = match self.goto_wait(url, "load", timeout_ms) {
+            Ok(()) => {
+                format!("the page opened {url} in a new tab; the lightpanda engine has one tab, so it was loaded here")
+            }
+            Err(e) => format!("the page opened {url} in a new tab; loading it here failed: {e:#}"),
+        };
+        // The navigation we just made is not a popup.
+        shared.take_popups();
+        vec![note]
+    }
+
+    /// The active tab's console log, oldest first (`clear` empties it).
+    pub fn console(&self, clear: bool) -> Vec<cdp::logs::ConsoleEntry> {
+        self.browser.caught_up();
+        let mut logs = self.browser.shared().logs.lock().unwrap();
+        match logs.tabs.get_mut(self.active_tab().session_id()) {
+            Some(tab) if clear => std::mem::take(&mut tab.console).into(),
+            Some(tab) => tab.console.iter().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The active tab's network requests, oldest first (`clear` empties the log).
+    pub fn requests(&self, clear: bool) -> Vec<cdp::logs::Request> {
+        self.browser.caught_up();
+        let mut logs = self.browser.shared().logs.lock().unwrap();
+        match logs.tabs.get_mut(self.active_tab().session_id()) {
+            Some(tab) if clear => std::mem::take(&mut tab.requests).into(),
+            Some(tab) => tab.requests.iter().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// A logged request's response body: (body, base64-encoded?).
+    pub fn response_body(&self, request_id: &str) -> Result<(String, bool)> {
+        let r = self.active_tab().send_cdp(
+            "Network.getResponseBody",
+            serde_json::json!({ "requestId": request_id }),
+            self.timeout(None),
+        )?;
+        Ok((
+            r.get("body").and_then(|b| b.as_str()).unwrap_or_default().to_string(),
+            r.get("base64Encoded").and_then(|b| b.as_bool()).unwrap_or(false),
+        ))
+    }
+
+    /// A logged request's body when the event didn't carry it.
+    pub fn request_post_data(&self, request_id: &str) -> Result<String> {
+        let r = self.active_tab().send_cdp(
+            "Network.getRequestPostData",
+            serde_json::json!({ "requestId": request_id }),
+            self.timeout(None),
+        )?;
+        Ok(r.get("postData").and_then(|b| b.as_str()).unwrap_or_default().to_string())
+    }
+
+    /// Replace one kind of override (`viewport`, `media`, …) on every tab,
+    /// and for tabs opened later. `calls` are CDP (method, params) sent to
+    /// each tab; `reset` undoes the previous ones first.
+    pub fn set_override(
+        &mut self,
+        kind: &'static str,
+        calls: Vec<(&'static str, serde_json::Value)>,
+        reset: Vec<(&'static str, serde_json::Value)>,
+    ) -> Result<()> {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            for (method, params) in reset.iter().chain(calls.iter()) {
+                page.send_cdp(method, params.clone(), timeout).map_err(|e| anyhow::anyhow!("{method}: {e:#}"))?;
+            }
+        }
+        if calls.is_empty() {
+            self.overrides.remove(kind);
+        } else {
+            self.overrides.insert(kind, calls);
+        }
+        Ok(())
+    }
+
+    /// Read a property of the target element (`get`): text, value, attr,
+    /// html, outer, box, style, checked.
+    pub fn get_prop(
+        &self,
+        target: &Target,
+        what: &str,
+        name: Option<&str>,
+        timeout_ms: Option<f64>,
+    ) -> Result<serde_json::Value> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        self.active_tab().on_element(
+            target,
+            "get",
+            cdp::page_js::GET_EL,
+            &[serde_json::json!(what), serde_json::json!(name)],
+            wait,
+            timeout,
+        )
+    }
+
+    /// How many elements match a CSS selector (no waiting).
+    pub fn count(&self, selector: &str) -> Result<u64> {
+        let n: serde_json::Value = self.active_tab().evaluate(
+            &format!("document.querySelectorAll({}).length", serde_json::json!(selector)),
+            self.timeout(None),
+        )?;
+        Ok(n.as_u64().unwrap_or(0))
+    }
+
+    /// An element state (`is`). A missing element is not visible, not
+    /// enabled, not checked: false (true for `hidden`), after a short wait.
+    pub fn is_state(&self, target: &Target, state: &str, timeout_ms: Option<f64>) -> Result<bool> {
+        let (_, timeout) = self.element_budget(timeout_ms);
+        let wait = timeout_ms.map(|ms| Duration::from_secs_f64(ms / 1000.0)).unwrap_or(Duration::from_millis(500));
+        match self.active_tab().on_element(
+            target,
+            "is",
+            cdp::page_js::IS_EL,
+            &[serde_json::json!(state)],
+            wait,
+            timeout,
+        ) {
+            Ok(v) => Ok(v.as_bool().unwrap_or(false)),
+            Err(e) if format!("{e:#}").contains("no element") => Ok(state == "hidden"),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Drag `from` onto `to` (see [`cdp::Page::drag`]); waits for any
+    /// navigation the drop starts.
+    pub fn drag(&self, from: &Target, to: &Target, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let r = self.active_tab().drag(from, to, wait, timeout)?;
+        self.settle_for(timeout_ms);
+        Ok(r)
+    }
+
+    pub fn dblclick(&self, target: &Target, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let point = self.active_tab().dblclick(target, wait, timeout)?;
+        self.settle_for(timeout_ms);
+        Ok(point)
+    }
+
+    pub fn focus(&self, target: &Target, timeout_ms: Option<f64>) -> Result<bool> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let v = self.active_tab().on_element(target, "focus", cdp::page_js::FOCUS_EL, &[], wait, timeout)?;
+        Ok(v.as_bool().unwrap_or(false))
+    }
+
+    /// Make a checkbox/radio/switch checked (`want`) by clicking it when it
+    /// isn't; fails when the click didn't change it.
+    pub fn set_checked(&self, target: &Target, want: bool, timeout_ms: Option<f64>) -> Result<bool> {
+        let checked = |s: &Self| -> Result<bool> {
+            Ok(s.get_prop(target, "checked", None, timeout_ms)?.as_bool().unwrap_or(false)
+                || s.is_state(target, "checked", timeout_ms)?)
+        };
+        if checked(self)? == want {
+            return Ok(false);
+        }
+        self.click_target(target, timeout_ms)?;
+        if checked(self)? != want {
+            bail!("clicking it did not {} it", if want { "check" } else { "uncheck" });
+        }
+        Ok(true)
+    }
+
+    pub fn key_event(&self, key: &str, down: bool) -> Result<()> {
+        self.active_tab().key_event(key, down, self.timeout(None))?;
+        let modifier = ["Shift", "Control", "Alt", "Meta"].into_iter().find(|m| m.eq_ignore_ascii_case(key));
+        if let Some(m) = modifier {
+            let mut held = self.held.lock().unwrap();
+            held.retain(|h| h != m);
+            if down {
+                held.push(m.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn insert_text(&self, target: Option<&Target>, text: &str, timeout_ms: Option<f64>) -> Result<()> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        self.active_tab().insert_text(target, text, wait, timeout)
+    }
+
+    /// Run `source` before the page's own scripts in every new document of
+    /// every tab (and in the current document right away). Returns how
+    /// many scripts are installed.
+    pub fn add_init_script(&mut self, source: &str) -> Result<usize> {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            let r = page
+                .send_cdp(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    serde_json::json!({ "source": source, "runImmediately": true }),
+                    timeout,
+                )
+                .map_err(|e| anyhow::anyhow!("Page.addScriptToEvaluateOnNewDocument: {e:#}"))?;
+            if let Some(id) =
+                r.get("identifier").map(|i| i.as_str().map(str::to_string).unwrap_or_else(|| i.to_string()))
+            {
+                self.init_ids.entry(page.target_id().to_string()).or_default().push(id);
+            }
+        }
+        self.init_scripts.push(source.to_string());
+        Ok(self.init_scripts.len())
+    }
+
+    /// Every cookie, and the localStorage of each origin open in a tab, as
+    /// Playwright's `storageState` writes them, so a file from either tool
+    /// loads in the other.
+    pub fn storage_state(&self) -> Result<serde_json::Value> {
+        let cookies = self.cookies(true, None)?;
+        let cookies: Vec<serde_json::Value> = cookies
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c["name"],
+                    "value": c["value"],
+                    "domain": c["domain"],
+                    "path": c["path"],
+                    "expires": c.get("expires").cloned().unwrap_or(serde_json::json!(-1)),
+                    "httpOnly": c.get("httpOnly").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "secure": c.get("secure").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "sameSite": c.get("sameSite").and_then(|v| v.as_str()).unwrap_or("Lax"),
+                })
+            })
+            .collect();
+        let mut origins: Vec<serde_json::Value> = Vec::new();
+        for page in &self.pages {
+            let Ok(here) = page.evaluate(
+                "() => { try { return { origin: location.origin, \
+                 localStorage: Object.entries(localStorage).map(([name, value]) => ({ name, value })) }; } \
+                 catch (e) { return null; } }",
+                self.timeout(None),
+            ) else {
+                continue;
+            };
+            let origin = here.get("origin").and_then(|o| o.as_str()).unwrap_or("null");
+            let empty = here.get("localStorage").and_then(|l| l.as_array()).is_none_or(Vec::is_empty);
+            if origin == "null" || empty || origins.iter().any(|o| o["origin"] == origin) {
+                continue;
+            }
+            origins.push(here);
+        }
+        Ok(serde_json::json!({ "cookies": cookies, "origins": origins }))
+    }
+
+    /// Put a [`BrowserSession::storage_state`] file back: its cookies now, and
+    /// each origin's localStorage into the tab already on that origin and,
+    /// through an init script, into any document of that origin that does
+    /// not have the key yet. Returns how many cookies and origins it read.
+    pub fn load_storage_state(&mut self, state: &serde_json::Value) -> Result<(usize, usize)> {
+        let cookies = state.get("cookies").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+        for c in &cookies {
+            let mut p = serde_json::json!({
+                "name": c["name"],
+                "value": c["value"],
+                "domain": c["domain"],
+                "path": c.get("path").cloned().unwrap_or(serde_json::json!("/")),
+            });
+            for key in ["httpOnly", "secure", "sameSite"] {
+                if let Some(v) = c.get(key) {
+                    p[key] = v.clone();
+                }
+            }
+            if let Some(e) = c.get("expires").and_then(|e| e.as_f64()).filter(|e| *e > 0.0) {
+                p["expires"] = serde_json::json!(e);
+            }
+            self.set_cookie(p).with_context(|| format!("state load: cookie {}", c["name"]))?;
+        }
+        let origins = state.get("origins").and_then(|o| o.as_array()).cloned().unwrap_or_default();
+        if !origins.is_empty() {
+            let data = serde_json::to_string(&origins)?;
+            // Set-if-absent: what the page itself stores later is kept.
+            let script = format!(
+                "(() => {{ for (const o of {data}) {{ if (o.origin !== location.origin) continue; \
+                 try {{ for (const {{ name, value }} of o.localStorage || []) \
+                 if (localStorage.getItem(name) === null) localStorage.setItem(name, value); }} catch (e) {{}} }} }})()"
+            );
+            self.add_init_script(&script)?;
+        }
+        Ok((cookies.len(), origins.len()))
+    }
+
+    /// Remove every `init-script`; returns how many there were.
+    pub fn clear_init_scripts(&mut self) -> usize {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            for id in self.init_ids.remove(page.target_id()).unwrap_or_default() {
+                let _ = page.send_cdp(
+                    "Page.removeScriptToEvaluateOnNewDocument",
+                    serde_json::json!({ "identifier": id }),
+                    timeout,
+                );
+            }
+        }
+        self.init_ids.clear();
+        std::mem::take(&mut self.init_scripts).len()
+    }
+
+    pub fn init_scripts(&self) -> &[String] {
+        &self.init_scripts
+    }
+
+    fn apply_init_scripts(&mut self, page: &Page) {
+        let timeout = self.timeout(None);
+        for source in &self.init_scripts {
+            match page.send_cdp(
+                "Page.addScriptToEvaluateOnNewDocument",
+                serde_json::json!({ "source": source, "runImmediately": true }),
+                timeout,
+            ) {
+                Ok(r) => {
+                    if let Some(id) = r.get("identifier").and_then(|i| i.as_str()) {
+                        self.init_ids.entry(page.target_id().to_string()).or_default().push(id.to_string());
+                    }
+                }
+                Err(e) => eprintln!("[browser] init-script on a new tab: {e:#}"),
+            }
+        }
+    }
+
+    /// Add a `route` rule (a rule with the same pattern is replaced).
+    pub fn add_route(&mut self, route: cdp::Route) -> Result<()> {
+        {
+            let mut routes = self.browser.shared().routes.lock().unwrap();
+            routes.retain(|r| r.pattern != route.pattern);
+            routes.push(route);
+        }
+        self.sync_fetch()
+    }
+
+    /// Remove the rule for `pattern`, or every rule; returns how many went.
+    pub fn remove_routes(&mut self, pattern: Option<&str>) -> Result<usize> {
+        let removed = {
+            let mut routes = self.browser.shared().routes.lock().unwrap();
+            let before = routes.len();
+            routes.retain(|r| pattern.is_some_and(|p| r.pattern != p));
+            before - routes.len()
+        };
+        self.sync_fetch()?;
+        Ok(removed)
+    }
+
+    pub fn routes(&self) -> Vec<cdp::Route> {
+        self.browser.shared().routes.lock().unwrap().clone()
+    }
+
+    /// HTTP auth credentials for every origin (`None`: answer challenges
+    /// the browser's way, i.e. fail them).
+    pub fn set_credentials(&mut self, credentials: Option<(String, String)>) -> Result<()> {
+        *self.browser.shared().credentials.lock().unwrap() = credentials;
+        self.sync_fetch()
+    }
+
+    /// Fetch interception on every tab, for exactly the URLs a rule names
+    /// (all of them once credentials are set): unrouted requests never wait
+    /// on navigera.
+    fn sync_fetch(&mut self) -> Result<()> {
+        let shared = self.browser.shared();
+        let auth = shared.credentials.lock().unwrap().is_some();
+        let patterns: Vec<serde_json::Value> = if auth {
+            vec![serde_json::json!({ "urlPattern": "*" })]
+        } else {
+            shared.routes.lock().unwrap().iter().map(|r| serde_json::json!({ "urlPattern": r.pattern })).collect()
+        };
+        if patterns.is_empty() {
+            return self.set_override("fetch", vec![], vec![("Fetch.disable", serde_json::json!({}))]);
+        }
+        self.set_override(
+            "fetch",
+            vec![("Fetch.enable", serde_json::json!({ "patterns": patterns, "handleAuthRequests": auth }))],
+            vec![],
+        )
+    }
+
+    /// Browser-wide permission for the pages' origins (geolocation).
+    pub fn grant(&self, permission: &str) {
+        let _ = self.browser.grant_permission(permission);
+    }
+
+    fn apply_overrides(&self, page: &Page) {
+        let timeout = self.timeout(None);
+        for calls in self.overrides.values() {
+            for (method, params) in calls {
+                if let Err(e) = page.send_cdp(method, params.clone(), timeout) {
+                    eprintln!("[browser] {method} on a new tab: {e:#}");
+                }
+            }
+        }
+    }
+
+    /// Cookies the current page sends (`url`: that URL's), or every cookie.
+    pub fn cookies(&self, all: bool, url: Option<&str>) -> Result<serde_json::Value> {
+        let tab = self.active_tab();
+        let r = if all {
+            tab.send_cdp("Storage.getCookies", serde_json::json!({}), self.timeout(None))?
+        } else {
+            let urls = vec![url.map(str::to_string).unwrap_or_else(|| self.url())];
+            tab.send_cdp("Network.getCookies", serde_json::json!({ "urls": urls }), self.timeout(None))?
+        };
+        Ok(r.get("cookies").cloned().unwrap_or_else(|| serde_json::json!([])))
+    }
+
+    /// `Network.setCookie` with these parameters.
+    pub fn set_cookie(&self, cookie: serde_json::Value) -> Result<()> {
+        let r = self.active_tab().send_cdp("Network.setCookie", cookie, self.timeout(None))?;
+        if r.get("success").and_then(|v| v.as_bool()) == Some(false) {
+            bail!("the browser refused the cookie (check the domain/url, and Secure for SameSite=None)");
+        }
+        Ok(())
+    }
+
+    pub fn delete_cookies(&self, params: serde_json::Value) -> Result<()> {
+        self.active_tab().send_cdp("Network.deleteCookies", params, self.timeout(None)).map(|_| ())
+    }
+
+    pub fn clear_cookies(&self) -> Result<()> {
+        self.active_tab().send_cdp("Network.clearBrowserCookies", serde_json::json!({}), self.timeout(None)).map(|_| ())
+    }
+
+    /// The active tab printed to PDF.
+    pub fn pdf(&self, landscape: bool, background: bool) -> Result<Vec<u8>> {
+        use base64::Engine as _;
+        let r = self.active_tab().send_cdp(
+            "Page.printToPDF",
+            serde_json::json!({ "landscape": landscape, "printBackground": background }),
+            self.timeout(None).max(Duration::from_secs(60)),
+        )?;
+        let data =
+            r.get("data").and_then(|d| d.as_str()).ok_or_else(|| anyhow::anyhow!("printToPDF returned no data"))?;
+        Ok(base64::engine::general_purpose::STANDARD.decode(data)?)
+    }
+
+    /// Uncaught exceptions in the active tab not reported yet.
+    pub fn take_exceptions(&self) -> Vec<String> {
+        self.browser.caught_up();
+        self.browser.shared().logs.lock().unwrap().take_exceptions(self.active_tab().session_id())
+    }
+
     /// Dialogs answered since the last call (`{type, message, accepted}`).
     pub fn take_dialogs(&self) -> Vec<serde_json::Value> {
+        self.browser.caught_up();
         self.browser.shared().take_dialogs()
     }
 
@@ -688,6 +1166,13 @@ impl BrowserSession {
     /// timeout). Only a wait that used the whole navigation timeout marks
     /// the load abandoned; a shorter op budget leaves it for the next op.
     pub fn settle_within(&self, budget: Duration) -> bool {
+        // A navigation the last command started may already be reported
+        // (Lightpanda sends it before the command's response), or be
+        // reported only once the engine handles another message (one a
+        // script scheduled): ask for that message, then let the watcher
+        // record what came before deciding there is nothing to wait for.
+        self.active_tab().flush_events(Duration::from_millis(500));
+        self.browser.caught_up();
         let tab = self.active_tab();
         let key = (tab.target_id().to_string(), tab.nav_generation());
         if self.abandoned.lock().ok().is_some_and(|a| a.as_ref() == Some(&key)) {
@@ -749,20 +1234,12 @@ impl BrowserSession {
     /// Navigate the active tab; `wait` is `load`, `domcontentloaded` or
     /// `commit`. Retries benign aborts (third-party trackers can abort the
     /// main-frame load mid-flight).
-    ///
-    /// Lightpanda sessions use a `commit` wait: Lightpanda emits no
-    /// `Page.loadEventFired`, so a full wait would just burn the navigation
-    /// timeout. Callers confirm content by polling the DOM.
     pub fn goto_wait(&self, url: &str, wait: &str, timeout_ms: Option<f64>) -> Result<()> {
         if !matches!(wait, "load" | "domcontentloaded" | "commit") {
             bail!("--wait takes load|domcontentloaded|commit, got {wait:?}");
         }
-        let (wait, timeout) = if self.lightpanda {
-            ("commit", Duration::from_millis(500))
-        } else {
-            // Honors --timeout-ms (was a hard-coded 40 s per attempt).
-            (wait, self.timeout(timeout_ms))
-        };
+        // Honors --timeout-ms (was a hard-coded 40 s per attempt).
+        let timeout = self.timeout(timeout_ms);
         let max_attempts = 3;
         let mut attempt = 0;
         loop {
@@ -770,9 +1247,6 @@ impl BrowserSession {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     let msg = format!("{e:#}");
-                    if self.lightpanda && msg.contains("timed out") {
-                        return Ok(());
-                    }
                     attempt += 1;
                     let transient = msg.contains("ERR_ABORTED") || msg.contains("ERR_CONNECTION_RESET");
                     if transient && attempt <= max_attempts {
@@ -847,7 +1321,16 @@ impl BrowserSession {
     pub fn press(&self, target: Option<&Target>, key: &str, timeout_ms: Option<f64>) -> Result<()> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let generation = self.active_tab().nav_generation();
-        let may_navigate = self.active_tab().press(target, key, wait, timeout)?;
+        // Modifiers held with `keydown` apply, as on a real keyboard.
+        let held = self.held.lock().unwrap().clone();
+        let chord = held
+            .iter()
+            .filter(|m| !key.split('+').any(|k| k.eq_ignore_ascii_case(m)))
+            .map(String::as_str)
+            .chain(std::iter::once(key))
+            .collect::<Vec<_>>()
+            .join("+");
+        let may_navigate = self.active_tab().press(target, &chord, wait, timeout)?;
         if may_navigate {
             // Enter in a form submits it (implicit submission); on a link
             // it follows it.

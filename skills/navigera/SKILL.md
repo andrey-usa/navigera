@@ -36,6 +36,17 @@ navigera -s work --raw ax                 # look again to verify
 navigera -s work quit                     # done
 ```
 
+**If `start` prints `"decider"`** (a decision model is on; its note says so),
+describe instead of looking. Each step is one call with no tree to read:
+
+```bash
+navigera -s work click --find "the Sign in link"
+navigera -s work fill --find "the email field" "ada@example.com"
+navigera -s work click --find "the Sign in button"
+navigera -s work check "Is the user signed in?"     # {"yes":0.97,"answer":true}
+navigera -s work --raw ax --selector main           # read only text you must report
+```
+
 - Chain steps you are sure of in one shell call and end with a look:
   `navigera -s work fill 21 "Ada" && navigera -s work click 30 && navigera -s work --raw ax`.
   A failing step stops the chain. Fewer calls = fewer tokens.
@@ -49,10 +60,10 @@ navigera -s work quit                     # done
   session. `-s <name>` is short for `--session <name>`. `$NAVIGERA_SESSION`
   sets a default session. An idle session shuts down after 30 min.
 
-### When `start` prints `"decider"`: act without reading the tree
+### The decision model in detail
 
-A fast decision model then picks elements and answers yes/no questions, so
-most steps need no `ax`:
+When `start` prints `"decider"`, a fast decision model picks elements and
+answers yes/no questions, so most steps need no `ax`:
 
 ```bash
 navigera -s work click --find "accept the cookies"
@@ -152,7 +163,26 @@ page "Checkout — Acme" http://shop.test/checkout
 | `dialog --accept\|--dismiss [--prompt-text t]` | how future `alert`/`confirm`/`prompt` dialogs are answered |
 
 Element commands wait up to 5 s for the element to appear. Pass
-`--timeout-ms <ms>` to wait longer.
+`--timeout-ms <ms>` to wait longer. Besides a ref, `--selector` and
+`--text`, they take `--role button --name "Save"`, `--label "Email"`,
+`--placeholder …`, `--testid …`, and `--nth <i>` (`-1` = last).
+
+## Inspecting, state, emulation
+
+| command | what it does |
+|---|---|
+| `get text\|value\|html\|box <ref>`, `get attr <name> <ref>`, `get count <css>` | read one thing without a whole `ax` |
+| `is visible\|enabled\|checked <ref>` | `true`/`false` |
+| `check <ref>` / `uncheck <ref>` | set a checkbox or switch (clicks only if needed) |
+| `dblclick`, `focus`, `keydown Shift`/`keyup Shift`, `insert-text "…"` | the rest of the keyboard and mouse |
+| `drag 12 15`, `drag --from-text "Task 1" --to-text "Done"` | drag and drop, sliders, sortable lists |
+| `errors`, `console [--level warn]` | what the page logged; an action whose handler threw says so in `notes` |
+| `network [--failed] [--filter api]`, `network <n>` | requests one line each; one request with its body |
+| `cookies`, `cookies set <name> <value>`, `storage [get\|set k v]` | cookies and localStorage |
+| `state save auth.json` … `state load auth.json` | sign in once, reuse the session later (Playwright storageState format) |
+| `set device "iPhone 15"`, `set viewport 1280 720`, `set media dark`, `set geo <lat> <lon>`, `set offline on`, `set credentials <user> <pass>` | emulate (`off` resets) |
+| `route "*/api/*" --body '{…}'`, `route "*.png"` (fail), `unroute` | mock or block requests |
+| `pdf [file.pdf]`, `init-script "<js>"`, `wait --idle` | print, run code before the page's, wait for the network |
 
 ## What the tool handles for you
 

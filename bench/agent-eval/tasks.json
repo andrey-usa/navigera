@@ -60,6 +60,22 @@
       }
     },
     {
+      "id": "preferences",
+      "title": "Change four settings on a long preferences form",
+      "prompt": "On the shop's Preferences page (in the Account menu), turn on price-drop alerts, turn off the weekly newsletter, set the currency to EUR and the number of orders per page in the order history to 50, and save. Leave everything else as it is. When the page confirms the preferences were saved, answer: saved",
+      "check": {
+        "preferences": {
+          "price_drop": true,
+          "newsletter": false,
+          "currency": "EUR",
+          "history_page_size": "50"
+        },
+        "answer_contains": [
+          "saved"
+        ]
+      }
+    },
+    {
       "id": "purchase-live",
       "title": "Live web: log in and check out on a public demo shop",
       "live": true,

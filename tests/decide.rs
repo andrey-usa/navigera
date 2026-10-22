@@ -100,7 +100,15 @@ fn find_check_and_find_targets_ask_the_decision_model() {
     let started = s.run(&["start"], &[("NAVIGERA_DECIDER_URL", &jev.url), ("TYPESAFE_API_KEY", "test-key")]);
     assert_eq!(started["ok"], true, "{started}");
     assert_eq!(started["result"]["decider"], "jev-latest", "{started}");
+    // The contract is told where the agent decides how to go on, not only
+    // in the skill.
+    let note = started["notes"][0].as_str().unwrap_or_default();
+    assert!(note.contains("--find") && note.contains("check"), "{started}");
     s.ok(&["goto", &format!("{}/shop", site.url)]);
+    // A long tree says, once read, that acting does not need it.
+    let read = s.run(&["ax"], &[]);
+    let note = read["notes"][0].as_str().unwrap_or_default();
+    assert!(note.contains("lines") && note.contains("--find"), "{note}");
 
     // find: one of twelve "Add to cart" buttons, told apart by its card.
     let found = s.ok(&["find", "add the brass valve to the cart"]);
@@ -148,7 +156,9 @@ fn without_a_decision_model_find_says_how_to_get_one() {
     let started = s.run(&["start"], &[("NAVIGERA_DECIDER_URL", ""), ("TYPESAFE_API_KEY", "")]);
     assert_eq!(started["ok"], true, "{started}");
     assert!(started["result"].get("decider").is_none(), "{started}");
+    assert!(started.get("notes").is_none(), "{started}");
     s.ok(&["goto", &format!("{}/shop", site.url)]);
+    assert!(s.run(&["ax"], &[]).get("notes").is_none(), "no decision model, no note");
     let r = s.run(&["click", "--find", "the cart link"], &[]);
     assert_eq!(r["ok"], false);
     assert!(r["error"].as_str().unwrap().contains("TYPESAFE_API_KEY"), "{r}");

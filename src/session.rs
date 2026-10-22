@@ -452,6 +452,12 @@ fn localize_request(request: &mut Value, config: &SessionConfig) {
         }
         _ => {}
     }
+    // Files the server writes for the caller: relative to the caller.
+    for key in ["har", "body_file", "path"] {
+        if let Some(p) = request.get(key).and_then(Value::as_str) {
+            request[key] = json!(absolute(p));
+        }
+    }
     if request.get("timeout_ms").is_none() && config.timeout_ms != crate::protocol::DEFAULT_TIMEOUT_MS {
         request["timeout_ms"] = json!(config.timeout_ms);
     }
@@ -464,10 +470,28 @@ fn log_tail(path: &std::path::Path, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
+/// The engine a running session server reports (`status`), if it answers.
+fn running_engine(stream: Stream) -> Option<String> {
+    let mut writer = &stream;
+    writer.write_all(b"{\"id\":1,\"op\":\"status\"}\n").ok()?;
+    writer.flush().ok()?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut line = String::new();
+    BufReader::new(&stream).read_line(&mut line).ok()?;
+    let response: Value = serde_json::from_str(line.trim()).ok()?;
+    response.pointer("/result/engine").and_then(Value::as_str).map(str::to_string)
+}
+
 fn fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCode {
     print_json(output, &json!({ "id": null, "ok": false, "error": error }), config);
     ExitCode::from(1)
 }
+
+/// What `start` tells an agent when a decision model is on.
+pub const DECIDER_NOTE: &str = "a decision model is on: act with `click --find \"<what>\"` or \
+     `fill --find \"<what>\" <value>` (any element command takes --find) and verify with \
+     `check \"<yes/no question>\"`, instead of reading `ax` for refs; read `ax` only for text you must report, \
+     or when --find says it is unsure.";
 
 /// `start`: spawn a detached session server and wait until it accepts.
 pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> ExitCode {
@@ -477,7 +501,21 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     };
     let log_path = path.with_extension("log");
     let (socket_str, log_str) = (path.display().to_string(), log_path.display().to_string());
-    if connect(&path).is_ok() {
+    if let Ok(stream) = connect(&path) {
+        // The running session must be the browser this `start` asks for: a
+        // Chrome command sent to a Lightpanda session left over from another
+        // run would quietly test the wrong engine.
+        let running = running_engine(stream);
+        let wanted = if crate::browser::is_lightpanda(&config.engine) { "lightpanda" } else { "chrome" };
+        if let Some(running) = running.filter(|r| r != wanted) {
+            return fail(
+                output,
+                config,
+                format!(
+                    "session {name} is already running the {running} engine, not {wanted}; `navigera --session {name} quit` first, or pick another --session"
+                ),
+            );
+        }
         print_json(
             output,
             &json!({ "id": null, "ok": true, "result": {
@@ -537,14 +575,18 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     let deadline = Instant::now() + Duration::from_secs(wait);
     loop {
         if connect(&path).is_ok() {
-            let mut result = json!({ "session": name, "socket": socket_str, "log": log_str, "pid": child.id() });
+            let result = json!({ "session": name, "socket": socket_str, "log": log_str, "pid": child.id() });
             // The server inherited this environment. Saying so lets an agent
             // know `find`/`check` work without reading a key variable (and
             // printing the key into its own context).
+            let mut response = json!({ "id": null, "ok": true, "result": result });
             if let Some(decider) = crate::decide::Decider::from_env() {
-                result["decider"] = json!(decider.model());
+                response["result"]["decider"] = json!(decider.model());
+                // The contract, where the agent decides how to proceed: a
+                // skill section further down is read once, if at all.
+                response["notes"] = json!([DECIDER_NOTE]);
             }
-            print_json(output, &json!({ "id": null, "ok": true, "result": result }), config);
+            print_json(output, &response, config);
             return ExitCode::SUCCESS;
         }
         if let Ok(Some(status)) = child.try_wait() {

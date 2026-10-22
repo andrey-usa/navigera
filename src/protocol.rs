@@ -94,6 +94,23 @@ pub struct TargetArgs {
     /// model before the op runs (see `decide`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub find: Option<String>,
+    /// ARIA role (`button`, `link`, `textbox`, `checkbox`, …), with `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Accessible name (with `role`, or alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A form control's label text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    /// `data-testid` (or `data-test-id`, `data-test`, `data-qa`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub testid: Option<String>,
+    /// Which match (0-based; -1 = the last), with any of the above or `selector`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth: Option<i64>,
 }
 
 impl TargetArgs {
@@ -105,16 +122,45 @@ impl TargetArgs {
         })
     }
 
+    fn locator(&self) -> bool {
+        self.role.is_some()
+            || self.name.is_some()
+            || self.label.is_some()
+            || self.placeholder.is_some()
+            || self.testid.is_some()
+    }
+
     fn optional(&self, op: &str) -> anyhow::Result<Option<Target>> {
-        let given = [self.selector.is_some(), self.node_ref.is_some(), self.text.is_some(), self.find.is_some()]
-            .iter()
-            .filter(|b| **b)
-            .count();
+        let given = [
+            self.node_ref.is_some(),
+            self.text.is_some(),
+            self.find.is_some(),
+            self.selector.is_some() || self.locator(),
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count();
         if given > 1 {
-            anyhow::bail!("{op}: give only one of ref, --selector, --text, --find");
+            anyhow::bail!("{op}: give only one of ref, --text, --find, or --selector/--role/--name/--label/--placeholder/--testid");
         }
         if self.find.is_some() {
             anyhow::bail!("{op}: --find was not resolved to an element");
+        }
+        if self.locator() || self.nth.is_some() {
+            if self.nth.is_some() && !self.locator() && self.selector.is_none() {
+                anyhow::bail!(
+                    "{op}: --nth picks among the matches of --selector, --role, --label, --placeholder or --testid"
+                );
+            }
+            return Ok(Some(Target::Locator(crate::cdp::Locator {
+                role: self.role.clone(),
+                name: self.name.clone(),
+                label: self.label.clone(),
+                placeholder: self.placeholder.clone(),
+                testid: self.testid.clone(),
+                css: self.selector.clone(),
+                nth: self.nth,
+            })));
         }
         Ok(if let Some(r) = self.node_ref {
             Some(Target::Ref(r))
@@ -247,6 +293,9 @@ pub enum Command {
         /// Just sleep this long.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ms: Option<f64>,
+        /// No fetch/XHR in flight for 500 ms (network idle).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        idle: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<f64>,
     },
@@ -311,9 +360,254 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<f64>,
     },
+    /// Console messages, uncaught exceptions and browser log entries of
+    /// the active tab, oldest first.
+    #[serde(rename = "console")]
+    Console {
+        /// Only this level and above: `debug`, `log`, `info`, `warn`, `error`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        /// Empty the log after reading it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear: bool,
+        /// `json`: a list of `{level, source, text, location}`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
+    /// `console --level error`: exceptions, console.error, failed loads.
+    #[serde(rename = "errors")]
+    Errors {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
+    /// The active tab's network requests, one line each; with `n`, one
+    /// request in full (headers, post data, response body).
+    #[serde(rename = "network")]
+    Network {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        n: Option<u64>,
+        /// Only URLs containing this.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<String>,
+        /// Only this resource type (`fetch`, `xhr`, `document`, `script`, …).
+        #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        /// Only failed requests and HTTP errors (status >= 400).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        failed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear: bool,
+        /// Write the (filtered) log as a HAR 1.2 file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        har: Option<String>,
+        /// With `n`: write the response body to this file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_file: Option<String>,
+    },
+    /// Cookies of the current page (or all of them), or set / delete / clear.
+    #[serde(rename = "cookies")]
+    Cookies {
+        /// `list` (default), `set`, `delete`, `clear`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        /// The URL the cookie belongs to (default: the current page).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Unix time in seconds; none = a session cookie.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires: Option<f64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        http_only: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        secure: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        same_site: Option<String>,
+        /// `list`: every cookie in the browser, not just the page's.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
+    /// Cookies and localStorage to a file, or back from one, in Playwright's
+    /// `storageState` format: sign in once, save, and load in a new session.
+    #[serde(rename = "state")]
+    State {
+        /// `save` or `load`.
+        action: String,
+        path: String,
+    },
+    /// The page as a PDF file.
+    #[serde(rename = "pdf")]
+    Pdf {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        landscape: bool,
+        /// Print background colors and images.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        background: bool,
+    },
+    /// localStorage / sessionStorage of the current page.
+    #[serde(rename = "storage")]
+    Storage {
+        /// `local` (default) or `session`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        area: Option<String>,
+        /// `get` (default), `set`, `remove`, `clear`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
+    /// Emulate a device or network condition for every tab: `viewport`,
+    /// `device`, `media`, `geo`, `offline`, `headers`, `ua`, `locale`,
+    /// `timezone` (`off` resets one).
+    #[serde(rename = "set")]
+    Set {
+        what: String,
+        #[serde(default, alias = "value", deserialize_with = "de_values")]
+        values: Vec<String>,
+        /// `viewport`: device pixel ratio.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f64>,
+        /// `viewport`: a mobile viewport (meta viewport, overlay scrollbars).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mobile: bool,
+        /// `geo`: accuracy in meters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accuracy: Option<f64>,
+    },
+    /// Intercept requests whose URL matches `pattern` (`*` and `?` globs):
+    /// fail them, or answer with `status`/`body`. Without a pattern: list
+    /// the rules.
+    #[serde(rename = "route")]
+    Route {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        abort: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body_file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        headers: Vec<String>,
+    },
+    /// Remove the rule for `pattern`, or all rules.
+    #[serde(rename = "unroute")]
+    Unroute {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+    },
+    /// A script that runs before the page's own scripts in every document
+    /// of every tab (auth shims, feature flags, mocks of `Date`/`fetch`).
+    /// Without a source: list them; `clear`: remove them.
+    #[serde(rename = "init-script")]
+    InitScript {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clear: bool,
+    },
+    /// A property of an element: `text`, `value`, `attr <name>`, `html`,
+    /// `outer`, `box`, `style <property>`; `count` of a selector's matches.
+    #[serde(rename = "get")]
+    Get {
+        what: String,
+        /// `attr`: the attribute; `style`: the CSS property.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_of: Option<String>,
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    /// Whether an element is `visible`, `hidden`, `enabled`, `disabled`,
+    /// `checked`, `editable` or `focused` (a missing element: not visible).
+    #[serde(rename = "is")]
+    Is {
+        state: String,
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    /// Drag one element onto another: HTML5 drag and drop for a
+    /// `draggable` source, a held mouse moved across for anything else.
+    #[serde(rename = "drag")]
+    Drag {
+        from: TargetArgs,
+        to: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    #[serde(rename = "dblclick")]
+    Dblclick {
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    #[serde(rename = "focus")]
+    Focus {
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    /// Check (or uncheck) a checkbox, radio or switch: clicks it only when
+    /// its state differs.
+    #[serde(rename = "set-checked")]
+    SetChecked {
+        checked: bool,
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
+    /// Hold a key down (`Shift`, `Control`, a character) without releasing it.
+    #[serde(rename = "keydown")]
+    KeyDown { key: String },
+    #[serde(rename = "keyup")]
+    KeyUp { key: String },
+    /// Insert text at the caret in one go (paste / IME commit): no key events.
+    #[serde(rename = "insert-text")]
+    InsertText {
+        value: String,
+        #[serde(flatten)]
+        target: TargetArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
     /// Current page URL and tab state.
     #[serde(rename = "url")]
     Url {},
+    /// What this session runs: engine, browser executable, CDP endpoint,
+    /// tabs, active URL.
+    #[serde(rename = "status")]
+    Status {},
     /// PNG screenshot to disk; result is the written path + byte length.
     #[serde(rename = "screenshot")]
     Screenshot {
@@ -371,6 +665,9 @@ pub struct Response {
     /// one is active).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_tabs: Option<Vec<usize>>,
+    /// Things the engine did differently from what the agent asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<String>>,
     /// Server-side time for the op, in milliseconds with µs resolution.
     pub elapsed_ms: f64,
 }
@@ -522,13 +819,35 @@ const OPS: &[(&str, &str, &str)] = &[
     ("hover", "<ref> | --selector <css> | --text <t>", "move the mouse over an element (hover menus)"),
     ("scroll", "[--by <px> | --to top|bottom] [<ref> | --selector <css>]", "scroll the page, or an element into view"),
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
-    ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms)"),
+    ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--idle] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms"),
     ("eval", "<js> | --file <path.js> | -", "evaluate JS (arrow functions are called); prints the JSON result; `-` reads the script from stdin"),
     ("text", "--selector <css>", "textContent of the first match"),
     ("find", "<description>", "the element a description means, chosen by a decision model (TYPESAFE_API_KEY); element ops also take --find <description>"),
     ("check", "<yes/no question>", "probability that the answer about the page is yes, from a decision model (TYPESAFE_API_KEY)"),
     ("title", "", "page title"),
+    ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
+    ("errors", "[--limit <n>] [--clear] [--json]", "only the errors: exceptions, console.error, failed loads"),
+    ("network", "[<n>] [--filter <text>] [--type fetch|xhr|document|…] [--failed] [--limit <n>] [--clear] [--har <file>] [--body-file <file>]", "the active tab's requests, one line each (#n METHOD STATUS type url size time); `network <n>` shows one in full with its response body"),
+    ("cookies", "[set <name> <value> [--url <u> | --domain <d>] [--path <p>] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax|Strict|None] | delete <name> [--url <u>] | clear] [--all] [--json]", "the current page's cookies (--all: every cookie), or set, delete or clear them"),
+    ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
+    ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
+    ("state", "save|load <file.json>", "every cookie and the open tabs' localStorage to a file, or back (Playwright storageState format): sign in once, reuse it in later sessions"),
+    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password>  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
+    ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value']]]", "fail or answer requests whose URL matches (* and ? globs); no flags = fail; no pattern = list the rules"),
+    ("unroute", "[<url glob>]", "remove one route rule, or all"),
+    ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
+    ("get", "text|value|html|outer|box|attr <name>|style <prop> <target> | count <css>", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --nth)"),
+    ("is", "visible|hidden|enabled|disabled|checked|editable|focused <target>", "true/false; a missing element is not visible"),
+    ("dblclick", "<target>", "trusted double click"),
+    ("drag", "<from> <to> | --from-text <t> --to-text <t>", "drag one element onto another (each a ref or CSS selector): HTML5 drag and drop for a draggable source, a held mouse moved across otherwise"),
+    ("focus", "<target>", "focus an element"),
+    ("check", "<target> | <yes/no question>", "check a checkbox/radio/switch (clicks only if needed); with a question instead of a target, the decision model's yes/no"),
+    ("uncheck", "<target>", "uncheck a checkbox/switch"),
+    ("keydown", "<key>", "hold a key (Shift, Control, a character) until keyup"),
+    ("keyup", "<key>", "release a held key"),
+    ("insert-text", "<text> [<target>]", "insert text at the caret in one go (paste/IME), no key events"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
+    ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
@@ -566,7 +885,7 @@ pub fn usage(program: &str) -> String {
          --session <name>       warm browser behind a local socket ($NAVIGERA_SESSION)\n  \
          --raw                  print only the result (strings unquoted); errors on stderr\n  \
          --timeout-ms <ms>      navigation/command timeout (default {DEFAULT_TIMEOUT_MS}); per op: element wait (default 5000)\n  \
-         --chromium <path>      browser binary ($CHROME_BIN); --engine lightpanda; --headed\n  \
+         --chromium <path>      browser binary ($CHROME_BIN); --engine lightpanda ($NAVIGERA_ENGINE); --headed\n  \
          --transport ws         CDP over a DevTools port instead of a private pipe (to attach DevTools; Windows default)\n  \
          --idle-timeout-s <s>   session server idle shutdown (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never)\n  \
          --attach [chrome|edge|<dir>|<port>]  with `start`: use your running browser (Chrome 144+: chrome://inspect/#remote-debugging); never closes it\n  \
@@ -770,6 +1089,17 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
         },
         text: str_flag(args, "--text")?,
         find: str_flag(args, "--find")?,
+        role: str_flag(args, "--role")?,
+        name: str_flag(args, "--name")?,
+        label: str_flag(args, "--label")?,
+        placeholder: str_flag(args, "--placeholder")?,
+        testid: str_flag(args, "--testid")?,
+        nth: match str_flag(args, "--nth")? {
+            Some(raw) => Some(raw.parse::<i64>().map_err(|_| {
+                ArgsError::Invalid(format!("--nth takes an index (0, 1, -1 for the last), got {raw:?}"))
+            })?),
+            None => None,
+        },
     };
     if positional_target && t == TargetArgs::default() {
         if let Some(first) = args.front().filter(|a| !a.starts_with("--")).cloned() {
@@ -813,6 +1143,11 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         std::path::Path::new(&program).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or(program);
     let mut args: Args = argv.collect();
     let mut config = SessionConfig::default();
+    // `--engine` wins; the variable sets it for every command of a shell
+    // (an agent never has to repeat the flag).
+    if let Some(engine) = std::env::var("NAVIGERA_ENGINE").ok().filter(|e| !e.trim().is_empty()) {
+        config.engine = engine.trim().to_string();
+    }
 
     // Leading globals (the only place --timeout-ms is global; after a
     // command it is that op's own timeout).
@@ -1022,6 +1357,12 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 gone: str_flag(&mut args, "--gone")?,
                 js: str_flag(&mut args, "--js")?,
                 ms: num_flag(&mut args, "--ms")?,
+                idle: extract_present(&mut args, "--idle")
+                    || match str_flag(&mut args, "--load")?.as_deref() {
+                        None => false,
+                        Some("networkidle" | "idle") => true,
+                        Some(other) => return invalid(format!("wait --load takes networkidle, got {other:?}")),
+                    },
                 timeout_ms,
             };
             if let (Some(p), Command::Wait { selector, ms, .. }) = (positional(&mut args), &mut cmd) {
@@ -1032,7 +1373,16 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
             if matches!(
                 &cmd,
-                Command::Wait { selector: None, text: None, url: None, gone: None, js: None, ms: None, .. }
+                Command::Wait {
+                    selector: None,
+                    text: None,
+                    url: None,
+                    gone: None,
+                    js: None,
+                    ms: None,
+                    idle: false,
+                    ..
+                }
             ) {
                 return Err(need("wait", "a condition"));
             }
@@ -1057,10 +1407,96 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             what: rest_words(&mut args).ok_or_else(|| need("find", "a description of the element"))?,
             timeout_ms,
         },
+        // `check <target>` checks a checkbox; `check <question>` asks the
+        // decision model. A target is a ref or a targeting flag.
+        "check" | "uncheck"
+            if op == "uncheck"
+                || args.iter().any(|a| {
+                    matches!(
+                        a.as_str(),
+                        "--selector"
+                            | "--ref"
+                            | "--text"
+                            | "--find"
+                            | "--role"
+                            | "--name"
+                            | "--label"
+                            | "--placeholder"
+                            | "--testid"
+                            | "--nth"
+                    )
+                })
+                || (args.len() == 1 && parse_ref(&args[0]).is_some()) =>
+        {
+            Command::SetChecked { checked: op == "check", target: target_args(&mut args, true)?, timeout_ms }
+        }
         "check" => Command::Check {
             question: rest_words(&mut args).ok_or_else(|| need("check", "a yes/no question about the page"))?,
             timeout_ms,
         },
+        "get" => {
+            let what = positional(&mut args).ok_or_else(|| need("get", "what to read"))?;
+            match what.as_str() {
+                "count" => Command::Get {
+                    what,
+                    name_of: None,
+                    target: TargetArgs {
+                        selector: Some(match str_flag(&mut args, "--selector")? {
+                            Some(s) => s,
+                            None => positional(&mut args).ok_or_else(|| need("get", "a CSS selector to count"))?,
+                        }),
+                        ..TargetArgs::default()
+                    },
+                    timeout_ms,
+                },
+                "title" => Command::Title {},
+                "url" => Command::Url {},
+                "attr" | "style" => {
+                    let name_of =
+                        Some(positional(&mut args).ok_or_else(|| need("get", "the attribute or CSS property name"))?);
+                    Command::Get { what, name_of, target: target_args(&mut args, true)?, timeout_ms }
+                }
+                _ => Command::Get { what, name_of: None, target: target_args(&mut args, true)?, timeout_ms },
+            }
+        }
+        "is" => Command::Is {
+            state: positional(&mut args).ok_or_else(|| need("is", "a state (visible, enabled, checked, …)"))?,
+            target: target_args(&mut args, true)?,
+            timeout_ms,
+        },
+        "dblclick" => Command::Dblclick { target: target_args(&mut args, true)?, timeout_ms },
+        "drag" | "drag-drop" => {
+            let side = |text: Option<String>, args: &mut Args| -> Result<TargetArgs, ArgsError> {
+                if text.is_some() {
+                    return Ok(TargetArgs { text, ..TargetArgs::default() });
+                }
+                let raw = positional(args).ok_or_else(|| need("drag", "<from> <to> (refs or selectors)"))?;
+                Ok(match parse_ref(&raw) {
+                    Some(r) => TargetArgs { node_ref: Some(r), ..TargetArgs::default() },
+                    None => TargetArgs { selector: Some(raw), ..TargetArgs::default() },
+                })
+            };
+            let (from_text, to_text) = (str_flag(&mut args, "--from-text")?, str_flag(&mut args, "--to-text")?);
+            let from = side(from_text, &mut args)?;
+            let to = side(to_text, &mut args)?;
+            Command::Drag { from, to, timeout_ms }
+        }
+        "focus" => Command::Focus { target: target_args(&mut args, true)?, timeout_ms },
+        "keydown" | "keyup" => {
+            let key = positional(&mut args).ok_or_else(|| need(&op, "a key"))?;
+            if op == "keydown" {
+                Command::KeyDown { key }
+            } else {
+                Command::KeyUp { key }
+            }
+        }
+        "insert-text" => {
+            let value = match str_flag(&mut args, "--value")? {
+                Some(v) => v,
+                None => positional(&mut args).ok_or_else(|| need("insert-text", "the text"))?,
+            };
+            Command::InsertText { value, target: target_args(&mut args, true)?, timeout_ms }
+        }
         "eval" | "evaluate" => {
             // `--file <path>` and `-` (stdin) keep the script away from the
             // shell's quoting rules (PowerShell mangles quotes and backslashes).
@@ -1094,7 +1530,138 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             scope: target_args(&mut args, true)?,
             timeout_ms,
         },
+        "console" => Command::Console {
+            level: str_flag(&mut args, "--level")?,
+            limit: num_flag(&mut args, "--limit")?.map(|v| v as usize),
+            clear: extract_present(&mut args, "--clear"),
+            format: extract_present(&mut args, "--json").then(|| "json".to_string()),
+        },
+        "errors" => Command::Errors {
+            limit: num_flag(&mut args, "--limit")?.map(|v| v as usize),
+            clear: extract_present(&mut args, "--clear"),
+            format: extract_present(&mut args, "--json").then(|| "json".to_string()),
+        },
+        "network" => Command::Network {
+            filter: str_flag(&mut args, "--filter")?,
+            kind: str_flag(&mut args, "--type")?,
+            failed: extract_present(&mut args, "--failed"),
+            limit: num_flag(&mut args, "--limit")?.map(|v| v as usize),
+            clear: extract_present(&mut args, "--clear"),
+            har: str_flag(&mut args, "--har")?,
+            body_file: str_flag(&mut args, "--body-file")?,
+            n: match positional(&mut args) {
+                Some(raw) => Some(
+                    raw.trim_start_matches('#')
+                        .parse::<u64>()
+                        .map_err(|_| ArgsError::Invalid(format!("network: {raw:?} is not a request number")))?,
+                ),
+                None => None,
+            },
+        },
+        "cookies" | "cookie" => {
+            let action = match args.front().map(String::as_str) {
+                Some("set" | "delete" | "clear" | "list" | "get") => args.pop_front(),
+                _ => None,
+            };
+            let mut cmd = Command::Cookies {
+                action: action.map(|a| if a == "get" { "list".into() } else { a }),
+                name: None,
+                value: None,
+                url: str_flag(&mut args, "--url")?,
+                domain: str_flag(&mut args, "--domain")?,
+                path: str_flag(&mut args, "--path")?,
+                expires: num_flag(&mut args, "--expires")?,
+                http_only: extract_present(&mut args, "--http-only"),
+                secure: extract_present(&mut args, "--secure"),
+                same_site: str_flag(&mut args, "--same-site")?,
+                all: extract_present(&mut args, "--all"),
+                format: extract_present(&mut args, "--json").then(|| "json".to_string()),
+            };
+            if let Command::Cookies { action, name, value, .. } = &mut cmd {
+                match action.as_deref() {
+                    Some("set") => {
+                        *name = Some(positional(&mut args).ok_or_else(|| need("cookies", "a cookie name"))?);
+                        *value = Some(positional(&mut args).ok_or_else(|| need("cookies", "a cookie value"))?);
+                    }
+                    Some("delete") => {
+                        *name = Some(positional(&mut args).ok_or_else(|| need("cookies", "a cookie name"))?);
+                    }
+                    _ => {}
+                }
+            }
+            cmd
+        }
+        "state" => {
+            let action = positional(&mut args).ok_or_else(|| need("state", "save or load"))?;
+            if action != "save" && action != "load" {
+                return Err(ArgsError::Invalid(format!("state takes save|load, got {action:?}")));
+            }
+            let path = positional(&mut args).ok_or_else(|| need("state", "a file"))?;
+            Command::State { action, path }
+        }
+        "pdf" => Command::Pdf {
+            path: match str_flag(&mut args, "--path")? {
+                Some(p) => Some(p),
+                None => positional(&mut args),
+            },
+            landscape: extract_present(&mut args, "--landscape"),
+            background: extract_present(&mut args, "--background"),
+        },
+        "storage" => {
+            let area = match args.front().map(String::as_str) {
+                Some("local" | "session") => args.pop_front(),
+                _ => None,
+            };
+            let action = match args.front().map(String::as_str) {
+                Some("get" | "set" | "remove" | "clear") => args.pop_front(),
+                _ => None,
+            };
+            let key = positional(&mut args);
+            let value = positional(&mut args);
+            match (action.as_deref(), &key, &value) {
+                (Some("set"), Some(_), Some(_)) | (Some("remove"), Some(_), None) | (Some("clear"), None, None) => {}
+                (None | Some("get"), _, None) => {}
+                _ => return Err(need("storage", "`get [<key>]`, `set <key> <value>`, `remove <key>` or `clear`")),
+            }
+            Command::Storage { area, action, key, value }
+        }
+        "set" | "emulate" => {
+            let what = positional(&mut args).ok_or_else(|| need("set", "what to set"))?;
+            let scale = num_flag(&mut args, "--scale")?;
+            let mobile = extract_present(&mut args, "--mobile");
+            let accuracy = num_flag(&mut args, "--accuracy")?;
+            let mut values = Vec::new();
+            while let Some(v) = positional(&mut args) {
+                values.push(v);
+            }
+            Command::Set { what, values, scale, mobile, accuracy }
+        }
+        "route" => Command::Route {
+            abort: extract_present(&mut args, "--abort"),
+            status: num_flag(&mut args, "--status")?.map(|v| v as u16),
+            body: str_flag(&mut args, "--body")?,
+            body_file: str_flag(&mut args, "--body-file")?,
+            content_type: str_flag(&mut args, "--content-type")?,
+            headers: extract_values(&mut args, "--header").map_err(ArgsError::Invalid)?,
+            pattern: positional(&mut args),
+        },
+        "unroute" => Command::Unroute { pattern: positional(&mut args) },
+        "init-script" | "addinitscript" => {
+            let clear = extract_present(&mut args, "--clear");
+            let source = match str_flag(&mut args, "--file")? {
+                Some(path) => Some(
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| ArgsError::Invalid(format!("init-script --file {path}: {e}")))?,
+                ),
+                None => positional(&mut args),
+            };
+            if clear && source.is_some() {
+                return invalid("init-script takes a script or --clear, not both");
+            }
+            Command::InitScript { source, clear }
+        }
         "url" => Command::Url {},
+        "status" => Command::Status {},
         // Mostly for sessions (`--session s quit` stops the server); as a
         // one-shot it just launches and closes.
         "quit" | "close" => Command::Quit { close_browser: extract_present(&mut args, "--close-browser") },
@@ -1162,6 +1729,10 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
 ///
 /// Construct once per session; every [`Command`] runs against the same warm
 /// Chrome (no relaunch between ops).
+/// A tree longer than this, read while a decision model is on, gets a note
+/// that acting does not need it.
+const AX_DECIDER_LINES: usize = 60;
+
 pub struct Driver {
     session: BrowserSession,
 }
@@ -1171,6 +1742,7 @@ pub struct Outcome {
     pub result: Value,
     pub dialogs: Vec<Value>,
     pub new_tabs: Vec<usize>,
+    pub notes: Vec<String>,
 }
 
 impl Driver {
@@ -1217,6 +1789,113 @@ impl Driver {
     }
 
     /// Tab inventory for `tab-list` / `tab-new` results.
+    /// `console` / `errors`: the active tab's log at `min` level or above.
+    fn console_result(&self, min: u8, limit: Option<usize>, clear: bool, format: Option<&str>) -> Value {
+        let rank = |level: &str| match level {
+            "debug" => 0,
+            "log" => 1,
+            "info" => 2,
+            "warn" => 3,
+            _ => 4,
+        };
+        let all = self.session.console(clear);
+        let mut picked: Vec<_> = all.into_iter().filter(|e| rank(&e.level) >= min).collect();
+        let limit = limit.unwrap_or(200);
+        if picked.len() > limit {
+            picked.drain(..picked.len() - limit);
+        }
+        if format == Some("json") {
+            return crate::cdp::logs::console_json(&picked);
+        }
+        if picked.is_empty() {
+            return json!(if min >= 4 { "(no errors)" } else { "(no console messages)" });
+        }
+        json!(crate::cdp::logs::console_text(&picked))
+    }
+
+    /// `network`: the request list, one request in full, or a HAR file.
+    #[allow(clippy::too_many_arguments)]
+    fn network(
+        &self,
+        n: Option<u64>,
+        filter: Option<&str>,
+        kind: Option<&str>,
+        failed: bool,
+        limit: Option<usize>,
+        clear: bool,
+        har: Option<&str>,
+        body_file: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        let all = self.session.requests(clear && n.is_none());
+        if let Some(n) = n {
+            let r = all
+                .iter()
+                .find(|r| r.n == n)
+                .ok_or_else(|| anyhow::anyhow!("network: no request #{n} (older ones are dropped after 1000)"))?;
+            let mut out = crate::cdp::logs::request_json(r);
+            if r.post_data.is_none() && r.has_post_data {
+                if let Ok(data) = self.session.request_post_data(&r.id) {
+                    out["post_data"] = json!(data);
+                }
+            }
+            match self.session.response_body(&r.id) {
+                Ok((body, base64)) => {
+                    let bytes = if base64 {
+                        use base64::Engine as _;
+                        base64::engine::general_purpose::STANDARD.decode(&body).unwrap_or_default()
+                    } else {
+                        body.clone().into_bytes()
+                    };
+                    if let Some(path) = body_file {
+                        std::fs::write(path, &bytes).map_err(|e| anyhow::anyhow!("network --body-file {path}: {e}"))?;
+                        out["body_file"] = json!(path);
+                        out["body_bytes"] = json!(bytes.len());
+                    } else if base64 {
+                        out["body"] =
+                            json!(format!("({} bytes of binary data; --body-file <path> saves it)", bytes.len()));
+                    } else {
+                        const MAX: usize = 8 * 1024;
+                        let text = String::from_utf8_lossy(&bytes);
+                        out["body"] = if text.len() > MAX {
+                            let cut = text
+                                .char_indices()
+                                .take_while(|(i, _)| *i < MAX)
+                                .last()
+                                .map(|(i, c)| i + c.len_utf8())
+                                .unwrap_or(0);
+                            json!(format!("{}… ({} bytes; --body-file <path> saves all)", &text[..cut], bytes.len()))
+                        } else {
+                            json!(text)
+                        };
+                    }
+                }
+                Err(e) => out["body"] = json!(format!("(unavailable: {e:#})")),
+            }
+            return Ok(out);
+        }
+        let kind = kind.map(str::to_ascii_lowercase);
+        let mut picked: Vec<_> = all
+            .into_iter()
+            .filter(|r| filter.is_none_or(|f| r.url.contains(f)))
+            .filter(|r| kind.as_ref().is_none_or(|k| r.kind.to_ascii_lowercase() == *k))
+            .filter(|r| !failed || r.failed.is_some() || r.status.is_some_and(|s| s >= 400))
+            .collect();
+        if let Some(path) = har {
+            let har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
+            std::fs::write(path, serde_json::to_vec_pretty(&har)?)
+                .map_err(|e| anyhow::anyhow!("network --har {path}: {e}"))?;
+            return Ok(json!({ "har": path, "entries": picked.len() }));
+        }
+        let limit = limit.unwrap_or(100);
+        if picked.len() > limit {
+            picked.drain(..picked.len() - limit);
+        }
+        if picked.is_empty() {
+            return Ok(json!("(no requests)"));
+        }
+        Ok(json!(crate::cdp::logs::requests_text(&picked, &origin_of(&self.session.url()))))
+    }
+
     fn tabs_json(&self) -> Value {
         let active = self.session.active_page();
         let tabs: Vec<Value> = self
@@ -1247,6 +1926,16 @@ impl Driver {
             Command::Quit { .. }
                 | Command::Dialog { .. }
                 | Command::TabList {}
+                | Command::Status {}
+                | Command::Console { .. }
+                | Command::Errors { .. }
+                | Command::Network { .. }
+                | Command::Cookies { .. }
+                | Command::State { .. }
+                | Command::Route { .. }
+                | Command::InitScript { .. }
+                | Command::Unroute { .. }
+                | Command::Set { .. }
                 | Command::TabNew { .. }
                 | Command::TabSelect { .. }
                 | Command::TabClose { .. }
@@ -1256,7 +1945,16 @@ impl Driver {
                 | Command::Reload {}
                 | Command::Back {}
                 | Command::Forward {}
-                | Command::Wait { ms: Some(_), selector: None, text: None, url: None, gone: None, js: None, .. }
+                | Command::Wait {
+                    ms: Some(_),
+                    selector: None,
+                    text: None,
+                    url: None,
+                    gone: None,
+                    js: None,
+                    idle: false,
+                    ..
+                }
         );
         if reads_page {
             let budget = op_timeout_ms(command)
@@ -1308,6 +2006,17 @@ impl Driver {
                 e
             }
         });
+        let mut notes = if result.is_ok() { self.session.follow_popups(op_timeout_ms(command)) } else { Vec::new() };
+        // Uncaught exceptions while this op ran (a handler that crashed is
+        // why a click "did nothing"): one line, `errors` has the rest.
+        if !matches!(command, Command::Console { .. } | Command::Errors { .. }) {
+            let thrown = self.session.take_exceptions();
+            if let Some(first) = thrown.first() {
+                let more = if thrown.len() > 1 { format!(" (+{} more)", thrown.len() - 1) } else { String::new() };
+                let first: String = first.chars().take(160).collect();
+                notes.push(format!("the page threw {first}{more}; `errors` lists them"));
+            }
+        }
         let opened = self.session.sync_tabs();
         if !opened.is_empty() {
             // The op opened a tab and the session switched to it: let its
@@ -1319,7 +2028,7 @@ impl Driver {
         }
         new_tabs.extend(opened);
         let dialogs = self.session.take_dialogs();
-        let mut result = match (result, new_tabs.is_empty()) {
+        let mut result = match (result, new_tabs.is_empty() && notes.is_empty()) {
             // A click that opened a tab: report the state of the new tab.
             (Ok(r), false) if r.get("tab").is_some() => Ok(self.state_json()),
             (r, _) => r,
@@ -1327,7 +2036,19 @@ impl Driver {
         if let (Some(f), Some(obj)) = (found, result.as_object_mut()) {
             obj.insert("found".into(), json!({ "ref": f.chosen.node_ref, "element": f.chosen.line, "p": f.p }));
         }
-        Ok(Outcome { result, dialogs, new_tabs })
+        // A long tree read while a decision model is on: say, where the
+        // choice to read it again is made, that acting needs no reading.
+        if let (Command::Ax { .. }, Value::String(tree)) = (command, &result) {
+            let lines = tree.lines().count();
+            if lines > AX_DECIDER_LINES && crate::decide::Decider::from_env().is_some() {
+                notes.push(format!(
+                    "this tree is {lines} lines; with the decision model on, `click --find \"<what>\"`, \
+                     `fill --find \"<what>\" <value>` and `check \"<yes/no question>\"` act and verify \
+                     without reading it. Read it for text you must report."
+                ));
+            }
+        }
+        Ok(Outcome { result, dialogs, new_tabs, notes })
     }
 
     /// The page as `find` and `check` see it: the whole text tree.
@@ -1391,7 +2112,9 @@ impl Driver {
                 let point =
                     s.click_target(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("click {}: {e:#}", t.label()))?;
                 let mut state = self.state_json();
-                if point.get("synthetic").and_then(Value::as_bool) == Some(true) {
+                // Lightpanda lays nothing out, so a DOM-event click there is
+                // the normal case, not a sign of an overlay.
+                if point.get("synthetic").and_then(Value::as_bool) == Some(true) && !s.is_lightpanda() {
                     // The agent should know the click was not a real one.
                     state["synthetic_click"] = json!(if point.get("dropped").and_then(Value::as_bool) == Some(true) {
                         "the browser did not deliver the mouse events (twice); dispatched DOM events instead"
@@ -1450,9 +2173,23 @@ impl Driver {
                 s.upload(&t, files, *timeout_ms).map_err(|e| anyhow::anyhow!("upload {}: {e:#}", t.label()))?;
                 Ok(json!({ "files": files.len() }))
             }
-            Command::Wait { selector, text, url, gone, js, ms, timeout_ms } => {
+            Command::Wait { selector, text, url, gone, js, ms, idle, timeout_ms } => {
                 if let Some(ms) = ms {
                     std::thread::sleep(std::time::Duration::from_secs_f64(ms.max(0.0) / 1000.0));
+                }
+                if *idle {
+                    let max = timeout_ms
+                        .map(|ms| std::time::Duration::from_secs_f64(ms / 1000.0))
+                        .unwrap_or(std::time::Duration::from_secs(10));
+                    let started = std::time::Instant::now();
+                    if !s.network_quiet(NETWORK_QUIET, max) {
+                        anyhow::bail!("wait: the network was not idle within {} ms", max.as_millis());
+                    }
+                    if [selector, text, url, gone, js].iter().all(|c| c.is_none()) {
+                        let mut state = self.state_json();
+                        state["waited_ms"] = json!(started.elapsed().as_millis() as u64);
+                        return Ok(state);
+                    }
                 }
                 let mut checks = Vec::new();
                 let mut what = Vec::new();
@@ -1543,7 +2280,335 @@ impl Driver {
                     other => Ok(other),
                 }
             }
+            Command::Console { level, limit, clear, format } => {
+                let min = match level.as_deref() {
+                    None | Some("debug") => 0,
+                    Some("log") => 1,
+                    Some("info") => 2,
+                    Some("warn" | "warning") => 3,
+                    Some("error") => 4,
+                    Some(other) => anyhow::bail!("console --level takes debug|log|info|warn|error, got {other:?}"),
+                };
+                Ok(self.console_result(min, *limit, *clear, format.as_deref()))
+            }
+            Command::Errors { limit, clear, format } => Ok(self.console_result(4, *limit, *clear, format.as_deref())),
+            Command::Network { n, filter, kind, failed, limit, clear, har, body_file } => self.network(
+                *n,
+                filter.as_deref(),
+                kind.as_deref(),
+                *failed,
+                *limit,
+                *clear,
+                har.as_deref(),
+                body_file.as_deref(),
+            ),
+            Command::Cookies {
+                action,
+                name,
+                value,
+                url,
+                domain,
+                path,
+                expires,
+                http_only,
+                secure,
+                same_site,
+                all,
+                format,
+            } => match action.as_deref().unwrap_or("list") {
+                "list" => {
+                    let cookies = s.cookies(*all, url.as_deref())?;
+                    if format.as_deref() == Some("json") {
+                        return Ok(cookies);
+                    }
+                    Ok(json!(cookies_text(&cookies)))
+                }
+                "set" => {
+                    let mut c = json!({ "name": name, "value": value });
+                    match (url, domain) {
+                        (_, Some(d)) => c["domain"] = json!(d),
+                        (Some(u), None) => c["url"] = json!(u),
+                        (None, None) => c["url"] = json!(s.url()),
+                    }
+                    if let Some(p) = path {
+                        c["path"] = json!(p);
+                    } else if domain.is_some() {
+                        c["path"] = json!("/");
+                    }
+                    if let Some(e) = expires {
+                        c["expires"] = json!(e);
+                    }
+                    if *http_only {
+                        c["httpOnly"] = json!(true);
+                    }
+                    if *secure {
+                        c["secure"] = json!(true);
+                    }
+                    if let Some(ss) = same_site {
+                        let ss = match ss.to_ascii_lowercase().as_str() {
+                            "lax" => "Lax",
+                            "strict" => "Strict",
+                            "none" => "None",
+                            other => anyhow::bail!("cookies --same-site takes Lax|Strict|None, got {other:?}"),
+                        };
+                        c["sameSite"] = json!(ss);
+                    }
+                    s.set_cookie(c)?;
+                    Ok(json!({ "set": name }))
+                }
+                "delete" => {
+                    let mut p = json!({ "name": name });
+                    match (url, domain) {
+                        (_, Some(d)) => p["domain"] = json!(d),
+                        (Some(u), None) => p["url"] = json!(u),
+                        (None, None) => p["url"] = json!(s.url()),
+                    }
+                    s.delete_cookies(p)?;
+                    Ok(json!({ "deleted": name }))
+                }
+                "clear" => {
+                    s.clear_cookies()?;
+                    Ok(json!({ "cleared": true }))
+                }
+                other => anyhow::bail!("cookies: unknown action {other:?} (list|set|delete|clear)"),
+            },
+            Command::State { action, path } if action == "save" => {
+                let state = self.session.storage_state()?;
+                let (cookies, origins) =
+                    (state["cookies"].as_array().map_or(0, Vec::len), state["origins"].as_array().map_or(0, Vec::len));
+                std::fs::write(path, serde_json::to_string_pretty(&state)? + "\n")
+                    .map_err(|e| anyhow::anyhow!("state save {path}: {e}"))?;
+                Ok(json!({ "saved": path, "cookies": cookies, "origins": origins }))
+            }
+            Command::State { path, .. } => {
+                let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("state load {path}: {e}"))?;
+                let state: Value =
+                    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("state load {path}: not JSON ({e})"))?;
+                let (cookies, origins) = self.session.load_storage_state(&state)?;
+                Ok(json!({ "loaded": path, "cookies": cookies, "origins": origins }))
+            }
+            Command::Pdf { path, landscape, background } => {
+                let path = path.clone().unwrap_or_else(|| {
+                    format!(
+                        "page-{}.pdf",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)
+                    )
+                });
+                let bytes = s.pdf(*landscape, *background).map_err(|e| anyhow::anyhow!("pdf: {e:#}"))?;
+                std::fs::write(&path, &bytes).map_err(|e| anyhow::anyhow!("pdf: writing {path}: {e:#}"))?;
+                let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
+                Ok(json!({ "path": path, "bytes": bytes.len() }))
+            }
+            Command::Storage { area, action, key, value } => {
+                let area = match area.as_deref().unwrap_or("local") {
+                    "local" => "localStorage",
+                    "session" => "sessionStorage",
+                    other => anyhow::bail!("storage takes local|session, got {other:?}"),
+                };
+                let js = match (action.as_deref().unwrap_or("get"), key, value) {
+                    ("get", Some(k), _) => format!("{area}.getItem({})", json!(k)),
+                    ("get", None, _) => format!("Object.fromEntries(Object.entries({area}))"),
+                    ("set", Some(k), Some(v)) => format!("({area}.setItem({}, {}), true)", json!(k), json!(v)),
+                    ("remove", Some(k), _) => format!("({area}.removeItem({}), true)", json!(k)),
+                    ("clear", _, _) => format!("({area}.clear(), true)"),
+                    (other, ..) => anyhow::bail!("storage: {other} needs a key (set: and a value)"),
+                };
+                s.evaluate_with_timeout::<Value>(&js, None).map_err(|e| anyhow::anyhow!("storage: {e:#}"))
+            }
+            Command::Route { pattern: None, .. } => {
+                let routes = self.session.routes();
+                if routes.is_empty() {
+                    return Ok(json!("(no routes)"));
+                }
+                Ok(json!(routes
+                    .iter()
+                    .map(|r| {
+                        let what = match &r.action {
+                            crate::cdp::RouteAction::Abort => "abort".to_string(),
+                            crate::cdp::RouteAction::Fulfill { status, .. } => format!("fulfill {status}"),
+                        };
+                        format!("{} -> {what} ({} hits)", r.pattern, r.hits)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")))
+            }
+            Command::Route { pattern: Some(pattern), abort, status, body, body_file, content_type, headers } => {
+                let fulfill = status.is_some() || body.is_some() || body_file.is_some();
+                if *abort && fulfill {
+                    anyhow::bail!("route: --abort or a response (--status/--body), not both");
+                }
+                let action = if fulfill {
+                    use base64::Engine as _;
+                    let bytes = match (body, body_file) {
+                        (Some(_), Some(_)) => anyhow::bail!("route: --body or --body-file, not both"),
+                        (Some(b), None) => b.clone().into_bytes(),
+                        (None, Some(f)) => {
+                            std::fs::read(f).map_err(|e| anyhow::anyhow!("route --body-file {f}: {e}"))?
+                        }
+                        (None, None) => Vec::new(),
+                    };
+                    let mut hs: Vec<(String, String)> = headers
+                        .iter()
+                        .map(|h| {
+                            h.split_once(':')
+                                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                                .ok_or_else(|| anyhow::anyhow!("route --header {h:?}: use 'Name: value'"))
+                        })
+                        .collect::<anyhow::Result<_>>()?;
+                    let ctype = content_type.clone().unwrap_or_else(|| {
+                        let t = String::from_utf8_lossy(&bytes);
+                        let t = t.trim_start();
+                        if t.starts_with('{') || t.starts_with('[') {
+                            "application/json"
+                        } else if t.starts_with('<') {
+                            "text/html"
+                        } else {
+                            "text/plain"
+                        }
+                        .to_string()
+                    });
+                    if !hs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+                        hs.push(("Content-Type".into(), ctype));
+                    }
+                    crate::cdp::RouteAction::Fulfill {
+                        status: status.unwrap_or(200),
+                        headers: hs,
+                        body_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    }
+                } else {
+                    crate::cdp::RouteAction::Abort
+                };
+                let what = match &action {
+                    crate::cdp::RouteAction::Abort => "abort".to_string(),
+                    crate::cdp::RouteAction::Fulfill { status, .. } => format!("fulfill {status}"),
+                };
+                self.session
+                    .add_route(crate::cdp::Route { pattern: pattern.clone(), action, hits: 0 })
+                    .map_err(|e| anyhow::anyhow!("route: {e:#}"))?;
+                Ok(json!({ "route": pattern, "action": what }))
+            }
+            Command::InitScript { source: Some(source), .. } => {
+                let n = self.session.add_init_script(source).map_err(|e| anyhow::anyhow!("init-script: {e:#}"))?;
+                Ok(json!({ "init_scripts": n }))
+            }
+            Command::InitScript { source: None, clear: true } => {
+                Ok(json!({ "removed": self.session.clear_init_scripts() }))
+            }
+            Command::InitScript { source: None, clear: false } => {
+                let scripts = self.session.init_scripts();
+                if scripts.is_empty() {
+                    return Ok(json!("(no init scripts)"));
+                }
+                Ok(json!(scripts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, src)| format!(
+                        "{}: {}",
+                        i + 1,
+                        src.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect::<String>()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n")))
+            }
+            Command::Unroute { pattern } => {
+                let removed =
+                    self.session.remove_routes(pattern.as_deref()).map_err(|e| anyhow::anyhow!("unroute: {e:#}"))?;
+                Ok(json!({ "removed": removed }))
+            }
+            Command::Set { what, values, .. } if what == "credentials" || what == "auth" => {
+                let creds = match values.as_slice() {
+                    [off] if matches!(off.as_str(), "off" | "reset" | "none" | "clear") => None,
+                    [user, pass] => Some((user.clone(), pass.clone())),
+                    _ => anyhow::bail!("set credentials <user> <password> (or `off`)"),
+                };
+                let on = creds.is_some();
+                self.session.set_credentials(creds).map_err(|e| anyhow::anyhow!("set credentials: {e:#}"))?;
+                Ok(json!({ "credentials": if on { "set" } else { "off" } }))
+            }
+            Command::Set { what, values, scale, mobile, accuracy } => {
+                let plan = crate::emulate::plan(what, values, *scale, *mobile, *accuracy, s.is_lightpanda())?;
+                if let Some(permission) = plan.grant {
+                    self.session.grant(permission);
+                }
+                self.session
+                    .set_override(plan.kind, plan.calls, plan.reset)
+                    .map_err(|e| anyhow::anyhow!("set {what}: {e:#}"))?;
+                Ok(plan.result)
+            }
+            Command::Get { what, name_of, target, timeout_ms } => {
+                if what == "count" {
+                    let sel = target.selector.as_deref().unwrap_or("*");
+                    return Ok(json!(s.count(sel).map_err(|e| anyhow::anyhow!("get count {sel:?}: {e:#}"))?));
+                }
+                if !matches!(what.as_str(), "text" | "value" | "attr" | "html" | "outer" | "box" | "style" | "checked")
+                {
+                    anyhow::bail!("get takes text, value, attr <name>, html, outer, box, style <prop>, checked, count <css>, title or url; got {what:?}");
+                }
+                let t = target.target("get")?;
+                s.get_prop(&t, what, name_of.as_deref(), *timeout_ms)
+                    .map_err(|e| anyhow::anyhow!("get {what} {}: {e:#}", t.label()))
+            }
+            Command::Is { state, target, timeout_ms } => {
+                let t = target.target("is")?;
+                Ok(json!(s
+                    .is_state(&t, state, *timeout_ms)
+                    .map_err(|e| anyhow::anyhow!("is {state} {}: {e:#}", t.label()))?))
+            }
+            Command::Drag { from, to, timeout_ms } => {
+                let (f, t) = (from.target("drag")?, to.target("drag")?);
+                let r = s
+                    .drag(&f, &t, *timeout_ms)
+                    .map_err(|e| anyhow::anyhow!("drag {} to {}: {e:#}", f.label(), t.label()))?;
+                let mut out = self.state_json();
+                out["drag"] = r;
+                Ok(out)
+            }
+            Command::Dblclick { target, timeout_ms } => {
+                let t = target.target("dblclick")?;
+                s.dblclick(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("dblclick {}: {e:#}", t.label()))?;
+                Ok(self.state_json())
+            }
+            Command::Focus { target, timeout_ms } => {
+                let t = target.target("focus")?;
+                let focused = s.focus(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("focus {}: {e:#}", t.label()))?;
+                Ok(json!({ "focused": focused }))
+            }
+            Command::SetChecked { checked, target, timeout_ms } => {
+                let t = target.target(if *checked { "check" } else { "uncheck" })?;
+                let changed = s.set_checked(&t, *checked, *timeout_ms).map_err(|e| {
+                    anyhow::anyhow!("{} {}: {e:#}", if *checked { "check" } else { "uncheck" }, t.label())
+                })?;
+                let mut state = self.state_json();
+                state["checked"] = json!(checked);
+                state["changed"] = json!(changed);
+                Ok(state)
+            }
+            Command::KeyDown { key } => {
+                s.key_event(key, true).map_err(|e| anyhow::anyhow!("keydown: {e:#}"))?;
+                Ok(json!({ "down": key }))
+            }
+            Command::KeyUp { key } => {
+                s.key_event(key, false).map_err(|e| anyhow::anyhow!("keyup: {e:#}"))?;
+                Ok(json!({ "up": key }))
+            }
+            Command::InsertText { value, target, timeout_ms } => {
+                let t = target.optional("insert-text")?;
+                s.insert_text(t.as_ref(), value, *timeout_ms).map_err(|e| anyhow::anyhow!("insert-text: {e:#}"))?;
+                Ok(self.state_json())
+            }
             Command::Url {} => Ok(self.state_json()),
+            Command::Status {} => {
+                let mut state = self.state_json();
+                state["engine"] = json!(if self.session.is_lightpanda() { "lightpanda" } else { "chrome" });
+                state["executable"] = json!(self.session.executable());
+                state["endpoint"] = json!(self.session.endpoint());
+                state["attached"] = json!(self.session.is_attached());
+                state["version"] = json!(env!("CARGO_PKG_VERSION"));
+                Ok(state)
+            }
             Command::TabList {} => Ok(self.tabs_json()),
             Command::TabNew { url } => {
                 self.session.new_page().map_err(|e| anyhow::anyhow!("tab-new: {e:#}"))?;
@@ -1618,7 +2683,13 @@ impl Command {
             | Command::Press { target, .. }
             | Command::Type { target, .. }
             | Command::Scroll { target, .. }
-            | Command::Upload { target, .. } => Some(target),
+            | Command::Upload { target, .. }
+            | Command::Get { target, .. }
+            | Command::Is { target, .. }
+            | Command::Dblclick { target, .. }
+            | Command::Focus { target, .. }
+            | Command::SetChecked { target, .. }
+            | Command::InsertText { target, .. } => Some(target),
             Command::Ax { scope, .. } => Some(scope),
             _ => None,
         }
@@ -1757,6 +2828,9 @@ pub fn print_cli_response(output: &mut dyn Write, response: &Value, config: &Ses
             if d.get("accepted").and_then(Value::as_bool) == Some(true) { "accepted" } else { "dismissed" }
         );
     }
+    for n in response.get("notes").and_then(Value::as_array).into_iter().flatten() {
+        eprintln!("note: {}", n.as_str().unwrap_or_default());
+    }
     if let Some(tabs) = response.get("new_tabs").and_then(Value::as_array) {
         eprintln!(
             "note: the page opened {} new tab(s); now on tab {}",
@@ -1789,6 +2863,45 @@ pub fn print_cli_response(output: &mut dyn Write, response: &Value, config: &Ses
     ok
 }
 
+/// One line per cookie: `name=value; domain=…; path=/; expires=…; HttpOnly; Secure; SameSite=Lax`.
+fn cookies_text(cookies: &Value) -> String {
+    let lines: Vec<String> = cookies
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let get = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("");
+            let value: String = get("value").chars().take(120).collect();
+            let mut line = format!("{}={value}; domain={}; path={}", get("name"), get("domain"), get("path"));
+            match c.get("expires").and_then(Value::as_f64) {
+                Some(e) if e > 0.0 => line.push_str(&format!("; expires={}", e as i64)),
+                _ => line.push_str("; session"),
+            }
+            for (flag, label) in [("httpOnly", "HttpOnly"), ("secure", "Secure")] {
+                if c.get(flag).and_then(Value::as_bool) == Some(true) {
+                    line.push_str(&format!("; {label}"));
+                }
+            }
+            if !get("sameSite").is_empty() {
+                line.push_str(&format!("; SameSite={}", get("sameSite")));
+            }
+            line
+        })
+        .collect();
+    if lines.is_empty() {
+        "(no cookies)".into()
+    } else {
+        lines.join("\n")
+    }
+}
+
+/// `scheme://host[:port]` of a URL ("" when it has none).
+fn origin_of(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return String::new() };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    format!("{scheme}://{host}")
+}
+
 fn outcome_response(id: Value, outcome: Outcome, started: Instant) -> Response {
     let mut r = ok_response(id, outcome.result, started);
     if !outcome.dialogs.is_empty() {
@@ -1796,6 +2909,9 @@ fn outcome_response(id: Value, outcome: Outcome, started: Instant) -> Response {
     }
     if !outcome.new_tabs.is_empty() {
         r.new_tabs = Some(outcome.new_tabs);
+    }
+    if !outcome.notes.is_empty() {
+        r.notes = Some(outcome.notes);
     }
     r
 }
@@ -1808,6 +2924,7 @@ fn ok_response(id: Value, result: Value, started: Instant) -> Response {
         error: None,
         dialogs: None,
         new_tabs: None,
+        notes: None,
         elapsed_ms: elapsed_ms(started),
     }
 }
@@ -1825,6 +2942,7 @@ fn err_response(id: Value, error: String, started: Instant) -> Response {
         error: Some(error),
         dialogs: None,
         new_tabs: None,
+        notes: None,
         elapsed_ms: elapsed_ms(started),
     }
 }
@@ -2069,6 +3187,7 @@ mod tests {
                 gone: None,
                 js: None,
                 ms: None,
+                idle: false,
                 timeout_ms: None
             }
         );
@@ -2081,6 +3200,7 @@ mod tests {
                 gone: None,
                 js: None,
                 ms: Some(250.0),
+                idle: false,
                 timeout_ms: None
             }
         );
@@ -2216,6 +3336,7 @@ mod tests {
                 gone: None,
                 js: None,
                 ms: None,
+                idle: false,
                 timeout_ms: None,
             },
             Command::Quit { close_browser: false },
