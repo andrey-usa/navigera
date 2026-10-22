@@ -215,9 +215,10 @@ tell without looking at the variables.
   the op fails and lists the candidates, so a guess is never acted on.
 - `check "Did the order go through?"` returns the probability of yes. The
   page goes as its text tree without refs; near 0.5 means unsure.
-- A plain `ax` of a tree over 60 lines shows its first 40, ends with
-  `... N more lines not shown`, and notes that `--find` and `check` act on
-  the whole page; `ax --limit <n>`, `--max-depth`, `--all` or a scope
+- A plain `ax` of a tree over 16 KB (`NAVIGERA_AX_PREVIEW_BYTES`; `0` turns
+  it off) shows its first 40 lines, ends with `... N more lines not shown`,
+  and notes that `--find` and `check` act on the whole page; a tree over 60
+  lines but under that size is shown whole, with the note; `ax --limit <n>`, `--max-depth`, `--all` or a scope
   (`--selector`, a ref) returns what was asked for, with the note. Without a
   decider, `ax` is unchanged.
 

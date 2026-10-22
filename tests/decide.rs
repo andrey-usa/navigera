@@ -97,7 +97,12 @@ fn find_check_and_find_targets_ask_the_decision_model() {
     let s = Session { name: format!("nv-decide-{}", std::process::id()) };
     // The session server reads the decider's settings from the `start`
     // environment, as it would from the agent's.
-    let started = s.run(&["start"], &[("NAVIGERA_DECIDER_URL", &jev.url), ("TYPESAFE_API_KEY", "test-key")]);
+    // The bench site's pages are a few KB, under the default preview size;
+    // the session takes a smaller one from its environment.
+    let started = s.run(
+        &["start"],
+        &[("NAVIGERA_DECIDER_URL", &jev.url), ("TYPESAFE_API_KEY", "test-key"), ("NAVIGERA_AX_PREVIEW_BYTES", "1000")],
+    );
     assert_eq!(started["ok"], true, "{started}");
     assert_eq!(started["result"]["decider"], "jev-latest", "{started}");
     // The contract is told where the agent decides how to go on, not only
