@@ -265,10 +265,11 @@ impl Browser {
     }
 
     /// Grant a permission (e.g. `geolocation`) to every origin.
+    /// (`Browser.grantPermissions` did the same and is deprecated.)
     pub fn grant_permission(&self, permission: &str) -> Result<()> {
         self.block_on(self.client.send(
-            "Browser.grantPermissions",
-            json!({ "permissions": [permission] }),
+            "Browser.setPermission",
+            json!({ "permission": { "name": permission }, "setting": "granted" }),
             None,
             CMD_TIMEOUT,
         ))

@@ -76,6 +76,7 @@ fn lightpanda_refuses(what: &str, values: &[String]) -> Option<String> {
     }
     match what {
         "media" => Some("the lightpanda engine does not emulate media features (prefers-color-scheme, print)".into()),
+        "offline" => Some("the lightpanda engine does not emulate going offline".into()),
         "locale" | "timezone" | "tz" => Some(format!(
             "the lightpanda engine takes its {what} at launch only (`lightpanda serve --{}`)",
             if what == "locale" { "locale" } else { "timezone" }
@@ -97,12 +98,22 @@ pub fn plan(
     accuracy: Option<f64>,
     lightpanda: bool,
 ) -> Result<Plan> {
+    let first = values.first().map(String::as_str).unwrap_or("");
     if lightpanda {
         if let Some(why) = lightpanda_refuses(what, values) {
             bail!("set {what}: {why}");
         }
+        // Never on, so nothing to undo: the engine knows neither call.
+        if what == "offline" {
+            return Ok(Plan {
+                kind: "offline",
+                calls: vec![],
+                reset: vec![],
+                grant: None,
+                result: json!({ "offline": false }),
+            });
+        }
     }
-    let first = values.first().map(String::as_str).unwrap_or("");
     let reset_metrics = vec![("Emulation.clearDeviceMetricsOverride", json!({}))];
     Ok(match what {
         "viewport" => {
@@ -222,14 +233,32 @@ pub fn plan(
                 "off" | "false" | "0" => false,
                 other => bail!("set offline takes on|off, got {other:?}"),
             };
+            // Requests fail by a rule for every URL (an empty pattern), and
+            // `navigator.onLine` follows from a state of its own: the two
+            // calls that replace the deprecated `emulateNetworkConditions`.
+            let state = |offline: bool| {
+                json!({ "offline": offline, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 })
+            };
             Plan {
                 kind: "offline",
                 calls: if on {
-                    vec![("Network.emulateNetworkConditions", json!({ "offline": true, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 }))]
+                    vec![
+                        (
+                            "Network.emulateNetworkConditionsByRule",
+                            json!({ "matchedNetworkConditions": [{
+                                "urlPattern": "", "offline": true, "latency": 0,
+                                "downloadThroughput": -1, "uploadThroughput": -1
+                            }] }),
+                        ),
+                        ("Network.overrideNetworkState", state(true)),
+                    ]
                 } else {
                     vec![]
                 },
-                reset: vec![("Network.emulateNetworkConditions", json!({ "offline": false, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 }))],
+                reset: vec![
+                    ("Network.emulateNetworkConditionsByRule", json!({ "matchedNetworkConditions": [] })),
+                    ("Network.overrideNetworkState", state(false)),
+                ],
                 grant: None,
                 result: json!({ "offline": on }),
             }
@@ -357,6 +386,22 @@ mod tests {
         let p = plan("headers", &v(&[r#"{"X-C": 3}"#]), None, false, None, false).unwrap();
         assert_eq!(p.calls[0].1["headers"]["X-C"], "3");
         assert!(plan("offline", &v(&["off"]), None, false, None, false).unwrap().calls.is_empty());
+        // Not the deprecated `emulateNetworkConditions`: a rule for every URL
+        // and the navigator state, both undone by `off`.
+        let p = plan("offline", &v(&["on"]), None, false, None, false).unwrap();
+        let methods: Vec<&str> = p.calls.iter().chain(p.reset.iter()).map(|(m, _)| *m).collect();
+        assert_eq!(
+            methods,
+            [
+                "Network.emulateNetworkConditionsByRule",
+                "Network.overrideNetworkState",
+                "Network.emulateNetworkConditionsByRule",
+                "Network.overrideNetworkState"
+            ]
+        );
+        assert_eq!(p.calls[0].1["matchedNetworkConditions"][0]["offline"], true);
+        assert_eq!(p.calls[0].1["matchedNetworkConditions"][0]["urlPattern"], "");
+        assert_eq!(p.reset[0].1["matchedNetworkConditions"], serde_json::json!([]));
         assert!(plan("wat", &v(&[]), None, false, None, false).is_err());
         let p = plan("headers", &v(&["X-D:", "4"]), None, false, None, false).unwrap();
         assert_eq!(p.calls[0].1["headers"]["X-D"], "4");
@@ -365,6 +410,9 @@ mod tests {
         assert!(plan("timezone", &v(&["Asia/Tokyo"]), None, false, None, true).is_err());
         assert!(plan("ua", &v(&["Mozilla/5.0"]), None, false, None, true).is_err());
         assert!(plan("media", &v(&["off"]), None, false, None, true).is_ok());
+        assert!(plan("offline", &v(&["on"]), None, false, None, true).is_err());
+        let p = plan("offline", &v(&["off"]), None, false, None, true).unwrap();
+        assert!(p.calls.is_empty() && p.reset.is_empty(), "nothing the engine would refuse");
         assert_eq!(plan("device", &v(&["Pixel 8"]), None, false, None, true).unwrap().calls.len(), 1);
     }
 }

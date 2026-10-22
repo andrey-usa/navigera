@@ -304,12 +304,17 @@ fn emulation() {
             a.ok(&["tab-new", &format!("{}/form", site.base)]);
             assert_eq!(a.ok(&["eval", "devicePixelRatio"]), 2.625, "a new tab gets the device too");
             a.ok(&["set", "offline", "on"]);
+            assert_eq!(a.ok(&["eval", "navigator.onLine"]), false, "the page is told it is offline");
             assert!(a.err(&["goto", &format!("{}/form", site.base)]).contains("INTERNET_DISCONNECTED"));
             a.ok(&["set", "offline", "off"]);
+            a.ok(&["goto", &format!("{}/form", site.base)]);
+            assert_eq!(a.ok(&["eval", "navigator.onLine"]), true, "and back online");
         } else {
             // Settings Lightpanda would accept and ignore are refused.
             assert!(a.err(&["set", "media", "dark"]).contains("does not emulate"));
             assert!(a.err(&["set", "timezone", "Asia/Tokyo"]).contains("at launch only"));
+            assert!(a.err(&["set", "offline", "on"]).contains("does not emulate going offline"));
+            a.ok(&["set", "offline", "off"]);
             assert!(a.ok(&["set", "device", "Pixel 8"])["note"].as_str().unwrap().contains("viewport only"));
         }
     }
