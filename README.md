@@ -119,8 +119,10 @@ portable:
 | `start --profile agent --from chrome` | a browser of its own, seeded with a copy of your Chrome profile's sign-ins (cookies, site storage, saved logins); it can run `--headless` while you keep working | any Chrome; same machine and user. On Windows close Chrome for the copy (it locks its cookies) |
 | `state save` / `state load` | the cookies and site storage of a session, as a file, to any other machine or CI job | nothing; Playwright's `storageState` format |
 
-`--profile work` without `--from` is a persistent browser you sign in to
-yourself. Either way navigera works in windows of its own, `quit` only
+`navigera profiles` lists what can be handed over: each installed browser's
+profiles (name, signed-in email), whether `--attach` reaches it right now,
+and navigera's own `--profile` browsers. `--profile work` without `--from` is
+a persistent browser you sign in to yourself. Either way navigera works in windows of its own, `quit` only
 disconnects, and `quit --close-browser` waits until the profile is free.
 
 **Natural mode.** `--natural` makes a headless browser look like the browser

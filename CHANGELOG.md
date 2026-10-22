@@ -16,6 +16,9 @@ All notable changes to this project are documented here. The format follows
   `chromium`, `edge` or a user data directory; `--from-profile` picks a
   profile by directory, name or email. The copy replaces only a profile
   navigera made, and is refused while that profile's browser runs.
+- `navigera profiles`: the browsers and profiles a session can be handed
+  (name, signed-in email, whether `--attach` reaches the browser now), and
+  navigera's own `--profile` browsers.
 - `--natural` (`NAVIGERA_NATURAL=1`): a headless browser that shows pages no
   sign of being headless -- the user agent the same Chrome sends with a
   window (page, workers, request headers) and a real screen size -- checked
