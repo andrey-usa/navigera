@@ -814,6 +814,11 @@ def render(mode: str, agent: str, model: str, runs: list, tools: list, tasks: li
             lines.append(f"- `{label(r)}` {r['task']}: {'; '.join(r.get('why', []))[:240]}"
                          + (" (timed out)" if r.get("timed_out") else "")
                          + (f" — {r['errors'][-1][:160]}" if r.get("errors") else ""))
+            # What the agent did last explains most failures, and this table
+            # is the one notice a long run's JSON chunks cannot crowd out.
+            tail = [" ".join(c.split()).replace("`", "'")[:110] for c in (r.get("shell_commands") or [])[-8:]]
+            if tail:
+                lines.append("  last commands: " + " · ".join(f"`{c}`" for c in tail))
     return "\n".join(lines) + "\n", summary
 
 
