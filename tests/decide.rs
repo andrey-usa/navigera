@@ -105,16 +105,26 @@ fn find_check_and_find_targets_ask_the_decision_model() {
     let note = started["notes"][0].as_str().unwrap_or_default();
     assert!(note.contains("--find") && note.contains("check"), "{started}");
     s.ok(&["goto", &format!("{}/shop", site.url)]);
-    // A long tree says, once read, that acting does not need it.
+    // A long tree is shown as its top, with the way to act on the rest
+    // without reading it, and the way to read it all.
     let read = s.run(&["ax"], &[]);
     let note = read["notes"][0].as_str().unwrap_or_default();
-    assert!(note.contains("lines") && note.contains("--find"), "{note}");
+    assert!(note.contains("lines") && note.contains("--find") && note.contains("--limit"), "{note}");
+    let preview = read["result"].as_str().unwrap();
+    assert!(preview.lines().count() <= 41, "{preview}");
+    assert!(preview.ends_with("more lines not shown"), "{preview}");
+    // Asked for with a limit, the tree is whole, and still says acting
+    // does not need it.
+    let whole = s.run(&["ax", "--limit", "2000"], &[]);
+    assert!(whole["result"].as_str().unwrap().lines().count() > 60, "{whole}");
+    assert!(!whole["result"].as_str().unwrap().contains("more lines not shown"), "{whole}");
+    assert!(whole["notes"][0].as_str().unwrap_or_default().contains("--find"), "{whole}");
 
     // find: one of twelve "Add to cart" buttons, told apart by its card.
     let found = s.ok(&["find", "add the brass valve to the cart"]);
     assert!(found["element"].as_str().unwrap().contains("Brass Valve"), "{found}");
     assert_eq!(found["sure"], true, "{found}");
-    let tree = s.ok(&["ax"]);
+    let tree = s.ok(&["ax", "--limit", "2000"]);
     let want = format!("[ref={}]", found["ref"]);
     assert!(tree.as_str().unwrap().lines().any(|l| l.contains(&want) && l.contains("Brass Valve")), "{tree}");
 

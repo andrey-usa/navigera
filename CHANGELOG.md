@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- With a decision model on, a plain `ax` of a tree over 60 lines shows its
+  first 40 lines and how many more there are, with a note that `--find` and
+  `check` act on the whole page without reading it and that `ax --limit
+  <n>` reads it all. The note alone came after the whole tree, once the
+  agent had read it: in the 0.5.0 eval the agent reached for `--find` or
+  `check` unasked in 3 of 12 runs. `ax` with a limit, a depth, `--all` or a
+  scope is unchanged, and so is `ax` without a decider.
+
 ## [0.5.0] - 2026-10-22
 
 Lightpanda 1.0 as a second engine, the inspection and state commands agents

@@ -1729,9 +1729,28 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
 ///
 /// Construct once per session; every [`Command`] runs against the same warm
 /// Chrome (no relaunch between ops).
-/// A tree longer than this, read while a decision model is on, gets a note
-/// that acting does not need it.
+/// A tree longer than this, read while a decision model is on, is shown as a
+/// preview of its first [`AX_PREVIEW_LINES`] lines, with a note that acting
+/// does not need the rest.
 const AX_DECIDER_LINES: usize = 60;
+
+/// The lines a plain `ax` shows of a long tree while a decision model is on.
+///
+/// The note alone, after the whole tree, came too late: the agent had read
+/// the tree by the time it was told it need not, and in 12 runs it reached
+/// for `--find` or `check` unasked in 3. The preview makes the cheap path the
+/// default one; `ax --limit <n>` (or a scope) still reads everything.
+const AX_PREVIEW_LINES: usize = 40;
+
+/// The first `keep` lines of `tree`, and how many lines were left out.
+fn ax_preview(tree: &str, keep: usize) -> (String, usize) {
+    let total = tree.lines().count();
+    if total <= keep {
+        return (tree.to_string(), 0);
+    }
+    let shown: Vec<&str> = tree.lines().take(keep).collect();
+    (shown.join("\n"), total - keep)
+}
 
 pub struct Driver {
     session: BrowserSession,
@@ -2036,16 +2055,34 @@ impl Driver {
         if let (Some(f), Some(obj)) = (found, result.as_object_mut()) {
             obj.insert("found".into(), json!({ "ref": f.chosen.node_ref, "element": f.chosen.line, "p": f.p }));
         }
-        // A long tree read while a decision model is on: say, where the
-        // choice to read it again is made, that acting needs no reading.
-        if let (Command::Ax { .. }, Value::String(tree)) = (command, &result) {
+        // A long tree read while a decision model is on: a plain `ax` shows
+        // its top, and says that acting needs no more of it. Asked for with a
+        // limit, a depth or a scope, the tree is what was asked for, and the
+        // note still says acting does not need it.
+        if let (Command::Ax { max_depth, all, limit, scope, .. }, Value::String(tree)) = (command, &mut result) {
             let lines = tree.lines().count();
             if lines > AX_DECIDER_LINES && crate::decide::Decider::from_env().is_some() {
-                notes.push(format!(
-                    "this tree is {lines} lines; with the decision model on, `click --find \"<what>\"`, \
-                     `fill --find \"<what>\" <value>` and `check \"<yes/no question>\"` act and verify \
-                     without reading it. Read it for text you must report."
-                ));
+                let plain = max_depth.is_none()
+                    && *all != Some(true)
+                    && limit.is_none()
+                    && scope.optional("ax").ok().flatten().is_none();
+                if plain {
+                    let (shown, hidden) = ax_preview(tree, AX_PREVIEW_LINES);
+                    *tree = format!("{shown}\n... {hidden} more lines not shown");
+                    notes.push(format!(
+                        "the first {AX_PREVIEW_LINES} of {lines} lines: with the decision model on, \
+                         `click --find \"<what>\"`, `fill --find \"<what>\" <value>` (any element command \
+                         takes --find) and `check \"<yes/no question>\"` act and verify on the whole page \
+                         without reading it; `ax --limit {DEFAULT_AX_LIMIT}` (MCP: browser_snapshot with limit) \
+                         shows every line, for text you must report."
+                    ));
+                } else {
+                    notes.push(format!(
+                        "this tree is {lines} lines; with the decision model on, `click --find \"<what>\"`, \
+                         `fill --find \"<what>\" <value>` and `check \"<yes/no question>\"` act and verify \
+                         without reading it. Read it for text you must report."
+                    ));
+                }
             }
         }
         Ok(Outcome { result, dialogs, new_tabs, notes })
@@ -3080,6 +3117,17 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ax_preview_keeps_the_top_and_counts_the_rest() {
+        let tree: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        let (shown, hidden) = super::ax_preview(&tree, 40);
+        assert_eq!(hidden, 60);
+        assert_eq!(shown.lines().count(), 40);
+        assert!(shown.starts_with("line 1\n") && shown.ends_with("line 40"), "{shown}");
+        let short = "a\nb\n";
+        assert_eq!(super::ax_preview(short, 40), (short.to_string(), 0));
+    }
+
     use super::*;
 
     fn argv(items: &[&str]) -> Vec<String> {

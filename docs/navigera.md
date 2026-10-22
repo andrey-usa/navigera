@@ -215,6 +215,11 @@ tell without looking at the variables.
   the op fails and lists the candidates, so a guess is never acted on.
 - `check "Did the order go through?"` returns the probability of yes. The
   page goes as its text tree without refs; near 0.5 means unsure.
+- A plain `ax` of a tree over 60 lines shows its first 40, ends with
+  `... N more lines not shown`, and notes that `--find` and `check` act on
+  the whole page; `ax --limit <n>`, `--max-depth`, `--all` or a scope
+  (`--selector`, a ref) returns what was asked for, with the note. Without a
+  decider, `ax` is unchanged.
 
 What leaves the machine: the page's tree, with what was typed into text
 fields replaced by `(filled)` (password fields are masked by the browser
