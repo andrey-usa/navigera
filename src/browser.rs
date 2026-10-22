@@ -1099,8 +1099,7 @@ impl BrowserSession {
     pub fn cookies(&self, all: bool, url: Option<&str>) -> Result<serde_json::Value> {
         let tab = self.active_tab();
         let r = if all {
-            tab.send_cdp("Storage.getCookies", serde_json::json!({}), self.timeout(None))
-                .or_else(|_| tab.send_cdp("Network.getAllCookies", serde_json::json!({}), self.timeout(None)))?
+            tab.send_cdp("Storage.getCookies", serde_json::json!({}), self.timeout(None))?
         } else {
             let urls = vec![url.map(str::to_string).unwrap_or_else(|| self.url())];
             tab.send_cdp("Network.getCookies", serde_json::json!({ "urls": urls }), self.timeout(None))?
