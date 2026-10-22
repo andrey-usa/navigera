@@ -402,6 +402,7 @@ Registry as `io.github.andrey-usa/navigera` (`server.json`).
 | `--attach` / `--attach chrome` | your running Chrome (also `beta`, `dev`, `canary`, `chromium`, `edge`): Chrome 144+ serves remote debugging for your default profile once you turn it on at `chrome://inspect/#remote-debugging`, and asks you to Allow each connection. navigera reads the endpoint from `DevToolsActivePort` in that browser's user data directory | never |
 | `--attach <dir>` | a Chrome started with `--remote-debugging-port` and `--user-data-dir=<dir>` | never |
 | `--attach ws://…` / `http://host:port` / `<port>` | that DevTools endpoint | never |
+| `--profile <name> --from <browser>` | the same, its profile first replaced with a copy of one of your browser's profiles (`chrome`, `beta`, `dev`, `canary`, `chromium`, `edge`, or a user data directory; `--from-profile` picks one by directory, name or email, default the one used last): cookies (HttpOnly too), Local Storage, IndexedDB, saved logins and autofill, bookmarks, preferences, and `Local State` with the cookie key. Not caches, history, tabs, sync or extensions. The key stays where Chrome keeps it (Keychain, DPAPI, the desktop keyring), so the copy opens for the same user on the same machine. Refused while that profile's browser runs, and for a directory that is not a browser profile. On Windows close Chrome for the copy; it locks its cookie database | only with `quit --close-browser` |
 | `--profile <name>` | a visible Chrome on its own persistent profile (`%LOCALAPPDATA%\navigera\profiles\<name>`, `~/Library/Application Support/navigera/profiles/<name>`, `~/.local/share/navigera/profiles/<name>`; a path works too), started when it isn't running and reused when it is. Sign in once; cookies, settings and extensions stay. `--headless` hides it | only with `quit --close-browser` |
 
 The agent gets a window of its own; your tabs are never touched, and only
@@ -412,6 +413,22 @@ with `--attach` is refused. Chrome 136–143 can't serve its default profile
 at all (the `--remote-debugging-port` switch is ignored for it, and the
 inspect toggle arrives in 144): use `--profile` there, which works on any
 version.
+
+**Natural mode: `--natural`** (or `NAVIGERA_NATURAL=1`). What headless
+Chrome shows a page that a windowed one doesn't, removed: the user agent
+says `HeadlessChrome` in `navigator.userAgent`, in workers and in every
+request header; it becomes the one the same Chrome sends with a window (its
+major version, the reduced form Chrome sends). The screen is 800x600 behind
+a 1440x900 window; it becomes 1920x1080. The full Chrome is used, not
+chrome-headless-shell, which is a different program. In every mode,
+`navigator.webdriver` is false, there is no `--enable-automation`, and a
+`--profile` browser starts with no automation flag. The CI check is
+`tests/handoff.rs` against `tests/fixtures/natural_site.py`, a page that runs
+the checks anti-bot scripts make: webdriver, user agent and client hints
+(page, worker, header), `Runtime.enable` side effects, plugins, languages,
+`window.chrome`, window and screen sizes, notification permissions. What
+natural mode does not do: solve CAPTCHAs, or fake a fingerprint (WebGL on a
+machine without a GPU still reports a software renderer).
 
 **Diagnostics:**
 

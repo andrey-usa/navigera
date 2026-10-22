@@ -6,7 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `start --profile <name> --from chrome`: the agent's own browser, seeded
+  with a copy of one of your Chrome profiles' sign-ins -- cookies (HttpOnly
+  too), Local Storage, IndexedDB, saved logins -- so it starts signed in
+  without touching your running browser, on any Chrome version (attaching
+  needs 144+). `--from` takes `chrome`, `beta`, `dev`, `canary`,
+  `chromium`, `edge` or a user data directory; `--from-profile` picks a
+  profile by directory, name or email. The copy replaces only a profile
+  navigera made, and is refused while that profile's browser runs.
+- `--natural` (`NAVIGERA_NATURAL=1`): a headless browser that shows pages no
+  sign of being headless -- the user agent the same Chrome sends with a
+  window (page, workers, request headers) and a real screen size -- checked
+  in CI against a page that runs the checks anti-bot scripts make.
+
 ### Changed
+
+- A `--profile` browser starts with `navigator.webdriver` false, as
+  navigera's own launches always have, and `quit --close-browser` returns
+  once the profile is free, so a `start` right after it finds no browser on
+  its way out.
 
 - With a decision model on, a plain `ax` of a tree over 16 KB
   (`NAVIGERA_AX_PREVIEW_BYTES`) shows its first 40 lines and how many more

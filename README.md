@@ -110,14 +110,25 @@ and the like, and `route` to fail or answer requests.
 - **Reference:** [docs/navigera.md](docs/navigera.md) has the full
   reference, and [llms.txt](llms.txt) is an index for LLMs.
 
-**Your own browser.** `navigera -s me start --attach` works in the Chrome
-you already have open (Chrome 144+, after turning on
-`chrome://inspect/#remote-debugging` once; Chrome asks you to Allow the
-connection), with your logins, settings and extensions.
-`navigera -s me start --profile work` keeps a separate visible browser on
-its own persistent profile instead: sign in once and it stays open between
-sessions. Either way navigera works in a window of its own, and `quit` only
-disconnects. Details: [docs/navigera.md](docs/navigera.md#browsers-and-engines).
+**Hand the agent your browser.** Three ways, from most direct to most
+portable:
+
+| | the agent gets | needs |
+|---|---|---|
+| `start --attach` | your running Chrome itself, in a window of its own: your logins, settings, extensions, live | Chrome 144+, remote debugging turned on once at `chrome://inspect/#remote-debugging`, and a click on Allow |
+| `start --profile agent --from chrome` | a browser of its own, seeded with a copy of your Chrome profile's sign-ins (cookies, site storage, saved logins); it can run `--headless` while you keep working | any Chrome; same machine and user. On Windows close Chrome for the copy (it locks its cookies) |
+| `state save` / `state load` | the cookies and site storage of a session, as a file, to any other machine or CI job | nothing; Playwright's `storageState` format |
+
+`--profile work` without `--from` is a persistent browser you sign in to
+yourself. Either way navigera works in windows of its own, `quit` only
+disconnects, and `quit --close-browser` waits until the profile is free.
+
+**Natural mode.** `--natural` makes a headless browser look like the browser
+it is: no `HeadlessChrome` in the user agent (page, workers, request
+headers), and a real screen size. `navigator.webdriver` is false in every
+mode, and navigera never passes `--enable-automation`. It is not a CAPTCHA
+solver and fakes no fingerprint: it is a regular Chrome, run for you.
+Details: [docs/navigera.md](docs/navigera.md#browsers-and-engines).
 
 Programs can keep one browser on a pipe instead: `navigera serve` reads
 one JSON command per stdin line, for example

@@ -702,6 +702,16 @@ pub struct SessionConfig {
     pub profile: Option<String>,
     /// `--headless` for a `--profile` browser (visible by default).
     pub headless: bool,
+    /// `--from <browser|user-data-dir>`: seed the `--profile` browser's
+    /// profile from the user's own browser (a copy: logins, cookies, site
+    /// storage), replacing what it held.
+    pub from: Option<String>,
+    /// `--from-profile <name|dir|email>`: which of that browser's profiles
+    /// (default: the one it used last).
+    pub from_profile: Option<String>,
+    /// `--natural`: a browser that looks like the browser it is, not like an
+    /// automated one (see `browser::natural_flags`).
+    pub natural: bool,
 }
 
 /// Before `ax`/`screenshot`: no fetch/XHR for this long (Playwright's
@@ -728,6 +738,9 @@ impl Default for SessionConfig {
             attach: None,
             profile: None,
             headless: false,
+            from: None,
+            from_profile: None,
+            natural: false,
         }
     }
 }
@@ -742,8 +755,22 @@ impl SessionConfig {
             name: name.clone(),
             executable: self.chromium.clone(),
             headless: self.headless,
+            from: self.from.clone(),
+            from_profile: self.from_profile.clone(),
         })
     }
+}
+
+/// `--from` and `--from-profile` seed a `--profile` browser and mean nothing
+/// without one.
+fn check_profile_flags(config: &SessionConfig) -> Result<(), String> {
+    if (config.from.is_some() || config.from_profile.is_some()) && config.profile.is_none() {
+        return Err("--from copies your browser's profile into a `--profile <name>` browser: add --profile".into());
+    }
+    if config.from_profile.is_some() && config.from.is_none() {
+        return Err("--from-profile picks a profile of the browser --from names: add --from chrome (or another)".into());
+    }
+    Ok(())
 }
 
 /// `--attach` takes an optional value; the default is the user's Chrome.
@@ -808,7 +835,7 @@ pub struct ParsedArgs {
 
 /// One op's CLI documentation: (name, synopsis, what it does).
 const OPS: &[(&str, &str, &str)] = &[
-    ("start", "[--attach [<where>] | --profile <name> [--headless]]", "spawn a detached session server + headless browser (needs --session); --attach/--profile use a browser that stays open"),
+    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless]] [--natural]", "spawn a detached session server + headless browser (needs --session); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
     ("ax", "[--selector <css> | <ref>] [--limit <lines>] [--refs all] [--format json]", "accessibility snapshot: indented tree, [ref=N] on actionable nodes"),
     ("click", "<ref> | --selector <css> | --text <visible text>", "trusted mouse click; waits for the element and for any navigation it starts"),
@@ -890,6 +917,8 @@ pub fn usage(program: &str) -> String {
          --idle-timeout-s <s>   session server idle shutdown (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never)\n  \
          --attach [chrome|edge|<dir>|<port>]  with `start`: use your running browser (Chrome 144+: chrome://inspect/#remote-debugging); never closes it\n  \
          --profile <name>       with `start`: persistent visible navigera browser, kept open between sessions (--headless to hide)\n  \
+         --from <browser|dir>   with --profile: first copy your own browser's sign-ins into it (cookies, site storage, saved logins); --from-profile <dir|name|email>\n  \
+         --natural              look like the browser it is: no HeadlessChrome user agent, a real screen size ($NAVIGERA_NATURAL=1)\n  \
          --pretty               pretty-print JSON\n\n\
          Output: one JSON object per command, {{\"ok\":true,\"result\":…}} or {{\"ok\":false,\"error\":…}}; exit 1 on error.\n\
          Without --session each command launches and closes its own browser (one-shot).\n\
@@ -1050,6 +1079,16 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
     if extract_present(args, "--headless") {
         config.headless = true;
     }
+    if let Some(from) = extract_value(args, "--from")? {
+        config.from = Some(from);
+    }
+    if let Some(from_profile) = extract_value(args, "--from-profile")? {
+        config.from_profile = Some(from_profile);
+    }
+    if extract_present(args, "--natural") {
+        config.natural = true;
+    }
+    check_profile_flags(config)?;
     if config.attach.is_some() && config.profile.is_some() {
         return Err("--attach and --profile are alternatives: pick one".into());
     }
@@ -1188,6 +1227,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
             "--profile" => config.profile = Some(value("--profile")?),
             "--headless" => config.headless = true,
+            "--from" => config.from = Some(value("--from")?),
+            "--from-profile" => config.from_profile = Some(value("--from-profile")?),
+            "--natural" => config.natural = true,
             "--idle-timeout-s" => {
                 let raw = value("--idle-timeout-s")?;
                 config.idle_timeout_s = raw
@@ -1779,6 +1821,7 @@ pub struct Outcome {
 impl Driver {
     /// Launch the engine described by `config` (Chrome by default).
     pub fn launch(config: &SessionConfig) -> anyhow::Result<Self> {
+        crate::browser::set_natural(config.natural);
         if let Some(target) = config.attach_target() {
             let session = BrowserSession::attach(&target, config.timeout_ms)
                 .map_err(|e| anyhow::anyhow!("could not connect to the browser: {e:#}"))?;

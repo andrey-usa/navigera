@@ -99,6 +99,92 @@ fn chrome_flags() -> Vec<String> {
 
 const NO_SANDBOX: &str = "--no-sandbox";
 
+/// `--natural`: the browser looks like the browser it is, not like an
+/// automated one. Set once per process, before the browser starts.
+static NATURAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn natural mode on for the browsers this process starts.
+pub fn set_natural(on: bool) {
+    NATURAL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether browsers started here run in natural mode (`--natural`, or
+/// `NAVIGERA_NATURAL=1`).
+pub fn natural() -> bool {
+    NATURAL.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var("NAVIGERA_NATURAL").is_ok_and(|v| !v.trim().is_empty() && v.trim() != "0")
+}
+
+/// What a headless Chrome shows a page that a windowed one does not, put
+/// right for natural mode: the user agent says `HeadlessChrome` (in
+/// `navigator.userAgent`, in workers, in every request's header), and the
+/// screen is 800x600 behind a larger window. The user agent becomes the one
+/// the same Chrome sends with a window -- its major version, the reduced form
+/// Chrome sends -- and the screen 1920x1080. Navigator's `webdriver` flag
+/// is off in every mode (`--disable-blink-features=AutomationControlled`),
+/// and nothing here passes `--enable-automation`. A windowed browser needs
+/// none of this.
+pub fn natural_flags(exe: &str, headless: bool) -> Vec<String> {
+    if !headless {
+        return Vec::new();
+    }
+    let mut flags = vec!["--screen-info={1920x1080}".to_string()];
+    match chrome_major(exe) {
+        Some(major) => flags.push(format!("--user-agent={}", windowed_user_agent(exe, major))),
+        None => crate::timing::log(&format!("[browser] natural: no version from {exe}; user agent left as is")),
+    }
+    flags
+}
+
+/// The user agent Chrome `major` sends with a window on this platform.
+fn windowed_user_agent(exe: &str, major: u32) -> String {
+    let platform = if cfg!(windows) {
+        "Windows NT 10.0; Win64; x64"
+    } else if cfg!(target_os = "macos") {
+        "Macintosh; Intel Mac OS X 10_15_7"
+    } else {
+        "X11; Linux x86_64"
+    };
+    let file = Path::new(exe).file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let edge =
+        if file.contains("msedge") || file.contains("edge") { format!(" Edg/{major}.0.0.0") } else { String::new() };
+    format!("Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36{edge}")
+}
+
+/// The major version of a Chrome-family executable: from the version
+/// directory beside it on Windows (where `--version` opens a window instead
+/// of printing), else from `--version` (a few tens of milliseconds).
+pub fn chrome_major(exe: &str) -> Option<u32> {
+    let parse = |text: &str| -> Option<u32> {
+        text.split(|c: char| c.is_whitespace() || c == '/')
+            .find(|w| {
+                w.split('.').count() == 4
+                    && w.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .and_then(|w| w.split('.').next()?.parse().ok())
+    };
+    if cfg!(windows) {
+        let dir = Path::new(exe).parent()?;
+        return std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                // `141.0.7390.37\` in an install, `141.0.7390.37.manifest`
+                // in a Chrome for Testing archive.
+                let name = e.file_name().to_string_lossy().into_owned();
+                parse(name.strip_suffix(".manifest").unwrap_or(&name))
+            })
+            .max();
+    }
+    let out = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    parse(&String::from_utf8_lossy(&out.stdout))
+}
+
 /// Chrome refuses to start its sandbox as root (containers, CI images);
 /// `NAVIGERA_NO_SANDBOX=1` turns it off explicitly.
 fn no_sandbox_wanted(root: bool, env: Option<&str>) -> bool {
@@ -331,7 +417,15 @@ pub enum AttachTarget {
     Running(String),
     /// `--profile <name|dir>`: the persistent navigera browser on that
     /// profile, started when it isn't running.
-    Profile { name: String, executable: Option<String>, headless: bool },
+    Profile {
+        name: String,
+        executable: Option<String>,
+        headless: bool,
+        /// `--from`: seed the profile from this browser first (a copy).
+        from: Option<String>,
+        /// `--from-profile`: which of its profiles.
+        from_profile: Option<String>,
+    },
 }
 
 /// CDP transport when none is asked for. The pipe (fds 3/4) is Unix-only
@@ -364,6 +458,8 @@ pub struct BrowserSession {
     /// Connected to a browser navigera doesn't own (`--attach`,
     /// `--profile`): closing only disconnects.
     attached: bool,
+    /// The user data directory of a `--profile` browser.
+    profile_dir: Option<std::path::PathBuf>,
     /// `set …` overrides (keyed by what they set): applied to every open
     /// tab and replayed on tabs opened later.
     overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
@@ -422,7 +518,10 @@ impl BrowserSession {
             crate::timing::log(&format!("[browser] engine=lightpanda launched {} via {bin}", browser.ws_url()));
             (browser, bin)
         } else {
-            let Some(exe) = resolve_executable_for(executable, headless) else {
+            // Natural mode wants the full Chrome even headless:
+            // chrome-headless-shell is a different program with tells of its
+            // own.
+            let Some(exe) = resolve_executable_for(executable, headless && !natural()) else {
                 bail!(
                     "no Chrome/Chromium/Edge found — install Chrome, or `npx @puppeteer/browsers install chrome-headless-shell@stable` and pass its path via --chromium or $CHROME_BIN"
                 );
@@ -450,6 +549,9 @@ impl BrowserSession {
                 Ok(browser)
             };
             let mut flags = chrome_flags();
+            if natural() {
+                flags.extend(natural_flags(&exe, headless));
+            }
             let note = no_sandbox_note(&exe);
             if !flags.iter().any(|f| f == NO_SANDBOX) && note.as_ref().is_some_and(|n| n.exists()) {
                 eprintln!("{NO_SANDBOX_WARNING}");
@@ -495,6 +597,7 @@ impl BrowserSession {
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             attached: false,
+            profile_dir: None,
             overrides: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
@@ -511,15 +614,26 @@ impl BrowserSession {
         let started = std::time::Instant::now();
         let runtime = engine_runtime()?;
         let handle = runtime.handle().clone();
+        let profile_dir = match target {
+            AttachTarget::Profile { name, .. } => Some(cdp::attach::profile_dir(name)?),
+            AttachTarget::Running(_) => None,
+        };
         let (ws_url, what) = match target {
             AttachTarget::Running(spec) => (cdp::attach::resolve(spec)?, format!("attach {spec}")),
-            AttachTarget::Profile { name, executable, headless } => {
+            AttachTarget::Profile { name, executable, headless, from, from_profile } => {
                 let dir = cdp::attach::profile_dir(name)?;
-                let Some(exe) = resolve_executable_for(executable.as_deref(), *headless) else {
+                let Some(exe) = resolve_executable_for(executable.as_deref(), *headless && !natural()) else {
                     bail!("no Chrome/Chromium/Edge found for --profile — pass --chromium <path> or set $CHROME_BIN");
                 };
-                let url = cdp::attach::ensure_profile_browser(&exe, &dir, *headless)?;
-                (url, format!("profile {}", dir.display()))
+                let mut what = format!("profile {}", dir.display());
+                if let Some(from) = from {
+                    let copied = cdp::import::import_profile(from, from_profile.as_deref(), &dir, name)?;
+                    eprintln!("navigera: {copied}");
+                    what = format!("{what}, {copied}");
+                }
+                let extra = if natural() { natural_flags(&exe, *headless) } else { Vec::new() };
+                let url = cdp::attach::ensure_profile_browser(&exe, &dir, *headless, &extra)?;
+                (url, what)
             }
         };
         // Chrome asks the user to Allow a connection to their own profile:
@@ -538,6 +652,7 @@ impl BrowserSession {
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             attached: true,
+            profile_dir,
             overrides: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
@@ -554,7 +669,21 @@ impl BrowserSession {
     /// Ask the browser itself to shut down (`quit --close-browser` on an
     /// attached session): Chrome closes its windows and saves its profile.
     pub fn close_browser(&self) -> Result<()> {
-        self.browser.close_remote()
+        self.browser.close_remote()?;
+        // A `--profile` browser is done when its profile is free again, so
+        // the next `start` on it (or a `--from` that replaces it) finds no
+        // browser still on its way out.
+        if let Some(dir) = &self.profile_dir {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while std::time::Instant::now() < deadline {
+                let lock = std::fs::symlink_metadata(dir.join("SingletonLock")).is_ok();
+                if cdp::attach::live_endpoint(dir).is_none() && !lock {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        Ok(())
     }
 
     fn timeout(&self, override_ms: Option<f64>) -> Duration {
