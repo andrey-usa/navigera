@@ -528,7 +528,12 @@ impl Server<'_> {
         }
         if plan.snapshot {
             match self.run(&json!({"op": "ax", "format": "text"})) {
-                Ok(outcome) => text.push(describe(&outcome.result)),
+                Ok(outcome) => {
+                    text.push(describe(&outcome.result));
+                    // A long tree is a preview while a decision model is on,
+                    // and its note says how to read the rest.
+                    text.extend(notes(&[], &[], &outcome.notes));
+                }
                 Err(e) => text.push(format!("snapshot failed: {e}")),
             }
         }

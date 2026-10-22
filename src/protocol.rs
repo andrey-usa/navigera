@@ -2073,8 +2073,8 @@ impl Driver {
                         "the first {AX_PREVIEW_LINES} of {lines} lines: with the decision model on, \
                          `click --find \"<what>\"`, `fill --find \"<what>\" <value>` (any element command \
                          takes --find) and `check \"<yes/no question>\"` act and verify on the whole page \
-                         without reading it; `ax --limit {DEFAULT_AX_LIMIT}` shows every line, for text you \
-                         must report."
+                         without reading it; `ax --limit {DEFAULT_AX_LIMIT}` (MCP: browser_snapshot with limit) \
+                         shows every line, for text you must report."
                     ));
                 } else {
                     notes.push(format!(
