@@ -44,6 +44,14 @@ All notable changes to this project are documented here. The format follows
   instead of a new browser's few hundred. For test runners that isolate
   scenarios, and agents that want to start over signed out. `set`, routes,
   init scripts and the dialog answer stay; `reset --all` drops them too.
+- `mouse move|down|up|click|wheel`: raw mouse input at a point, for what
+  has no element to aim at (a canvas, a map, a game): viewport CSS pixels,
+  or from a target's top-left corner (`mouse click 30 40 --selector
+  canvas`). The pointer stays where it went and held buttons stay held, so
+  `mouse down`, moves (`--steps` for a smooth path), `mouse up` drags or
+  draws; `--count 2` double-clicks; `--button right|middle`. MCP:
+  `browser_mouse`. (An agent working through WebGames couldn't play its
+  canvas games without it.)
 - `--attach ws://host:port/devtools/page/<id>`: work in that one tab of a
   running browser as it is, not in a window of its own (a tab a paused
   test run left open for a look). `BrowserSession::page_endpoint` gives a
