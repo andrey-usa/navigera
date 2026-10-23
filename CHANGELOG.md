@@ -30,6 +30,11 @@ All notable changes to this project are documented here. The format follows
 - `fill --keys`: clear the field and type the value key by key, for forms
   whose app keeps only what was typed.
 - `scroll --to top|bottom` with a target scrolls inside it.
+- Selectors, text and locators reach into cross-origin iframes (a payment
+  provider's card form, a sign-in frame) when the page itself has no match:
+  navigera looks there from an isolated world of its own, which the page
+  can't see. A single `wait --text`/`--selector` does too. With `--attach`,
+  frames in another process stay ref-only.
 
 - `start --profile <name> --from chrome`: the agent's own browser, seeded
   with a copy of one of your Chrome profiles' sign-ins -- cookies (HttpOnly

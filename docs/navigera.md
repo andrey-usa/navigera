@@ -57,7 +57,13 @@ Selector, text and locator targets auto-wait (default 5 s, `--wait-ms`) for
 the element to appear. They search the top document first, then its open
 shadow roots and the documents of same-origin frames (iframes, framesets,
 `srcdoc`), so a form inside an iframe or a button inside a web component is
-reached the same way. Inside a cross-origin frame, act by ref.
+reached the same way. When the element isn't there, frames of another
+origin (a card form from a payment provider, a sign-in frame) are searched
+too, from an isolated world navigera makes in each, which the page can't
+see. A single `wait --text` or `wait --selector` looks there as well. In a
+browser navigera launched, cross-site frames share the page's process, so
+all of them are reachable; with `--attach` to your own browser, frames in
+another process are reachable by ref only.
 
 ## Commands
 
