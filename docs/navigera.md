@@ -24,6 +24,8 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | `--raw` | print only the result (strings unquoted, e.g. the `ax` tree). Errors go to stderr as `error: …`, notes (dialogs, new tabs, an exception the page threw, an engine difference) as `note: …` |
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
+| `--wait-ms <ms>` | element ops' wait when they name no timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
+| `--download-dir <dir>` | where downloaded files go (`$NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own under the system temp directory) |
 | `--chromium <path>` | browser binary (also `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`) |
 | `--engine chrome\|lightpanda` (`$NAVIGERA_ENGINE`), `--headed` | engine; visible window |
 | `--idle-timeout-s <s>` | a session server shuts down after this idle time (default 1800, 0 = never) |
@@ -50,8 +52,11 @@ and `new_tabs` (tabs the page opened, now in the tab list). The exit code is
   roots included); `--nth <i>` picks among their matches or `--selector`'s
   (0-based, `-1` = the last).
 
-Selector, text and locator targets auto-wait (default 5 s) for the element
-to appear.
+Selector, text and locator targets auto-wait (default 5 s, `--wait-ms`) for
+the element to appear. They search the top document first, then its open
+shadow roots and the documents of same-origin frames (iframes, framesets,
+`srcdoc`), so a form inside an iframe or a button inside a web component is
+reached the same way. Inside a cross-origin frame, act by ref.
 
 ## Commands
 
@@ -60,15 +65,16 @@ to appear.
 | `start` | (with `-s`) | `{session, socket, log, pid}`; detached server + browser; `already_running` if it exists |
 | `goto` | `<url>` or `--url`; `--wait load\|domcontentloaded\|commit`; `--timeout-ms` | state `{tab, tabs, url, title}`. `example.com` → `https://`, `localhost:3000` → `http://` |
 | `ax` (`snapshot`) | `[<ref> \| --selector <css> \| --text t]` scope; `--limit <lines>` (2000); `--refs all`; `--format json` (old flat list); `--all` | text tree (below) |
-| `click` | target | state; `synthetic_click` note if a DOM click had to be used |
+| `click` | target; `--button right\|middle`; `--force` | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box) |
 | `fill` | target, `<value>` or `--value` | state |
 | `type` | `<text>` or `--value`; optional `--selector/--ref/--text` to focus first | state |
 | `press` | `<key>` or `--key`; optional target to focus first | state |
-| `select` | target, option label(s)/value(s) (positional or repeated `--value`) | state + `selected` |
+| `select` | target, option label(s)/value(s) (positional or repeated `--value`; labels match with whitespace collapsed); `--add` keeps what a multiple select already has | state + `selected` (everything selected after the op) |
 | `hover` | target | state; `synthetic_hover` note if the element could not be hovered |
 | `scroll` | `--by <px>` (default 800) or `--to top\|bottom`; or a target to scroll into view (`--by` scrolls inside it) | `{scrollY, scrollHeight, viewport}` |
 | `upload` | target, file path(s) (positional or `--file`) | `{files}` |
-| `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--idle` (no fetch/XHR for 500 ms; also `--load networkidle`), `--ms <n>`; `--timeout-ms` | state + `waited_ms` |
+| `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--idle` (no fetch/XHR for 500 ms; also `--load networkidle`), `--download [<glob>]` (a finished download whose file name matches), `--ms <n>`; `--timeout-ms` | state + `waited_ms` (+ `download`) |
+| `downloads` | `--clear`, `--json` | `#n state bytes path (url)` per file the pages downloaded, saved under `--download-dir` with the name the page gave it (`report (2).csv` if taken). With `--attach` the browser keeps its own download folder and `path` is empty |
 | `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value (an arrow function is called; promises are awaited) |
 | `text` | `--selector <css>` | `textContent` or `null` |
 | `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
@@ -82,7 +88,7 @@ to appear.
 | `insert-text` | `<text>`, optional target to focus first | state: text inserted at the caret in one go (paste, IME), no key events |
 | `console` | `--level error\|warn\|info\|log\|debug`, `--limit <n>` (200), `--clear`, `--json` | `[level] text  (url:line)` per line: console calls, uncaught exceptions (`[exception]`), failed loads and CSP reports |
 | `errors` | `--limit`, `--clear`, `--json` | `console --level error` |
-| `network` | `--filter <text>`, `--type fetch\|xhr\|document\|…`, `--failed`, `--limit <n>` (100), `--clear`; `--har <file>` | `#n METHOD STATUS type url size time` per line (same-origin URLs as paths); `--har` writes HAR 1.2 |
+| `network` | `--filter <text>`, `--type fetch\|xhr\|document\|…`, `--failed`, `--since <n>` (only requests after #n), `--limit <n>` (100), `--clear`; `--har <file>` | `#n METHOD STATUS type url size time` per line (same-origin URLs as paths); `--har` writes HAR 1.2 |
 | `network <n>` | `--body-file <file>` | one request in full: headers, post data, response body (8 KB shown; the file gets all of it) |
 | `cookies` | `[--all] [--url <u>] [--json]`; `set <name> <value> [--url <u> \| --domain <d>] [--path] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax\|Strict\|None]`; `delete <name>`; `clear` | one cookie per line (`--all`: every cookie in the browser) |
 | `storage` | `[local\|session] [get [<key>] \| set <key> <value> \| remove <key> \| clear]` | the value, or the whole store as an object |
@@ -100,7 +106,7 @@ to appear.
 | `screenshot` | `[<path>]` or `--path`; `--full-page` | `{path, bytes}` |
 | `tab-new` | `[<url>]` | `{tabs:[{index,target,active}], active, url}` |
 | `tab-list` | — | same |
-| `tab-select` | `<index>` | state |
+| `tab-select` | `<index>` or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |
 | `tab-close` | `[<index>]` (default: active) | state |
 | `dialog` | `--accept [--prompt-text t]` or `--dismiss` | `{dialogs: "accept"\|"dismiss"}` |
 | `quit` (`close`) | — | `{bye: true}`; a session server and its browser exit |
@@ -149,7 +155,11 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   `goto … && … ax` shows a single-page app's list, not its "Loading…"
   placeholder.
 - **Clicks** are trusted mouse events at the element's centre after
-  scrolling it into view. navigera checks that the press reached the page:
+  scrolling it into view, once the element has stopped moving: CSS
+  animations and transitions running on it or an ancestor (a dialog sliding
+  in) finish first, as a user waits for them, and pages often wire a
+  dialog's buttons only once it has opened. With nothing animating this
+  costs nothing. navigera checks that the press reached the page:
   Chrome occasionally acknowledges mouse events it never delivers (seen
   right after a tab switch), and then the click is sent once more, or as
   DOM events if it still doesn't arrive (`synthetic_click` says so). Same-origin iframe offsets are added in the page;
@@ -157,10 +167,15 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   `DOM.getContentQuads`.
   - A styled checkbox or radio (the `<input>` hidden or covered by its own
     label's box) is clicked through its label, as a user would.
-  - If something else covers the element (a toast, an overlay), the click
-    retries for up to 3 s.
-  - After that it dispatches DOM mouse events and says so
-    (`synthetic_click`).
+  - If something else covers the element's centre (a toast, a sticky
+    header, an overlay), the element is tried at the edges of the viewport,
+    then the click waits for the cover to go (up to the element wait). If it
+    stays covered the click fails and names the covering element: a user
+    would have clicked that instead. `click --force` sends DOM events to the
+    element regardless (`synthetic_click`). `fill` likewise scrolls a field
+    out from under a panel before setting it.
+  - An element with no box at all (zero size, not laid out) gets DOM mouse
+    events, and the response says so (`synthetic_click`).
   - If the click starts a navigation, the command returns once the new
     document is parsed.
 - **Page errors are reported.** An uncaught exception while a command ran

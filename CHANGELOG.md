@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Element ops reach into same-origin iframes, framesets and `srcdoc`
+  frames, and `--selector` into open shadow roots, when the page itself
+  has no match (role/name and text locators already reached shadow roots).
+  `wait --selector/--text/--gone`, `get count` and `text` look there too.
+- `--wait-ms <ms>` (on `start`, `serve`, `mcp` or one command;
+  `NAVIGERA_WAIT_MS`): how long element ops wait for their element when they
+  name no timeout. A test suite against a slow app sets it once.
+- Downloads: files a page downloads are saved under `--download-dir`
+  (`NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own) with
+  the name the page gave them. `downloads` lists them; `wait --download
+  "*.csv"` waits for one and returns its path.
+- `click --button right|middle` (a native context-menu click), `click
+  --force` (DOM events on the element, covered or not), `select --add`
+  (add to a multiple select's choice), `tab-select <target id>`,
+  `network --since <n>`.
+
 - `start --profile <name> --from chrome`: the agent's own browser, seeded
   with a copy of one of your Chrome profiles' sign-ins -- cookies (HttpOnly
   too), Local Storage, IndexedDB, saved logins -- so it starts signed in
@@ -30,6 +46,22 @@ All notable changes to this project are documented here. The format follows
   in CI against a page that runs the checks anti-bot scripts make.
 
 ### Changed
+
+- A click waits for its element to stop moving: CSS animations and
+  transitions on it or an ancestor (a modal sliding in) finish first, since
+  pages often wire a dialog's buttons only once it has opened. Pages with
+  nothing animating pay nothing for this.
+- A click on an element that stays covered by another fails and names the
+  covering element, instead of sending DOM events to an element no user
+  could click. The element is first tried at other scroll positions, which
+  is what uncovers it from a sticky header; `fill` does the same before
+  typing into a field under a panel.
+- `select` matches option labels with whitespace collapsed (non-breaking
+  spaces count as spaces).
+- `type` with a target fails when the target doesn't take focus, instead of
+  typing into whatever has it.
+- "not found" errors name the wait asked for (5000 ms, not 4750), and page
+  errors drop the redundant `Error:` prefix.
 
 - A `--profile` browser starts with `navigator.webdriver` false, as
   navigera's own launches always have, and `quit --close-browser` returns
