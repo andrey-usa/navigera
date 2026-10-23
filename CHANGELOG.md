@@ -68,6 +68,10 @@ All notable changes to this project are documented here. The format follows
   transitions on it or an ancestor (a modal sliding in) finish first, since
   pages often wire a dialog's buttons only once it has opened. Pages with
   nothing animating pay nothing for this.
+- `--text` matches what an element shows as well as what names it: a
+  button showing "Add to cart" whose `aria-label` is "Add Carbon Gear to
+  cart" is the match, not the product card around it (a click on the card
+  did nothing; `no_effect` caught it in the benchmark).
 - A click on an element that stays covered by another fails and names the
   covering element, instead of sending DOM events to an element no user
   could click. The element is first tried at other scroll positions, which
