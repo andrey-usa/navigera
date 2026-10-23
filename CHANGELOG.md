@@ -35,6 +35,10 @@ All notable changes to this project are documented here. The format follows
   navigera looks there from an isolated world of its own, which the page
   can't see. A single `wait --text`/`--selector` does too. With `--attach`,
   frames in another process stay ref-only.
+- Library: `Driver::fork` (and `BrowserSession::fork`), another driver on
+  the same browser in a browser context of its own, movable to another
+  thread: several sessions at once without a browser each (primavera's
+  workers). Each takes only the tabs its own tabs open.
 - `reset`: a clean slate in the same browser, a new browser context (no
   cookies, storage or cache from before) with one blank tab, in about 40 ms
   instead of a new browser's few hundred. For test runners that isolate
