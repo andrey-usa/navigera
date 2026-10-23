@@ -67,6 +67,12 @@ All notable changes to this project are documented here. The format follows
   spaces count as spaces).
 - `type` with a target fails when the target doesn't take focus, instead of
   typing into whatever has it.
+- A disabled control is waited for (a Submit that unlocks once the form is
+  valid) and otherwise refused: `click` and `fill` no longer report
+  success on a disabled button, or a disabled or read-only field.
+- When a selector's first match is out of a user's reach (a decoy copy of
+  an id parked off the page) and another match isn't, the other one is
+  used.
 - A click on an element a user can't see where it is (zero size, clipped,
   the hidden input of a styled radio card) fails at once and names what
   stands for it, instead of waiting and then sending DOM events.

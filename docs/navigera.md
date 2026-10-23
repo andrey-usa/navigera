@@ -41,7 +41,8 @@ and `new_tabs` (tabs the page opened, now in the tab list). The exit code is
 
 - a ref from `ax` as the first argument (`click 12`; `@12`, `e12` and
   `ref=12` also work) or `--ref 12`;
-- `--selector <css>`: the first match;
+- `--selector <css>`: the first match a user could reach (when the first
+  one is parked off the page and another isn't, the other);
 - `--text "<visible text>"`: the best match by accessible label, text or
   value. An exact match beats a partial one, actionable elements beat plain
   ones, and a `<label>` stands for its control.
@@ -174,6 +175,8 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     would have clicked that instead. `click --force` sends DOM events to the
     element regardless (`synthetic_click`). `fill` likewise scrolls a field
     out from under a panel before setting it.
+  - A disabled control is waited for (up to the element wait) and then
+    refused; `fill` does the same for a disabled or read-only field.
   - An element a user can't see where it is (zero size, clipped, or under
     its own wrapper, like the real input of a styled radio card) fails at
     once, naming what a click there would hit and, where there is one, what
