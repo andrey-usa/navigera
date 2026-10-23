@@ -66,12 +66,12 @@ reached the same way. Inside a cross-origin frame, act by ref.
 | `goto` | `<url>` or `--url`; `--wait load\|domcontentloaded\|commit`; `--timeout-ms` | state `{tab, tabs, url, title}`. `example.com` → `https://`, `localhost:3000` → `http://` |
 | `ax` (`snapshot`) | `[<ref> \| --selector <css> \| --text t]` scope; `--limit <lines>` (2000); `--refs all`; `--format json` (old flat list); `--all` | text tree (below) |
 | `click` | target; `--button right\|middle`; `--force` | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box) |
-| `fill` | target, `<value>` or `--value` | state |
+| `fill` | target, `<value>` or `--value`; `--keys` selects what the field holds and types the value key by key (apps that keep only typed input, observable-model forms) | state |
 | `type` | `<text>` or `--value`; optional `--selector/--ref/--text` to focus first | state |
 | `press` | `<key>` or `--key`; optional target to focus first | state |
-| `select` | target, option label(s)/value(s) (positional or repeated `--value`; labels match with whitespace collapsed); `--add` keeps what a multiple select already has | state + `selected` (everything selected after the op) |
+| `select` | target, option label(s)/value(s) (positional or repeated `--value`; labels match with whitespace collapsed); `--add` keeps what a multiple select already has. On a custom dropdown (an ARIA combobox: react-select and the like) it does what a user does: focuses it, opens it (ArrowDown, else a click), finds the option by its text in the listbox that opened (a portal at the end of `<body>` included), types to filter when it isn't listed, and clicks it | state + `selected` |
 | `hover` | target | state; `synthetic_hover` note if the element could not be hovered |
-| `scroll` | `--by <px>` (default 800) or `--to top\|bottom`; or a target to scroll into view (`--by` scrolls inside it) | `{scrollY, scrollHeight, viewport}` |
+| `scroll` | `--by <px>` (default 800) or `--to top\|bottom`; or a target to scroll into view (`--by` and `--to` scroll inside it: a list that loads more at its end) | `{scrollY, scrollHeight, viewport}`, plus the element's `scrollTop` |
 | `upload` | target, file path(s) (positional or `--file`) | `{files}` |
 | `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--idle` (no fetch/XHR for 500 ms; also `--load networkidle`), `--download [<glob>]` (a finished download whose file name matches), `--ms <n>`; `--timeout-ms` | state + `waited_ms` (+ `download`) |
 | `downloads` | `--clear`, `--json` | `#n state bytes path (url)` per file the pages downloaded, saved under `--download-dir` with the name the page gave it (`report (2).csv` if taken). With `--attach` the browser keeps its own download folder and `path` is empty |
@@ -174,8 +174,11 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     would have clicked that instead. `click --force` sends DOM events to the
     element regardless (`synthetic_click`). `fill` likewise scrolls a field
     out from under a panel before setting it.
-  - An element with no box at all (zero size, not laid out) gets DOM mouse
-    events, and the response says so (`synthetic_click`).
+  - An element a user can't see where it is (zero size, clipped, or under
+    its own wrapper, like the real input of a styled radio card) fails at
+    once, naming what a click there would hit and, where there is one, what
+    stands for it (its label, or the clickable card around it). `--force`
+    sends DOM events to it.
   - If the click starts a navigation, the command returns once the new
     document is parsed.
 - **Page errors are reported.** An uncaught exception while a command ran
@@ -183,6 +186,10 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   lists them`), so a click whose handler crashed doesn't look like a click
   that did nothing. `console`, `errors` and `network` keep the last 1000
   entries per tab.
+- **A page replaced mid-op:** when a navigation replaces the page while an
+  op is still looking for its element (a step that saves with a request and
+  only then reloads, a client-side redirect), the op looks again on the new
+  page within its wait.
 - **Navigation settling:** every command that reads or acts on the page
   first waits for any navigation an earlier action started, such as a JS
   redirect, so it never reads the previous page. The wait is bounded by the

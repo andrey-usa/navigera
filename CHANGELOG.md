@@ -23,6 +23,13 @@ All notable changes to this project are documented here. The format follows
   --force` (DOM events on the element, covered or not), `select --add`
   (add to a multiple select's choice), `tab-select <target id>`,
   `network --since <n>`.
+- `select` on custom dropdowns (ARIA comboboxes such as react-select): it
+  opens them the way a user does (ArrowDown, else a click), finds the
+  option in the listbox that opened (portals included), types to filter
+  when it isn't listed, and clicks it.
+- `fill --keys`: clear the field and type the value key by key, for forms
+  whose app keeps only what was typed.
+- `scroll --to top|bottom` with a target scrolls inside it.
 
 - `start --profile <name> --from chrome`: the agent's own browser, seeded
   with a copy of one of your Chrome profiles' sign-ins -- cookies (HttpOnly
@@ -60,6 +67,13 @@ All notable changes to this project are documented here. The format follows
   spaces count as spaces).
 - `type` with a target fails when the target doesn't take focus, instead of
   typing into whatever has it.
+- A click on an element a user can't see where it is (zero size, clipped,
+  the hidden input of a styled radio card) fails at once and names what
+  stands for it, instead of waiting and then sending DOM events.
+- An element op whose page is replaced by a navigation while it looks for
+  its element (a step that saves with a request and then reloads) looks
+  again on the new page instead of failing with "Inspected target
+  navigated or closed".
 - "not found" errors name the wait asked for (5000 ms, not 4750), and page
   errors drop the redundant `Error:` prefix.
 
