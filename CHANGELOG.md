@@ -78,6 +78,9 @@ All notable changes to this project are documented here. The format follows
 - A script sent to a page that a navigation then replaced no longer waits
   out the whole timeout when the old page never answers (seen on macOS):
   a second after the new page commits, the op looks again there.
+- `--text` prefers an exact match inside a cross-origin frame (the "Pay"
+  button of a payment frame) over page text that merely contains it (a
+  "Payment details" heading), and never picks an iframe by its title.
 - `--text` matches what an element shows as well as what names it: a
   button showing "Add to cart" whose `aria-label` is "Add Carbon Gear to
   cart" is the match, not the product card around it (a click on the card
