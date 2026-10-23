@@ -42,7 +42,12 @@ All notable changes to this project are documented here. The format follows
 - `reset`: a clean slate in the same browser, a new browser context (no
   cookies, storage or cache from before) with one blank tab, in about 40 ms
   instead of a new browser's few hundred. For test runners that isolate
-  scenarios, and agents that want to start over signed out.
+  scenarios, and agents that want to start over signed out. `set`, routes,
+  init scripts and the dialog answer stay; `reset --all` drops them too.
+- `--attach ws://host:port/devtools/page/<id>`: work in that one tab of a
+  running browser as it is, not in a window of its own (a tab a paused
+  test run left open for a look). `BrowserSession::page_endpoint` gives a
+  tab's.
 - A click that changes nothing says so (`no_effect` in its result): no DOM
   change, focus, form value, URL, scroll, clipboard write, request, dialog,
   tab or download within 200 ms. Requests that are the page reporting the
@@ -192,6 +197,13 @@ reach for in Playwright, and a decision model the agent is told how to use.
 
 ### Fixed
 
+- Sessions on one browser (`Driver::fork`) no longer share routes, HTTP
+  credentials, the dialog answer or the download list: each is the
+  session's own, keyed by its browser context. One worker's `route` mocked
+  the others' requests, and `unroute` removed theirs.
+- `--attach <port>` and `--attach http://host:port`: the DevTools URL asked
+  for carries the port again (Chrome answered with a WebSocket URL without
+  one, and the connection was refused).
 - Lightpanda 1.0.x: `goto` waits for the load event (it returned at commit
   and gave up after 500 ms); confirm()/prompt() get the dialog policy (they
   returned false/null while reported accepted); `target=_blank` pages are
