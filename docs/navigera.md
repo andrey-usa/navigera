@@ -111,6 +111,7 @@ another process are reachable by ref only.
 | `title` / `url` | — | string / state |
 | `back` / `forward` / `reload` | — | state |
 | `screenshot` | `[<path>]` or `--path`; `--full-page` | `{path, bytes}` |
+| `reset` | | `{tabs, active, url}`: a new browser context (no cookies, storage or cache from before) with one blank tab, in the same browser (about 40 ms); the old tabs close; `set`, routes and init scripts stay. Chrome only |
 | `tab-new` | `[<url>]` | `{tabs:[{index,target,active}], active, url}` |
 | `tab-list` | — | same |
 | `tab-select` | `<index>` or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |

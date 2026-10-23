@@ -35,6 +35,10 @@ All notable changes to this project are documented here. The format follows
   navigera looks there from an isolated world of its own, which the page
   can't see. A single `wait --text`/`--selector` does too. With `--attach`,
   frames in another process stay ref-only.
+- `reset`: a clean slate in the same browser, a new browser context (no
+  cookies, storage or cache from before) with one blank tab, in about 40 ms
+  instead of a new browser's few hundred. For test runners that isolate
+  scenarios, and agents that want to start over signed out.
 - A click that changes nothing says so (`no_effect` in its result): no DOM
   change, focus, form value, URL, scroll, clipboard write, request, dialog,
   tab or download within 200 ms. Requests that are the page reporting the
@@ -71,6 +75,9 @@ All notable changes to this project are documented here. The format follows
   transitions on it or an ancestor (a modal sliding in) finish first, since
   pages often wire a dialog's buttons only once it has opened. Pages with
   nothing animating pay nothing for this.
+- A script sent to a page that a navigation then replaced no longer waits
+  out the whole timeout when the old page never answers (seen on macOS):
+  a second after the new page commits, the op looks again there.
 - `--text` matches what an element shows as well as what names it: a
   button showing "Add to cart" whose `aria-label` is "Add Carbon Gear to
   cart" is the match, not the product card around it (a click on the card
