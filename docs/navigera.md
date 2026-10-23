@@ -193,16 +193,22 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   - A click that changes nothing says so. From just before the press,
     navigera watches the page's DOM (the document, the element's frame and
     every open shadow root), events a DOM observer can't see (input,
-    change, submit, toggle, invalid, a scroll, a navigation starting),
-    focus moving elsewhere, form values and the URL a script set, and what
-    only the browser sees (requests, navigations, dialogs, new tabs,
-    downloads). The first sign ends the watch, usually within the same
-    round trip as the delivery check; with none after 200 ms the result
-    carries `no_effect`: often a control the page hasn't wired up yet (its
-    script still loading), so wait for the page and click again. Clicks on
-    fields, `<select>`s and right or middle clicks aren't judged (what they
-    open isn't in the DOM), nor pages with same-origin frames it doesn't
-    watch.
+    change, submit, toggle, invalid, copy, a scroll, a navigation
+    starting), clipboard writes, focus moving elsewhere, form values and
+    the URL a script set, and what only the browser sees (navigations,
+    dialogs, new tabs, downloads, requests). The first sign ends the
+    watch, usually within the round trip that already checked delivery.
+    Requests that are the page reporting on itself don't count: beacons
+    and well-known analytics services are ignored, and a first-party
+    request that reads like reporting (`/event/…`, `/collect`, `/log`) is
+    waited for (up to 1.5 s) and judged by what the page does with the
+    answer. With nothing after 200 ms (or after that answer), the result
+    carries `no_effect`, naming any reporting requests: often a control
+    the page hasn't wired up yet, so check for what the click should do
+    before clicking again. Clicks on fields, `<select>`s and right or
+    middle clicks aren't judged, nor pages with same-origin frames it
+    doesn't watch. `NAVIGERA_TRACE_EFFECT=1` on `start` adds an
+    `effect_trace` to click results (what was seen).
 - **Page errors are reported.** An uncaught exception while a command ran
   adds one line to its `notes` (`the page threw TypeError: …; \`errors\`
   lists them`), so a click whose handler crashed doesn't look like a click
