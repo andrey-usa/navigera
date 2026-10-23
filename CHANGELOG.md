@@ -35,6 +35,11 @@ All notable changes to this project are documented here. The format follows
   navigera looks there from an isolated world of its own, which the page
   can't see. A single `wait --text`/`--selector` does too. With `--attach`,
   frames in another process stay ref-only.
+- A click that changes nothing says so (`no_effect` in its result): no DOM
+  change, focus, form value, URL, scroll, request, dialog, tab or download
+  within 200 ms. Typically a button the page hasn't wired up yet. A click
+  that does something costs nothing extra; one whose effect comes a moment
+  later now returns once it has.
 
 - `start --profile <name> --from chrome`: the agent's own browser, seeded
   with a copy of one of your Chrome profiles' sign-ins -- cookies (HttpOnly

@@ -72,7 +72,7 @@ another process are reachable by ref only.
 | `start` | (with `-s`) | `{session, socket, log, pid}`; detached server + browser; `already_running` if it exists |
 | `goto` | `<url>` or `--url`; `--wait load\|domcontentloaded\|commit`; `--timeout-ms` | state `{tab, tabs, url, title}`. `example.com` → `https://`, `localhost:3000` → `http://` |
 | `ax` (`snapshot`) | `[<ref> \| --selector <css> \| --text t]` scope; `--limit <lines>` (2000); `--refs all`; `--format json` (old flat list); `--all` | text tree (below) |
-| `click` | target; `--button right\|middle`; `--force` | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box) |
+| `click` | target; `--button right\|middle`; `--force` | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box); `no_effect` note if the page did nothing in response |
 | `fill` | target, `<value>` or `--value`; `--keys` selects what the field holds and types the value key by key (apps that keep only typed input, observable-model forms) | state |
 | `type` | `<text>` or `--value`; optional `--selector/--ref/--text` to focus first | state |
 | `press` | `<key>` or `--key`; optional target to focus first | state |
@@ -190,6 +190,19 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     sends DOM events to it.
   - If the click starts a navigation, the command returns once the new
     document is parsed.
+  - A click that changes nothing says so. From just before the press,
+    navigera watches the page's DOM (the document, the element's frame and
+    every open shadow root), events a DOM observer can't see (input,
+    change, submit, toggle, invalid, a scroll, a navigation starting),
+    focus moving elsewhere, form values and the URL a script set, and what
+    only the browser sees (requests, navigations, dialogs, new tabs,
+    downloads). The first sign ends the watch, usually within the same
+    round trip as the delivery check; with none after 200 ms the result
+    carries `no_effect`: often a control the page hasn't wired up yet (its
+    script still loading), so wait for the page and click again. Clicks on
+    fields, `<select>`s and right or middle clicks aren't judged (what they
+    open isn't in the DOM), nor pages with same-origin frames it doesn't
+    watch.
 - **Page errors are reported.** An uncaught exception while a command ran
   adds one line to its `notes` (`the page threw TypeError: …; \`errors\`
   lists them`), so a click whose handler crashed doesn't look like a click
