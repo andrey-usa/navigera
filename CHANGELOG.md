@@ -209,6 +209,12 @@ reach for in Playwright, and a decision model the agent is told how to use.
 
 ### Fixed
 
+- A fork's `tab-new` opened its tab in the default browser context, with
+  the owner's cookies and storage; it opens in the fork's own now. A
+  download started by a subframe is listed for the session whose tab holds
+  it (it went to the default list); `reset --all` no longer reports a
+  dialog answered before it; a closed fork's routes, answers and downloads
+  are let go.
 - Sessions on one browser (`Driver::fork`) no longer share routes, HTTP
   credentials, the dialog answer or the download list: each is the
   session's own, keyed by its browser context. One worker's `route` mocked
