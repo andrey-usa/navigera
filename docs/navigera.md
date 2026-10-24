@@ -363,6 +363,7 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_navigate` | `goto` |
 | `browser_snapshot` | `ax`: the tree with `[ref=N]` (optional `ref`/`selector` scope, `limit`) |
 | `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_select_option`, `browser_hover`, `browser_scroll`, `browser_file_upload` | the element ops, by `ref`, `selector` or `text` |
+| `browser_mouse` | `mouse`: raw input at a point (a canvas, a map, a game), or from an element's corner |
 | `browser_wait_for`, `browser_evaluate`, `browser_screenshot` (returns the image), `browser_tabs`, `browser_history`, `browser_handle_dialog` | as the CLI |
 | `browser_console_messages`, `browser_network_requests` | `console`, `network` |
 | `browser_resize` | `set viewport` |
@@ -371,7 +372,7 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_close` | close the browser; the next call starts a fresh one |
 
 Every action takes `snapshot: true` to return the updated tree in the same
-call. The whole tool list (21 tools) is about 11.6 KB (~2,900 tokens), against
+call. The whole tool list (23 tools) is about 14 KB (~3,600 tokens), against
 ~20 KB for Playwright MCP 0.0.83 and ~26 KB for Chrome DevTools MCP 1.10.1.
 
 Client configuration (all run the same command):
@@ -397,8 +398,8 @@ mcpServers:
 
 From a shell: `cline mcp install navigera -- navigera mcp`, `claude mcp add navigera -- navigera mcp`.
 Without a local install, use `"command": "npx", "args": ["-y", "navigera", "mcp"]`
-(the npm package carries the binary). The server is published to the MCP
-Registry as `io.github.andrey-usa/navigera` (`server.json`).
+(the npm package carries the binary). `server.json` describes it for the
+MCP Registry, as `io.github.andrey-usa/navigera`.
 
 ## Browsers and engines
 
@@ -410,9 +411,8 @@ Registry as `io.github.andrey-usa/navigera` (`server.json`).
   4. Playwright and Puppeteer browser caches. For headless runs the cache
      search prefers chrome-headless-shell.
 
-  Brave and Edge work via `--chromium`. chrome-headless-shell starts about
-  3× faster than full Chrome (cold start 0.32 s → 0.11 s in bench run
-  37498679296).
+  Brave and Edge work via `--chromium`. chrome-headless-shell starts
+  faster than full Chrome: it has no browser UI to bring up.
 - **CDP transport.** `--remote-debugging-pipe` by default on Linux/macOS:
   no TCP port, and the browser exits when navigera dies. `--transport ws`
   (or `$NAVIGERA_CDP_TRANSPORT=ws`) opens a DevTools WebSocket port instead, for
