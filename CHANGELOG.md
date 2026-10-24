@@ -41,7 +41,9 @@ All notable changes to this project are documented here. The format follows
 - Library: `Driver::fork` (and `BrowserSession::fork`), another driver on
   the same browser in a browser context of its own, movable to another
   thread: several sessions at once without a browser each (primavera's
-  workers). Each takes only the tabs its own tabs open.
+  workers). Each takes only the tabs its own tabs open, and routes,
+  credentials, the dialog answer and the downloads list are each
+  session's own.
 - `reset`: a clean slate in the same browser, a new browser context (no
   cookies, storage or cache from before) with one blank tab, in about 40 ms
   instead of a new browser's few hundred. For test runners that isolate
@@ -149,6 +151,15 @@ All notable changes to this project are documented here. The format follows
   agent had read it: in the 0.5.0 eval the agent reached for `--find` or
   `check` unasked in 3 of 12 runs. `ax` with a limit, a depth, `--all` or a
   scope is unchanged, and so is `ax` without a decider.
+
+### Fixed
+
+- `--attach <port>` and `--attach http://host:port` sent Chrome's
+  `/json/version` request without the port in `Host`, got back a WebSocket
+  URL without one, and failed to connect.
+- `goto` and `reload` try once more when Chrome answers "Not attached to
+  an active page" (the tab's target was swapped mid-navigation), instead of
+  failing the step.
 
 ## [0.5.0] - 2026-10-22
 
