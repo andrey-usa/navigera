@@ -44,6 +44,10 @@ All notable changes to this project are documented here. The format follows
   instead of a new browser's few hundred. For test runners that isolate
   scenarios, and agents that want to start over signed out. `set`, routes,
   init scripts and the dialog answer stay; `reset --all` drops them too.
+- `--frame <css>` on element targets and `wait`: look only inside that
+  iframe or frame (`"#outer >> #inner"` for nested ones), of this origin
+  or another, when two frames hold the same element. Without it, frames
+  are searched as before.
 - `mouse move|down|up|click|wheel`: raw mouse input at a point, for what
   has no element to aim at (a canvas, a map, a game): viewport CSS pixels,
   or from a target's top-left corner (`mouse click 30 40 --selector

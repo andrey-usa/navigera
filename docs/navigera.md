@@ -52,6 +52,10 @@ and `new_tabs` (tabs the page opened, now in the tab list). The exit code is
   (case-insensitive, exact before contains, visible first, open shadow
   roots included); `--nth <i>` picks among their matches or `--selector`'s
   (0-based, `-1` = the last).
+- `--frame <css>` with any of them: look only inside that iframe or frame
+  (`"#outer >> #inner"` for one inside another), of this origin or another,
+  when two frames hold the same element (two address forms, two payment
+  frames). `wait --selector/--text/--gone --frame …` too.
 
 Selector, text and locator targets auto-wait (default 5 s, `--wait-ms`) for
 the element to appear. They search the top document first, then its open
