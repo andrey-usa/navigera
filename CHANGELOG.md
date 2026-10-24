@@ -103,6 +103,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- A click that may navigate waits for this tab's navigation only when one
+  can come: not for a `download` link, a link or form that opens another
+  tab or window, or a link or submit inside a frame (which navigates the
+  frame), and the wait ends as soon as the click opened a dialog, a tab or
+  a download instead. Each of those clicks had cost 150-200 ms (a
+  download link 170 ms, now about 20).
+
 - A click waits for its element to stop moving: CSS animations and
   transitions on it or an ancestor (a modal sliding in) finish first, since
   pages often wire a dialog's buttons only once it has opened. Pages with
