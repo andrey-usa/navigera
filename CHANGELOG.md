@@ -18,7 +18,10 @@ All notable changes to this project are documented here. The format follows
 - Downloads: files a page downloads are saved under `--download-dir`
   (`NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own) with
   the name the page gave them. `downloads` lists them; `wait --download
-  "*.csv"` waits for one and returns its path.
+  "*.csv"` waits for one and returns its path. `downloads --dir <path>`
+  gives one session a directory of its own (kept across `reset`; forks
+  and other sessions keep theirs), so a test runner can give each test
+  one and file names don't carry over (`report (2).csv`) between tests.
 - `click --button right|middle` (a native context-menu click), `click
   --force` (DOM events on the element, covered or not), `select --add`
   (add to a multiple select's choice), `tab-select <target id>`,
