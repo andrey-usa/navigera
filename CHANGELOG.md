@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
+The browser handed over to a person and back, downloads, frames of any
+origin and custom dropdowns; clicks that wait for what moves or covers
+their element and say when they changed nothing; and `reset` and `fork`,
+so a test runner gets a clean, separate session in about 40 ms.
+
 ### Added
 
 - Element ops reach into same-origin iframes, framesets and `srcdoc`
@@ -354,6 +361,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.6.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.0
 [0.5.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.5.0
 [0.4.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.1
 [0.4.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.0
