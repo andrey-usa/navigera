@@ -209,6 +209,10 @@ reach for in Playwright, and a decision model the agent is told how to use.
 
 ### Fixed
 
+- `reload` and `goto` try again after a moment when Chrome answers "Not
+  attached to an active page" (the tab between two documents; nothing was
+  done yet): seen once in a parallel test run. `tab-select` reads 4 or
+  more hex characters as a target id even when they are all digits.
 - A fork's `tab-new` opened its tab in the default browser context, with
   the owner's cookies and storage; it opens in the fork's own now. A
   download started by a subframe is listed for the session whose tab holds
