@@ -160,6 +160,10 @@ All notable changes to this project are documented here. The format follows
 - `goto` and `reload` try once more when Chrome answers "Not attached to
   an active page" (the tab's target was swapped mid-navigation), instead of
   failing the step.
+- `goto` and `reload` no longer wait out their whole timeout when the
+  load event is lost on its way (seen as rare 35 s stalls on slow macOS
+  machines): every 2 s they also look at the page itself, and return once
+  its document is the new one and has loaded.
 
 ## [0.5.0] - 2026-10-22
 
