@@ -55,7 +55,9 @@ and `new_tabs` (tabs the page opened, now in the tab list). The exit code is
 - `--frame <css>` with any of them: look only inside that iframe or frame
   (`"#outer >> #inner"` for one inside another), of this origin or another,
   when two frames hold the same element (two address forms, two payment
-  frames). `wait --selector/--text/--gone --frame …` too.
+  frames). `wait --selector/--text/--gone --frame …` too. When the CSS
+  matches several frames, the first in document order is the one; when it
+  matches none, the error says so.
 
 Selector, text and locator targets auto-wait (default 5 s, `--wait-ms`) for
 the element to appear. They search the top document first, then its open
@@ -82,7 +84,7 @@ another process are reachable by ref only.
 | `press` | `<key>` or `--key`; optional target to focus first | state |
 | `select` | target, option label(s)/value(s) (positional or repeated `--value`; labels match with whitespace collapsed); `--add` keeps what a multiple select already has. On a custom dropdown (an ARIA combobox: react-select and the like) it does what a user does: focuses it, opens it (ArrowDown, else a click), finds the option by its text in the listbox that opened (a portal at the end of `<body>` included), types to filter when it isn't listed, and clicks it | state + `selected` |
 | `hover` | target | state; `synthetic_hover` note if the element could not be hovered |
-| `mouse` | `move <x> <y> [--steps n]`, `down`, `up`, `click <x> <y> [--count n]`, `wheel <dx> <dy>`; `--button left\|right\|middle`; an optional target makes x/y relative to its top-left corner | state, plus `mouse: {x, y, held}` (viewport CSS pixels, the buttons still held) |
+| `mouse` | `move <x> <y> [--steps n]`, `down`, `up`, `click <x> <y> [--count n]`, `wheel <dx> <dy>`; `--button left\|right\|middle`; an optional target makes x/y relative to its top-left corner, scrolling it into view when that point is out of it (`down`, `up` and `wheel` with a target go to its center; a target in a cross-origin frame is refused). A `click` at viewport coordinates outside the viewport is refused; a `move` may leave it (a drag out of the window) | state, plus `mouse: {x, y, held}` (viewport CSS pixels, the buttons still held) |
 | `scroll` | `--by <px>` (default 800) or `--to top\|bottom`; or a target to scroll into view (`--by` and `--to` scroll inside it: a list that loads more at its end) | `{scrollY, scrollHeight, viewport}`, plus the element's `scrollTop` |
 | `upload` | target, file path(s) (positional or `--file`) | `{files}` |
 | `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--idle` (no fetch/XHR for 500 ms; also `--load networkidle`), `--download [<glob>]` (a finished download whose file name matches), `--ms <n>`; `--timeout-ms` | state + `waited_ms` (+ `download`) |
@@ -116,7 +118,7 @@ another process are reachable by ref only.
 | `title` / `url` | — | string / state |
 | `back` / `forward` / `reload` | — | state |
 | `screenshot` | `[<path>]` or `--path`; `--full-page` | `{path, bytes}` |
-| `reset` | | `{tabs, active, url}`: a new browser context (no cookies, storage or cache from before) with one blank tab, in the same browser (about 40 ms); the old tabs close; `set`, routes and init scripts stay. Chrome only |
+| `reset` | | `{tabs, active, url}`: a new browser context (no cookies, storage or cache from before) with one blank tab, in the same browser (about 40 ms); the old tabs close; `set`, routes, credentials, init scripts, the dialog answer and the `downloads --dir` stay (`reset --all` drops them, as in a new session). Chrome only |
 | `tab-new` | `[<url>]` | `{tabs:[{index,target,active}], active, url}` |
 | `tab-list` | — | same |
 | `tab-select` | `<index>` or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |

@@ -51,14 +51,18 @@ All notable changes to this project are documented here. The format follows
   init scripts and the dialog answer stay; `reset --all` drops them too.
 - `--frame <css>` on element targets and `wait`: look only inside that
   iframe or frame (`"#outer >> #inner"` for nested ones), of this origin
-  or another, when two frames hold the same element. Without it, frames
-  are searched as before.
+  or another, when two frames hold the same element (the first frame the
+  CSS matches; when it matches none, the error says so). Without it,
+  frames are searched as before.
 - `mouse move|down|up|click|wheel`: raw mouse input at a point, for what
   has no element to aim at (a canvas, a map, a game): viewport CSS pixels,
   or from a target's top-left corner (`mouse click 30 40 --selector
   canvas`). The pointer stays where it went and held buttons stay held, so
   `mouse down`, moves (`--steps` for a smooth path), `mouse up` drags or
-  draws; `--count 2` double-clicks; `--button right|middle`. MCP:
+  draws; `--count 2` double-clicks; `--button right|middle`. A target
+  out of view is scrolled into view first, as for a click; `down`, `up`
+  and `wheel` with a target go to its center; a click outside the
+  viewport is refused instead of landing on nothing. MCP:
   `browser_mouse`. (An agent working through WebGames couldn't play its
   canvas games without it.)
 - `--attach ws://host:port/devtools/page/<id>`: work in that one tab of a
@@ -160,6 +164,11 @@ All notable changes to this project are documented here. The format follows
 - `goto` and `reload` try once more when Chrome answers "Not attached to
   an active page" (the tab's target was swapped mid-navigation), instead of
   failing the step.
+- `goto` no longer retries a navigation that ended in `ERR_ABORTED`
+  because it was an answer: a URL that downloads a file was fetched four
+  times (four copies on disk); now the file is saved once and `goto`
+  succeeds with `download: <name>`, the page staying where it was. A 204 or
+  205 answer fails at once and says so, instead of after three retries.
 - `goto` and `reload` no longer wait out their whole timeout when the
   load event is lost on its way (seen as rare 35 s stalls on slow macOS
   machines): every 2 s they also look at the page itself, and return once
