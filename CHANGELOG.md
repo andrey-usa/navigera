@@ -40,7 +40,7 @@ All notable changes to this project are documented here. The format follows
   frames in another process stay ref-only.
 - Library: `Driver::fork` (and `BrowserSession::fork`), another driver on
   the same browser in a browser context of its own, movable to another
-  thread: several sessions at once without a browser each (primavera's
+  thread: several sessions at once without a browser each (a test runner's
   workers). Each takes only the tabs its own tabs open, and routes,
   credentials, the dialog answer and the downloads list are each
   session's own.
