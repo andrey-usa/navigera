@@ -2442,6 +2442,9 @@ impl Driver {
         let mut entry = command.recorded().then(|| json!({ "command": command, "at": at() }));
         if let (Some(e), Some(r)) = (entry.as_mut(), command.clone().target_mut().and_then(|t| t.node_ref)) {
             let found = self.session.locate(&Target::Ref(r), Some(2000.0)).ok();
+            if found.as_ref().is_some_and(|v| v["secret"] == true) {
+                e["secret"] = json!(true);
+            }
             e["locators"] = found.and_then(|v| v.get("locators").cloned()).unwrap_or_else(|| json!([]));
         }
         let result = self.dispatch(command).map_err(|e| {

@@ -959,7 +959,7 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
 /// when the finder the op would use picks this very element on the page as
 /// it is now. Inside a same-origin frame each one names it with `--frame`;
 /// inside a cross-origin one there is none (`xframe`).
-const LOCATE_EL: &str = r#"async function (el) {
+const LOCATE_EL: &str = r#"async function (el, asFrame) {
     const deep = __DEEP__;
     const byLocator = __WAIT_LOCATOR__;
     const byText = __WAIT_TEXT__;
@@ -985,17 +985,35 @@ const LOCATE_EL: &str = r#"async function (el) {
         }
         return parts.join(' > ');
     };
-    const chain = [];
-    for (let w = el.ownerDocument.defaultView; w && w !== w.top; w = w.parent) {
-        let fe = null;
-        try { fe = w.frameElement; } catch (_) {}
-        if (!fe) return { xframe: true, locators: [] };
-        // A frame by its name or title when that is unique, else by place.
+    // A frame by its name or title when that is unique, else by place.
+    const frameCss = (fe) => {
         const tag = fe.tagName.toLowerCase();
         const attr = ['name', 'title'].map((a) => [a, fe.getAttribute(a)]).find(([, v]) => v
             && fe.ownerDocument.querySelectorAll(tag + '[' + a + '="' + esc(v) + '"]').length === 1);
-        chain.unshift(attr ? tag + '[' + attr[0] + '="' + esc(attr[1]) + '"]' : cssOf(fe));
+        return attr ? tag + '[' + attr[0] + '="' + esc(attr[1]) + '"]' : cssOf(fe);
+    };
+    // The frames from the top down to window `w`; `cut` where one is of
+    // another origin (its element can't be seen from inside).
+    const walk = (w) => {
+        const chain = [];
+        for (; w && w !== w.top; w = w.parent) {
+            let fe = null;
+            try { fe = w.frameElement; } catch (_) {}
+            if (!fe) return { chain, cut: true };
+            chain.unshift(frameCss(fe));
+        }
+        return { chain, cut: false };
+    };
+    // Asked about a frame element: the chain that names it.
+    if (asFrame) {
+        const up = walk(el.ownerDocument.defaultView);
+        return { chain: up.cut ? null : [...up.chain, frameCss(el)] };
     }
+    const up = walk(el.ownerDocument.defaultView);
+    // In a frame of another origin: the locators from inside it, `xframe`
+    // set (the caller names the frame from outside); deeper in, none.
+    if (up.cut && up.chain.length) return { xframe: true, locators: [] };
+    const chain = up.chain;
     const out = [];
     const add = async (kind, flags, found) => {
         if (await found) out.push({ kind, flags: chain.length ? [...flags, '--frame', chain.join(' >> ')] : flags });
@@ -1013,7 +1031,10 @@ const LOCATE_EL: &str = r#"async function (el) {
     if (text && text.length <= 60) await add('text', ['--text', text], finds(byText(text, 0, 'locate', deep, 2)));
     const css = cssOf(el);
     await add('css', ['--selector', css], finds(byCss(css, 0, 'locate', () => deep)));
-    return { locators: out };
+    // A field whose value is a secret (what a test writes as ${secret:…}).
+    const secret = el.tagName === 'INPUT'
+        && (el.type === 'password' || /(current|new)-password|one-time-code/.test(el.getAttribute('autocomplete') || ''));
+    return { locators: out, ...(up.cut ? { xframe: true } : {}), ...(secret ? { secret: true } : {}) };
 }"#;
 
 /// `locate`'s page function, `async function (el)` resolving to
@@ -1998,7 +2019,55 @@ impl Page {
 
     /// The locators that find `target`'s element again (see LOCATE_EL).
     pub fn locate(&self, target: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
-        self.on_element(target, "locate", locate_fn(), &[], wait, timeout)
+        let mut found = self.on_element(target, "locate", locate_fn(), &[], wait, timeout)?;
+        // In a frame of another origin (in this process: site isolation is
+        // off): its element is named from the page that holds it.
+        if let (Target::Ref(node), true) = (target, found["xframe"] == true) {
+            match self.frame_chain_of(*node, timeout) {
+                Some(chain) => {
+                    for l in found["locators"].as_array_mut().into_iter().flatten() {
+                        if let Some(flags) = l["flags"].as_array_mut() {
+                            flags.extend([json!("--frame"), json!(chain)]);
+                        }
+                    }
+                    found.as_object_mut().map(|o| o.remove("xframe"));
+                }
+                None => found["locators"] = json!([]),
+            }
+        }
+        Ok(found)
+    }
+
+    /// The `--frame` chain of the frame a ref's element is in, found from
+    /// outside: the frame whose document is the element's.
+    fn frame_chain_of(&self, node: u64, timeout: Duration) -> Option<String> {
+        let (_, doc) =
+            self.call_on_ref(node, "function () { return this.ownerDocument; }", &[], false, timeout).ok()?;
+        let doc = self.send("DOM.describeNode", json!({ "objectId": doc? }), timeout).ok()?;
+        let doc = doc.pointer("/node/backendNodeId").and_then(Value::as_u64)?;
+        let tree = self.send("Page.getFrameTree", json!({}), timeout).ok()?;
+        fn ids(node: &Value, out: &mut Vec<String>) {
+            for child in node.get("childFrames").and_then(Value::as_array).into_iter().flatten() {
+                if let Some(id) = child.pointer("/frame/id").and_then(Value::as_str) {
+                    out.push(id.to_string());
+                }
+                ids(child, out);
+            }
+        }
+        let mut frames = Vec::new();
+        ids(tree.get("frameTree")?, &mut frames);
+        let owner = frames.iter().take(50).find_map(|id| {
+            let owner = self.send("DOM.getFrameOwner", json!({ "frameId": id }), timeout).ok()?;
+            let owner = owner.get("backendNodeId").and_then(Value::as_u64)?;
+            let d = self
+                .send("DOM.describeNode", json!({ "backendNodeId": owner, "depth": 1, "pierce": true }), timeout)
+                .ok()?;
+            (d.pointer("/node/contentDocument/backendNodeId").and_then(Value::as_u64) == Some(doc)).then_some(owner)
+        })?;
+        let f = format!("function () {{ return ({})(this, true); }}", locate_fn());
+        let (chain, _) = self.call_on_ref(owner, &f, &[], true, timeout).ok()?;
+        let chain: Vec<&str> = chain["chain"].as_array()?.iter().filter_map(Value::as_str).collect();
+        (!chain.is_empty()).then(|| chain.join(" >> "))
     }
 
     pub fn url(&self, timeout: Duration) -> Result<String> {

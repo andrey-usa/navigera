@@ -688,6 +688,11 @@ fn locate_and_history_turn_refs_into_locators() {
     let found = s.ok(&["locate", &size]);
     assert_eq!(found["locators"][0]["flags"], serde_json::json!(["--role", "combobox", "--name", "Size"]), "{found}");
     s.ok(&["select", "--label", "Size", "Large"]);
+    // A password field says so, whatever it is called.
+    s.ok(&["eval", "(document.body.insertAdjacentHTML('beforeend', '<label>Token <input type=password></label>'), 1)"]);
+    let token = ref_of(&s, "textbox \"Token\"");
+    assert_eq!(s.ok(&["locate", &token])["secret"], true);
+    assert!(s.ok(&["locate", &size]).get("secret").is_none());
     // The actions, a ref's with its locators read before it ran; reads aren't kept.
     s.ok(&["history", "--clear"]);
     s.ok(&["fill", &email, "ada@example.com"]);
