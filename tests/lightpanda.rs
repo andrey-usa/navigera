@@ -182,7 +182,7 @@ fn acme_supply_on_lightpanda() {
     agent.ok(&["press", "Enter", "--selector", "#password"]);
     agent.ok(&["click", "--text", "Next page"]);
     let table = agent.ax(&["--selector", "table"]);
-    assert!(table.contains("- cell: A-1042"), "cells carry their text:\n{table}");
+    assert!(table.contains("- row: \"A-1042\" | "), "a row is one line of its cells' text:\n{table}");
     assert!(table.contains("Awaiting pickup"), "{table}");
     assert!(!table.contains("table \""), "the table is not named with its own text:\n{table}");
 
