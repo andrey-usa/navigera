@@ -135,11 +135,7 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 - main:
   - heading "Your cart" [level=1]
   - table:
-    - row:
-      - cell "Brass Sprocket"
-      - cell "Qty 2":
-        - spinbutton "Qty" [ref=146] value="2"
-      - cell "Remove Brass Sprocket": button [ref=193]
+    - row: "Brass Sprocket" | spinbutton "Qty" [ref=146] value="2" | button "Remove Brass Sprocket" [ref=193]
   - textbox "Coupon code" [ref=148]
   - button "Apply coupon" [ref=212]
 ```
@@ -149,6 +145,10 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   node, and open shadow roots are included.
 - Wrapper nodes (`generic`, label boxes) are collapsed, and text that repeats
   an ancestor's name or a neighbouring control's label is dropped.
+- A table row whose cells each hold text or one control is one line, cells
+  apart by ` | ` (`- row: "Brass Sprocket" | button "Remove" [ref=193]`);
+  a cell holding more than that keeps the row a tree. Read a cell's ref
+  from the text before it: a row line has a ref per control.
 - A named node with one same-named actionable child is printed on one line,
   for example `heading "X": link [ref=7]`.
 - `[ref=N]` (a backend DOM node id) appears on actionable nodes: interactive

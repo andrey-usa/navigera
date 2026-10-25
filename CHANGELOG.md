@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `ax` prints a table row whose cells each hold text or one control on one
+  line, cells apart by ` | `: a 20-row order grid is 24 lines, not 150,
+  with the same refs. A row with a richer cell (a select, a cell of
+  several controls) is drawn as before.
+
 ## [0.6.0] - 2026-10-24
 
 The browser handed over to a person and back, downloads, frames of any
