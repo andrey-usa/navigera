@@ -260,7 +260,12 @@ fn acme_supply_on_lightpanda() {
     let prefs = agent.ax(&[]);
     assert!(!prefs.contains("value=\"on\""), "{prefs}");
     assert!(prefs.contains("- combobox \"Currency\" [ref="), "{prefs}");
-    assert!(prefs.contains("- cell: checkbox \"Email alerts for Drive\" [checked, ref="), "{prefs}");
+    // A table row of controls is one line: the checkbox is on its row's.
+    assert!(
+        prefs.lines().any(|l| l.trim_start().starts_with("- row:")
+            && l.contains("checkbox \"Email alerts for Drive\" [checked, ref=")),
+        "{prefs}"
+    );
     assert!(prefs.lines().count() < 190, "{} lines", prefs.lines().count());
     assert!(prefs.contains("- checkbox \"Price-drop alerts\" [ref="), "{prefs}");
     assert!(prefs.contains("- checkbox \"Weekly newsletter\" [checked, ref="), "{prefs}");
