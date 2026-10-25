@@ -530,7 +530,12 @@ fn the_mouse_goes_where_it_is_told_on_a_canvas() {
     assert!(events.contains(&"move 60 20 1".to_string()), "{events:?}");
     assert_eq!(events.last().map(String::as_str), Some("click 110 20 0 0"), "{events:?}");
     assert!(events.contains(&"mouseup 110 20 0 0".to_string()), "{events:?}");
-    assert!(s.ok(&["eval", "ink(60, 20)"]).as_u64().unwrap_or(0) > 0, "the line is drawn");
+    // Every segment was drawn; the pixels show it unless the platform lost
+    // the canvas's context meanwhile (macOS under load; it is never restored).
+    assert_eq!(s.ok(&["eval", "drawn"]), 10, "a stroke per move with the button down");
+    if s.ok(&["eval", "lost.length"]) == 0 {
+        assert!(s.ok(&["eval", "ink(60, 20)"]).as_u64().unwrap_or(0) > 0, "the line is drawn");
+    }
     assert_eq!(s.ok(&["eval", "ink(60, 120)"]), 0, "nothing drawn off the path");
     // Viewport coordinates, a double click, the right button, the wheel.
     s.ok(&["mouse", "click", "250", "140", "--count", "2"]);
