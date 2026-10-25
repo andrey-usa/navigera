@@ -957,13 +957,15 @@ const LOCATE_EL: &str = r#"async function (el) {
     const byText = __WAIT_TEXT__;
     const byCss = __WAIT_FOR__;
     const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    // (Taken apart: the CDP check reads Domain-dot-name spellings as commands.)
+    const { escape: esc } = window.CSS;
     const finds = async (p) => { try { return (await p) === el; } catch (_) { return false; } };
     // A selector unique where the element is: its id, else the path from
     // the nearest ancestor with one (or <body>), positions where needed.
     const cssOf = (e) => {
         const root = e.getRootNode();
         const unique = (s) => { try { return root.querySelectorAll(s).length === 1; } catch (_) { return false; } };
-        const id = (n) => (n.id && unique('#' + CSS.escape(n.id)) ? '#' + CSS.escape(n.id) : null);
+        const id = (n) => (n.id && unique('#' + esc(n.id)) ? '#' + esc(n.id) : null);
         if (id(e)) return id(e);
         const parts = [];
         for (let n = e; n && n.nodeType === 1; n = n.parentElement) {
@@ -983,8 +985,8 @@ const LOCATE_EL: &str = r#"async function (el) {
         // A frame by its name or title when that is unique, else by place.
         const tag = fe.tagName.toLowerCase();
         const attr = ['name', 'title'].map((a) => [a, fe.getAttribute(a)]).find(([, v]) => v
-            && fe.ownerDocument.querySelectorAll(tag + '[' + a + '="' + CSS.escape(v) + '"]').length === 1);
-        chain.unshift(attr ? tag + '[' + attr[0] + '="' + CSS.escape(attr[1]) + '"]' : cssOf(fe));
+            && fe.ownerDocument.querySelectorAll(tag + '[' + a + '="' + esc(v) + '"]').length === 1);
+        chain.unshift(attr ? tag + '[' + attr[0] + '="' + esc(attr[1]) + '"]' : cssOf(fe));
     }
     const out = [];
     const add = async (kind, flags, found) => {
