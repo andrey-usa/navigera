@@ -2496,8 +2496,13 @@ impl Driver {
             }
             r => r,
         };
-        if let (Ok(_), Some(mut e)) = (&result, entry) {
+        if let (Ok(r), Some(mut e)) = (&result, entry) {
             e["url"] = json!(self.session.url());
+            // A click that changed nothing (the next one is usually the
+            // same click again, once the page is ready for it).
+            if r.get("no_effect").is_some() {
+                e["no_effect"] = json!(true);
+            }
             // What the page says after it: its heading, and messages it
             // announces (what a test would check next).
             if let Ok(page) = self.session.evaluate_with_timeout::<Value>(PAGE_SAYS, Some(1000.0)) {

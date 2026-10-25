@@ -773,10 +773,20 @@ pub const FOCUS_EL: &str = r#"function (el) {
     return a === el || el.contains(a);
 }"#;
 
+/// How long `scroll --to bottom` at the end already waits for more to load.
+const LAZY_GROW: Duration = Duration::from_millis(2000);
+
 /// Scroll an element into view (or scroll inside it by `dy`).
 /// With `to` (`top`/`bottom`) the element's own content scrolls there: a
 /// list that loads more as it reaches its end.
-const SCROLL_EL: &str = r#"function (el, dy, to) {
+const SCROLL_EL: &str = r#"async function (el, dy, to, grow) {
+    // Already at its end: a list that loads more is still loading; wait
+    // (at most `grow` ms) for it to get longer, then go to the new end.
+    const end = () => el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+    if (to === 'bottom' && end()) {
+        const h = el.scrollHeight, until = Date.now() + grow;
+        while (el.scrollHeight <= h && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+    }
     if (to === 'bottom') { el.scrollTo({ top: el.scrollHeight, behavior: 'instant' }); }
     else if (to === 'top') { el.scrollTo({ top: 0, behavior: 'instant' }); }
     else if (dy) { el.scrollBy({ top: dy, behavior: 'instant' }); }
@@ -3109,18 +3119,24 @@ impl Page {
             if let Some(to) = to.filter(|t| !matches!(*t, "top" | "bottom")) {
                 bail!("scroll --to takes top|bottom, got {to:?}");
             }
-            return self.on_element(target, "scroll", SCROLL_EL, &[json!(dy.unwrap_or(0.0)), json!(to)], wait, timeout);
+            let args = [json!(dy.unwrap_or(0.0)), json!(to), json!(LAZY_GROW.as_millis() as u64)];
+            return self.on_element(target, "scroll", SCROLL_EL, &args, wait, timeout);
         }
         let action = match to {
             Some("top") => "window.scrollTo({ top: 0, behavior: 'instant' })".to_string(),
-            Some("bottom") => {
-                "window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' })".to_string()
-            }
+            // At the end already: wait for a page that loads more to grow.
+            Some("bottom") => format!(
+                "const d = document.documentElement, h = d.scrollHeight, until = Date.now() + {}; \
+                 if (window.scrollY + window.innerHeight >= h - 2) \
+                   while (d.scrollHeight <= h && Date.now() < until) await new Promise((r) => setTimeout(r, 50)); \
+                 window.scrollTo({{ top: d.scrollHeight, behavior: 'instant' }})",
+                LAZY_GROW.as_millis()
+            ),
             Some(other) => bail!("scroll --to takes top|bottom, got {other:?}"),
             None => format!("window.scrollBy({{ top: {}, behavior: 'instant' }})", dy.unwrap_or(800.0)),
         };
         self.evaluate_raw(
-            &format!("(() => {{ {action}; return {{ scrollY: Math.round(window.scrollY), scrollHeight: document.documentElement.scrollHeight, viewport: window.innerHeight }}; }})()"),
+            &format!("(async () => {{ {action}; return {{ scrollY: Math.round(window.scrollY), scrollHeight: document.documentElement.scrollHeight, viewport: window.innerHeight }}; }})()"),
             timeout,
         )
     }

@@ -28,6 +28,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `scroll --to bottom` (the page's, or inside a target) at the end already
+  waits up to 2 s for a list that loads more to grow, then goes to the new
+  end: two in a row, as a recorded session replays them, reached only the
+  first page of a lazy list.
+- `history` marks a click that changed nothing (`no_effect: true`), so a
+  test writer can drop it when the same click follows.
 - A `goto` to a server that takes the connection and never answers fails
   at its timeout and cancels that navigation: the tab answers at once again
   (it had answered nothing while the dead load was pending, so the next

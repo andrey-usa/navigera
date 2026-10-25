@@ -369,6 +369,13 @@ fn scroll_to_bottom_scrolls_the_box_itself() {
         s.ok(&["wait", "--js", &format!("document.querySelectorAll('#list div').length >= {loaded}")]);
     }
     s.ok(&["click", "--text", "Item 55"]);
+    // Twice in a row, as a recorded session replays it: the second, at the
+    // end already, waits for what the first loaded.
+    s.ok(&["reload"]);
+    s.ok(&["scroll", "--selector", "#list", "--to", "bottom"]);
+    let r = s.ok(&["scroll", "--selector", "#list", "--to", "bottom"]);
+    assert!(r["elementScrollHeight"].as_u64().unwrap() > 1000, "{r}");
+    s.ok(&["click", "--text", "Item 55", "--timeout-ms", "2000"]);
 }
 
 #[test]
