@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format follows
   only when the finder an op would use picks that element on the page;
   `--frame` added inside a frame (a cross-origin one named from the page
   that holds it); `secret: true` for a password field.
-- `history [--clear]`: the actions a session ran, oldest first; one on a
+- `history [--clear]`: the actions a session ran and its waits, oldest first; one on a
   ref carries its element's `locate` from just before it ran. What
   `primavera from-session` turns into a test.
 

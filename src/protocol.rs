@@ -3371,7 +3371,7 @@ impl Command {
         }
     }
 
-    /// An action `history` keeps (reads, waits and evals aren't).
+    /// An action `history` keeps, and the waits between (reads and evals aren't).
     fn recorded(&self) -> bool {
         matches!(
             self,
@@ -3399,6 +3399,8 @@ impl Command {
                 | Command::TabNew { .. }
                 | Command::TabSelect { .. }
                 | Command::TabClose { .. }
+                // What the agent waited for is when the test may go on.
+                | Command::Wait { .. }
         )
     }
 

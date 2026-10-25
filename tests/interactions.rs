@@ -698,9 +698,11 @@ fn locate_and_history_turn_refs_into_locators() {
     s.ok(&["fill", &email, "ada@example.com"]);
     s.ok(&["click", "--text", "Subscribe"]);
     s.ok(&["get", "text", "--selector", "#msg"]);
+    s.ok(&["wait", "--text", "Thanks"]);
     let h = s.ok(&["history"]);
     let h = h["history"].as_array().unwrap();
-    assert_eq!(h.len(), 2, "{h:?}");
+    assert_eq!(h.len(), 3, "reads aren't kept, the wait is: {h:?}");
+    assert_eq!(h[2]["command"]["op"], "wait", "{h:?}");
     assert_eq!(
         (h[0]["command"]["op"].as_str(), h[0]["command"]["value"].as_str()),
         (Some("fill"), Some("ada@example.com"))
