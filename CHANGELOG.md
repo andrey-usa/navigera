@@ -172,6 +172,13 @@ so a test runner gets a clean, separate session in about 40 ms.
 
 ### Fixed
 
+- A page that stops answering (a script holding its thread, a renderer
+  hung under load) cost one full command timeout per command after it:
+  a click's press timed out, then its clean-up and checks each waited the
+  whole 35 s again (105 s for one click on a loaded macOS runner). Now,
+  once a command on a tab has gone unanswered, the next ones wait 3 s
+  until the tab answers again: the click fails about 35 s in and says it
+  timed out, and the next op fails in seconds rather than another 35.
 - A session's only tab closing (the user closed it in an `--attach`ed
   browser, or the page closed itself) left every op failing with Chrome's
   "Session with given id not found", while `status` and `tab-list` still
