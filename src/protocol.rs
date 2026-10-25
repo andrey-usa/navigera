@@ -2057,6 +2057,17 @@ pub struct Driver {
 /// Actions `history` keeps.
 const HISTORY_MAX: usize = 1000;
 
+/// A history entry's `page`: the visible top heading and the status or
+/// alert messages showing, each one line of up to 120 characters.
+const PAGE_SAYS: &str = "(() => {
+  const line = (e) => ((e && (e.innerText || e.textContent)) || '').replace(/\\s+/g, ' ').trim().slice(0, 120);
+  const shown = (e) => e.getClientRects().length > 0;
+  const h1 = [...document.querySelectorAll('h1')].find(shown);
+  const said = [...document.querySelectorAll('[role=status],[role=alert],[aria-live=polite],[aria-live=assertive],output')]
+    .filter(shown).map(line).filter(Boolean);
+  return { title: document.title, h1: line(h1), status: [...new Set(said)].slice(0, 3) };
+})()";
+
 /// One op's result plus side effects the agent should know about.
 pub struct Outcome {
     pub result: Value,
@@ -2475,6 +2486,11 @@ impl Driver {
         };
         if let (Ok(_), Some(mut e)) = (&result, entry) {
             e["url"] = json!(self.session.url());
+            // What the page says after it: its heading, and messages it
+            // announces (what a test would check next).
+            if let Ok(page) = self.session.evaluate_with_timeout::<Value>(PAGE_SAYS, Some(1000.0)) {
+                e["page"] = page;
+            }
             if self.history.len() >= HISTORY_MAX {
                 self.history.remove(0);
             }

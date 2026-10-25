@@ -14,7 +14,8 @@ All notable changes to this project are documented here. The format follows
   `--frame` added inside a frame (a cross-origin one named from the page
   that holds it); `secret: true` for a password field.
 - `history [--clear]`: the actions a session ran and its waits, oldest first; one on a
-  ref carries its element's `locate` from just before it ran. What
+  ref carries its element's `locate` from just before it ran, and each
+  what the page said after it (title, heading, status messages). What
   `primavera from-session` turns into a test.
 
 ### Fixed
