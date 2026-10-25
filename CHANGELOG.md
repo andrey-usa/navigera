@@ -178,7 +178,10 @@ so a test runner gets a clean, separate session in about 40 ms.
   showed the tab. Now ops say the tab is closed and that `tab-new`
   opens another; `status` and the tab in `tab-list` carry `closed: true`;
   and `tab-new` (or `reset`) replaces the closed tab instead of listing
-  it beside the new one.
+  it beside the new one. An op still waiting on a tab when it closes (an
+  `eval` awaiting a promise, a `goto` waiting for a slow page) ends then
+  and says so, instead of after its 35 s timeout; with other tabs open,
+  the session goes on in one of them.
 - `--attach <port>` and `--attach http://host:port` sent Chrome's
   `/json/version` request without the port in `Host`, got back a WebSocket
   URL without one, and failed to connect.
