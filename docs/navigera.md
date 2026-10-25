@@ -171,7 +171,9 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 - `[ref=N]` (a backend DOM node id) appears on actionable nodes: interactive
   roles and focusable elements, and what the page made clickable without
   saying so (an element with a click, mousedown or mouseup handler of its
-  own, or the outermost element of a `cursor: pointer` area): a `<div>` row
+  own, or the outermost element of a `cursor: pointer` area, where a user's
+  click can land: a box of some size, not `pointer-events: none`, not fully
+  transparent, not in another site's frame such as an ad): a `<div>` row
   or card prints as `clickable [ref=N]: <its text>`, a role it has (`row`)
   keeps it. A container that holds other actionable nodes isn't one. An
   actionable node with no name or text shows its `#id` or `.class`

@@ -12,7 +12,9 @@ All notable changes to this project are documented here. The format follows
   doesn't call actionable: elements with a click, mousedown or mouseup
   handler of their own and the outermost element of a `cursor: pointer`
   area (`clickable [ref=N]: <text>` for a `<div>` row or card, an icon
-  `<span>`). An actionable node with no name or text shows its `#id` or
+  `<span>`), where a user's click can land: not an empty box, not
+  `pointer-events: none`, not fully transparent (an ad's click guard),
+  not inside another site's frame. An actionable node with no name or text shows its `#id` or
   `.class`, so two blank buttons can be told apart. A container listening
   for its children's clicks isn't marked. One `DOMSnapshot` call, Chrome
   only.
