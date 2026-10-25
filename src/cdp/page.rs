@@ -75,6 +75,10 @@ pub struct Locator {
     pub testid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub css: Option<String>,
+    /// The match whose own part of the page shows this text (its card, row
+    /// or section: the largest ancestor holding no other match).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near: Option<String>,
     /// 0-based; negative counts from the end (-1: the last).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nth: Option<i64>,
@@ -90,6 +94,7 @@ impl Locator {
             ("placeholder", &self.placeholder),
             ("testid", &self.testid),
             ("selector", &self.css),
+            ("near", &self.near),
         ] {
             if let Some(v) = v {
                 parts.push(format!("{k}={v:?}"));
@@ -941,6 +946,19 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
         }
         // Best score first; document order among equals.
         found = found.sort((a, b) => b.score - a.score).map((f) => f.el);
+        // `locate` asks for every match.
+        if (spec.all) return found;
+        // `near`: the match whose own part of the page (the largest
+        // ancestor holding no other match) shows the text.
+        if (spec.near) {
+            const all = found, want = norm(spec.near);
+            const own = (el) => {
+                let c = el;
+                for (let p = c.parentElement; p && !all.some((o) => o !== el && p.contains(o)); p = p.parentElement) c = p;
+                return c;
+            };
+            found = found.filter((el) => norm(own(el).innerText || own(el).textContent).includes(want));
+        }
         if (spec.nth !== undefined && spec.nth !== null) {
             const top = found.length ? found : [];
             const i = spec.nth < 0 ? top.length + spec.nth : spec.nth;
@@ -1014,6 +1032,22 @@ const LOCATE_EL: &str = r#"async function (el, asFrame) {
     // set (the caller names the frame from outside); deeper in, none.
     if (up.cut && up.chain.length) return { xframe: true, locators: [] };
     const chain = up.chain;
+    // Words that tell the element's own part of the page from the others
+    // like it: the largest ancestor whose role+name matches only it, then
+    // its heading, else its first line that isn't the element's own text.
+    const nearText = async (target, spec) => {
+        let same = [];
+        try { same = (await byLocator({ ...spec, all: true }, 0, 'locate', deep)).filter((e) => e !== target); } catch (_) {}
+        if (!same.length) return null;
+        let c = target;
+        for (let p = c.parentElement; p && !same.some((o) => p.contains(o)); p = p.parentElement) c = p;
+        if (c === target) return null;
+        const own = norm(target.innerText || target.textContent);
+        const heading = c.querySelector('h1,h2,h3,h4,h5,h6,[role=heading],legend,caption,figcaption,strong');
+        const lines = [heading && heading.innerText, ...(c.innerText || '').split('\n')]
+            .map(norm).filter((l) => l && l !== own && l.length <= 60);
+        return lines[0] || null;
+    };
     const out = [];
     const add = async (kind, flags, found) => {
         if (await found) out.push({ kind, flags: chain.length ? [...flags, '--frame', chain.join(' >> ')] : flags });
@@ -1023,7 +1057,17 @@ const LOCATE_EL: &str = r#"async function (el, asFrame) {
     const d = await byLocator({ describe: el }, 0, 'locate', deep);
     const name = norm(d.name), label = norm(d.label), placeholder = norm(el.getAttribute('placeholder'));
     if (d.role && name && name.length <= 80) {
+        const n = out.length;
         await add('role', ['--role', d.role, '--name', name], finds(byLocator({ role: d.role, name }, 0, 'locate', deep)));
+        // The same name elsewhere too (a card's "Add to cart"): the one
+        // near its own part of the page's heading, or first words.
+        if (out.length === n) {
+            const text = await nearText(el, { role: d.role, name });
+            if (text) {
+                await add('near', ['--role', d.role, '--name', name, '--near', text],
+                    finds(byLocator({ role: d.role, name, near: text }, 0, 'locate', deep)));
+            }
+        }
     }
     if (label && label.length <= 80) await add('label', ['--label', label], finds(byLocator({ label }, 0, 'locate', deep)));
     if (placeholder) await add('placeholder', ['--placeholder', placeholder], finds(byLocator({ placeholder }, 0, 'locate', deep)));

@@ -52,6 +52,11 @@ and `new_tabs` (tabs the page opened, now in the tab list). The exit code is
   (case-insensitive, exact before contains, visible first, open shadow
   roots included); `--nth <i>` picks among their matches or `--selector`'s
   (0-based, `-1` = the last).
+- `--near <text>` with any of them: the match whose own part of the page
+  (its card, row or section: the largest ancestor holding no other match)
+  shows the text: `click --role button --name "Add to cart" --near "Brass
+  Widget"`. It holds when items reorder, where `--nth` doesn't; `locate`
+  writes it when a role and name match more than one element.
 - `--frame <css>` with any of them: look only inside that iframe or frame
   (`"#outer >> #inner"` for one inside another), of this origin or another,
   when two frames hold the same element (two address forms, two payment

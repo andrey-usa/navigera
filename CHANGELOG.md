@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `--near <text>` with a locator: the match whose own part of the page
+  (its card, row or section) shows the text. `locate` writes it when a
+  role and name match more than one element, before falling back to a CSS
+  path.
 - `locate <target>`: the locators that find an element again, most stable
   first (test id, role and name, label, placeholder, text, CSS), each kept
   only when the finder an op would use picks that element on the page;

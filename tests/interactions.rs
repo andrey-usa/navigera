@@ -682,6 +682,22 @@ fn locate_and_history_turn_refs_into_locators() {
     let kinds: Vec<&str> = found["locators"].as_array().unwrap().iter().map(|l| l["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["css"], "{found}");
     assert_eq!(found["locators"][0]["flags"][1], "body > button:nth-of-type(2)", "{found}");
+    // The same name in two cards: the one near its card's heading.
+    s.ok(&["eval", "(document.body.insertAdjacentHTML('beforeend', '<div><h3>Nickel Widget</h3><p>$5</p><button onclick=\"window.added=1\">Add to cart</button></div><div><h3>Brass Widget</h3><p>$7</p><button onclick=\"window.added=2\">Add to cart</button></div>'), 1)"]);
+    let brass = s.text(&["ax"]).lines().filter(|l| l.contains("button \"Add to cart\"")).nth(1).unwrap().to_string();
+    let brass = brass.split("ref=").nth(1).unwrap().trim_end_matches(']').to_string();
+    let found = s.ok(&["locate", &brass]);
+    assert_eq!(found["locators"][0]["kind"], "near", "{found}");
+    let flags: Vec<String> =
+        found["locators"][0]["flags"].as_array().unwrap().iter().map(|f| f.as_str().unwrap().to_string()).collect();
+    assert_eq!(flags, ["--role", "button", "--name", "Add to cart", "--near", "Brass Widget"], "{found}");
+    let mut click = vec!["click"];
+    click.extend(flags.iter().map(String::as_str));
+    s.ok(&click);
+    assert_eq!(s.ok(&["eval", "window.added"]), 2);
+    // --near on its own is refused: it narrows a locator.
+    let (ok, r) = s.run(&["click", "--near", "Brass Widget"]);
+    assert!(!ok && r.to_string().contains("--near narrows"), "{r}");
     // A select inside its label is named by the label's words, not its options.
     s.ok(&["eval", "(document.body.insertAdjacentHTML('beforeend', '<label>Size <select><option>Small</option><option>Large</option></select></label>'), 1)"]);
     let size = ref_of(&s, "combobox \"Size\"");

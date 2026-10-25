@@ -108,6 +108,10 @@ pub struct TargetArgs {
     /// `data-testid` (or `data-test-id`, `data-test`, `data-qa`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub testid: Option<String>,
+    /// The match whose own part of the page (its card, row, section) shows
+    /// this text, with any of the above or `selector`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near: Option<String>,
     /// Which match (0-based; -1 = the last), with any of the above or `selector`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nth: Option<i64>,
@@ -162,7 +166,12 @@ impl TargetArgs {
         if self.find.is_some() {
             anyhow::bail!("{op}: --find was not resolved to an element");
         }
-        if self.locator() || self.nth.is_some() {
+        if self.near.is_some() && !self.locator() && self.selector.is_none() {
+            anyhow::bail!(
+                "{op}: --near narrows --role/--name, --label, --placeholder, --testid or --selector to the match in the part of the page that shows the text"
+            );
+        }
+        if self.locator() || self.nth.is_some() || self.near.is_some() {
             if self.nth.is_some() && !self.locator() && self.selector.is_none() {
                 anyhow::bail!(
                     "{op}: --nth picks among the matches of --selector, --role, --label, --placeholder or --testid"
@@ -175,6 +184,7 @@ impl TargetArgs {
                 placeholder: self.placeholder.clone(),
                 testid: self.testid.clone(),
                 css: self.selector.clone(),
+                near: self.near.clone(),
                 nth: self.nth,
             })));
         }
@@ -987,7 +997,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value']]]", "fail or answer requests whose URL matches (* and ? globs); no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
-    ("get", "text|value|html|outer|box|checked|attr <name>|style <prop> <target> | count <css> | title | url", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --nth; --frame <css> to look only inside that frame)"),
+    ("get", "text|value|html|outer|box|checked|attr <name>|style <prop> <target> | count <css> | title | url", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --near <text>, --nth; --frame <css> to look only inside that frame)"),
     ("is", "visible|hidden|enabled|disabled|checked|editable|focused <target>", "true/false; a missing element is not visible"),
     ("dblclick", "<target>", "trusted double click"),
     ("drag", "<from> <to> | --from-text <t> --to-text <t>", "drag one element onto another (each a ref or CSS selector): HTML5 drag and drop for a draggable source, a held mouse moved across otherwise"),
@@ -1280,6 +1290,7 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
         label: str_flag(args, "--label")?,
         placeholder: str_flag(args, "--placeholder")?,
         testid: str_flag(args, "--testid")?,
+        near: str_flag(args, "--near")?,
         nth: match str_flag(args, "--nth")? {
             Some(raw) => Some(raw.parse::<i64>().map_err(|_| {
                 ArgsError::Invalid(format!("--nth takes an index (0, 1, -1 for the last), got {raw:?}"))
@@ -1675,6 +1686,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                             | "--label"
                             | "--placeholder"
                             | "--testid"
+                            | "--near"
                             | "--nth"
                             | "--frame"
                     )
