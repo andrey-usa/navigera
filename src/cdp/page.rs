@@ -901,7 +901,15 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
     const labelText = (el) => {
         const own = el.getAttribute('aria-label') || byIds(el, 'aria-labelledby');
         if (own) return own;
-        if (el.labels && el.labels.length) return [...el.labels].map((l) => l.textContent).join(' ');
+        // A label's own words: not the options of a select (or the text
+        // of a textarea) inside it.
+        const words = (l) => {
+            if (!l.querySelector('select,textarea,datalist')) return l.textContent;
+            const c = l.cloneNode(true);
+            for (const x of c.querySelectorAll('select,textarea,datalist')) x.remove();
+            return c.textContent;
+        };
+        if (el.labels && el.labels.length) return [...el.labels].map(words).join(' ');
         return '';
     };
     const FROM_CONTENT = new Set(['button', 'link', 'heading', 'cell', 'columnheader', 'rowheader', 'option', 'tab',

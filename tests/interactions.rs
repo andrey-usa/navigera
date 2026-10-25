@@ -682,6 +682,12 @@ fn locate_and_history_turn_refs_into_locators() {
     let kinds: Vec<&str> = found["locators"].as_array().unwrap().iter().map(|l| l["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["css"], "{found}");
     assert_eq!(found["locators"][0]["flags"][1], "body > button:nth-of-type(2)", "{found}");
+    // A select inside its label is named by the label's words, not its options.
+    s.ok(&["eval", "(document.body.insertAdjacentHTML('beforeend', '<label>Size <select><option>Small</option><option>Large</option></select></label>'), 1)"]);
+    let size = ref_of(&s, "combobox \"Size\"");
+    let found = s.ok(&["locate", &size]);
+    assert_eq!(found["locators"][0]["flags"], serde_json::json!(["--role", "combobox", "--name", "Size"]), "{found}");
+    s.ok(&["select", "--label", "Size", "Large"]);
     // The actions, a ref's with its locators read before it ran; reads aren't kept.
     s.ok(&["history", "--clear"]);
     s.ok(&["fill", &email, "ada@example.com"]);
