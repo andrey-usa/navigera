@@ -176,17 +176,26 @@ pub fn download_dir() -> Result<std::path::PathBuf> {
 /// Chrome sends -- and the screen 1920x1080. Navigator's `webdriver` flag
 /// is off in every mode (`--disable-blink-features=AutomationControlled`),
 /// and nothing here passes `--enable-automation`. A windowed browser needs
-/// none of this.
-pub fn natural_flags(exe: &str, headless: bool) -> Vec<String> {
+/// none of this. chrome-headless-shell is refused: it is a different
+/// program, and its client hints, plugins and `window.chrome` say headless
+/// whatever the flags.
+pub fn natural_flags(exe: &str, headless: bool) -> Result<Vec<String>> {
     if !headless {
-        return Vec::new();
+        return Ok(Vec::new());
+    }
+    let stem = Path::new(exe).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if matches!(stem.as_str(), "chrome-headless-shell" | "headless_shell") {
+        bail!(
+            "--natural needs the full Chrome: {exe} is chrome-headless-shell, which tells a page it is headless \
+             whatever navigera does; point --chromium or $CHROME_BIN at Chrome"
+        );
     }
     let mut flags = vec!["--screen-info={1920x1080}".to_string()];
     match chrome_major(exe) {
         Some(major) => flags.push(format!("--user-agent={}", windowed_user_agent(exe, major))),
         None => crate::timing::log(&format!("[browser] natural: no version from {exe}; user agent left as is")),
     }
-    flags
+    Ok(flags)
 }
 
 /// The user agent Chrome `major` sends with a window on this platform.
@@ -641,7 +650,7 @@ impl BrowserSession {
             };
             let mut flags = chrome_flags();
             if natural() {
-                flags.extend(natural_flags(&exe, headless));
+                flags.extend(natural_flags(&exe, headless)?);
             }
             let note = no_sandbox_note(&exe);
             if !flags.iter().any(|f| f == NO_SANDBOX) && note.as_ref().is_some_and(|n| n.exists()) {
@@ -743,7 +752,7 @@ impl BrowserSession {
                     eprintln!("navigera: {copied}");
                     what = format!("{what}, {copied}");
                 }
-                let extra = if natural() { natural_flags(&exe, *headless) } else { Vec::new() };
+                let extra = if natural() { natural_flags(&exe, *headless)? } else { Vec::new() };
                 let url = cdp::attach::ensure_profile_browser(&exe, &dir, *headless, &extra)?;
                 profile_exe = Some(exe);
                 (url, what)
