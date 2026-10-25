@@ -128,12 +128,16 @@ another process are reachable by ref only.
 | `reset` | | `{tabs, active, url}`: a new browser context (no cookies, storage or cache from before) with one blank tab, in the same browser (about 40 ms); the old tabs close; `set`, routes, credentials, init scripts, the dialog answer and the `downloads --dir` stay (`reset --all` drops them, as in a new session). Chrome only |
 | `tab-new` | `[<url>]` | `{tabs:[{index,target,active}], active, url}`; a tab that was closed under the session (the user closed it, or the page did) shows `closed: true` until `tab-new` replaces it, and ops that need it say so |
 | `tab-list` | — | same |
-| `tab-select` | `<index>` or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |
+| `tab-select` | `<index>` (or `--index <n>`) or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |
 | `tab-close` | `[<index>]` (default: active) | state |
 | `dialog` | `--accept [--prompt-text t]` or `--dismiss` | `{dialogs: "accept"\|"dismiss"}` |
 | `quit` (`close`) | — | `{bye: true}`; a session server and its browser exit |
 | `skill` | — | prints the agent guide (SKILL.md) |
 | `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
+
+Other names the parser takes, for agents used to Playwright's: `navigate`
+(`goto`), `drag-drop` (`drag`), `cookie` (`cookies`), `emulate` (`set`),
+`addinitscript` (`init-script`), `close-page` (`tab-close`).
 
 ### The `ax` tree
 
@@ -378,6 +382,11 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_run` | several ops in one call (`[{"op":"fill","ref":21,"value":"Ada"}, {"op":"click","ref":30}]`), stopping at the first failure, ending with a snapshot |
 | `browser_close` | close the browser; the next call starts a fresh one |
 
+An MCP client may have no shell of its own, so the browser is not its way to
+the disk: `file:` pages are refused, and `browser_file_upload` takes only
+files inside the working directory (the project the client opened).
+`NAVIGERA_MCP_ALLOW_FILES=1` lifts both limits.
+
 Every action takes `snapshot: true` to return the updated tree in the same
 call. The whole tool list (23 tools) is about 14 KB (~3,600 tokens), against
 ~20 KB for Playwright MCP 0.0.83 and ~26 KB for Chrome DevTools MCP 1.10.1.
@@ -420,6 +429,14 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
 
   Brave and Edge work via `--chromium`. chrome-headless-shell starts
   faster than full Chrome: it has no browser UI to bring up.
+- **Browser flags.** Chrome runs without its sandbox as root, or when a
+  first launch shows this machine can't give it one (the warning says so
+  once); `NAVIGERA_NO_SANDBOX=1` turns it off up front and silences the
+  warning. `NAVIGERA_EXTRA_FLAGS` (space-separated) adds Chrome flags;
+  `NAVIGERA_DROP_FLAGS` (comma-separated prefixes) removes navigera's own.
+  `NAVIGERA_EXTRA_FLAGS` reaches `--profile` browsers too. `NAVIGERA_PROFILE_DIR=<dir>` is
+  where throwaway profiles go (default `/dev/shm` when it is tmpfs with room,
+  else the system temp directory).
 - **CDP transport.** `--remote-debugging-pipe` by default on Linux/macOS:
   no TCP port, and the browser exits when navigera dies. `--transport ws`
   (or `$NAVIGERA_CDP_TRANSPORT=ws`) opens a DevTools WebSocket port instead, for
@@ -508,6 +525,13 @@ machine without a GPU still reports a software renderer).
 - `NAVIGERA_CDP_TRACE=<file>` records every CDP command sent; CI checks it with
   `tools/cdp_check.py`.
 - `NAVIGERA_VERBOSE=1` turns on launch logs.
+- `NAVIGERA_CHROME_LOG=<file>` appends the browser's own stderr there.
+- `NAVIGERA_RSS_REPORT=1` prints navigera's peak memory when a `serve` ends.
+- Off switches, for telling a navigera behaviour from the page's:
+  `NAVIGERA_NO_NETWORK=1` (no Network domain: `network` stays empty and ops
+  don't wait for data), `NAVIGERA_NO_CLICK_CHECK=1` (clicks don't watch what
+  they changed: no `no_effect`), `NAVIGERA_NO_DISCOVER=1` (popups aren't
+  adopted as tabs).
 
 ## Playwright CLI / agent-browser → navigera
 

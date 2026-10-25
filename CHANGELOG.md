@@ -37,6 +37,17 @@ All notable changes to this project are documented here. The format follows
 - `--natural` with chrome-headless-shell as the browser (`--chromium`,
   `$CHROME_BIN`) is refused with a message instead of starting a browser
   that still tells pages it is headless.
+- `--from` copies Chrome 156's local storage, which is one `LocalStorage`
+  SQLite file there (with its journal) instead of a `Local Storage`
+  directory: sign-ins kept in local storage came over empty.
+- A `--profile` browser falls back to no sandbox the way navigera's own
+  launches do (as root, with `NAVIGERA_NO_SANDBOX`, or after a first start
+  that failed for want of one); it had exited and the profile could not
+  be used on such a machine.
+
+### Security
+
+- tokio 1.54 (RUSTSEC-2026-0386).
 
 ## [0.6.0] - 2026-10-24
 
