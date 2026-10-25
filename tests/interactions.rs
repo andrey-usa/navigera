@@ -727,3 +727,28 @@ fn locate_and_history_turn_refs_into_locators() {
     assert_eq!(h[1]["command"]["text"], "Subscribe", "{h:?}");
     assert!(h[1].get("locators").is_none() && h[1]["url"].as_str().unwrap().ends_with("/iframe-form"), "{h:?}");
 }
+
+#[test]
+fn an_element_in_a_shadow_root_is_located_through_its_hosts() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("shadow-hosts", &[]);
+    s.ok(&["goto", &format!("{}/iframe-form", site.url)]);
+    // Two cards inside an app, each with an icon button and no name for it.
+    s.ok(&[
+        "eval",
+        r#"(customElements.define('x-card', class extends HTMLElement { connectedCallback() { if (!this.shadowRoot) this.attachShadow({ mode: 'open' }).innerHTML = '<span>card</span><button onclick="window.picked = this.getRootNode().host.title"><svg width=12 height=12></svg></button>'; } }),
+           customElements.define('x-app', class extends HTMLElement { connectedCallback() { if (!this.shadowRoot) this.attachShadow({ mode: 'open' }).innerHTML = '<x-card title=Nickel></x-card><x-card title=Brass></x-card>'; } }),
+           document.body.insertAdjacentHTML('beforeend', '<button>Decoy</button><x-app id=app></x-app>'), 1)"#,
+    ]);
+    assert_eq!(s.ok(&["get", "count", "#app >>> x-card >>> button"]), 2);
+    assert_eq!(s.ok(&["get", "count", "#app >>> button"]), 2, "a shadow root under the host's counts");
+    assert_eq!(s.ok(&["get", "count", "#app >>> nothing"]), 0);
+    let found = s.ok(&["locate", "--selector", "#app >>> x-card:nth-of-type(2) >>> button"]);
+    assert_eq!(
+        found["locators"],
+        serde_json::json!([{"kind": "css", "flags": ["--selector", "#app >>> x-card:nth-of-type(2) >>> button"]}]),
+        "{found}"
+    );
+    s.ok(&["click", "--selector", "#app >>> x-card:nth-of-type(2) >>> button"]);
+    assert_eq!(s.ok(&["eval", "window.picked"]), "Brass");
+}

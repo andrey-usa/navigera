@@ -16,7 +16,11 @@ All notable changes to this project are documented here. The format follows
   first (test id, role and name, label, placeholder, text, CSS), each kept
   only when the finder an op would use picks that element on the page;
   `--frame` added inside a frame (a cross-origin one named from the page
-  that holds it); `secret: true` for a password field.
+  that holds it); `secret: true` for a password field. An element in a
+  shadow root gets its hosts' path: `--selector "#app >>> x-card >>> button"`.
+- `--selector "host >>> inner"`: `inner` inside the open shadow root of an
+  element `host` matches (or a shadow root under it), for every op,
+  `wait --selector` and `get count`.
 - `history [--clear]`: the actions a session ran and its waits, oldest first; one on a
   ref carries its element's `locate` from just before it ran, and each
   what the page said after it (title, heading, status messages). What

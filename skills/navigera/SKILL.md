@@ -194,7 +194,9 @@ only there.
   Don't assume the click worked.
 - **Iframes and shadow DOM:** refs work in any iframe. `--selector`, `--text`
   and the locators also search iframes (cross-origin ones included) and open
-  shadow roots when the page itself has no match.
+  shadow roots when the page itself has no match. `--selector "#app >>> x-card
+  >>> button"` names a path through shadow hosts (what `locate` writes for
+  an icon button in a web component).
 - **Files:** `upload ./doc.txt` and `screenshot shot.png` take paths relative
   to your current directory.
 

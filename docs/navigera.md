@@ -42,7 +42,11 @@ and `new_tabs` (tabs the page opened, now in the tab list). The exit code is
 - a ref from `ax` as the first argument (`click 12`; `@12`, `e12` and
   `ref=12` also work) or `--ref 12`;
 - `--selector <css>`: the first match a user could reach (when the first
-  one is parked off the page and another isn't, the other);
+  one is parked off the page and another isn't, the other). `host >>>
+  inner` crosses shadow roots: `inner` inside the open shadow root of an
+  element `host` matches (or a shadow root under it), as in `"#app >>>
+  x-card:nth-of-type(2) >>> button"`; `locate` writes one for an element
+  in a shadow root;
 - `--text "<visible text>"`: the best match by accessible label, text or
   value. An exact match beats a partial one, actionable elements beat plain
   ones, and a `<label>` stands for its control.

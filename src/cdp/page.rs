@@ -133,6 +133,8 @@ impl Target {
 /// (iframes, framesets, `srcdoc`) and their shadow roots. A plain CSS query
 /// stops at a shadow root or a frame; a user's eyes don't. Cross-origin
 /// frames are out of reach here (their elements are in `ax` with refs).
+/// `host >>> inner` is a path across shadow boundaries: `inner` inside the
+/// shadow root of an element `host` matches (or a shadow root under it).
 pub const DEEP: &str = r#"(() => {
     // Where the search starts: the page, or the frame a `--frame` names
     // (`__nvStart`, defined around a scoped finder; null while that frame
@@ -156,19 +158,37 @@ pub const DEEP: &str = r#"(() => {
         return out;
     };
     const roots = () => { const out = []; for (const d of topDocs()) { out.push(d); shadows(d, out); } return out; };
+    const pierced = (sel) => {
+        const [head, ...rest] = sel.split('>>>').map((s) => s.trim());
+        let at = [];
+        for (const r of roots()) at.push(...r.querySelectorAll(head));
+        for (const part of rest) {
+            const next = new Set();
+            for (const host of at) {
+                if (!host.shadowRoot) continue;
+                for (const r of [host.shadowRoot, ...shadows(host.shadowRoot, [])]) for (const e of r.querySelectorAll(part)) next.add(e);
+            }
+            at = [...next];
+        }
+        return at;
+    };
     return {
         roots,
         docs: topDocs,
         // The top document's own answer first: a plain query costs nothing
         // extra when the element is where it usually is.
         first(sel) {
+            if (sel.includes('>>>')) return pierced(sel)[0] || null;
             const d = start();
             const el = d && d.querySelector(sel);
             if (el) return el;
             for (const r of roots().slice(1)) { const e = r.querySelector(sel); if (e) return e; }
             return null;
         },
-        all(sel) { const out = []; for (const r of roots()) out.push(...r.querySelectorAll(sel)); return out; },
+        all(sel) {
+            if (sel.includes('>>>')) return pierced(sel);
+            const out = []; for (const r of roots()) out.push(...r.querySelectorAll(sel)); return out;
+        },
         style: (el) => (el.ownerDocument.defaultView || window).getComputedStyle(el),
         text() {
             let t = '';
@@ -843,7 +863,7 @@ const WAIT_FOR: &str = r#"async function (sel, ms, what, deepFn) {
         // only when the top document has no match. When the first match is
         // out of a user's reach and another isn't, the other is the one.
         const doc = typeof __nvStart === 'function' ? __nvStart() : document;
-        let el = doc && doc.querySelector(sel);
+        let el = !sel.includes('>>>') && doc && doc.querySelector(sel);
         if (el && !reachable(el)) {
             for (const c of doc.querySelectorAll(sel)) if (reachable(c)) { el = c; break; }
         }
@@ -987,9 +1007,13 @@ const LOCATE_EL: &str = r#"async function (el, asFrame) {
     const { escape: esc } = window.CSS;
     const finds = async (p) => { try { return (await p) === el; } catch (_) { return false; } };
     // A selector unique where the element is: its id, else the path from
-    // the nearest ancestor with one (or <body>), positions where needed.
+    // the nearest ancestor with one (or <body>), positions where needed; in
+    // a shadow root, its host's selector first (`host >>> path`).
     const cssOf = (e) => {
         const root = e.getRootNode();
+        return root.host ? cssOf(root.host) + ' >>> ' + ownCss(e, root) : ownCss(e, root);
+    };
+    const ownCss = (e, root) => {
         const unique = (s) => { try { return root.querySelectorAll(s).length === 1; } catch (_) { return false; } };
         const id = (n) => (n.id && unique('#' + esc(n.id)) ? '#' + esc(n.id) : null);
         if (id(e)) return id(e);
@@ -998,7 +1022,9 @@ const LOCATE_EL: &str = r#"async function (el, asFrame) {
             if (n !== e && id(n)) { parts.unshift(id(n)); break; }
             const tag = n.tagName.toLowerCase();
             if (tag === 'body' || tag === 'html') { parts.unshift(tag); break; }
-            const same = n.parentElement ? [...n.parentElement.children].filter((c) => c.tagName === n.tagName) : [n];
+            // (A shadow root's own children have no parentElement.)
+            const up = n.parentElement || n.parentNode;
+            const same = up && up.children ? [...up.children].filter((c) => c.tagName === n.tagName) : [n];
             parts.unshift(same.length > 1 ? tag + ':nth-of-type(' + (same.indexOf(n) + 1) + ')' : tag);
         }
         return parts.join(' > ');
