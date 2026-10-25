@@ -103,15 +103,15 @@ another process are reachable by ref only.
 | `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
 | `check` | `<yes/no question>` (no target given) | `{question, yes, answer}`: the probability the answer is yes |
 | `check` / `uncheck` | target (a ref or a targeting flag) | state + `checked`, `changed`: clicks a checkbox/radio/switch only when its state differs, fails if the click didn't change it |
-| `get` | `text\|value\|html\|outer\|box\|checked` target; `attr <name>` / `style <prop>` target; `count <css>`; `title`; `url` | the value; `box` is `{x, y, width, height}` in top-level viewport pixels (inside a cross-origin frame, that frame's) |
+| `get` | `text\|value\|html\|outer\|box\|checked` target; `attr <name>` / `style <prop>` target; `count <css>`; `title`; `url` | the value (`url`: the state object, as `url` returns it); `box` is `{x, y, width, height}` in top-level viewport pixels (inside a cross-origin frame, that frame's) |
 | `is` | `visible\|hidden\|enabled\|disabled\|checked\|editable\|focused` target | `true`/`false` (a missing element is not visible, after 500 ms) |
 | `dblclick` / `focus` | target | state / `{focused}` |
 | `drag` | `<from> <to>` (each a ref or CSS selector), or `--from-text <t> --to-text <t>` | state and `drag`: `{html5: true, dropped}` for a `draggable` source (the drag events with one DataTransfer, which headless Chrome will not start from synthetic input; `dropped` is false when the target does not accept it), else the two points a held mouse moved between (sliders, pointer-driven sortable lists) |
 | `keydown` / `keyup` | `<key>` | holds / releases a key; held modifiers apply to later `press`es |
 | `insert-text` | `<text>`, optional target to focus first | state: text inserted at the caret in one go (paste, IME), no key events |
-| `console` | `--level error\|warn\|info\|log\|debug`, `--limit <n>` (200), `--clear`, `--json` | `[level] text  (url:line)` per line: console calls, uncaught exceptions (`[exception]`), failed loads and CSP reports |
+| `console` | `--level error\|warn\|info\|log\|debug`, `--limit <n>` (200), `--clear`, `--json` | `[level] text  (url:line)` per line: console calls, uncaught exceptions (`[exception]`), failed loads and CSP reports; `--clear` prints them, then empties the list |
 | `errors` | `--limit`, `--clear`, `--json` | `console --level error` |
-| `network` | `--filter <text>`, `--type fetch\|xhr\|document\|…`, `--failed`, `--since <n>` (only requests after #n), `--limit <n>` (100), `--clear`; `--har <file>` | `#n METHOD STATUS type url size time` per line (same-origin URLs as paths); `--har` writes HAR 1.2 |
+| `network` | `--filter <text>`, `--type fetch\|xhr\|document\|…`, `--failed`, `--since <n>` (only requests after #n), `--limit <n>` (100), `--clear`; `--har <file>` | `#n METHOD STATUS type url size time` per line (same-origin URLs as paths); `--har` writes HAR 1.2; `--clear` prints them, then empties the list |
 | `network <n>` | `--body-file <file>` | one request in full: headers, post data, response body (8 KB shown; the file gets all of it) |
 | `cookies` | `[--all] [--url <u>] [--json]`; `set <name> <value> [--url <u> \| --domain <d>] [--path] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax\|Strict\|None]`; `delete <name>`; `clear` | one cookie per line (`--all`: every cookie in the browser); `set` → `{set}`, `delete` → `{deleted}`, `clear` → `{cleared: true}` |
 | `storage` | `[local\|session] [get [<key>] \| set <key> <value> \| remove <key> \| clear]` | the value, or the whole store as an object |
@@ -383,7 +383,7 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_console_messages`, `browser_network_requests` | `console`, `network` |
 | `browser_resize` | `set viewport` |
 | `browser_handoff` | `show` / `hide`: the browser on the person's screen with the same tabs and sign-ins (a login, 2FA, a CAPTCHA), and back |
-| `browser_run` | several ops in one call (`[{"op":"fill","ref":21,"value":"Ada"}, {"op":"click","ref":30}]`), stopping at the first failure, ending with a snapshot |
+| `browser_run` | several ops in one call (`{"steps": [{"op":"fill","ref":21,"value":"Ada"}, {"op":"click","ref":30}]}`), stopping at the first failure, ending with a snapshot |
 | `browser_close` | close the browser; the next call starts a fresh one |
 
 An MCP client may have no shell of its own, so the browser is not its way to
