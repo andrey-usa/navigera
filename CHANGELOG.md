@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ax` gives a ref to what a user could click that the accessibility tree
+  doesn't call actionable: elements with a click, mousedown or mouseup
+  handler of their own and the outermost element of a `cursor: pointer`
+  area (`clickable [ref=N]: <text>` for a `<div>` row or card, an icon
+  `<span>`). An actionable node with no name or text shows its `#id` or
+  `.class`, so two blank buttons can be told apart. A container listening
+  for its children's clicks isn't marked. One `DOMSnapshot` call, Chrome
+  only.
+
 ## [0.6.2] - 2026-10-26
 
 A security fix to 0.6.1's MCP file limits: a link inside the working

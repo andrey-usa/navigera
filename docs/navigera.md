@@ -160,7 +160,8 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   - button "Apply coupon" [ref=212]
 ```
 
-- The tree comes from one `Accessibility.getFullAXTree` call per frame.
+- The tree comes from one `Accessibility.getFullAXTree` call per frame, and
+  one `DOMSnapshot.captureSnapshot` for what is clickable (Chrome only).
   Same-origin and in-process iframes are spliced in under their `Iframe`
   node, and open shadow roots are included.
 - Wrapper nodes (`generic`, label boxes) are collapsed, and text that repeats
@@ -168,7 +169,14 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 - A named node with one same-named actionable child is printed on one line,
   for example `heading "X": link [ref=7]`.
 - `[ref=N]` (a backend DOM node id) appears on actionable nodes: interactive
-  roles and focusable elements. Use `--refs all` to get one on every node.
+  roles and focusable elements, and what the page made clickable without
+  saying so (an element with a click, mousedown or mouseup handler of its
+  own, or the outermost element of a `cursor: pointer` area): a `<div>` row
+  or card prints as `clickable [ref=N]: <its text>`, a role it has (`row`)
+  keeps it. A container that holds other actionable nodes isn't one. An
+  actionable node with no name or text shows its `#id` or `.class`
+  (`clickable #send-forward [ref=19]`, `button #close [ref=7]`). Use
+  `--refs all` to get one on every node.
 - States are shown in brackets: `checked`, `disabled`, `expanded` or
   `collapsed`, `selected`, `required`, `invalid`, `level=N`.
 - Inputs show `value="…"`, links show `url=` (shortened to the path on the
