@@ -172,6 +172,13 @@ so a test runner gets a clean, separate session in about 40 ms.
 
 ### Fixed
 
+- A session's only tab closing (the user closed it in an `--attach`ed
+  browser, or the page closed itself) left every op failing with Chrome's
+  "Session with given id not found", while `status` and `tab-list` still
+  showed the tab. Now ops say the tab is closed and that `tab-new`
+  opens another; `status` and the tab in `tab-list` carry `closed: true`;
+  and `tab-new` (or `reset`) replaces the closed tab instead of listing
+  it beside the new one.
 - `--attach <port>` and `--attach http://host:port` sent Chrome's
   `/json/version` request without the port in `Host`, got back a WebSocket
   URL without one, and failed to connect.

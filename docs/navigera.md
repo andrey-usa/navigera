@@ -114,12 +114,12 @@ another process are reachable by ref only.
 | `route` | `<url glob>` (`*`, `?` over the whole URL), then `--abort` (default) or `--status <n> [--body <text> \| --body-file <f>] [--content-type <t>] [--header 'Name: value']…`; no argument lists the rules with their hit counts | `{route, action}`. Only matching URLs are intercepted |
 | `unroute` | `[<url glob>]` | `{removed}` (all rules without a glob) |
 | `init-script` | `<js>`, `--file <path.js>`, `--clear`; no argument lists them | runs before the page's own scripts in every document of every tab |
-| `status` | — | `{engine, executable, endpoint, attached, version}` + state |
+| `status` | — | `{engine, executable, endpoint, attached, version}` + state (`closed: true` once the session's only tab was closed) |
 | `title` / `url` | — | string / state |
 | `back` / `forward` / `reload` | — | state |
 | `screenshot` | `[<path>]` or `--path`; `--full-page` | `{path, bytes}` |
 | `reset` | | `{tabs, active, url}`: a new browser context (no cookies, storage or cache from before) with one blank tab, in the same browser (about 40 ms); the old tabs close; `set`, routes, credentials, init scripts, the dialog answer and the `downloads --dir` stay (`reset --all` drops them, as in a new session). Chrome only |
-| `tab-new` | `[<url>]` | `{tabs:[{index,target,active}], active, url}` |
+| `tab-new` | `[<url>]` | `{tabs:[{index,target,active}], active, url}`; a tab that was closed under the session (the user closed it, or the page did) shows `closed: true` until `tab-new` replaces it, and ops that need it say so |
 | `tab-list` | — | same |
 | `tab-select` | `<index>` or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |
 | `tab-close` | `[<index>]` (default: active) | state |
