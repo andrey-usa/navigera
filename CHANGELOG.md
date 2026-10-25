@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A `goto` to a server that takes the connection and never answers fails
+  at its timeout and cancels that navigation: the tab answers at once again
+  (it had answered nothing while the dead load was pending, so the next
+  `url` or `ax`, and a test runner's failure screenshot, each waited their
+  whole timeout too: one failed step cost 105 s).
 - `get box` of an element inside an iframe is in top-level viewport pixels
   (each frame's offset added), as `mouse` takes them and Playwright's
   `boundingBox()` reports; it was relative to the element's own frame.

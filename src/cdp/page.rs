@@ -1584,10 +1584,19 @@ impl Page {
     pub fn navigate(&self, url: &str, wait: &str, timeout: Duration) -> Result<()> {
         self.block_on(async {
             let mut events = self.client.subscribe();
-            let res = self
-                .send_page_op("Page.navigate", json!({ "url": url }), timeout)
-                .await
-                .with_context(|| format!("navigate to {url}"))?;
+            let res = self.send_page_op("Page.navigate", json!({ "url": url }), timeout).await;
+            // Unanswered (a server that accepts and never responds): cancel
+            // that navigation, or the tab answers nothing while it is pending
+            // and every op after (the failure's screenshot, `url`, `ax`)
+            // waits its whole timeout too. Stalled if even that goes
+            // unanswered (see STALLED_WAIT).
+            if res.as_ref().is_err_and(|e| format!("{e:#}").contains("CDP command timed out")) {
+                let stop = self.client.send("Page.stopLoading", json!({}), Some(&self.session_id), STALLED_WAIT).await;
+                if stop.is_err() {
+                    self.stalled.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let res = res.with_context(|| format!("navigate to {url}"))?;
             if let Some(error) = res.get("errorText").and_then(Value::as_str) {
                 bail!("navigate to {url}: {error}");
             }
@@ -1813,6 +1822,9 @@ impl Page {
     /// If an earlier action started a navigation in this tab, wait (up to
     /// `timeout`) until its new document is parsed. No-op otherwise.
     pub fn settle(&self, timeout: Duration) -> Result<()> {
+        // A stalled tab's load (see STALLED_WAIT) isn't waited for in full.
+        let timeout =
+            if self.stalled.load(std::sync::atomic::Ordering::SeqCst) { timeout.min(STALLED_WAIT) } else { timeout };
         let end = Instant::now() + timeout;
         loop {
             let state = self.shared.nav_state(&self.session_id);
