@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `locate <target>`: the locators that find an element again, most stable
+  first (test id, role and name, label, placeholder, text, CSS), each kept
+  only when the finder an op would use picks that element on the page;
+  `--frame` added inside a same-origin frame.
+- `history [--clear]`: the actions a session ran, oldest first; one on a
+  ref carries its element's `locate` from just before it ran. What
+  `primavera from-session` turns into a test.
+
 ### Fixed
 
 - `get box` of an element inside an iframe is in top-level viewport pixels
