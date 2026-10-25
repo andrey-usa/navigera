@@ -1008,7 +1008,9 @@ const LOCATE_EL: &str = r#"async function (el) {
     return { locators: out };
 }"#;
 
-fn locate_fn() -> &'static str {
+/// `locate`'s page function, `async function (el)` resolving to
+/// `{locators}` (a recorder in the page calls it as elements are used).
+pub fn locate_fn() -> &'static str {
     static F: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     F.get_or_init(|| {
         LOCATE_EL
