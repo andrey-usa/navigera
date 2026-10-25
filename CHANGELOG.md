@@ -20,6 +20,12 @@ All notable changes to this project are documented here. The format follows
   with the same refs. A row with a richer cell (a select, a cell of
   several controls) is drawn as before.
 
+### Fixed
+
+- `--natural` with chrome-headless-shell as the browser (`--chromium`,
+  `$CHROME_BIN`) is refused with a message instead of starting a browser
+  that still tells pages it is headless.
+
 ## [0.6.0] - 2026-10-24
 
 The browser handed over to a person and back, downloads, frames of any

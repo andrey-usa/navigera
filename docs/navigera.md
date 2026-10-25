@@ -487,7 +487,10 @@ says `HeadlessChrome` in `navigator.userAgent`, in workers and in every
 request header; it becomes the one the same Chrome sends with a window (its
 major version, the reduced form Chrome sends). The screen is 800x600 behind
 a 1440x900 window; it becomes 1920x1080. The full Chrome is used, not
-chrome-headless-shell, which is a different program. In every mode,
+chrome-headless-shell, which is a different program; `--natural` with a
+chrome-headless-shell given (`--chromium`, `$CHROME_BIN`) is refused, since
+its client hints, plugins and `window.chrome` say headless whatever the
+flags. In every mode,
 `navigator.webdriver` is false, there is no `--enable-automation`, and a
 `--profile` browser starts with no automation flag. The CI check is
 `tests/handoff.rs` against `tests/fixtures/natural_site.py`, a page that runs
