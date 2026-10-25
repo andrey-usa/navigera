@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ax --grep <text>` (MCP: `browser_snapshot` with `grep`): only the lines
+  holding the text, each under the lines of its ancestors (which row, form
+  or section), in place of `ax | grep`, which loses where a match sits, and
+  of reading the DOM with `eval` to find a link or field by its text.
+
 ### Changed
 
 - `ax` prints a table row whose cells each hold text or one control on one

@@ -77,7 +77,7 @@ another process are reachable by ref only.
 |---|---|---|
 | `start` | (with `-s`) | `{session, socket, log, pid}`; detached server + browser; `already_running` if it exists |
 | `goto` | `<url>` or `--url`; `--wait load\|domcontentloaded\|commit`; `--timeout-ms` | state `{tab, tabs, url, title}`. `example.com` → `https://`, `localhost:3000` → `http://` |
-| `ax` (`snapshot`) | `[<ref> \| --selector <css> \| --text t]` scope; `--limit <lines>` (2000); `--refs all`; `--format json` (old flat list); `--all` | text tree (below) |
+| `ax` (`snapshot`) | `[<ref> \| --selector <css> \| --text t]` scope; `--grep <text>`; `--limit <lines>` (2000); `--refs all`; `--format json` (old flat list); `--all` | text tree (below) |
 | `click` | target; `--button right\|middle`; `--force` | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box); `no_effect` note if the page did nothing in response |
 | `fill` | target, `<value>` or `--value`; `--keys` selects what the field holds and types the value key by key (apps that keep only typed input, observable-model forms) | state |
 | `type` | `<text>` or `--value`; optional `--selector/--ref/--text` to focus first | state |
@@ -159,6 +159,11 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   same origin), and `<select>` lists its `options:` inline.
 - Collapsed content (closed `<details>`, menus that open on hover) is not in
   the tree until it is opened.
+- `ax --grep <text>` keeps the lines holding the text (any case), each under
+  the lines of its ancestors, so a match says which row, form or section it
+  is in: `ax --grep costello` on an order grid is the page line, `- main:`,
+  `- table:` and the one row, ref included. It is applied before `--limit`;
+  with no match it says so.
 
 ## Behaviour
 
@@ -361,7 +366,7 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | tool | does |
 |---|---|
 | `browser_navigate` | `goto` |
-| `browser_snapshot` | `ax`: the tree with `[ref=N]` (optional `ref`/`selector` scope, `limit`) |
+| `browser_snapshot` | `ax`: the tree with `[ref=N]` (optional `ref`/`selector` scope, `grep`, `limit`) |
 | `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_select_option`, `browser_hover`, `browser_scroll`, `browser_file_upload` | the element ops, by `ref`, `selector` or `text` |
 | `browser_mouse` | `mouse`: raw input at a point (a canvas, a map, a game), or from an element's corner |
 | `browser_wait_for`, `browser_evaluate`, `browser_screenshot` (returns the image), `browser_tabs`, `browser_history`, `browser_handle_dialog` | as the CLI |
