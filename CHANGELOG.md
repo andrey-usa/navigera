@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `get box` of an element inside an iframe is in top-level viewport pixels
+  (each frame's offset added), as `mouse` takes them and Playwright's
+  `boundingBox()` reports; it was relative to the element's own frame.
+
 ## [0.6.0] - 2026-10-24
 
 The browser handed over to a person and back, downloads, frames of any

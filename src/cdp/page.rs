@@ -549,7 +549,18 @@ pub const GET_EL: &str = r#"function (el, what, name) {
         case 'attr': return el.getAttribute(name);
         case 'html': return el.innerHTML;
         case 'outer': return el.outerHTML;
-        case 'box': { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }
+        case 'box': {
+            // In top-level viewport pixels, as `mouse` takes them: plus the
+            // offset of each frame on the way up (a cross-origin one's own).
+            const r = el.getBoundingClientRect();
+            let x = r.x, y = r.y, w = el.ownerDocument.defaultView;
+            while (w && w !== w.top && w.frameElement) {
+                const fe = w.frameElement, fr = fe.getBoundingClientRect();
+                x += fr.left + fe.clientLeft; y += fr.top + fe.clientTop;
+                w = w.parent;
+            }
+            return { x, y, width: r.width, height: r.height };
+        }
         case 'style': return (el.ownerDocument.defaultView || window).getComputedStyle(el).getPropertyValue(name);
         case 'checked': return !!el.checked;
         default: throw new Error('get: unknown property ' + what);

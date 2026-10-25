@@ -94,7 +94,7 @@ another process are reachable by ref only.
 | `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
 | `check` | `<yes/no question>` (no target given) | `{question, yes, answer}`: the probability the answer is yes |
 | `check` / `uncheck` | target (a ref or a targeting flag) | state + `checked`, `changed`: clicks a checkbox/radio/switch only when its state differs, fails if the click didn't change it |
-| `get` | `text\|value\|html\|outer\|box\|checked` target; `attr <name>` / `style <prop>` target; `count <css>`; `title`; `url` | the value |
+| `get` | `text\|value\|html\|outer\|box\|checked` target; `attr <name>` / `style <prop>` target; `count <css>`; `title`; `url` | the value; `box` is `{x, y, width, height}` in top-level viewport pixels (inside a cross-origin frame, that frame's) |
 | `is` | `visible\|hidden\|enabled\|disabled\|checked\|editable\|focused` target | `true`/`false` (a missing element is not visible, after 500 ms) |
 | `dblclick` / `focus` | target | state / `{focused}` |
 | `drag` | `<from> <to>` (each a ref or CSS selector), or `--from-text <t> --to-text <t>` | state and `drag`: `{html5: true, dropped}` for a `draggable` source (the drag events with one DataTransfer, which headless Chrome will not start from synthetic input; `dropped` is false when the target does not accept it), else the two points a held mouse moved between (sliders, pointer-driven sortable lists) |

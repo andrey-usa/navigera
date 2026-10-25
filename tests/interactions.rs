@@ -148,6 +148,19 @@ fn locators_reach_into_same_origin_frames() {
     s.ok(&["goto", &format!("{}/srcdoc", site.url)]);
     s.ok(&["click", "--text", "Deep button"]);
     assert_eq!(s.text(&["get", "text", "--selector", "#out"]), "deep clicked");
+    // Its box is where it is on the page, both frames' offsets added.
+    let b = s.ok(&["get", "box", "--text", "Deep button"]);
+    let want = s.ok(&[
+        "eval",
+        "(() => { let x = 0, y = 0, d = document; for (const id of ['host', 'innerframe']) { \
+         const f = id === 'host' ? d.querySelector('#host iframe') : d.getElementById(id); const r = f.getBoundingClientRect(); \
+         x += r.left + f.clientLeft; y += r.top + f.clientTop; d = f.contentDocument; } \
+         const r = d.getElementById('deep').getBoundingClientRect(); return [x + r.x, y + r.y]; })()",
+    ]);
+    for (k, i) in [("x", 0), ("y", 1)] {
+        let (got, want) = (b[k].as_f64().unwrap(), want[i].as_f64().unwrap());
+        assert!((got - want).abs() < 0.5 && want > 20.0, "{k}: {got} vs {want} ({b})");
+    }
 }
 
 #[test]
