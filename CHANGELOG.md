@@ -35,6 +35,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Numbers from the page keep their exact value: `eval` and the JSON
+  output printed about one double in five slightly off in its last digit
+  (`9480.300552478155` as `9480.300552478157`). Found by fuzzing.
 - `scroll --to bottom` (the page's, or inside a target) at the end already
   waits up to 2 s for a list that loads more to grow, then goes to the new
   end: two in a row, as a recorded session replays them, reached only the

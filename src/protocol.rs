@@ -3872,6 +3872,18 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn numbers_come_back_as_the_page_wrote_them() {
+        // serde_json's default float parsing is off by one ulp for about a
+        // fifth of doubles; eval printed 9480.300552478155 as ...157.
+        for text in ["9480.300552478155", "0.30000000000000004", "7.777777777777778e163", "-1.81996730402717e-179"] {
+            let v: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(v.as_f64(), Some(text.parse::<f64>().unwrap()), "{text}");
+            let back: f64 = serde_json::from_str(&v.to_string()).unwrap();
+            assert_eq!(back.to_bits(), text.parse::<f64>().unwrap().to_bits(), "{text}");
+        }
+    }
+
+    #[test]
     fn ax_preview_keeps_the_top_and_counts_the_rest() {
         let tree: String = (1..=100).map(|i| format!("line {i}\n")).collect();
         let (shown, hidden) = super::ax_preview(&tree, 40);
