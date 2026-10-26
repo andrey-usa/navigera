@@ -134,11 +134,13 @@ jobs:
       TASKS: ${{ inputs.tasks || 'all' }}
       MODE: ${{ inputs.mode || 'both' }}
       REPS: ${{ inputs.reps || '1' }}
-      HAS_KEY: ${{ secrets[matrix.run.key] != '' || secrets.GEMINI_API_KEY != '' }}
-      KEY_SLOT: ${{ secrets[matrix.run.key] != '' && matrix.run.key || 'GEMINI_API_KEY' }}
+      HAS_KEY: ${{ ((matrix.run.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2) || (matrix.run.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3) || secrets.GEMINI_API_KEY) != '' }}
+      KEY_SLOT: ${{ ((matrix.run.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2 != '') || (matrix.run.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3 != '')) && matrix.run.key || 'GEMINI_API_KEY' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: ./.github/actions/agent-setup
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/agent-setup
       - name: Lightpanda binary (navigera-lightpanda tools)
         if: contains(matrix.run.tool, 'lightpanda')
         env:
@@ -190,7 +192,7 @@ jobs:
         # smoke test.
         if: "!cancelled() && env.HAS_KEY == 'true' && env.MODE != 'scripted'"
         env:
-          GEMINI_API_KEY: ${{ secrets[matrix.run.key] || secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ ((matrix.run.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2) || (matrix.run.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3) || secrets.GEMINI_API_KEY) }}
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
         run: |
           log="$RUNNER_TEMP/smoke.txt"
@@ -203,13 +205,13 @@ jobs:
           cat "$log"
       - name: Decider relay (TypeSafe Jev)
         if: "!cancelled() && contains(matrix.run.tool, '+jev') && env.HAS_KEY == 'true' && env.MODE != 'scripted' && steps.smoke.outcome == 'success'"
-        uses: ./.github/actions/jev-relay
+        uses: $/.github/actions/jev-relay
         with:
           key: ${{ secrets.TYPESAFE_API_KEY }}
       - name: Onboarding (the agent installs the tool from its own docs)
         if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'onboard' || env.MODE == 'both') && steps.smoke.outcome == 'success'"
         env:
-          GEMINI_API_KEY: ${{ secrets[matrix.run.key] || secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ ((matrix.run.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2) || (matrix.run.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3) || secrets.GEMINI_API_KEY) }}
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
         run: |
           bash bench/agent-eval/logged.sh "agent run log (onboard, $TOOL, ${{ matrix.run.os }})" \
@@ -227,7 +229,7 @@ jobs:
       - name: Skilled runs (tool installed, its own skill in the workspace)
         if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'skilled' || env.MODE == 'both') && steps.smoke.outcome == 'success'"
         env:
-          GEMINI_API_KEY: ${{ secrets[matrix.run.key] || secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ ((matrix.run.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2) || (matrix.run.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3) || secrets.GEMINI_API_KEY) }}
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
         run: |
           bash bench/agent-eval/logged.sh "agent run log (skilled, $TOOL, ${{ matrix.run.os }})" \
@@ -251,8 +253,10 @@ jobs:
     environment: main
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: ./.github/actions/agent-setup
-      - uses: ./.github/actions/jev-relay
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/agent-setup
+      - uses: $/.github/actions/jev-relay
         with:
           key: ${{ secrets.TYPESAFE_API_KEY }}
       - name: Jev and the model on the same decisions
@@ -285,6 +289,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: eval-*

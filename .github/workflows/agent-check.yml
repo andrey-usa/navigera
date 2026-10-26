@@ -51,20 +51,22 @@ jobs:
       run:
         shell: bash
     env:
-      HAS_KEY: ${{ secrets[matrix.key] != '' || secrets.GEMINI_API_KEY != '' }}
-      KEY_SLOT: ${{ secrets[matrix.key] != '' && matrix.key || 'GEMINI_API_KEY' }}
+      HAS_KEY: ${{ ((matrix.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2) || (matrix.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3) || secrets.GEMINI_API_KEY) != '' }}
+      KEY_SLOT: ${{ ((matrix.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2 != '') || (matrix.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3 != '')) && matrix.key || 'GEMINI_API_KEY' }}
       MODEL: gemini-3.5-flash-lite
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: No key
         if: env.HAS_KEY != 'true'
         run: echo "::notice title=agent check::no Gemini key available to this run (fork PR or unset); skipped."
-      - uses: ./.github/actions/agent-setup
+      - uses: $/.github/actions/agent-setup
         if: env.HAS_KEY == 'true'
       - name: Agent run
         if: env.HAS_KEY == 'true'
         env:
-          GEMINI_API_KEY: ${{ secrets[matrix.key] || secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ ((matrix.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2) || (matrix.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3) || secrets.GEMINI_API_KEY) }}
         run: |
           echo "::notice title=agent check key::${{ matrix.task }} (${{ matrix.os }}) used $KEY_SLOT"
           bash bench/agent-eval/logged.sh "agent run log (${{ matrix.task }}, ${{ matrix.os }})" \

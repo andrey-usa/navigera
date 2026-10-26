@@ -28,7 +28,7 @@ runs:
         rustup default stable
     - name: Chrome
       shell: bash
-      run: |
+      run: |  # zizmor: ignore[github-env] runner-local values, no event input
         if [ "$RUNNER_OS" = Windows ]; then
           chrome='C:\Program Files\Google\Chrome\Application\chrome.exe'
           echo "CHROME_BIN=$chrome" >> "$GITHUB_ENV"
@@ -39,7 +39,7 @@ runs:
         fi
     - name: Gemini CLI
       shell: bash
-      run: |
+      run: |  # zizmor: ignore[github-env] runner-local values, no event input
         npm install -g @google/gemini-cli@0.62.0
         if [ "$RUNNER_OS" = Windows ]; then
           # The JS entry point, run with node: the npm .cmd shim goes
