@@ -15,7 +15,7 @@ runs:
       shell: bash
       env:
         TYPESAFE_API_KEY: ${{ inputs.key }}
-      run: |
+      run: |  # zizmor: ignore[github-env] runner-local values, no event input
         if [ -z "$TYPESAFE_API_KEY" ]; then
           echo "::error title=jev relay::TYPESAFE_API_KEY is not set in the main environment"
           exit 1

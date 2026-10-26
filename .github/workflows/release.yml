@@ -50,6 +50,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - id: p
         env:
           EVENT: ${{ github.event_name }}
@@ -97,10 +98,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.plan.outputs.ref }}
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
         with:
           toolchain: stable
           target: ${{ matrix.target }}
+          # No cache in a release: a poisoned cache entry would ship.
+          cache: false
       - name: musl tools
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
@@ -183,6 +187,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: dist
@@ -190,6 +195,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
+          package-manager-cache: false
       - id: meta
         env:
           REF: ${{ needs.plan.outputs.ref }}
@@ -241,9 +247,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.plan.outputs.ref }}
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
         with:
           toolchain: stable
+          cache: false
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
       - env:
@@ -271,6 +279,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
+          package-manager-cache: false
           registry-url: https://registry.npmjs.org
       - env:
           VERSION: ${{ needs.packages.outputs.version }}
@@ -300,6 +309,8 @@ jobs:
       PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install mcp-publisher (pinned and checksummed)
         run: |
           curl -sSfL --proto '=https' -o mcp-publisher.tar.gz \

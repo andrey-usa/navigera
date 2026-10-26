@@ -87,6 +87,8 @@ jobs:
       MAX_SPEND: ${{ matrix.cell.max_spend }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       # The site images are large (GitLab alone is ~22 GB compressed);
       # hosted runners need the preinstalled bulk gone before pulls.
       - name: Free disk space
