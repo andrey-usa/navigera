@@ -175,7 +175,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      NAVIGERA_BROWSERS: ${{ runner.temp }}/browsers
       NAVIGERA_TIMINGS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -189,6 +188,7 @@ jobs:
       - name: install, again (already there), then a session on it
         shell: bash
         run: |
+          export NAVIGERA_BROWSERS="$RUNNER_TEMP/browsers"
           nv=target/debug/navigera
           $nv install-browser --where
           $nv install-browser | tee "$RUNNER_TEMP/first.json"
