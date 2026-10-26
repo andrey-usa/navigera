@@ -604,7 +604,7 @@ impl<'a> Server<'a> {
 }
 
 /// `NAVIGERA_MCP_ALLOW_FILES=1` lifts the file limits below.
-fn files_allowed() -> bool {
+pub fn files_allowed() -> bool {
     std::env::var("NAVIGERA_MCP_ALLOW_FILES").is_ok_and(|v| v.trim() == "1")
 }
 
@@ -658,6 +658,13 @@ fn check_file_access(step: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Whether `name` (relative to the working directory, or absolute; existing
+/// or about to be written) is inside the working directory: the limit an
+/// MCP server built on this one (primavera's) holds its own files to.
+pub fn in_working_dir(name: &str) -> bool {
+    std::env::current_dir().is_ok_and(|cwd| inside(&cwd.canonicalize().unwrap_or(cwd.clone()), &cwd.join(name)))
 }
 
 /// Whether `path` (existing or about to be written) is under `root` once
