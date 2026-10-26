@@ -6,7 +6,92 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-10-26
+## [0.6.1] - 2026-10-26
+
+A security fix for the MCP server: every file a `browser_run` step names
+stays inside the working directory. Also `install-browser`, which fetches
+Chrome for Testing into navigera's own cache; `locate` and `history`, which
+`primavera from-session` builds tests from; and numbers from the page that
+keep their exact value.
+
+### Added
+
+- `install-browser [chrome-headless-shell | chrome] [--channel stable|beta|dev|canary]`:
+  downloads Chrome from Google's Chrome for Testing into navigera's own cache
+  (`--where` prints it; `$NAVIGERA_BROWSERS` moves it), each file checked
+  against the archive's checksum. Headless sessions use an installed
+  chrome-headless-shell first (about 3x faster to start); a Chrome installed
+  this way is the fallback where the system has none.
+
+- `--near <text>` with a locator: the match whose own part of the page
+  (its card, row or section) shows the text. `locate` writes it when a
+  role and name match more than one element, before falling back to a CSS
+  path.
+- `locate <target>`: the locators that find an element again, most stable
+  first (test id, role and name, label, placeholder, text, CSS), each kept
+  only when the finder an op would use picks that element on the page;
+  `--frame` added inside a frame (a cross-origin one named from the page
+  that holds it); `secret: true` for a password field. An element in a
+  shadow root gets its hosts' path: `--selector "#app >>> x-card >>> button"`.
+- `--selector "host >>> inner"`: `inner` inside the open shadow root of an
+  element `host` matches (or a shadow root under it), for every op,
+  `wait --selector` and `get count`.
+- `history [--clear]`: the actions a session ran and its waits, oldest first; one on a
+  ref carries its element's `locate` from just before it ran, and each
+  what the page said after it (title, heading, status messages). What
+  `primavera from-session` turns into a test.
+
+### Fixed
+
+- Numbers from the page keep their exact value: `eval` and the JSON
+  output printed about one double in five slightly off in its last digit
+  (`9480.300552478155` as `9480.300552478157`). Found by fuzzing.
+- `scroll --to bottom` (the page's, or inside a target) at the end already
+  waits up to 2 s for a list that loads more to grow, then goes to the new
+  end: two in a row, as a recorded session replays them, reached only the
+  first page of a lazy list.
+- `history` marks a click that changed nothing (`no_effect: true`), so a
+  test writer can drop it when the same click follows.
+- A `goto` to a server that takes the connection and never answers fails
+  at its timeout and cancels that navigation: the tab answers at once again
+  (it had answered nothing while the dead load was pending, so the next
+  `url` or `ax`, and a test runner's failure screenshot, each waited their
+  whole timeout too: one failed step cost 105 s).
+- A control inside its `<label>` (a select, a textarea) is named by the
+  label's own words for `--label`/`--name`, not with its options' text.
+- `get box` of an element inside an iframe is in top-level viewport pixels
+  (each frame's offset added), as `mouse` takes them; it was relative to
+  the element's own frame.
+- `--natural` with chrome-headless-shell as the browser (`--chromium`,
+  `$CHROME_BIN`) is refused with a message instead of starting a browser
+  that still tells pages it is headless.
+- `--from` copies Chrome 156's local storage, which is one `LocalStorage`
+  SQLite file there (with its journal) instead of a `Local Storage`
+  directory: sign-ins kept in local storage came over empty.
+- A `--profile` browser falls back to no sandbox the way navigera's own
+  launches do (as root, with `NAVIGERA_NO_SANDBOX`, or after a first start
+  that failed for want of one); it had exited and the profile could not
+  be used on such a machine.
+
+### Changed
+
+- Browser discovery no longer looks in other tools' browser caches: it takes
+  `--chromium`, `$CHROME_BIN`, a system Chrome, Chromium or Edge, or what
+  `install-browser` installed. Point `$CHROME_BIN` at a browser elsewhere.
+
+### Security
+
+- tokio 1.54 (RUSTSEC-2026-0386).
+- MCP: `browser_run` steps could read and write files outside the working
+  directory (a route's `body_file` served any local file to the page;
+  `state save`, `network --har`/`--body-file`, `pdf` and `downloads --dir`
+  wrote anywhere). Every file a step names is now held to the working
+  directory, as uploads were, and the browser's own pages (`chrome://`,
+  `devtools://`) are refused; `NAVIGERA_MCP_ALLOW_FILES=1` lifts both.
+- The default download directory is now inside `navigera-<uid>` in the
+  temp directory (mode 0700), not a world-readable `navigera-downloads-<pid>`.
+
+## [0.6.0] - 2026-10-24
 
 The browser handed over to a person and back, downloads, frames of any
 origin and custom dropdowns; clicks that wait for what moves or covers
@@ -172,24 +257,6 @@ so a test runner gets a clean, separate session in about 40 ms.
 
 ### Fixed
 
-- A `goto` to a server that takes the connection and never answers fails
-  at its timeout and cancels that navigation: the tab answers at once again
-  (it had answered nothing while the dead load was pending, so the next
-  `url` or `ax`, and a test runner's failure screenshot, each waited their
-  whole timeout too: one failed step cost 105 s).
-- `get box` of an element inside an iframe is in top-level viewport pixels
-  (each frame's offset added), as `mouse` takes them and Playwright's
-  `boundingBox()` reports; it was relative to the element's own frame.
-- `--natural` with chrome-headless-shell as the browser (`--chromium`,
-  `$CHROME_BIN`) is refused with a message instead of starting a browser
-  that still tells pages it is headless.
-- `--from` copies Chrome 156's local storage, which is one `LocalStorage`
-  SQLite file there (with its journal) instead of a `Local Storage`
-  directory: sign-ins kept in local storage came over empty.
-- A `--profile` browser falls back to no sandbox the way navigera's own
-  launches do (as root, with `NAVIGERA_NO_SANDBOX`, or after a first start
-  that failed for want of one); it had exited and the profile could not
-  be used on such a machine.
 - A page that stops answering (a script holding its thread, a renderer
   hung under load) cost one full command timeout per command after it:
   a click's press timed out, then its clean-up and checks each waited the
@@ -222,10 +289,6 @@ so a test runner gets a clean, separate session in about 40 ms.
   load event is lost on its way (seen as rare 35 s stalls on slow macOS
   machines): every 2 s they also look at the page itself, and return once
   its document is the new one and has loaded.
-
-### Security
-
-- tokio 1.54 (RUSTSEC-2026-0386).
 
 ## [0.5.0] - 2026-10-22
 
@@ -400,7 +463,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.6.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.1
 [0.6.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.0
 [0.5.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.5.0
 [0.4.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.1
-[0.4.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.0

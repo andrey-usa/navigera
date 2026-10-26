@@ -31,8 +31,8 @@ fn python() -> &'static str {
 }
 
 /// True when the tool itself would find a browser to launch (same resolver
-/// as `navigera`: $CHROME_BIN, system Chrome, Playwright/Puppeteer
-/// caches). `NAVIGERA_REQUIRE_BROWSER=1` (set in CI) turns a skip into a failure,
+/// as `navigera`: $CHROME_BIN, system Chrome, a browser `navigera
+/// install-browser` put in place). `NAVIGERA_REQUIRE_BROWSER=1` (set in CI) turns a skip into a failure,
 /// so a runner without Chrome can't pass the e2e tests by skipping them.
 fn chrome_available() -> bool {
     let found = navigera::browser::resolve_executable_for(None, true).is_some();

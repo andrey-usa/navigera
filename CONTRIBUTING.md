@@ -13,7 +13,7 @@ cargo fmt --check
 ```
 
 The e2e tests drive a real Chrome. navigera finds `$CHROME_BIN`, a system
-Chrome/Chromium/Edge, or the Playwright and Puppeteer browser caches; without
+Chrome/Chromium/Edge, or one `navigera install-browser` installed; without
 any of them the browser tests are skipped (CI sets `NAVIGERA_REQUIRE_BROWSER=1`
 so they can't be skipped there). The Acme Supply scenario in
 `tests/site_scenarios.rs` takes about 10 s.

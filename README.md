@@ -54,16 +54,17 @@ the session file in your temp directory, CDP runs over a DevTools
 WebSocket, and Chrome sits in a kill-on-close job object, so it still exits
 when navigera dies.
 
-navigera finds Chrome or Chromium on its own: a system install,
-`$CHROME_BIN`, or a Playwright/Puppeteer browser cache. For the fastest
-cold start, point it at
-[chrome-headless-shell](https://developer.chrome.com/blog/chrome-headless-shell):
-`npx @puppeteer/browsers install chrome-headless-shell@stable` gives the same
-Chrome without its browser UI layer. In the benchmark it cut cold start from
-0.32 s to 0.11 s and the scripted session from 0.66 s to 0.32 s.
-navigera uses a system Chrome first; with none installed it picks
-chrome-headless-shell (or Chromium) from a Playwright or Puppeteer cache.
-Set `$CHROME_BIN` to choose explicitly.
+navigera finds Chrome on its own: `$CHROME_BIN`, a system Chrome,
+Chromium or Edge, or one it installed itself. For the fastest cold start,
+`navigera install-browser` downloads
+[chrome-headless-shell](https://developer.chrome.com/blog/chrome-headless-shell)
+from Google's [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
+into navigera's own cache: the same Chrome without its browser UI layer. In
+the benchmark it cut cold start from 0.32 s to 0.11 s and the scripted session
+from 0.66 s to 0.32 s. Once it is there, headless sessions use it and headed
+ones the system Chrome (`navigera install-browser chrome` puts the full
+Chrome there too, for a machine with none). Set `$CHROME_BIN` to choose
+explicitly.
 
 ## Use (agents and people)
 
@@ -94,8 +95,8 @@ The commands are `goto`, `ax`, `click`, `fill`, `type`, `press`, `select`,
 `hover`, `drag`, `scroll`, `upload`, `wait`, `eval`, `back`/`forward`/`reload`,
 `screenshot`, `pdf`, the `tab-*` commands, `dialog` and `quit`, with `get`
 and `is` for one value, `console` and `network` for what the page logged and
-fetched, `cookies`, `storage` and `state save|load` (Playwright's
-`storageState` format) for sign-ins, `set` for viewport, device, media, geo
+fetched, `cookies`, `storage` and `state save|load` (cookies and localStorage as one
+JSON file) for sign-ins, `set` for viewport, device, media, geo
 and the like, and `route` to fail or answer requests.
 
 - **Targets:** elements can be named by ref, `--selector <css>`,
@@ -117,7 +118,7 @@ portable:
 |---|---|---|
 | `start --attach` | your running Chrome itself, in a window of its own: your logins, settings, extensions, live | Chrome 144+, remote debugging turned on once at `chrome://inspect/#remote-debugging`, and a click on Allow |
 | `start --profile agent --from chrome` | a browser of its own, seeded with a copy of your Chrome profile's sign-ins (cookies, site storage, saved logins); it can run `--headless` while you keep working | any Chrome; same machine and user. On Windows close Chrome for the copy (it locks its cookies) |
-| `state save` / `state load` | the cookies and site storage of a session, as a file, to any other machine or CI job | nothing; Playwright's `storageState` format |
+| `state save` / `state load` | the cookies and site storage of a session, as a file, to any other machine or CI job | nothing; one JSON file of cookies and site storage |
 
 The other way round, `show` puts a headless session on the person's screen
 with the same tabs and sign-ins, for the step only they can do (a login, a
@@ -146,8 +147,8 @@ the same protocol.
 
 `navigera mcp` is a Model Context Protocol server for Cline, Roo Code, Kilo
 Code, Continue, VS Code, Claude Desktop and Cursor, with the same tree, refs and
-waits as the CLI and a smaller tool list than Playwright MCP's (14 KB against
-about 20 KB). Add it as `{"command": "navigera", "args": ["mcp"]}`, or without
+waits as the CLI and a smaller tool list than other browser MCP servers
+(about 14 KB; the numbers are in the benchmarks below). Add it as `{"command": "navigera", "args": ["mcp"]}`, or without
 installing anything as
 `{"command": "npx", "args": ["-y", "navigera", "mcp"]}`; per-client snippets
 are in [docs/navigera.md](docs/navigera.md#mcp-server-ide-agents). Agents that run
@@ -416,6 +417,7 @@ CI results, A/B benchmarks and releasing.
 - `src/cdp/attach.rs`: `--attach` (your running browser) and `--profile` (persistent navigera browser)
 - `src/mcp.rs`: `navigera mcp`, the Model Context Protocol server on stdio
 - `src/decide.rs`: `find` / `check`: the decision model's client and how page elements become options
+- `src/install.rs`: `install-browser` (Chrome for Testing's index, the download through curl, the zip unpacked and checked)
 - `src/timing.rs`: `NAVIGERA_TIMINGS=1` launch/close phase timings on stderr
 - `tests/`: browser e2e: serve protocol, sessions, and the Acme Supply scenario
 - `bench/site/server.py`: Acme Supply, a deterministic local shop (SPA, iframes, shadow DOM, dialogs, popups, login, upload)

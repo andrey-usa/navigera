@@ -140,8 +140,8 @@ Flash-Lite, the skill installed:
    reading it"), where the agent looks, rather than only in the skill. Then
    measure adoption and tokens again on the large-page tasks.
 2. **`wait --until "<question>"`**: poll `check` until yes. Replaces sleeps
-   and "read it again" turns on pages that render late (the reason Playwright
-   MCP needed five calls where navigera needed two in `bench/ide-eval`).
+   and "read it again" turns on pages that render late (the reason another browser
+   MCP server needed five calls where navigera needed two in `bench/ide-eval`).
 3. **Snapshot pruning**: score each region of the tree (landmark, form,
    table, article) for relevance to the task in one request, return the
    relevant regions in full and the rest as one-line outlines. The tree
