@@ -52,8 +52,8 @@ All notable changes to this project are documented here. The format follows
 - A control inside its `<label>` (a select, a textarea) is named by the
   label's own words for `--label`/`--name`, not with its options' text.
 - `get box` of an element inside an iframe is in top-level viewport pixels
-  (each frame's offset added), as `mouse` takes them and Playwright's
-  `boundingBox()` reports; it was relative to the element's own frame.
+  (each frame's offset added), as `mouse` takes them; it was relative to
+  the element's own frame.
 - `--natural` with chrome-headless-shell as the browser (`--chromium`,
   `$CHROME_BIN`) is refused with a message instead of starting a browser
   that still tells pages it is headless.
