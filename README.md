@@ -237,19 +237,20 @@ each driver. Fixtures are deterministic and local (500-card listing,
 
 | contender | session wall (best of 3) | warm eval mean (200×) | cold start (best of 5) | driver CPU (own) | driver peak RSS (own) | browser memory (PSS) |
 |---|---|---|---|---|---|---|
-| `nv-shell` (this repo on chrome-headless-shell) | **0.34s** | **0.42 ms** | **0.08s** | **<10 ms** | **6 MB** | 225 MB |
-| `nv-brave` (this repo on Brave) | 0.59s | 0.53 ms | 0.31s | **<10 ms** | **6 MB** | 528 MB |
-| `nv-serve` (this repo on Chrome) | 0.60s | 0.59 ms | 0.28s | **<10 ms** | **6 MB** | 370 MB |
-| `nv-edge` (this repo on Edge) | 0.71s | 0.55 ms | 0.34s | **<10 ms** | **6 MB** | 763 MB |
-| `gorod` (go-rod 0.116.2, Go) | 0.71s | 0.57 ms | 0.29s | **20 ms** | 16 MB | 391 MB |
-| `chromiumoxide` 0.7 (Rust) | 0.82s | 1.00 ms | 0.32s | **20 ms** | 9 MB | 426 MB |
-| `chromey` 2.x (Rust, maintained chromiumoxide fork) | 0.94s | 1.08 ms | 0.35s | 50 ms | 21 MB | 472 MB |
-| `chromedp` 0.19.1 (Go) | 1.02s | 0.61 ms | 0.47s | **40 ms** | 13 MB | 479 MB |
-| `puppeteer-core` (Node) | 1.03s | 0.83 ms | 0.63s | 0.39 s | 81 MB | 420 MB |
-| `playwright-core` (Node) | 1.31s | 1.36 ms | 0.77s | 0.71 s | 150 MB | 418 MB |
-| `nv-lightpanda` (this repo on Lightpanda, 1 tab) | 0.18s | 0.39 ms | 0.11s | **<10 ms** | **6 MB** | 14 MB |
+| `nv-shell` (this repo on chrome-headless-shell) | **0.34s** | **0.39 ms** | **0.09s** | **<10 ms** | **7 MB** | 234 MB |
+| `nv-brave` (this repo on Brave) | 0.65s | 0.50 ms | 0.34s | **<10 ms** | **7 MB** | 666 MB |
+| `nv-ws` (this repo on Chrome, WebSocket) | 0.67s | 0.61 ms | 0.29s | **10 ms** | **7 MB** | 374 MB |
+| `nv-serve` (this repo on Chrome) | 0.67s | 0.62 ms | 0.31s | **<10 ms** | **7 MB** | 341 MB |
+| `gorod` (go-rod 0.116.2, Go) | 0.73s | 0.52 ms | 0.30s | **40 ms** | 20 MB | 370 MB |
+| `nv-edge` (this repo on Edge) | 0.74s | 0.45 ms | 0.39s | **<10 ms** | **7 MB** | 774 MB |
+| `chromiumoxide` 0.7 (Rust) | 0.83s | 0.87 ms | 0.39s | **20 ms** | 9 MB | 424 MB |
+| `chromedp` 0.19.1 (Go) | 1.02s | 0.69 ms | 0.48s | **30 ms** | 8 MB | 475 MB |
+| `chromey` 2.x (Rust, maintained chromiumoxide fork) | 1.03s | 0.99 ms | 0.35s | 50 ms | 22 MB | 465 MB |
+| `puppeteer-core` (Node) | 1.05s | 0.85 ms | 0.64s | 0.38 s | 80 MB | 408 MB |
+| `playwright-core` (Node) | 1.26s | 1.43 ms | 0.78s | 0.68 s | 150 MB | 423 MB |
+| `nv-lightpanda` (this repo on Lightpanda, 1 tab) | 0.18s | 0.33 ms | 0.11s | **<10 ms** | **7 MB** | 14 MB |
 
-Measured 2026-10-21 on GitHub-hosted `ubuntu-latest` (AMD EPYC 7763 64-Core Processor — 4 vCPU · Chrome 155.0.8059.39).
+Measured 2026-10-26 on GitHub-hosted `ubuntu-latest` (AMD EPYC 7763 64-Core Processor — 4 vCPU · Chrome 155.0.8059.39).
 Every driver produced byte-identical extracted data and counts (correctness
 gate); wall is best-of-N.
 The ladder reruns weekly ([`bench.yml`](.github/workflows/bench.yml)) against
@@ -268,16 +269,16 @@ artifact ("0.82s vs 0.03s"). Browser memory is the whole browser process
 tree (every renderer/GPU/utility process), sampled as summed PSS every
 250 ms (shared pages counted once).
 
-**Reading the table.** Session wall order: nv-shell 0.34s, nv-brave 0.59s, nv-serve 0.60s, nv-edge 0.71s, gorod 0.71s, chromiumoxide 0.82s, chromey 0.94s, chromedp 1.02s, puppeteer 1.03s, playwright 1.31s. navigera's best
-(nv-shell) ranks #1 of 10; on regular Chrome, nv-serve (0.60s) is ahead of the fastest other driver, gorod (0.71s). All native drivers (navigera,
+**Reading the table.** Session wall order: nv-shell 0.34s, nv-brave 0.65s, nv-ws 0.67s, nv-serve 0.67s, gorod 0.73s, nv-edge 0.74s, chromiumoxide 0.83s, chromedp 1.02s, chromey 1.03s, puppeteer 1.05s, playwright 1.26s. navigera's best
+(nv-shell) ranks #1 of 11; on regular Chrome, nv-serve (0.67s) is ahead of the fastest other driver, gorod (0.73s). All native drivers (navigera,
 go-rod, chromiumoxide, chromedp) spend tens of milliseconds of their own CPU
 or less; the Node drivers spend hundreds and carry 80–150 MB of their own RSS.
 
 ### Real-world (public internet, best of 3, same run)
 
-example.com goto → title/h1: 10 of 10 pass; nv-shell 0.20s, gorod 0.41s, nv-serve 0.45s, chromey 0.45s, nv-brave 0.47s, chromiumoxide 0.48s, nv-edge 0.51s, chromedp 0.57s, puppeteer 0.75s, playwright 0.87s.
+example.com goto → title/h1: 12 of 12 pass; nv-lightpanda 0.19s, nv-shell 0.22s, gorod 0.41s, nv-serve 0.48s, chromey 0.48s, chromiumoxide 0.49s, nv-ws 0.49s, nv-brave 0.52s, nv-edge 0.56s, chromedp 0.61s, puppeteer 0.74s, playwright 0.86s.
 
-GitHub browse (awesome-list scroll + trending click-through): 10 of 10 pass; nv-shell 3.46s, gorod 3.63s, chromiumoxide 3.88s, nv-brave 3.90s, chromey 3.92s, puppeteer 4.22s, nv-edge 4.28s, nv-serve 4.37s, playwright 4.48s, chromedp 4.53s.
+GitHub browse (awesome-list scroll + trending click-through): 12 of 12 pass; gorod 3.57s, nv-shell 3.85s, chromiumoxide 3.93s, chromey 3.97s, nv-ws 4.09s, nv-lightpanda 4.09s, puppeteer 4.19s, nv-brave 4.20s, nv-serve 4.30s, chromedp 4.42s, playwright 4.48s, nv-edge 4.74s.
 Live pages change between runs, so these are informational, not part of the
 correctness gate. (The scroll check used to fail at random for every driver:
 GitHub sets CSS `scroll-behavior: smooth`, so `scrollY` was read mid-animation;
