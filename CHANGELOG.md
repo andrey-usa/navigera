@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-26
+
+A security fix to 0.6.1's MCP file limits: a link inside the working
+directory no longer leads a file out of it. The npm platform packages move
+to the `@navigera` scope; `npm install navigera` is unchanged.
+
+### Changed
+
+- npm: the platform packages are `@navigera/<os>-<cpu>` (`@navigera/linux-x64`
+  and so on); npm refused the unscoped names. Install as before:
+  `npm install -g navigera` or `npx navigera`.
+
+### Security
+
+- MCP: a file a `browser_run` step names could still land outside the
+  working directory through a link inside it: `link/../x`, with `link`
+  pointing elsewhere, was checked as `x` in the working directory and
+  written beside the link's target (`state save`, `pdf`, `downloads --dir`;
+  0.6.1). Each part of the path is now followed to where it leads before
+  the next `..`, as the system does. Found by red-teaming the 0.6.1 fix.
+
 ## [0.6.1] - 2026-10-26
 
 A security fix for the MCP server: every file a `browser_run` step names
@@ -463,6 +484,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.6.2]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.2
 [0.6.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.1
 [0.6.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.0
 [0.5.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.5.0
