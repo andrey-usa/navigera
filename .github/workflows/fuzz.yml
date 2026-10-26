@@ -1,0 +1,74 @@
+name: fuzz
+on:
+  pull_request:
+    paths: ["fuzz/**", "src/**"]
+  schedule: [{cron: "0 3 * * *"}]  # nightly, 30 min per target
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Fuzz seconds per target (empty: 300, or 1800 on schedule)"
+        required: false
+permissions: {contents: read}
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: parse_args
+            seeds: none
+          - target: command_json
+            seeds: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1
+        with:
+          toolchain: nightly
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: seed corpus
+        working-directory: fuzz
+        run: |
+          mkdir -p "corpus/${{ matrix.target }}" artifacts
+          ls "corpus/${{ matrix.target }}" | head -20
+      - name: fuzz
+        working-directory: fuzz
+        env:
+          # ASAN aborts on huge allocations instead of returning NULL; the
+          # product handles those cleanly, so let the allocator fail soft.
+          ASAN_OPTIONS: allocator_may_return_null=1
+          # Through the environment, not the script text: a dispatch input
+          # expanded into the script could run as code.
+          DURATION_INPUT: ${{ inputs.duration }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          # NOTE: this step runs under bash -e, so a plain failing command
+          # aborts the script before the log-copy lines below run. The
+          # cargo invocation must therefore be in an OR list (exempt from
+          # -e) for its log to survive a crash, hang or build failure.
+          DURATION="$DURATION_INPUT"
+          if [ -z "$DURATION" ]; then
+            if [ "$EVENT" = "schedule" ]; then DURATION=1800; else DURATION=300; fi
+          fi
+          case "$DURATION" in ''|*[!0-9]*) echo "duration must be a number of seconds: $DURATION" >&2; exit 2;; esac
+          code=0
+          cargo +nightly fuzz run --fuzz-dir . ${{ matrix.target }} "corpus/${{ matrix.target }}" -- \
+            -max_total_time="$DURATION" -rss_limit_mb=2048 -timeout=10 -max_len=65536 \
+            -artifact_prefix="$PWD/artifacts/" > "fuzz-${{ matrix.target }}.log" 2>&1 || code=$?
+          tail -40 "fuzz-${{ matrix.target }}.log" > artifacts/run-summary.txt || true
+          cp "fuzz-${{ matrix.target }}.log" artifacts/ || true
+          exit $code
+      - name: upload corpus and crashes
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: |
+            fuzz/corpus/${{ matrix.target }}
+            fuzz/artifacts
+            fuzz/fuzz-${{ matrix.target }}.log
+          retention-days: 30
