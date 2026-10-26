@@ -219,7 +219,8 @@ jobs:
           for kind in npm wheel homebrew scoop; do
             python3 packaging/package.py "$kind" --name navigera --version "$VERSION" --dist dist --out pkg \
               --repo "$GITHUB_REPOSITORY" --description "$DESCRIPTION" --keywords "$KEYWORDS" \
-              --readme release-ref/README.md --license-file release-ref/LICENSE --mcp-name "$mcp_name"
+              --readme release-ref/README.md --license-file release-ref/LICENSE --mcp-name "$mcp_name" \
+              --scope navigera
           done
           for dir in pkg/npm/*/; do (cd "$dir" && npm pack --silent); done
       - name: Install and run them

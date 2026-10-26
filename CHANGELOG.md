@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- npm: the platform packages are `@navigera/<os>-<cpu>` (`@navigera/linux-x64`
+  and so on); npm refused the unscoped names. Install as before:
+  `npm install -g navigera` or `npx navigera`.
+
 ### Security
 
 - MCP: a file a `browser_run` step names could still land outside the
