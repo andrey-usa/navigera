@@ -33,7 +33,7 @@ irm https://raw.githubusercontent.com/andrey-usa/navigera/master/install.ps1 | i
 
 Or with a package manager — each one installs the same prebuilt binary:
 
-| | |
+| Channel | Command |
 |---|---|
 | npm | `npm install -g navigera` (or `npx navigera …`) |
 | pip / uv | `pip install navigera` · `uv tool install navigera` |
@@ -114,7 +114,7 @@ and the like, and `route` to fail or answer requests.
 **Hand the agent your browser.** Three ways, from most direct to most
 portable:
 
-| | the agent gets | needs |
+| Way | the agent gets | needs |
 |---|---|---|
 | `start --attach` | your running Chrome itself, in a window of its own: your logins, settings, extensions, live | Chrome 144+, remote debugging turned on once at `chrome://inspect/#remote-debugging`, and a click on Allow |
 | `start --profile agent --from chrome` | a browser of its own, seeded with a copy of your Chrome profile's sign-ins (cookies, site storage, saved logins); it can run `--headless` while you keep working | any Chrome; same machine and user. On Windows close Chrome for the copy (it locks its cookies) |
