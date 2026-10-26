@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `install-browser [chrome-headless-shell | chrome] [--channel stable|beta|dev|canary]`:
+  downloads Chrome from Google's Chrome for Testing into navigera's own cache
+  (`--where` prints it; `$NAVIGERA_BROWSERS` moves it), each file checked
+  against the archive's checksum. Headless sessions use an installed
+  chrome-headless-shell first (about 3x faster to start); a Chrome installed
+  this way is the fallback where the system has none.
+
 - `--near <text>` with a locator: the match whose own part of the page
   (its card, row or section) shows the text. `locate` writes it when a
   role and name match more than one element, before falling back to a CSS
@@ -54,6 +61,12 @@ All notable changes to this project are documented here. The format follows
   launches do (as root, with `NAVIGERA_NO_SANDBOX`, or after a first start
   that failed for want of one); it had exited and the profile could not
   be used on such a machine.
+
+### Changed
+
+- Browser discovery no longer looks in other tools' browser caches: it takes
+  `--chromium`, `$CHROME_BIN`, a system Chrome, Chromium or Edge, or what
+  `install-browser` installed. Point `$CHROME_BIN` at a browser elsewhere.
 
 ### Security
 

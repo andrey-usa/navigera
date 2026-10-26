@@ -526,8 +526,8 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<String>,
     },
-    /// Cookies and localStorage to a file, or back from one, in Playwright's
-    /// `storageState` format: sign in once, save, and load in a new session.
+    /// Cookies and localStorage to a file, or back from one, as
+    /// `{cookies, origins}`: sign in once, save, and load in a new session.
     #[serde(rename = "state")]
     State {
         /// `save` or `load`.
@@ -841,8 +841,8 @@ pub struct SessionConfig {
     pub download_dir: Option<String>,
 }
 
-/// Before `ax`/`screenshot`: no fetch/XHR for this long (Playwright's
-/// `networkidle` uses the same 500 ms) …
+/// Before `ax`/`screenshot`: no fetch/XHR for this long (the usual 500 ms
+/// network-idle window) …
 const NETWORK_QUIET: std::time::Duration = std::time::Duration::from_millis(500);
 /// … waiting at most this long (long polls, chatty analytics).
 const NETWORK_QUIET_MAX: std::time::Duration = std::time::Duration::from_secs(3);
@@ -907,7 +907,7 @@ const DEFAULT_ATTACH: &str = "chrome";
 
 /// True when `word` is a command name (so it can't be `--attach`'s value).
 fn is_command_word(word: &str) -> bool {
-    matches!(word, "serve" | "mcp" | "skill" | "install-skill" | "profiles" | "help")
+    matches!(word, "serve" | "mcp" | "skill" | "install-skill" | "install-browser" | "profiles" | "help")
         || OPS.iter().any(|(name, _, _)| *name == word)
 }
 
@@ -948,6 +948,13 @@ pub enum Local {
     Version,
     /// List the browsers and profiles a session can be handed.
     Profiles,
+    /// Download a browser from Chrome for Testing into navigera's cache.
+    InstallBrowser {
+        product: String,
+        channel: String,
+        /// `--where`: print the directory, install nothing.
+        only_where: bool,
+    },
 }
 
 /// Result of [`parse_args`]: launch config plus an optional one-shot command.
@@ -992,7 +999,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("cookies", "[set <name> <value> [--url <u> | --domain <d>] [--path <p>] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax|Strict|None] | delete <name> [--url <u>] | clear] [--all] [--json]", "the current page's cookies (--all: every cookie), or set, delete or clear them"),
     ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
-    ("state", "save|load <file.json>", "every cookie and the open tabs' localStorage to a file, or back (Playwright storageState format): sign in once, reuse it in later sessions"),
+    ("state", "save|load <file.json>", "every cookie and the open tabs' localStorage to a file, or back (`{cookies, origins}`, the common storage-state format): sign in once, reuse it in later sessions"),
     ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password>  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value']]]", "fail or answer requests whose URL matches (* and ? globs); no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
@@ -1028,6 +1035,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("mcp", "[--headed] [--profile <name> | --attach [<where>]]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
     ("profiles", "", "list what a session can be handed: your browsers' profiles (name, email, whether --attach can reach them now) and navigera's own --profile browsers"),
     ("skill", "", "print the agent skill (usage guide) for this version"),
+    ("install-browser", "[chrome-headless-shell | chrome] [--channel stable|beta|dev|canary] [--where]", "download Chrome from Google's Chrome for Testing into navigera's cache (default chrome-headless-shell: the same Chrome without its UI layer, ~3x faster to start), used from then on; --where prints the directory"),
     ("install-skill", "[--dir <skills dir>] [--claude | --continue] [--global]", "install the skill for agents (default ./.agents/skills, read by Cline and Kilo; --claude: ./.claude/skills; --continue: ./.continue/skills)"),
 ];
 
@@ -1455,6 +1463,15 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 return invalid(format!("unexpected argument {extra:?} after profiles"));
             }
             return parsed(config, None, false, Some(Local::Profiles));
+        }
+        "install-browser" => {
+            let only_where = extract_present(&mut args, "--where");
+            let channel = str_flag(&mut args, "--channel")?.unwrap_or_else(|| "stable".into());
+            let product = positional(&mut args).unwrap_or_else(|| "chrome-headless-shell".into());
+            if let Some(extra) = args.pop_front() {
+                return invalid(format!("unexpected argument {extra:?} after install-browser"));
+            }
+            return parsed(config, None, false, Some(Local::InstallBrowser { product, channel, only_where }));
         }
         "install-skill" => {
             let claude = extract_present(&mut args, "--claude");
@@ -3817,6 +3834,21 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
         }
         Local::Profiles => {
             let response = json!({ "id": null, "ok": true, "result": crate::cdp::import::list_profiles() });
+            if print_cli_response(output, &response, config) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Local::InstallBrowser { only_where: true, .. } => {
+            let _ = writeln!(output, "{}", crate::install::root().map(|p| p.display().to_string()).unwrap_or_default());
+            ExitCode::SUCCESS
+        }
+        Local::InstallBrowser { product, channel, .. } => {
+            let response = match crate::install::install(product, channel) {
+                Ok(result) => json!({ "id": null, "ok": true, "result": result }),
+                Err(e) => json!({ "id": null, "ok": false, "error": format!("install-browser: {e:#}") }),
+            };
             if print_cli_response(output, &response, config) {
                 ExitCode::SUCCESS
             } else {

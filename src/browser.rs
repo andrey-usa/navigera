@@ -25,8 +25,8 @@ fn engine_runtime() -> Result<tokio::runtime::Runtime> {
 
 /// Chromium launch flags.
 ///
-/// Beyond the basics, this is the standard automation set that go-rod,
-/// chromiumoxide, Puppeteer and Playwright all ship by default: no
+/// Beyond the basics, this is the standard automation set CDP drivers ship
+/// by default: no
 /// background networking, component updates, crash reporter, sync, metrics
 /// or Translate competing with the page for CPU, and no throttling of
 /// background tabs. `--no-startup-window` skips Chrome's initial tab (the
@@ -351,84 +351,11 @@ fn common_executables() -> Vec<String> {
     paths
 }
 
-/// Browsers installed by Playwright / Puppeteer / `@puppeteer/browsers`
-/// (newest first), so a machine with only those still works out of the box.
-/// For headless sessions chrome-headless-shell comes first: it starts 2-3x
-/// faster than full Chrome (no browser UI layer to bring up).
-fn cached_browsers(headless: bool) -> Vec<String> {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-    let mut roots = vec![format!("{home}/.cache/ms-playwright")];
-    if let Ok(p) = std::env::var("LOCALAPPDATA") {
-        roots.push(format!("{p}/ms-playwright"));
-    }
-    roots.push(format!("{home}/Library/Caches/ms-playwright"));
-    if let Ok(p) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
-        roots.insert(0, p);
-    }
-    let pick = |root: &str, prefix: &str, rel: &[&str]| -> Vec<String> {
-        let mut dirs: Vec<String> = std::fs::read_dir(root)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .filter(|n| n.starts_with(prefix))
-                    .collect()
-            })
-            .unwrap_or_default();
-        dirs.sort_by(|a, b| b.cmp(a));
-        dirs.iter()
-            .flat_map(|d| rel.iter().map(move |r| format!("{root}/{d}/{r}")))
-            .filter(|p| Path::new(p).is_file())
-            .collect()
-    };
-    let mut shells = Vec::new();
-    let mut full = Vec::new();
-    for root in &roots {
-        shells.extend(pick(
-            root,
-            "chromium_headless_shell-",
-            &[
-                "chrome-linux/headless_shell",
-                "chrome-headless-shell-linux64/chrome-headless-shell",
-                "chrome-mac/headless_shell",
-                "chrome-win/headless_shell.exe",
-                "chrome-headless-shell-win64/chrome-headless-shell.exe",
-            ],
-        ));
-        full.extend(pick(
-            root,
-            "chromium-",
-            &[
-                "chrome-linux/chrome",
-                "chrome-linux64/chrome",
-                "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-                "chrome-win/chrome.exe",
-                "chrome-win64/chrome.exe",
-            ],
-        ));
-    }
-    let puppeteer = format!("{home}/.cache/puppeteer");
-    shells.extend(pick(
-        &format!("{puppeteer}/chrome-headless-shell"),
-        "linux-",
-        &["chrome-headless-shell-linux64/chrome-headless-shell"],
-    ));
-    shells.extend(pick(
-        &format!("{puppeteer}/chrome-headless-shell"),
-        "win64-",
-        &["chrome-headless-shell-win64/chrome-headless-shell.exe"],
-    ));
-    full.extend(pick(&format!("{puppeteer}/chrome"), "linux-", &["chrome-linux64/chrome"]));
-    full.extend(pick(&format!("{puppeteer}/chrome"), "win64-", &["chrome-win64/chrome.exe"]));
-    if headless {
-        shells.into_iter().chain(full).collect()
-    } else {
-        full
-    }
-}
-
 /// Resolve which executable to launch, honoring (in order) an explicit CLI
-/// override, `$NAVIGERA_CHROMIUM` / `$CHROME_BIN`, the common install
-/// paths, then browsers cached by Playwright/Puppeteer.
+/// override, `$NAVIGERA_CHROMIUM` / `$CHROME_BIN`, then for a headless
+/// launch a chrome-headless-shell `navigera install-browser` put in place
+/// (installed for this, and it starts 2-3x faster than full Chrome), the
+/// common install paths, and a Chrome `install-browser` put in place.
 pub fn resolve_executable(cli_override: Option<&str>) -> Option<String> {
     resolve_executable_for(cli_override, true)
 }
@@ -447,10 +374,10 @@ pub fn resolve_executable_for(cli_override: Option<&str>, headless: bool) -> Opt
             }
         }
     }
-    common_executables()
-        .into_iter()
-        .find(|p| Path::new(p).exists())
-        .or_else(|| cached_browsers(headless).into_iter().next())
+    let shell = headless.then(|| crate::install::installed("chrome-headless-shell").into_iter().next()).flatten();
+    shell
+        .or_else(|| common_executables().into_iter().find(|p| Path::new(p).exists()))
+        .or_else(|| crate::install::installed("chrome").into_iter().next())
 }
 
 /// True when `--engine` selects the Lightpanda CDP server instead of Chromium.
@@ -630,9 +557,10 @@ impl BrowserSession {
             // own.
             let Some(exe) = resolve_executable_for(executable, headless && !natural()) else {
                 bail!(
-                    "no Chrome/Chromium/Edge found — install Chrome, or `npx @puppeteer/browsers install chrome-headless-shell@stable` and pass its path via --chromium or $CHROME_BIN"
+                    "no Chrome/Chromium/Edge found — run `navigera install-browser` (Google's chrome-headless-shell, into navigera's cache), install Chrome, or pass a browser with --chromium or $CHROME_BIN"
                 );
             };
+            crate::timing::log(&format!("[browser] executable {exe}"));
             let launch = |flags: Vec<String>| -> Result<Browser> {
                 let browser = Browser::launch(
                     &handle,
@@ -751,7 +679,7 @@ impl BrowserSession {
             AttachTarget::Profile { name, executable, headless, from, from_profile } => {
                 let dir = cdp::attach::profile_dir(name)?;
                 let Some(exe) = resolve_executable_for(executable.as_deref(), *headless && !natural()) else {
-                    bail!("no Chrome/Chromium/Edge found for --profile — pass --chromium <path> or set $CHROME_BIN");
+                    bail!("no Chrome/Chromium/Edge found for --profile — run `navigera install-browser chrome`, install Chrome, or pass --chromium <path> or $CHROME_BIN");
                 };
                 let mut what = format!("profile {}", dir.display());
                 if let Some(from) = from {
@@ -1401,8 +1329,8 @@ impl BrowserSession {
     }
 
     /// Every cookie, and the localStorage of each origin open in a tab, as
-    /// Playwright's `storageState` writes them, so a file from either tool
-    /// loads in the other.
+    /// `{cookies, origins}`: the storage-state shape browser tools commonly
+    /// read and write, so a file saved elsewhere loads here and back.
     pub fn storage_state(&self) -> Result<serde_json::Value> {
         let cookies = self.cookies(true, None)?;
         let cookies: Vec<serde_json::Value> = cookies

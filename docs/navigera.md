@@ -115,7 +115,7 @@ another process are reachable by ref only.
 | `network <n>` | `--body-file <file>` | one request in full: headers, post data, response body (8 KB shown; the file gets all of it) |
 | `cookies` | `[--all] [--url <u>] [--json]`; `set <name> <value> [--url <u> \| --domain <d>] [--path] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax\|Strict\|None]`; `delete <name>`; `clear` | one cookie per line (`--all`: every cookie in the browser); `set` → `{set}`, `delete` → `{deleted}`, `clear` → `{cleared: true}` |
 | `storage` | `[local\|session] [get [<key>] \| set <key> <value> \| remove <key> \| clear]` | the value, or the whole store as an object |
-| `state` | `save\|load <file.json>` | every cookie (HttpOnly too) and the open tabs' localStorage to a file, or back: `{saved\|loaded, cookies, origins}`. The file is Playwright's `storageState` format, so either tool reads the other's. `load` sets the cookies at once and gives each origin's keys to documents of that origin that lack them |
+| `state` | `save\|load <file.json>` | every cookie (HttpOnly too) and the open tabs' localStorage to a file, or back: `{saved\|loaded, cookies, origins}`. The file is the common storage-state JSON, so one saved by another browser tool loads here, and back. `load` sets the cookies at once and gives each origin's keys to documents of that origin that lack them |
 | `show` / `hide` | — | the session's browser on screen, or off it, with the same tabs (the active one stays active) and sign-ins: a `--profile` browser restarts on its profile, which keeps everything; one navigera launched is replaced by one carrying its cookies and the open tabs' storage. For a step only a person can do (a login, 2FA, a CAPTCHA). `show` needs a display. Not for `--attach`, which is already on screen | state + `visible` |
 | `profiles` | — | no session needed: `{browsers: [{browser, user_data_dir, attach_ready, hand_off, profiles: [{dir, name, email, last_used}]}], navigera_profiles: [{name, dir, running}]}`: what `--attach` and `--from` can be pointed at |
 | `pdf` | `[<path>]` or `--path`; `--landscape`; `--background` | `{path, bytes}` |
@@ -137,9 +137,10 @@ another process are reachable by ref only.
 | `dialog` | `--accept [--prompt-text t]` or `--dismiss` | `{dialogs: "accept"\|"dismiss"}` |
 | `quit` (`close`) | — | `{bye: true}`; a session server and its browser exit |
 | `skill` | — | prints the agent guide (SKILL.md) |
+| `install-browser` | `[chrome-headless-shell \| chrome] [--channel stable\|beta\|dev\|canary] [--where]` | downloads that Chrome from Google's Chrome for Testing into navigera's cache, used from then on (see Browsers and engines): `{installed, version}`; `--where` prints the directory |
 | `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
 
-Other names the parser takes, for agents used to Playwright's: `navigate`
+Other names the parser takes, for agents used to other tools' names: `navigate`
 (`goto`), `drag-drop` (`drag`), `cookie` (`cookies`), `emulate` (`set`),
 `addinitscript` (`init-script`), `close-page` (`tab-close`).
 
@@ -179,7 +180,7 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 
 - **Snapshots wait for fetched data.** Before `ax` and `screenshot`,
   navigera waits until the tab has had no `fetch`/XHR in flight for 500 ms
-  (Playwright's `networkidle` window), at most 3 s; requests open longer
+  (the usual network-idle window), at most 3 s; requests open longer
   than 5 s (long polls, streams) don't count. A page that has been quiet —
   usual when an agent has been thinking — is read at once. So
   `goto … && … ax` shows a single-page app's list, not its "Loading…"
@@ -396,7 +397,7 @@ the client opened). `NAVIGERA_MCP_ALLOW_FILES=1` lifts these limits.
 
 Every action takes `snapshot: true` to return the updated tree in the same
 call. The whole tool list (23 tools) is about 14 KB (~3,600 tokens), against
-~20 KB for Playwright MCP 0.0.83 and ~26 KB for Chrome DevTools MCP 1.10.1.
+~26 KB for Chrome DevTools MCP 1.10.1.
 
 Client configuration (all run the same command):
 
@@ -430,12 +431,24 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   order:
   1. `--chromium`;
   2. `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`;
-  3. system Chrome, Chromium or Edge;
-  4. Playwright and Puppeteer browser caches. For headless runs the cache
-     search prefers chrome-headless-shell.
+  3. for a headless run, the chrome-headless-shell `navigera install-browser`
+     installed;
+  4. system Chrome, Chromium or Edge;
+  5. the Chrome `navigera install-browser chrome` installed.
 
   Brave and Edge work via `--chromium`. chrome-headless-shell starts
   faster than full Chrome: it has no browser UI to bring up.
+- **Installing a browser.** `navigera install-browser [chrome-headless-shell
+  | chrome] [--channel stable|beta|dev|canary]` downloads the latest of that
+  channel from Google's [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/),
+  the builds Google publishes for automation, through `curl`, checks every
+  file of the archive against its checksum, and unpacks it into
+  `$NAVIGERA_BROWSERS`, else `~/.cache/navigera/browsers`
+  (`~/Library/Caches/navigera/browsers` on macOS,
+  `%LOCALAPPDATA%\navigera\browsers` on Windows); `--where` prints the
+  directory. Run it again for a newer version; the newest installed one is
+  used. Chrome for Testing has no Linux ARM build: there, install Chromium
+  from the distribution. `--natural` always takes the full Chrome.
 - **Browser flags.** Chrome runs without its sandbox as root, or when a
   first launch shows this machine can't give it one (the warning says so
   once); `NAVIGERA_NO_SANDBOX=1` turns it off up front and silences the
@@ -540,17 +553,17 @@ machine without a GPU still reports a software renderer).
   they changed: no `no_effect`), `NAVIGERA_NO_DISCOVER=1` (popups aren't
   adopted as tabs).
 
-## Playwright CLI / agent-browser → navigera
+## agent-browser → navigera
 
-| playwright-cli | agent-browser | navigera |
-|---|---|---|
-| `open <url>` / `goto <url>` | `open <url>` | `start` + `goto <url>` |
-| `snapshot` | `snapshot` | `ax` (or `snapshot`) |
-| `click e15` | `click @e2` | `click 15` (also `@e15`, `e15`) |
-| `fill e3 "x"` | `fill @e3 "x"` | `fill 3 "x"` |
-| `type`, `press Enter`, `select`, `hover` | same | same |
-| `eval "document.title"` | `eval "document.title"` | `eval "document.title"` |
-| `tab-new`, `tab-list`, `tab-select`, `tab-close` | `tab new`, `tab`, … | `tab-new`, `tab-list`, `tab-select`, `tab-close` |
-| `close` | `close` | `quit` (or `close`) |
-| `-s=name` | `--session name` | `-s name` / `-s=name` |
-| `--raw` | `--json` (default text) | `--raw` (default JSON) |
+| agent-browser | navigera |
+|---|---|
+| `open <url>` | `start` + `goto <url>` |
+| `snapshot` | `ax` (or `snapshot`) |
+| `click @e2` | `click 2` (also `@e2`, `e2`) |
+| `fill @e3 "x"` | `fill 3 "x"` |
+| `type`, `press Enter`, `select`, `hover` | same |
+| `eval "document.title"` | `eval "document.title"` |
+| `tab new`, `tab`, … | `tab-new`, `tab-list`, `tab-select`, `tab-close` |
+| `close` | `quit` (or `close`) |
+| `--session name` | `-s name` / `-s=name` |
+| `--json` (default text) | `--raw` (default JSON) |

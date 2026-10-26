@@ -164,6 +164,43 @@ jobs:
   # The install path agents actually take: `curl install.sh | sh` (a
   # release binary, or the cargo fallback while there is no release), and
   # `irm install.ps1 | iex` on Windows.
+  # `install-browser` against the real Chrome for Testing, and a session on
+  # what it installed (the session log names the executable it launched).
+  install-browser:
+    name: install-browser (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      NAVIGERA_BROWSERS: ${{ runner.temp }}/browsers
+      NAVIGERA_TIMINGS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+        with:
+          toolchain: stable
+          cache: false
+      - run: cargo build --locked --bin navigera
+      - name: install, again (already there), then a session on it
+        shell: bash
+        run: |
+          nv=target/debug/navigera
+          $nv install-browser --where
+          $nv install-browser | tee "$RUNNER_TEMP/first.json"
+          grep -q '"ok":true' "$RUNNER_TEMP/first.json"
+          $nv install-browser | grep -q '"already":true'
+          $nv -s ib start | tee "$RUNNER_TEMP/start.json"
+          $nv -s ib goto "data:text/html,<title>ok</title>" | grep -q '"title":"ok"'
+          $nv -s ib quit
+          log=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['result']['log'])" "$RUNNER_TEMP/start.json")
+          grep "executable" "$log"
+          grep -q "executable .*chrome-headless-shell" "$log"
+
   install:
     name: install (${{ matrix.os }})
     strategy:

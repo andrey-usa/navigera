@@ -5,8 +5,8 @@
 //! under the hood, so the MCP server and the CLI behave identically: the same
 //! `ax` tree with `[ref=N]`, the same auto-waits, dialogs and tab adoption.
 //!
-//! Tool names follow Playwright MCP's (`browser_navigate`, `browser_snapshot`,
-//! `browser_click`, …) because models already know them. Two additions save
+//! Tool names are the common browser MCP ones (`browser_navigate`,
+//! `browser_snapshot`, `browser_click`, …) because models already know them. Two additions save
 //! turns: every action takes `snapshot: true` to return the page tree with
 //! its result, and `browser_run` chains several steps in one call.
 //!

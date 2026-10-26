@@ -1,6 +1,6 @@
 ---
 name: navigera
-description: Drive a real headless Chrome from the shell with navigera — one command per step against a warm session. Read pages as a compact accessibility tree with [ref=N], then click/fill/select/press by ref, wait, screenshot, handle tabs, iframes and dialogs. Use for web browsing, scraping, form filling and UI checks instead of writing Playwright/Puppeteer/Python scripts.
+description: Drive a real headless Chrome from the shell with navigera — one command per step against a warm session. Read pages as a compact accessibility tree with [ref=N], then click/fill/select/press by ref, wait, screenshot, handle tabs, iframes and dialogs. Use for web browsing, scraping, form filling and UI checks instead of writing browser automation scripts.
 ---
 
 # navigera
@@ -18,8 +18,9 @@ Windows (PowerShell): `irm https://raw.githubusercontent.com/andrey-usa/navigera
 single-quote JavaScript that contains `$` there. JavaScript with quotes,
 backslashes or regex survives no shell's quoting reliably: save it to a file
 and run `eval --file extract.js` (or pipe it to `eval -`). Chrome is found on
-its own (system install, Playwright/Puppeteer caches); else pass `start
---chromium <path>` or set `$CHROME_BIN`.
+its own (a system install, or the chrome-headless-shell `navigera
+install-browser` downloads from Google); else pass `start --chromium <path>`
+or set `$CHROME_BIN`.
 
 ## The loop: start, look, act, look again
 
@@ -164,7 +165,7 @@ only there.
 | `network [--failed] [--filter api] [--since <n>]`, `network <n>` | requests one per line (`--since`: after #n); one request with its body |
 | `downloads [--dir <path>]`, `wait --download "*.csv"` | downloaded files with their paths; `--dir` sets where they go |
 | `cookies`, `cookies set <name> <value>`, `storage [get\|set k v]` | cookies and localStorage |
-| `state save auth.json` … `state load auth.json` | sign in once, reuse it later (Playwright storageState) |
+| `state save auth.json` … `state load auth.json` | sign in once, reuse it later (cookies and localStorage in one file) |
 | `set device "iPhone 15"`, `set viewport 1280 720`, also `media dark`, `geo <lat> <lon>`, `offline on`, `credentials <user> <pass>` | emulate (`off` resets) |
 | `route "*/api/*" --body '{…}'`, `route "*.png"` (fail), `unroute` | mock or block requests |
 | `pdf [file.pdf]`, `init-script "<js>"`, `wait --idle` | print, run code before the page's, wait for the network |
