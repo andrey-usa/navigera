@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-26
+
+A security fix for the MCP server: every file a `browser_run` step names
+stays inside the working directory. Also `install-browser`, which fetches
+Chrome for Testing into navigera's own cache; `locate` and `history`, which
+`primavera from-session` builds tests from; and numbers from the page that
+keep their exact value.
+
 ### Added
 
 - `install-browser [chrome-headless-shell | chrome] [--channel stable|beta|dev|canary]`:
@@ -455,6 +463,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.6.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.1
 [0.6.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.0
 [0.5.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.5.0
 [0.4.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.4.1
