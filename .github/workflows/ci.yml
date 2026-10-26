@@ -189,6 +189,9 @@ jobs:
         shell: bash
         run: |
           export NAVIGERA_BROWSERS="$RUNNER_TEMP/browsers"
+          # Ubuntu's runner image sets $CHROME_BIN to its Chrome, and an
+          # explicit $CHROME_BIN wins over what install-browser installed.
+          unset CHROME_BIN NAVIGERA_CHROMIUM
           nv=target/debug/navigera
           $nv install-browser --where
           $nv install-browser | tee "$RUNNER_TEMP/first.json"
