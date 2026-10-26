@@ -174,7 +174,7 @@ pub fn launch_chrome(
 
 /// A browser launched with `--remote-debugging-pipe`: CDP runs over two
 /// anonymous pipes (Chrome reads commands on fd 3, writes replies on fd 4;
-/// messages are NUL-terminated JSON), the transport Playwright uses.
+/// messages are NUL-terminated JSON).
 ///
 /// Compared with `--remote-debugging-port`: no DevTools HTTP/WebSocket server
 /// to start and no handshake, and — more important for agents on shared

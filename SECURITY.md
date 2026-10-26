@@ -14,7 +14,7 @@ navigera runs a real browser for an agent that opens pages nobody vetted.
 | other local users vs. your session | Unix: the session socket and log live in `$XDG_RUNTIME_DIR/navigera` or `$TMPDIR/navigera-<uid>`, mode 0700, refused if it is a symlink, someone else's or open to others; the log is 0600 and never follows a symlink. Windows: a loopback port that drops any client whose first line isn't the 128-bit token from your own `%TEMP%` |
 | a web page vs. the CDP connection | the default transport is a private pipe (Linux/macOS): no port at all. Chrome rejects DevTools WebSocket connections from web origins |
 | the downloaded binary | `install.sh` / `install.ps1` verify the SHA-256 published with each release; release builds carry GitHub build-provenance attestations (`gh attestation verify <file> -R andrey-usa/navigera`) |
-| the MCP server's file access | `browser_file_upload` takes files inside the working directory only, and `file:` URLs are refused, unless `NAVIGERA_MCP_ALLOW_FILES=1` |
+| the MCP server's file access | every file a tool or `browser_run` step reads or writes (upload, route `body_file`, `state`, `network --har`/`--body-file`, `pdf`, `screenshot --path`, `downloads --dir`) must be inside the working directory, and `file:` and `chrome://`/`devtools://` pages are refused, unless `NAVIGERA_MCP_ALLOW_FILES=1` |
 | page content vs. third parties | nothing leaves the machine but the browser's own traffic, unless you configure a decision model (`TYPESAFE_API_KEY` / `NAVIGERA_DECIDER_URL`). Then `find` and `check` send the page's accessibility tree to it, with text typed into fields replaced by `(filled)`; the key goes to `curl` on stdin, not in its arguments |
 
 ## Known exposures

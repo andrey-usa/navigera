@@ -220,8 +220,8 @@ fn cookies_storage_pdf_init_scripts_and_routes() {
 }
 
 /// `state save` in one session and `state load` in a fresh one: the cookies
-/// (HttpOnly included) and the page's localStorage come back, in the file
-/// format Playwright's storageState uses.
+/// (HttpOnly included) and the page's localStorage come back, in the
+/// `{cookies, origins}` storage-state format.
 #[test]
 fn state_saved_in_one_session_loads_in_another() {
     let Some(site) = edge_site() else { return };

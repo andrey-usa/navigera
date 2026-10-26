@@ -1,6 +1,6 @@
 [package]
 name = "navigera"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 default-run = "navigera"
 description = "Drive headless Chrome from the shell, one command per step: a native Rust CDP CLI for AI agents (accessibility-tree refs, sessions, tabs, iframes, dialogs) plus a JSON-lines serve mode."
@@ -21,8 +21,9 @@ futures-util = "0.3"
 tempfile = "3"
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 anyhow = "1"
+miniz_oxide = "0.9"
 
 [profile.release]
 lto = true

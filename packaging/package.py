@@ -22,6 +22,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import stat
 import tarfile
 import zipfile
@@ -72,7 +73,7 @@ LAUNCHER = """#!/usr/bin/env node
 "use strict";
 // Runs the {name} binary from the platform package npm installed alongside.
 const {{ spawnSync }} = require("child_process");
-const pkg = `{name}-${{process.platform}}-${{process.arch}}`;
+const pkg = {pkg_expr};
 const exe = process.platform === "win32" ? "{name}.exe" : "{name}";
 let bin;
 try {{
@@ -91,8 +92,18 @@ process.exit(result.status ?? 1);
 """
 
 
+def platform_package(args, os_: str, cpu: str) -> tuple[str, str]:
+    """(npm package name, output directory) of one platform package. Without --scope: navigera-linux-x64.
+    With --scope navigera: @navigera/linux-x64 (npm needs a scope you own, so the owner creates the org)."""
+    if args.scope:
+        return f"@{args.scope}/{os_}-{cpu}", f"{args.scope}-{os_}-{cpu}"
+    return f"{args.name}-{os_}-{cpu}", f"{args.name}-{os_}-{cpu}"
+
+
 def npm(args) -> None:
     root = Path(args.out) / "npm"
+    if args.scope and not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", args.scope):
+        raise SystemExit(f"--scope {args.scope!r}: npm scopes are lowercase letters, digits, '.', '_' and '-' (write navigera, not @navigera)")
     common = {
         "version": args.version,
         "license": args.license,
@@ -102,24 +113,26 @@ def npm(args) -> None:
     optional = {}
     for target, archive, _ in archives(Path(args.dist), args.name):
         os_, cpu = TARGETS[target][:2]
-        pkg = f"{args.name}-{os_}-{cpu}"
+        pkg, pkg_dir = platform_package(args, os_, cpu)
         if pkg in optional:
             raise SystemExit(f"two archives map to the npm package {pkg}; ship one libc per platform")
         exe, data = binary(archive, args.name)
-        write_exe(root / pkg / "bin" / exe, data)
+        write_exe(root / pkg_dir / "bin" / exe, data)
         meta = {"name": pkg, **common, "description": f"The {os_}-{cpu} binary for {args.name}.",
                 "os": [os_], "cpu": [cpu], "files": ["bin"], "preferUnplugged": True}
         if target.endswith("-linux-gnu"):
             meta["libc"] = ["glibc"]
-        (root / pkg / "package.json").write_text(json.dumps(meta, indent=2) + "\n")
-        (root / pkg / "README.md").write_text(
+        (root / pkg_dir / "package.json").write_text(json.dumps(meta, indent=2) + "\n")
+        (root / pkg_dir / "README.md").write_text(
             f"# {pkg}\n\nThe {os_}-{cpu} binary for [{args.name}](https://github.com/{args.repo}). "
             f"Install `{args.name}` instead; npm picks this package for you.\n")
         optional[pkg] = args.version
     if not optional:
         raise SystemExit(f"no {args.name}-<target> archives in {args.dist}")
     main = root / args.name
-    write_exe(main / "bin" / f"{args.name}.js", LAUNCHER.format(name=args.name).encode())
+    pkg_expr = (f"`@{args.scope}/${{process.platform}}-${{process.arch}}`" if args.scope
+                else f"`{args.name}-${{process.platform}}-${{process.arch}}`")
+    write_exe(main / "bin" / f"{args.name}.js", LAUNCHER.format(name=args.name, pkg_expr=pkg_expr).encode())
     meta = {"name": args.name, **common, "description": args.description,
             "keywords": args.keywords.split(",") if args.keywords else [],
             "bin": {args.name: f"bin/{args.name}.js"}, "files": ["bin"],
@@ -249,6 +262,7 @@ def main() -> None:
     ap.add_argument("--license-file", default="LICENSE")
     ap.add_argument("--readme", default="README.md")
     ap.add_argument("--keywords", default="")
+    ap.add_argument("--scope", default="", help="npm: name the platform packages @<scope>/<os>-<cpu> (the main package keeps its name)")
     ap.add_argument("--mcp-name", default="", help="npm: the server's MCP Registry name (io.github.<owner>/<name>)")
     args = ap.parse_args()
     args.version = args.version.removeprefix("v")
