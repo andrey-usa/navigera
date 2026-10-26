@@ -668,34 +668,29 @@ pub fn in_working_dir(name: &str) -> bool {
 }
 
 /// Whether `path` (existing or about to be written) is under `root` once
-/// `..` and symlinks are resolved: the deepest part that exists is
-/// resolved, the rest can't be a link yet.
+/// `..` and symlinks are resolved the way the system resolves them: one part
+/// at a time, each part that exists followed to where it leads before the
+/// next `..` is taken from there. Collapsing `..` first got it wrong:
+/// `link/../x`, with `link` a link out of the working directory, read as `x`
+/// inside it while the system wrote `x` beside the link's target (T-0085).
 fn inside(root: &std::path::Path, path: &std::path::Path) -> bool {
     use std::path::Component;
-    let mut plain = std::path::PathBuf::new();
+    let mut at = std::path::PathBuf::new();
     for c in path.components() {
         match c {
+            Component::CurDir => continue,
             Component::ParentDir => {
-                plain.pop();
+                at.pop();
             }
-            Component::CurDir => {}
-            other => plain.push(other),
+            other => at.push(other),
         }
-    }
-    let mut rest = Vec::new();
-    let mut at = plain.as_path();
-    loop {
+        // What exists so far is followed to where it really is; a part that
+        // does not exist yet can't be a link, and is taken as written.
         if let Ok(real) = at.canonicalize() {
-            return rest.iter().rev().fold(real, |p, part| p.join(part)).starts_with(root);
-        }
-        match (at.parent(), at.file_name()) {
-            (Some(up), Some(name)) => {
-                rest.push(name.to_os_string());
-                at = up;
-            }
-            _ => return false,
+            at = real;
         }
     }
+    at.starts_with(root)
 }
 
 fn screenshot_path() -> String {
@@ -891,7 +886,18 @@ mod tests {
             let _ = std::fs::create_dir_all("target");
             let _ = std::fs::remove_file(link);
             if std::os::unix::fs::symlink(std::env::temp_dir(), link).is_ok() {
-                assert!(check_file_access(&json!({"op": "pdf", "path": "target/mcp-test-link-out/a.pdf"})).is_err());
+                for path in [
+                    "target/mcp-test-link-out/a.pdf",
+                    // `..` is taken from where the link leads, not from the link
+                    // (T-0085): these are beside the temporary directory.
+                    "target/mcp-test-link-out/../a.pdf",
+                    "target/not-yet/../mcp-test-link-out/../a.pdf",
+                ] {
+                    let step = json!({"op": "pdf", "path": path});
+                    assert!(check_file_access(&step).is_err(), "{path}");
+                    assert!(!in_working_dir(path), "{path}");
+                }
+                assert!(check_file_access(&json!({"op": "pdf", "path": "target/not-yet/../a.pdf"})).is_ok());
                 let _ = std::fs::remove_file(link);
             }
         }

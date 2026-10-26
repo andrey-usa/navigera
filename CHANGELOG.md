@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- MCP: a file a `browser_run` step names could still land outside the
+  working directory through a link inside it: `link/../x`, with `link`
+  pointing elsewhere, was checked as `x` in the working directory and
+  written beside the link's target (`state save`, `pdf`, `downloads --dir`;
+  0.6.1). Each part of the path is now followed to where it leads before
+  the next `..`, as the system does. Found by red-teaming the 0.6.1 fix.
+
 ## [0.6.1] - 2026-10-26
 
 A security fix for the MCP server: every file a `browser_run` step names
