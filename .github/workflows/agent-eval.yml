@@ -140,7 +140,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: $/.github/actions/agent-setup
+      - uses: ./.github/actions/agent-setup
       - name: Lightpanda binary (navigera-lightpanda tools)
         if: contains(matrix.run.tool, 'lightpanda')
         env:
@@ -205,7 +205,7 @@ jobs:
           cat "$log"
       - name: Decider relay (TypeSafe Jev)
         if: "!cancelled() && contains(matrix.run.tool, '+jev') && env.HAS_KEY == 'true' && env.MODE != 'scripted' && steps.smoke.outcome == 'success'"
-        uses: $/.github/actions/jev-relay
+        uses: ./.github/actions/jev-relay
         with:
           key: ${{ secrets.TYPESAFE_API_KEY }}
       - name: Onboarding (the agent installs the tool from its own docs)
@@ -255,8 +255,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: $/.github/actions/agent-setup
-      - uses: $/.github/actions/jev-relay
+      - uses: ./.github/actions/agent-setup
+      - uses: ./.github/actions/jev-relay
         with:
           key: ${{ secrets.TYPESAFE_API_KEY }}
       - name: Jev and the model on the same decisions

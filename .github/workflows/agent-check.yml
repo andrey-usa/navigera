@@ -61,7 +61,7 @@ jobs:
       - name: No key
         if: env.HAS_KEY != 'true'
         run: echo "::notice title=agent check::no Gemini key available to this run (fork PR or unset); skipped."
-      - uses: $/.github/actions/agent-setup
+      - uses: ./.github/actions/agent-setup
         if: env.HAS_KEY == 'true'
       - name: Agent run
         if: env.HAS_KEY == 'true'

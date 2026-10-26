@@ -138,7 +138,7 @@ jobs:
           echo "::notice title=openrouter eval chrome::$("$bin" --version)"
       - name: Decider relay (TypeSafe Jev)
         if: contains(matrix.run.tool, '+jev')
-        uses: $/.github/actions/jev-relay
+        uses: ./.github/actions/jev-relay
         with:
           key: ${{ secrets.TYPESAFE_API_KEY }}
       - name: Head-to-head runs
