@@ -312,12 +312,12 @@ persistent connection. Same canonical session plus one page snapshot.
 
 | tool | kind | total wall | mean per step | snapshot | snapshot size | gate |
 |---|---|---|---|---|---|---|
-| `navigera` (this repo) | CLI | 0.84s | 43 ms | 190 ms | 36 KB | ✓ |
-| `navigera` on chrome-headless-shell | CLI | 0.50s | 32 ms | 160 ms | 36 KB | ✓ |
-| `agent-browser` (Vercel Labs, Rust) | CLI | 1.24s | 89 ms | 207 ms | 73 KB | ✓ |
-| `playwright-cli` (Microsoft) | CLI | 10.07s | 801 ms | 430 ms | 50 KB | ✓ |
+| `navigera` (this repo) | CLI | 0.85s | 44 ms | 180 ms | 36 KB | ✓ |
+| `navigera` on chrome-headless-shell | CLI | 0.49s | 33 ms | 150 ms | 36 KB | ✓ |
+| `agent-browser` (Vercel Labs, Rust) | CLI | 1.29s | 94 ms | 198 ms | 73 KB | ✓ |
+| `playwright-cli` (Microsoft) | CLI | 10.08s | 804 ms | 422 ms | 50 KB | ✓ |
 | Playwright MCP (Microsoft) | MCP | 5.32s | 403 ms | 76 ms | 50 KB | ✓ |
-| Chrome DevTools MCP (Google) | MCP | 3.35s | 200 ms | 121 ms | 34 KB | ✓ |
+| Chrome DevTools MCP (Google) | MCP | 3.25s | 201 ms | 105 ms | 34 KB | ✓ |
 
 Per-step time includes process start (CLI) or JSON-RPC (MCP), the hop to
 the daemon, and the CDP work. playwright-cli and Playwright MCP share Playwright's tool
