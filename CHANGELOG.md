@@ -58,6 +58,14 @@ All notable changes to this project are documented here. The format follows
 ### Security
 
 - tokio 1.54 (RUSTSEC-2026-0386).
+- MCP: `browser_run` steps could read and write files outside the working
+  directory (a route's `body_file` served any local file to the page;
+  `state save`, `network --har`/`--body-file`, `pdf` and `downloads --dir`
+  wrote anywhere). Every file a step names is now held to the working
+  directory, as uploads were, and the browser's own pages (`chrome://`,
+  `devtools://`) are refused; `NAVIGERA_MCP_ALLOW_FILES=1` lifts both.
+- The default download directory is now inside `navigera-<uid>` in the
+  temp directory (mode 0700), not a world-readable `navigera-downloads-<pid>`.
 
 ## [0.6.0] - 2026-10-24
 

@@ -608,39 +608,87 @@ fn files_allowed() -> bool {
     std::env::var("NAVIGERA_MCP_ALLOW_FILES").is_ok_and(|v| v.trim() == "1")
 }
 
+/// The fields of a step that name a file or directory here, by op
+/// (`cookies`' `path` is a URL path, not one of them).
+const FILE_FIELDS: &[(&str, &[&str])] = &[
+    ("upload", &["files", "file"]),
+    ("route", &["body_file"]),
+    ("state", &["path"]),
+    ("network", &["har", "body_file"]),
+    ("pdf", &["path"]),
+    ("screenshot", &["path"]),
+    ("downloads", &["dir"]),
+];
+
+/// Pages of the browser itself (settings, inspect, flags), not of the web.
+const BROWSER_PAGES: &[&str] = &["chrome:", "chrome-untrusted:", "chrome-extension:", "devtools:", "edge:", "brave:"];
+
 /// An MCP client may have no shell of its own (Claude Desktop): the browser
-/// must not become its way to read the disk or to upload any file a page
-/// asks for. `file:` pages are refused, and uploads must come from inside
-/// the working directory (the project the client opened).
+/// must not become its way to the disk, to the browser's own pages, or to
+/// upload any file a page asks for. `file:` and browser pages are refused,
+/// and every file a step reads or writes (an upload, a route's body, a
+/// saved state, a HAR, a PDF, a download directory) must be inside the
+/// working directory (the project the client opened).
 fn check_file_access(step: &Value) -> Result<(), String> {
+    const ALLOW: &str = "(set NAVIGERA_MCP_ALLOW_FILES=1 to allow)";
     if let Some(url) = step.get("url").and_then(Value::as_str) {
         let lower = url.trim().to_ascii_lowercase();
-        if lower.starts_with("file:") || lower.starts_with("view-source:file:") {
-            return Err(format!(
-                "{url}: local files are not opened over MCP (set NAVIGERA_MCP_ALLOW_FILES=1 to allow)"
-            ));
+        let lower = lower.strip_prefix("view-source:").unwrap_or(&lower);
+        if lower.starts_with("file:") {
+            return Err(format!("{url}: local files are not opened over MCP {ALLOW}"));
+        }
+        if BROWSER_PAGES.iter().any(|p| lower.starts_with(p)) {
+            return Err(format!("{url}: the browser's own pages are not opened over MCP {ALLOW}"));
         }
     }
-    if step.get("op").and_then(Value::as_str) == Some("upload") {
-        let cwd = std::env::current_dir().map_err(|e| format!("upload: working directory: {e}"))?;
-        let root = cwd.canonicalize().unwrap_or(cwd.clone());
-        let files = match step.get("files") {
+    let op = step.get("op").and_then(Value::as_str).unwrap_or("");
+    let Some((_, fields)) = FILE_FIELDS.iter().find(|(o, _)| *o == op) else { return Ok(()) };
+    let cwd = std::env::current_dir().map_err(|e| format!("{op}: working directory: {e}"))?;
+    let root = cwd.canonicalize().unwrap_or(cwd.clone());
+    for field in *fields {
+        let names = match step.get(*field) {
             Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).map(str::to_string).collect(),
             Some(Value::String(one)) => vec![one.clone()],
             _ => Vec::new(),
         };
-        for file in files {
-            let path = cwd.join(&file);
-            let real = path.canonicalize().map_err(|e| format!("upload: {file}: {e}"))?;
-            if !real.starts_with(&root) {
-                return Err(format!(
-                    "upload: {file} is outside the working directory {} (set NAVIGERA_MCP_ALLOW_FILES=1 to allow)",
-                    root.display()
-                ));
+        for name in names {
+            if !inside(&root, &cwd.join(&name)) {
+                return Err(format!("{op}: {name} is outside the working directory {} {ALLOW}", root.display()));
             }
         }
     }
     Ok(())
+}
+
+/// Whether `path` (existing or about to be written) is under `root` once
+/// `..` and symlinks are resolved: the deepest part that exists is
+/// resolved, the rest can't be a link yet.
+fn inside(root: &std::path::Path, path: &std::path::Path) -> bool {
+    use std::path::Component;
+    let mut plain = std::path::PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                plain.pop();
+            }
+            Component::CurDir => {}
+            other => plain.push(other),
+        }
+    }
+    let mut rest = Vec::new();
+    let mut at = plain.as_path();
+    loop {
+        if let Ok(real) = at.canonicalize() {
+            return rest.iter().rev().fold(real, |p, part| p.join(part)).starts_with(root);
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(up), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = up;
+            }
+            _ => return false,
+        }
+    }
 }
 
 fn screenshot_path() -> String {
@@ -804,6 +852,49 @@ mod tests {
         let err = check_file_access(&json!({"op": "upload", "ref": 3, "files": ["../../../../etc/passwd"]}));
         assert!(err.is_err());
         assert!(check_file_access(&json!({"op": "upload", "ref": 3, "files": ["Cargo.toml"]})).is_ok());
+        // Every op that reads or writes a file: inside the working directory only.
+        let far = std::env::temp_dir().join("navigera-mcp-test-out").display().to_string();
+        for step in [
+            json!({"op": "route", "pattern": "*/leak", "body_file": "/etc/hostname"}),
+            json!({"op": "route", "pattern": "*/leak", "body_file": "src/../../x"}),
+            json!({"op": "state", "action": "save", "path": far}),
+            json!({"op": "state", "action": "load", "path": far}),
+            json!({"op": "network", "har": far}),
+            json!({"op": "network", "body_file": far}),
+            json!({"op": "pdf", "path": far}),
+            json!({"op": "screenshot", "path": far}),
+            json!({"op": "downloads", "dir": far}),
+        ] {
+            let err = check_file_access(&step).expect_err(&step.to_string());
+            assert!(err.contains("outside the working directory"), "{step}: {err}");
+        }
+        for step in [
+            json!({"op": "route", "pattern": "*/x", "body_file": "Cargo.toml"}),
+            json!({"op": "state", "action": "save", "path": "target/state.json"}),
+            json!({"op": "pdf", "path": "./not/yet/there.pdf"}),
+            json!({"op": "downloads", "dir": "target/dl"}),
+            json!({"op": "cookies", "path": "/"}),
+        ] {
+            assert!(check_file_access(&step).is_ok(), "{step}");
+        }
+        // A link inside the working directory that leads out of it.
+        #[cfg(unix)]
+        {
+            let link = std::path::Path::new("target/mcp-test-link-out");
+            let _ = std::fs::create_dir_all("target");
+            let _ = std::fs::remove_file(link);
+            if std::os::unix::fs::symlink(std::env::temp_dir(), link).is_ok() {
+                assert!(check_file_access(&json!({"op": "pdf", "path": "target/mcp-test-link-out/a.pdf"})).is_err());
+                let _ = std::fs::remove_file(link);
+            }
+        }
+        for url in
+            ["chrome://settings", " CHROME://inspect/#devices", "view-source:chrome://version", "devtools://devtools/x"]
+        {
+            let err = check_file_access(&json!({"op": "goto", "url": url})).unwrap_err();
+            assert!(err.contains("browser's own pages"), "{url}: {err}");
+        }
+        assert!(check_file_access(&json!({"op": "goto", "url": "https://example.com/chrome://x"})).is_ok());
     }
 
     #[test]

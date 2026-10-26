@@ -154,14 +154,21 @@ pub fn set_download_dir(dir: Option<&str>) {
     }
 }
 
-/// The download directory in force, created if missing (absolute).
+/// The download directory in force, created if missing (absolute). The
+/// default is this process's `downloads-<pid>` in a temp directory only
+/// this user can enter: what a signed-in session downloads is theirs.
 pub fn download_dir() -> Result<std::path::PathBuf> {
-    let dir = DOWNLOAD_DIR
+    let chosen = DOWNLOAD_DIR
         .lock()
         .unwrap()
         .clone()
-        .or_else(|| std::env::var_os("NAVIGERA_DOWNLOAD_DIR").filter(|v| !v.is_empty()).map(Into::into))
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("navigera-downloads-{}", std::process::id())));
+        .or_else(|| std::env::var_os("NAVIGERA_DOWNLOAD_DIR").filter(|v| !v.is_empty()).map(Into::into));
+    let dir = match chosen {
+        Some(dir) => dir,
+        None => crate::session::private_temp_dir()
+            .context("download directory")?
+            .join(format!("downloads-{}", std::process::id())),
+    };
     std::fs::create_dir_all(&dir).with_context(|| format!("download directory {}", dir.display()))?;
     // Not `canonicalize`: on Windows it gives a `\\?\C:\…` path, and Chrome
     // cancels every download into one of those.

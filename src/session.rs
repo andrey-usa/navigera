@@ -180,6 +180,26 @@ pub fn session_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// A directory in the temp dir only this user can enter (`$TMPDIR/navigera-<uid>`,
+/// 0700, checked as [`session_dir`]'s is), for files too big for
+/// `$XDG_RUNTIME_DIR`: the default downloads. Windows' `%TEMP%` is per user.
+#[cfg(unix)]
+pub fn private_temp_dir() -> std::io::Result<PathBuf> {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { geteuid() };
+    let dir = std::env::temp_dir().join(format!("navigera-{uid}"));
+    ensure_private_dir(&dir, uid)?;
+    Ok(dir)
+}
+
+#[cfg(not(unix))]
+pub fn private_temp_dir() -> std::io::Result<PathBuf> {
+    Ok(std::env::temp_dir())
+}
+
 /// Create `dir` 0700, or accept an existing one only if it is a real
 /// directory owned by `uid` that no one else can enter.
 #[cfg(unix)]

@@ -192,6 +192,22 @@ fn mcp_drives_a_page() {
     let (text, is_error, _) = c.call("browser_tabs", json!({"action": "list"}));
     assert!(!is_error && text.contains("Form"), "{text}");
 
+    // A step can't reach a file outside the working directory, or the
+    // browser's own pages: not as a route's body, not as a saved state.
+    let secret = std::env::temp_dir().join(format!("navigera-mcp-secret-{}", std::process::id()));
+    std::fs::write(&secret, "TOPSECRET").unwrap();
+    for step in [
+        json!({"op": "route", "pattern": "*/leak", "body_file": secret.display().to_string()}),
+        json!({"op": "state", "action": "save", "path": secret.with_extension("json").display().to_string()}),
+    ] {
+        let (text, is_error, _) = c.call("browser_run", json!({"steps": [step]}));
+        assert!(is_error && text.contains("outside the working directory"), "{text}");
+    }
+    assert!(!secret.with_extension("json").exists());
+    std::fs::remove_file(&secret).ok();
+    let (text, is_error, _) = c.call("browser_navigate", json!({"url": "chrome://version"}));
+    assert!(is_error && text.contains("browser's own pages"), "{text}");
+
     // Closing is not the end: the next call starts a fresh browser.
     let (text, is_error, _) = c.call("browser_close", json!({}));
     assert!(!is_error, "{text}");

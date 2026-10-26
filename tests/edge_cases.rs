@@ -561,7 +561,7 @@ fn ax_waits_for_fetched_content() {
     s.ok(&["goto", &format!("{}/spa", site.base)]);
     let (r, took) = s.run(&["ax"]);
     let tree = r["result"].as_str().unwrap_or_default().to_string();
-    assert!(tree.contains("Loaded 3 items"), "ax read the placeholder: {tree}");
+    assert!(tree.contains("Loaded 3 items"), "ax read the placeholder after {took:?}: {tree}");
     assert!(took < Duration::from_secs(4), "bounded wait: {took:?}");
     // A quiet page is read at once (the 500 ms quiet window is not waited
     // out again). Timed on the server: the client's own spawn and connect

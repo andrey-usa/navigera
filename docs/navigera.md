@@ -25,7 +25,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
 | `--wait-ms <ms>` | element ops' wait when they name no timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
-| `--download-dir <dir>` | where downloaded files go (`$NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own under the system temp directory) |
+| `--download-dir <dir>` | where downloaded files go (`$NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own in `navigera-<uid>` under the system temp directory, which only you can enter) |
 | `--chromium <path>` | browser binary (also `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`) |
 | `--engine chrome\|lightpanda` (`$NAVIGERA_ENGINE`), `--headed` | engine; visible window |
 | `--idle-timeout-s <s>` | a session server shuts down after this idle time (default 1800, 0 = never) |
@@ -387,9 +387,12 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_close` | close the browser; the next call starts a fresh one |
 
 An MCP client may have no shell of its own, so the browser is not its way to
-the disk: `file:` pages are refused, and `browser_file_upload` takes only
-files inside the working directory (the project the client opened).
-`NAVIGERA_MCP_ALLOW_FILES=1` lifts both limits.
+the disk: `file:` pages and the browser's own pages (`chrome://`,
+`devtools://`) are refused, and every file a tool or a `browser_run` step
+reads or writes (an upload, a route's `body_file`, `state save`/`load`, a
+HAR or response body from `network`, a PDF, a screenshot's path, a
+`downloads` directory) must be inside the working directory (the project
+the client opened). `NAVIGERA_MCP_ALLOW_FILES=1` lifts these limits.
 
 Every action takes `snapshot: true` to return the updated tree in the same
 call. The whole tool list (23 tools) is about 14 KB (~3,600 tokens), against
