@@ -99,13 +99,173 @@ fn chrome_flags() -> Vec<String> {
 
 const NO_SANDBOX: &str = "--no-sandbox";
 
+/// `--natural`: the browser looks like the browser it is, not like an
+/// automated one. Set once per process, before the browser starts.
+static NATURAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn natural mode on for the browsers this process starts.
+pub fn set_natural(on: bool) {
+    NATURAL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether browsers started here run in natural mode (`--natural`, or
+/// `NAVIGERA_NATURAL=1`).
+pub fn natural() -> bool {
+    NATURAL.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var("NAVIGERA_NATURAL").is_ok_and(|v| !v.trim().is_empty() && v.trim() != "0")
+}
+
+/// How long element ops wait for their element when the op names no
+/// timeout of its own: `--wait-ms` (on `start`, `serve`, `mcp` or a single
+/// command), else `NAVIGERA_WAIT_MS`, else [`DEFAULT_ELEMENT_WAIT`]. A test
+/// suite against a slow app sets it once instead of on every step.
+static ELEMENT_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Set the element wait for this process (`None` leaves it as it is).
+pub fn set_element_wait(ms: Option<f64>) {
+    if let Some(ms) = ms.filter(|ms| ms.is_finite() && *ms > 0.0) {
+        ELEMENT_WAIT_MS.store(ms as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The element wait in force (see [`set_element_wait`]).
+pub fn element_wait() -> Duration {
+    let ms = ELEMENT_WAIT_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if ms > 0 {
+        return Duration::from_millis(ms);
+    }
+    std::env::var("NAVIGERA_WAIT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|ms| ms.is_finite() && *ms > 0.0)
+        .map(|ms| Duration::from_millis(ms as u64))
+        .unwrap_or(DEFAULT_ELEMENT_WAIT)
+}
+
+/// Where downloads are saved: `--download-dir`, else
+/// `NAVIGERA_DOWNLOAD_DIR`, else a directory of this process's own under
+/// the system temp directory.
+static DOWNLOAD_DIR: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Set the download directory for the browsers this process starts.
+pub fn set_download_dir(dir: Option<&str>) {
+    if let Some(dir) = dir.filter(|d| !d.trim().is_empty()) {
+        *DOWNLOAD_DIR.lock().unwrap() = Some(std::path::PathBuf::from(dir));
+    }
+}
+
+/// The download directory in force, created if missing (absolute).
+pub fn download_dir() -> Result<std::path::PathBuf> {
+    let dir = DOWNLOAD_DIR
+        .lock()
+        .unwrap()
+        .clone()
+        .or_else(|| std::env::var_os("NAVIGERA_DOWNLOAD_DIR").filter(|v| !v.is_empty()).map(Into::into))
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("navigera-downloads-{}", std::process::id())));
+    std::fs::create_dir_all(&dir).with_context(|| format!("download directory {}", dir.display()))?;
+    // Not `canonicalize`: on Windows it gives a `\\?\C:\…` path, and Chrome
+    // cancels every download into one of those.
+    Ok(std::path::absolute(&dir).unwrap_or(dir))
+}
+
+/// What a headless Chrome shows a page that a windowed one does not, put
+/// right for natural mode: the user agent says `HeadlessChrome` (in
+/// `navigator.userAgent`, in workers, in every request's header), and the
+/// screen is 800x600 behind a larger window. The user agent becomes the one
+/// the same Chrome sends with a window -- its major version, the reduced form
+/// Chrome sends -- and the screen 1920x1080. Navigator's `webdriver` flag
+/// is off in every mode (`--disable-blink-features=AutomationControlled`),
+/// and nothing here passes `--enable-automation`. A windowed browser needs
+/// none of this. chrome-headless-shell is refused: it is a different
+/// program, and its client hints, plugins and `window.chrome` say headless
+/// whatever the flags.
+pub fn natural_flags(exe: &str, headless: bool) -> Result<Vec<String>> {
+    if !headless {
+        return Ok(Vec::new());
+    }
+    let stem = Path::new(exe).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if matches!(stem.as_str(), "chrome-headless-shell" | "headless_shell") {
+        bail!(
+            "--natural needs the full Chrome: {exe} is chrome-headless-shell, which tells a page it is headless \
+             whatever navigera does; point --chromium or $CHROME_BIN at Chrome"
+        );
+    }
+    let mut flags = vec!["--screen-info={1920x1080}".to_string()];
+    match chrome_major(exe) {
+        Some(major) => flags.push(format!("--user-agent={}", windowed_user_agent(exe, major))),
+        None => crate::timing::log(&format!("[browser] natural: no version from {exe}; user agent left as is")),
+    }
+    Ok(flags)
+}
+
+/// The user agent Chrome `major` sends with a window on this platform.
+fn windowed_user_agent(exe: &str, major: u32) -> String {
+    let platform = if cfg!(windows) {
+        "Windows NT 10.0; Win64; x64"
+    } else if cfg!(target_os = "macos") {
+        "Macintosh; Intel Mac OS X 10_15_7"
+    } else {
+        "X11; Linux x86_64"
+    };
+    let file = Path::new(exe).file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let edge =
+        if file.contains("msedge") || file.contains("edge") { format!(" Edg/{major}.0.0.0") } else { String::new() };
+    format!("Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36{edge}")
+}
+
+/// The major version of a Chrome-family executable: from the version
+/// directory beside it on Windows (where `--version` opens a window instead
+/// of printing), else from `--version`, which costs a launch about 30 ms, so
+/// the answer is noted in the session directory against the binary's path,
+/// size and modification time (an update asks again).
+pub fn chrome_major(exe: &str) -> Option<u32> {
+    let parse = |text: &str| -> Option<u32> {
+        text.split(|c: char| c.is_whitespace() || c == '/')
+            .find(|w| {
+                w.split('.').count() == 4
+                    && w.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .and_then(|w| w.split('.').next()?.parse().ok())
+    };
+    if cfg!(windows) {
+        let dir = Path::new(exe).parent()?;
+        return std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                // `141.0.7390.37\` in an install, `141.0.7390.37.manifest`
+                // in a Chrome for Testing archive.
+                let name = e.file_name().to_string_lossy().into_owned();
+                parse(name.strip_suffix(".manifest").unwrap_or(&name))
+            })
+            .max();
+    }
+    let note = exe_note(exe, "chrome-version", false);
+    if let Some(major) = note.as_ref().and_then(|n| std::fs::read_to_string(n).ok()).and_then(|t| t.trim().parse().ok())
+    {
+        return Some(major);
+    }
+    let out = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let major = parse(&String::from_utf8_lossy(&out.stdout))?;
+    if let Some(note) = note {
+        let _ = std::fs::write(note, major.to_string());
+    }
+    Some(major)
+}
+
 /// Chrome refuses to start its sandbox as root (containers, CI images);
 /// `NAVIGERA_NO_SANDBOX=1` turns it off explicitly.
-fn no_sandbox_wanted(root: bool, env: Option<&str>) -> bool {
+pub(crate) fn no_sandbox_wanted(root: bool, env: Option<&str>) -> bool {
     root || env.is_some_and(|v| !v.trim().is_empty() && v.trim() != "0")
 }
 
-const NO_SANDBOX_WARNING: &str = "navigera: this machine can't give Chrome its sandbox, so it runs without one \
+pub(crate) const NO_SANDBOX_WARNING: &str =
+    "navigera: this machine can't give Chrome its sandbox, so it runs without one \
      (pages are not isolated from your account). Fix: enable unprivileged user \
      namespaces or Chrome's setuid helper; NAVIGERA_NO_SANDBOX=1 silences this.";
 
@@ -116,21 +276,32 @@ const NO_SANDBOX_WARNING: &str = "navigera: this machine can't give Chrome its s
 /// private session directory and is keyed by the binary's path, size and
 /// modification time and by the boot, so a Chrome update or a reboot (after
 /// which the machine may allow a sandbox) brings the attempt back.
-fn no_sandbox_note(exe: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn no_sandbox_note(exe: &str) -> Option<std::path::PathBuf> {
+    exe_note(exe, "no-sandbox", true)
+}
+
+/// A note about `exe` in the private session directory, named `what` and
+/// keyed by the binary's path, size and modification time (and the boot,
+/// when `per_boot`).
+fn exe_note(exe: &str, what: &str, per_boot: bool) -> Option<std::path::PathBuf> {
     let meta = std::fs::metadata(exe).ok()?;
     let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
     let path = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.into());
-    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+    let boot = if per_boot {
+        std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default()
+    } else {
+        String::new()
+    };
     let key = format!("{}\n{}\n{modified}\n{}", path.display(), meta.len(), boot.trim());
     // FNV-1a: the same across builds, which std's hasher does not promise.
     let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
-    Some(crate::session::session_dir().ok()?.join(format!("no-sandbox-{hash:016x}")))
+    Some(crate::session::session_dir().ok()?.join(format!("{what}-{hash:016x}")))
 }
 
 /// Whether a launch failed because this machine can't give Chrome a
 /// sandbox (no unprivileged user namespaces, a setuid helper that isn't
 /// set up, an AppArmor policy that blocks the namespace).
-fn sandbox_unavailable(error: &str) -> bool {
+pub(crate) fn sandbox_unavailable(error: &str) -> bool {
     [
         "No usable sandbox",
         "Failed to move to new namespace",
@@ -331,7 +502,15 @@ pub enum AttachTarget {
     Running(String),
     /// `--profile <name|dir>`: the persistent navigera browser on that
     /// profile, started when it isn't running.
-    Profile { name: String, executable: Option<String>, headless: bool },
+    Profile {
+        name: String,
+        executable: Option<String>,
+        headless: bool,
+        /// `--from`: seed the profile from this browser first (a copy).
+        from: Option<String>,
+        /// `--from-profile`: which of its profiles.
+        from_profile: Option<String>,
+    },
 }
 
 /// CDP transport when none is asked for. The pipe (fds 3/4) is Unix-only
@@ -347,7 +526,7 @@ const NAV_GRACE: Duration = Duration::from_millis(150);
 
 /// One browser + tab list, driven by the from-scratch CDP engine.
 pub struct BrowserSession {
-    browser: Browser,
+    browser: std::sync::Arc<Browser>,
     pages: Vec<Page>,
     active: usize,
     /// Executable that was launched (browser binary or `lightpanda`); kept so
@@ -364,6 +543,18 @@ pub struct BrowserSession {
     /// Connected to a browser navigera doesn't own (`--attach`,
     /// `--profile`): closing only disconnects.
     attached: bool,
+    /// The target id of the session's only tab, once that tab was closed
+    /// (by the page, or by the user in an attached browser). The tab stays
+    /// in `pages`, since every op acts on one, until `tab-new` or `reset`
+    /// replaces it.
+    closed: Option<String>,
+    /// The user data directory of a `--profile` browser, and the browser
+    /// binary that runs it.
+    profile_dir: Option<std::path::PathBuf>,
+    profile_exe: Option<String>,
+    /// Where this session's downloads go (`downloads --dir`), when not
+    /// the process's download directory; kept across `reset`.
+    downloads_dir: Option<std::path::PathBuf>,
     /// `set …` overrides (keyed by what they set): applied to every open
     /// tab and replayed on tabs opened later.
     overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
@@ -375,9 +566,14 @@ pub struct BrowserSession {
     /// Modifiers held with `keydown` (Shift, Control, Alt, Meta): later
     /// `press`es carry them until `keyup`.
     held: std::sync::Mutex<Vec<String>>,
+    /// The browser context `reset` made (its tabs are the session's).
+    context: Option<String>,
+    /// False for a session `fork` made: closing it closes its context, not
+    /// the browser.
+    owner: bool,
     /// Owns the tokio runtime; declared LAST so it drops last, after the
     /// browser/client/pages that use it.
-    _runtime: tokio::runtime::Runtime,
+    _runtime: std::sync::Arc<tokio::runtime::Runtime>,
 }
 
 impl BrowserSession {
@@ -422,7 +618,10 @@ impl BrowserSession {
             crate::timing::log(&format!("[browser] engine=lightpanda launched {} via {bin}", browser.ws_url()));
             (browser, bin)
         } else {
-            let Some(exe) = resolve_executable_for(executable, headless) else {
+            // Natural mode wants the full Chrome even headless:
+            // chrome-headless-shell is a different program with tells of its
+            // own.
+            let Some(exe) = resolve_executable_for(executable, headless && !natural()) else {
                 bail!(
                     "no Chrome/Chromium/Edge found — install Chrome, or `npx @puppeteer/browsers install chrome-headless-shell@stable` and pass its path via --chromium or $CHROME_BIN"
                 );
@@ -450,6 +649,9 @@ impl BrowserSession {
                 Ok(browser)
             };
             let mut flags = chrome_flags();
+            if natural() {
+                flags.extend(natural_flags(&exe, headless)?);
+            }
             let note = no_sandbox_note(&exe);
             if !flags.iter().any(|f| f == NO_SANDBOX) && note.as_ref().is_some_and(|n| n.exists()) {
                 eprintln!("{NO_SANDBOX_WARNING}");
@@ -485,21 +687,34 @@ impl BrowserSession {
             browser.new_page(Some("about:blank")).map_err(|e| anyhow::anyhow!("{e:#} ({})", browser.death_report()))?
         };
         crate::timing::record("first_page", page_started);
+        if !lightpanda {
+            // Best effort: a browser without the call just doesn't report
+            // downloads (`downloads` then says there are none).
+            if let Ok(dir) = download_dir() {
+                let _ = browser.enable_downloads(Some(&dir));
+            }
+        }
         crate::timing::record("launch_total", launch_started);
         Ok(Self {
-            browser,
+            browser: std::sync::Arc::new(browser),
             pages: vec![page],
             active: 0,
             exe,
             lightpanda,
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
+            context: None,
+            owner: true,
             attached: false,
+            closed: None,
+            profile_dir: None,
+            profile_exe: None,
+            downloads_dir: None,
             overrides: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
-            _runtime: runtime,
+            _runtime: std::sync::Arc::new(runtime),
         })
     }
 
@@ -511,15 +726,36 @@ impl BrowserSession {
         let started = std::time::Instant::now();
         let runtime = engine_runtime()?;
         let handle = runtime.handle().clone();
+        let profile_dir = match target {
+            AttachTarget::Profile { name, .. } => Some(cdp::attach::profile_dir(name)?),
+            AttachTarget::Running(_) => None,
+        };
+        let mut profile_exe = None;
+        // A tab's own endpoint: work in that tab, not a new one.
+        let adopt = match target {
+            AttachTarget::Running(spec) => cdp::attach::page_endpoint(spec),
+            AttachTarget::Profile { .. } => None,
+        };
         let (ws_url, what) = match target {
-            AttachTarget::Running(spec) => (cdp::attach::resolve(spec)?, format!("attach {spec}")),
-            AttachTarget::Profile { name, executable, headless } => {
+            AttachTarget::Running(spec) => match &adopt {
+                Some((http, _)) => (cdp::attach::resolve(http)?, format!("attach {spec}")),
+                None => (cdp::attach::resolve(spec)?, format!("attach {spec}")),
+            },
+            AttachTarget::Profile { name, executable, headless, from, from_profile } => {
                 let dir = cdp::attach::profile_dir(name)?;
-                let Some(exe) = resolve_executable_for(executable.as_deref(), *headless) else {
+                let Some(exe) = resolve_executable_for(executable.as_deref(), *headless && !natural()) else {
                     bail!("no Chrome/Chromium/Edge found for --profile — pass --chromium <path> or set $CHROME_BIN");
                 };
-                let url = cdp::attach::ensure_profile_browser(&exe, &dir, *headless)?;
-                (url, format!("profile {}", dir.display()))
+                let mut what = format!("profile {}", dir.display());
+                if let Some(from) = from {
+                    let copied = cdp::import::import_profile(from, from_profile.as_deref(), &dir, name)?;
+                    eprintln!("navigera: {copied}");
+                    what = format!("{what}, {copied}");
+                }
+                let extra = if natural() { natural_flags(&exe, *headless)? } else { Vec::new() };
+                let url = cdp::attach::ensure_profile_browser(&exe, &dir, *headless, &extra)?;
+                profile_exe = Some(exe);
+                (url, what)
             }
         };
         // Chrome asks the user to Allow a connection to their own profile:
@@ -527,22 +763,36 @@ impl BrowserSession {
         let browser = Browser::connect(&handle, &ws_url, Duration::from_secs(120))?;
         crate::timing::log(&format!("[browser] {what}: connected to {ws_url}"));
         crate::timing::record("browser_up", started);
-        let page = browser.new_page_in(Some("about:blank"), true)?;
+        let page = match &adopt {
+            Some((_, id)) => browser.attach_page(id, "").with_context(|| format!("no tab {id} in that browser"))?,
+            None => browser.new_page_in(Some("about:blank"), true)?,
+        };
+        // A `--profile` browser is navigera's: its downloads go where ours
+        // do. The user's own browser (`--attach`) keeps its own setting;
+        // navigera only listens.
+        let dir = if profile_dir.is_some() { download_dir().ok() } else { None };
+        let _ = browser.enable_downloads(dir.as_deref());
         crate::timing::record("launch_total", started);
         Ok(Self {
-            browser,
+            browser: std::sync::Arc::new(browser),
             pages: vec![page],
             active: 0,
             exe: what,
             lightpanda: false,
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
+            context: None,
+            owner: true,
             attached: true,
+            closed: None,
+            profile_dir,
+            profile_exe,
+            downloads_dir: None,
             overrides: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
-            _runtime: runtime,
+            _runtime: std::sync::Arc::new(runtime),
         })
     }
 
@@ -554,7 +804,21 @@ impl BrowserSession {
     /// Ask the browser itself to shut down (`quit --close-browser` on an
     /// attached session): Chrome closes its windows and saves its profile.
     pub fn close_browser(&self) -> Result<()> {
-        self.browser.close_remote()
+        self.browser.close_remote()?;
+        // A `--profile` browser is done when its profile is free again, so
+        // the next `start` on it (or a `--from` that replaces it) finds no
+        // browser still on its way out.
+        if let Some(dir) = &self.profile_dir {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while std::time::Instant::now() < deadline {
+                let lock = std::fs::symlink_metadata(dir.join("SingletonLock")).is_ok();
+                if cdp::attach::live_endpoint(dir).is_none() && !lock {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        Ok(())
     }
 
     fn timeout(&self, override_ms: Option<f64>) -> Duration {
@@ -563,17 +827,70 @@ impl BrowserSession {
 
     /// (element auto-wait, CDP command timeout) for an element op: the op's
     /// own `timeout_ms` bounds the wait; without one, the element wait is
-    /// [`DEFAULT_ELEMENT_WAIT`] (fast feedback on a wrong selector).
+    /// [`element_wait`] (by default 5 s: fast feedback on a wrong selector).
     fn element_budget(&self, override_ms: Option<f64>) -> (Duration, Duration) {
         let wait = match override_ms {
             Some(ms) => Duration::from_secs_f64(ms / 1000.0),
-            None => DEFAULT_ELEMENT_WAIT.min(self.timeout(None)),
+            None => element_wait(),
         };
         (wait, self.timeout(None).max(wait + Duration::from_secs(1)))
     }
 
     fn active_tab(&self) -> &Page {
         &self.pages[self.active]
+    }
+
+    /// This session's downloads so far (`clear` empties its list afterwards).
+    /// Save this session's downloads in `dir` from now on (created if
+    /// missing), across `reset`; other sessions keep theirs. A test runner
+    /// gives each test its own, so names don't carry over between tests.
+    pub fn set_downloads_dir(&mut self, dir: &std::path::Path) -> Result<std::path::PathBuf> {
+        if self.lightpanda {
+            bail!("downloads --dir needs the chrome engine");
+        }
+        std::fs::create_dir_all(dir).with_context(|| format!("download directory {}", dir.display()))?;
+        // Not `canonicalize` (see `download_dir`).
+        let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+        self.browser.enable_downloads_in(Some(&dir), self.context.as_deref())?;
+        self.downloads_dir = Some(dir.clone());
+        Ok(dir)
+    }
+
+    pub fn downloads(&self, clear: bool) -> Vec<cdp::downloads::Download> {
+        let scope = self.scope();
+        let mut d = self.browser.shared().downloads.lock().unwrap();
+        let out: Vec<_> = d.items.iter().filter(|x| x.scope == scope).cloned().collect();
+        if clear {
+            d.items.retain(|x| x.scope != scope);
+        }
+        out
+    }
+
+    /// Wait for a finished download whose file name matches `glob`
+    /// (`*`, `?`; empty: any). A canceled match is an error.
+    pub fn wait_download(&self, glob: &str, timeout_ms: Option<f64>) -> Result<cdp::downloads::Download> {
+        let (wait, _) = self.element_budget(timeout_ms.or(Some(self.timeout_ms)));
+        let deadline = std::time::Instant::now() + wait;
+        let matches = |d: &cdp::downloads::Download| glob.is_empty() || cdp::glob_match(glob, &d.suggested);
+        loop {
+            let items = self.downloads(false);
+            if let Some(d) = items.iter().rev().find(|d| matches(d) && d.state == "completed") {
+                return Ok(d.clone());
+            }
+            if let Some(d) = items.iter().rev().find(|d| matches(d) && d.state == "canceled") {
+                bail!("download {} was canceled ({})", d.suggested, d.url);
+            }
+            if std::time::Instant::now() >= deadline {
+                let seen: Vec<String> = items.iter().map(|d| format!("{} ({})", d.suggested, d.state)).collect();
+                bail!(
+                    "no finished download{} within {} ms (seen: {})",
+                    if glob.is_empty() { String::new() } else { format!(" matching {glob:?}") },
+                    wait.as_millis(),
+                    if seen.is_empty() { "none".to_string() } else { seen.join(", ") }
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Number of open pages (tabs) in this session.
@@ -598,12 +915,107 @@ impl BrowserSession {
             // `TargetAlreadyLoaded` as soon as a page exists.
             bail!("the lightpanda engine supports one tab only; use the chrome engine for tabs");
         }
-        let page = self.browser.new_page(Some("about:blank"))?;
+        // In this session's own browser context (a fork's, or the one
+        // `reset` made), not the default one.
+        let page = self.browser.new_page_with(Some("about:blank"), false, self.context.as_deref())?;
         self.apply_overrides(&page);
         self.apply_init_scripts(&page);
         self.pages.push(page);
         self.active = self.pages.len() - 1;
+        self.forget_closed();
         Ok(self.active)
+    }
+
+    /// A clean slate in the same browser: a new browser context (no
+    /// cookies, storage or cache from before, like a fresh incognito
+    /// window) with one blank tab; the session's old tabs close. `set`
+    /// emulation, routes, credentials, init scripts and the dialog answer
+    /// carry over, unless `all`: then the session starts as a new one
+    /// would. Tens of milliseconds, against a few hundred for a new
+    /// browser.
+    pub fn reset(&mut self, all: bool) -> Result<()> {
+        if self.lightpanda {
+            bail!("reset needs the chrome engine (Lightpanda has one context per process): start a new session");
+        }
+        // Events already sent (a dialog answered a moment ago) are handled
+        // first, so they are moved along, or dropped by `--all`, with the rest.
+        self.browser.caught_up();
+        let context = self.browser.create_context()?;
+        if all {
+            self.downloads_dir = None;
+        }
+        // The user's own browser (`--attach`) keeps its download setting,
+        // unless the session chose a directory.
+        let dir = match &self.downloads_dir {
+            Some(own) => Some(own.clone()),
+            None if self.attached && self.profile_dir.is_none() => None,
+            None => download_dir().ok(),
+        };
+        let _ = self.browser.enable_downloads_in(dir.as_deref(), Some(&context));
+        // Before the new tab exists, so its first requests see its routes.
+        self.browser.shared().move_scope(&self.scope(), &context, !all);
+        if all {
+            self.overrides.clear();
+            self.init_scripts.clear();
+            self.init_ids.clear();
+        }
+        let page = self.browser.new_page_with(Some("about:blank"), false, Some(&context))?;
+        self.apply_overrides(&page);
+        self.apply_init_scripts(&page);
+        let timeout = self.timeout(None);
+        for old in self.pages.drain(..) {
+            let _ = old.close_target(timeout);
+        }
+        self.pages.push(page);
+        self.active = 0;
+        self.closed = None;
+        if let Some(old) = self.context.replace(context) {
+            let _ = self.browser.dispose_context(&old);
+        }
+        if let Ok(mut a) = self.abandoned.lock() {
+            *a = None;
+        }
+        self.bring_to_front()
+    }
+
+    /// Another session on the same browser, in a browser context of its
+    /// own (cookies, storage, cache and tabs apart), for running several
+    /// sessions at once without a browser each. Routes, credentials, init
+    /// scripts, `set` emulation and the dialog answer are each session's
+    /// own (a fork starts with none); the process-wide settings (element
+    /// wait, download directory, natural mode) are shared. Closing a fork
+    /// closes its context; the browser closes with the session it was
+    /// forked from.
+    pub fn fork(&self) -> Result<BrowserSession> {
+        if self.lightpanda {
+            bail!("the lightpanda engine has one context per process: start another session instead");
+        }
+        self.browser.shared().forked.store(true, std::sync::atomic::Ordering::Relaxed);
+        let context = self.browser.create_context()?;
+        let dir = if self.attached && self.profile_dir.is_none() { None } else { download_dir().ok() };
+        let _ = self.browser.enable_downloads_in(dir.as_deref(), Some(&context));
+        let page = self.browser.new_page_with(Some("about:blank"), false, Some(&context))?;
+        Ok(BrowserSession {
+            browser: std::sync::Arc::clone(&self.browser),
+            pages: vec![page],
+            active: 0,
+            exe: self.exe.clone(),
+            lightpanda: false,
+            timeout_ms: self.timeout_ms,
+            abandoned: std::sync::Mutex::new(None),
+            attached: self.attached,
+            closed: None,
+            profile_dir: None,
+            profile_exe: None,
+            downloads_dir: None,
+            overrides: Default::default(),
+            init_scripts: Vec::new(),
+            init_ids: Default::default(),
+            held: std::sync::Mutex::new(Vec::new()),
+            context: Some(context),
+            owner: false,
+            _runtime: std::sync::Arc::clone(&self._runtime),
+        })
     }
 
     /// Switch the active tab by zero-based index.
@@ -652,7 +1064,14 @@ impl BrowserSession {
         self.browser.caught_up();
         let shared = std::sync::Arc::clone(self.browser.shared());
         let mut adopted = Vec::new();
-        for (target_id, opener) in shared.take_opened() {
+        let forked = shared.forked.load(std::sync::atomic::Ordering::Relaxed);
+        let mine: Vec<String> = self.pages.iter().map(|p| p.target_id().to_string()).collect();
+        let opened = if forked {
+            shared.take_opened_by(|opener| mine.iter().any(|t| t == opener))
+        } else {
+            shared.take_opened()
+        };
+        for (target_id, opener) in opened {
             if self.pages.iter().any(|p| p.target_id() == target_id) {
                 continue;
             }
@@ -661,7 +1080,7 @@ impl BrowserSession {
             if self.attached && !self.pages.iter().any(|p| p.target_id() == opener) {
                 continue;
             }
-            match self.browser.attach_page(&target_id) {
+            match self.browser.attach_page(&target_id, &self.scope()) {
                 Ok(page) => {
                     self.apply_overrides(&page);
                     self.apply_init_scripts(&page);
@@ -672,21 +1091,82 @@ impl BrowserSession {
                 Err(e) => eprintln!("[browser] could not adopt new tab {target_id}: {e:#}"),
             }
         }
-        for target_id in shared.take_destroyed() {
+        let mine: Vec<String> = self.pages.iter().map(|p| p.target_id().to_string()).collect();
+        let destroyed =
+            if forked { shared.take_destroyed_by(|t| mine.iter().any(|m| m == t)) } else { shared.take_destroyed() };
+        for target_id in destroyed {
+            let Some(index) = self.pages.iter().position(|p| p.target_id() == target_id) else { continue };
             if self.pages.len() <= 1 {
-                break;
-            }
-            if let Some(index) = self.pages.iter().position(|p| p.target_id() == target_id) {
-                shared.unregister(self.pages[index].session_id());
-                self.pages.remove(index);
-                if self.active >= self.pages.len() {
-                    self.active = self.pages.len() - 1;
-                } else if index < self.active {
-                    self.active -= 1;
+                if self.target_is_gone(&target_id) {
+                    self.closed = Some(target_id);
                 }
+                continue;
+            }
+            shared.unregister(self.pages[index].session_id());
+            self.pages.remove(index);
+            if self.active >= self.pages.len() {
+                self.active = self.pages.len() - 1;
+            } else if index < self.active {
+                self.active -= 1;
             }
         }
         adopted
+    }
+
+    /// The target id of the session's only tab, if it was closed.
+    pub fn closed_tab(&self) -> Option<&str> {
+        self.closed.as_deref()
+    }
+
+    /// An op failed because Chrome no longer knows the tab's session: the
+    /// tab closed and its event may not have been read yet. Catch up and,
+    /// if it was the only tab, remember it is gone.
+    pub fn tab_gone(&mut self) {
+        self.sync_tabs();
+        if self.closed.is_some() {
+            return;
+        }
+        // The session can end a moment before the browser stops listing
+        // its target: give it a second.
+        let target = self.active_tab().target_id().to_string();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !self.target_is_gone(&target) {
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if self.pages.len() == 1 {
+            self.closed = Some(target);
+        } else {
+            // Another tab is left: go on in it, as when the event is read.
+            self.browser.shared().unregister(self.pages[self.active].session_id());
+            self.pages.remove(self.active);
+            self.active = self.active.min(self.pages.len() - 1);
+        }
+    }
+
+    /// The browser no longer lists the tab. Asked before a session gives
+    /// up on its only tab, so that an event for a tab that lives on (a
+    /// target swapped mid-navigation) can't strand the session; when the
+    /// browser can't say, the tab is taken to be there.
+    fn target_is_gone(&self, target_id: &str) -> bool {
+        !self.lightpanda && self.browser.tab_targets().is_ok_and(|tabs| !tabs.iter().any(|(id, _)| id == target_id))
+    }
+
+    /// Drop the closed tab once another one is open.
+    fn forget_closed(&mut self) {
+        let Some(target) = self.closed.take() else { return };
+        if self.pages.len() <= 1 {
+            return;
+        }
+        if let Some(index) = self.pages.iter().position(|p| p.target_id() == target) {
+            self.browser.shared().unregister(self.pages[index].session_id());
+            self.pages.remove(index);
+            if index < self.active {
+                self.active -= 1;
+            }
+        }
     }
 
     /// Lightpanda keeps one tab: a page it opened with `target=_blank` or
@@ -802,10 +1282,9 @@ impl BrowserSession {
 
     /// How many elements match a CSS selector (no waiting).
     pub fn count(&self, selector: &str) -> Result<u64> {
-        let n: serde_json::Value = self.active_tab().evaluate(
-            &format!("document.querySelectorAll({}).length", serde_json::json!(selector)),
-            self.timeout(None),
-        )?;
+        let n: serde_json::Value = self
+            .active_tab()
+            .evaluate(&format!("{}.all({}).length", cdp::DEEP, serde_json::json!(selector)), self.timeout(None))?;
         Ok(n.as_u64().unwrap_or(0))
     }
 
@@ -860,7 +1339,7 @@ impl BrowserSession {
         if checked(self)? == want {
             return Ok(false);
         }
-        self.click_target(target, timeout_ms)?;
+        self.click_target(target, &cdp::ClickOptions::default(), timeout_ms)?;
         if checked(self)? != want {
             bail!("clicking it did not {} it", if want { "check" } else { "uncheck" });
         }
@@ -1025,10 +1504,18 @@ impl BrowserSession {
         }
     }
 
+    /// The key of this session's routes, credentials and dialog answer:
+    /// its browser context ("" for the default one). Other sessions on the
+    /// same browser (forks) have their own.
+    fn scope(&self) -> String {
+        self.context.clone().unwrap_or_default()
+    }
+
     /// Add a `route` rule (a rule with the same pattern is replaced).
     pub fn add_route(&mut self, route: cdp::Route) -> Result<()> {
         {
-            let mut routes = self.browser.shared().routes.lock().unwrap();
+            let mut all = self.browser.shared().routes.lock().unwrap();
+            let routes = all.entry(self.scope()).or_default();
             routes.retain(|r| r.pattern != route.pattern);
             routes.push(route);
         }
@@ -1038,7 +1525,8 @@ impl BrowserSession {
     /// Remove the rule for `pattern`, or every rule; returns how many went.
     pub fn remove_routes(&mut self, pattern: Option<&str>) -> Result<usize> {
         let removed = {
-            let mut routes = self.browser.shared().routes.lock().unwrap();
+            let mut all = self.browser.shared().routes.lock().unwrap();
+            let routes = all.entry(self.scope()).or_default();
             let before = routes.len();
             routes.retain(|r| pattern.is_some_and(|p| r.pattern != p));
             before - routes.len()
@@ -1048,13 +1536,19 @@ impl BrowserSession {
     }
 
     pub fn routes(&self) -> Vec<cdp::Route> {
-        self.browser.shared().routes.lock().unwrap().clone()
+        self.browser.shared().routes.lock().unwrap().get(&self.scope()).cloned().unwrap_or_default()
     }
 
-    /// HTTP auth credentials for every origin (`None`: answer challenges
-    /// the browser's way, i.e. fail them).
+    /// HTTP auth credentials for every origin this session's tabs visit
+    /// (`None`: answer challenges the browser's way, i.e. fail them).
     pub fn set_credentials(&mut self, credentials: Option<(String, String)>) -> Result<()> {
-        *self.browser.shared().credentials.lock().unwrap() = credentials;
+        {
+            let mut all = self.browser.shared().credentials.lock().unwrap();
+            match credentials {
+                Some(c) => all.insert(self.scope(), c),
+                None => all.remove(&self.scope()),
+            };
+        }
         self.sync_fetch()
     }
 
@@ -1063,11 +1557,20 @@ impl BrowserSession {
     /// on navigera.
     fn sync_fetch(&mut self) -> Result<()> {
         let shared = self.browser.shared();
-        let auth = shared.credentials.lock().unwrap().is_some();
+        let scope = self.scope();
+        let auth = shared.credentials.lock().unwrap().contains_key(&scope);
         let patterns: Vec<serde_json::Value> = if auth {
             vec![serde_json::json!({ "urlPattern": "*" })]
         } else {
-            shared.routes.lock().unwrap().iter().map(|r| serde_json::json!({ "urlPattern": r.pattern })).collect()
+            shared
+                .routes
+                .lock()
+                .unwrap()
+                .get(&scope)
+                .into_iter()
+                .flatten()
+                .map(|r| serde_json::json!({ "urlPattern": r.pattern }))
+                .collect()
         };
         if patterns.is_empty() {
             return self.set_override("fetch", vec![], vec![("Fetch.disable", serde_json::json!({}))]);
@@ -1099,7 +1602,12 @@ impl BrowserSession {
     pub fn cookies(&self, all: bool, url: Option<&str>) -> Result<serde_json::Value> {
         let tab = self.active_tab();
         let r = if all {
-            tab.send_cdp("Storage.getCookies", serde_json::json!({}), self.timeout(None))?
+            // After `reset` (or in a fork) the tabs live in a context of
+            // their own: its cookies, not the default context's.
+            match &self.context {
+                Some(c) => self.browser.context_cookies(Some(c))?,
+                None => tab.send_cdp("Storage.getCookies", serde_json::json!({}), self.timeout(None))?,
+            }
         } else {
             let urls = vec![url.map(str::to_string).unwrap_or_else(|| self.url())];
             tab.send_cdp("Network.getCookies", serde_json::json!({ "urls": urls }), self.timeout(None))?
@@ -1146,12 +1654,13 @@ impl BrowserSession {
     /// Dialogs answered since the last call (`{type, message, accepted}`).
     pub fn take_dialogs(&self) -> Vec<serde_json::Value> {
         self.browser.caught_up();
-        self.browser.shared().take_dialogs()
+        self.browser.shared().take_dialogs(&self.scope())
     }
 
-    /// How future `alert`/`confirm`/`prompt` dialogs are answered.
+    /// How future `alert`/`confirm`/`prompt` dialogs in this session's tabs
+    /// are answered.
     pub fn set_dialog_policy(&self, accept: bool, prompt_text: Option<String>) {
-        self.browser.set_dialog_policy(DialogPolicy { accept, prompt_text });
+        self.browser.set_dialog_policy(&self.scope(), DialogPolicy { accept, prompt_text });
     }
 
     /// Wait for a navigation an earlier action started in the active tab.
@@ -1235,6 +1744,12 @@ impl BrowserSession {
     /// `commit`. Retries benign aborts (third-party trackers can abort the
     /// main-frame load mid-flight).
     pub fn goto_wait(&self, url: &str, wait: &str, timeout_ms: Option<f64>) -> Result<()> {
+        self.goto_or_download(url, wait, timeout_ms).map(|_| ())
+    }
+
+    /// [`BrowserSession::goto_wait`]; true when the URL turned out to be a
+    /// download (the page stays where it was; `downloads` lists the file).
+    pub fn goto_or_download(&self, url: &str, wait: &str, timeout_ms: Option<f64>) -> Result<bool> {
         if !matches!(wait, "load" | "domcontentloaded" | "commit") {
             bail!("--wait takes load|domcontentloaded|commit, got {wait:?}");
         }
@@ -1242,11 +1757,39 @@ impl BrowserSession {
         let timeout = self.timeout(timeout_ms);
         let max_attempts = 3;
         let mut attempt = 0;
+        let downloads_before = self.downloads(false).iter().map(|d| d.n).max().unwrap_or(0);
+        let requests_before = self.requests(false).last().map(|r| r.n).unwrap_or(0);
         loop {
             match self.active_tab().navigate(url, wait, timeout) {
-                Ok(_) => return Ok(()),
+                Ok(_) => return Ok(false),
                 Err(e) => {
                     let msg = format!("{e:#}");
+                    // ERR_ABORTED is the outcome, not a hiccup, when the URL
+                    // answered with no content (the browser stays put) or
+                    // turned into a download (saved: `downloads` lists it).
+                    // Trying again would fetch it again: a download link
+                    // downloaded the file four times.
+                    if msg.contains("ERR_ABORTED") {
+                        let status = self
+                            .requests(false)
+                            .into_iter()
+                            .filter(|r| r.n > requests_before && r.kind == "Document")
+                            .filter_map(|r| r.status)
+                            .next_back();
+                        if let Some(code @ (204 | 205)) = status {
+                            bail!("{msg}: the server answered {code} (no content), so the browser stays on the page it was on");
+                        }
+                        let end = std::time::Instant::now() + Duration::from_secs(1);
+                        loop {
+                            if self.downloads(false).iter().any(|d| d.n > downloads_before) {
+                                return Ok(true);
+                            }
+                            if std::time::Instant::now() >= end {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                    }
                     attempt += 1;
                     let transient = msg.contains("ERR_ABORTED") || msg.contains("ERR_CONNECTION_RESET");
                     if transient && attempt <= max_attempts {
@@ -1290,15 +1833,76 @@ impl BrowserSession {
 
     /// Click the element `target` names (trusted mouse click when hittable).
     /// If the click starts a navigation, waits for the new document.
-    pub fn click_target(&self, target: &Target, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+    pub fn click_target(
+        &self,
+        target: &Target,
+        opts: &cdp::ClickOptions,
+        timeout_ms: Option<f64>,
+    ) -> Result<serde_json::Value> {
         let (wait, timeout) = self.element_budget(timeout_ms);
-        let generation = self.active_tab().nav_generation();
-        let point = self.active_tab().click(target, wait, timeout)?;
+        let before = self.active_tab().activity();
+        let point = self.active_tab().click(target, opts, wait, timeout)?;
         if point.get("nav").and_then(|v| v.as_bool()) == Some(true) {
-            self.active_tab().navigation_started(generation, NAV_GRACE);
+            self.active_tab().navigation_started_since(before, NAV_GRACE);
         }
         self.settle_for(timeout_ms);
         Ok(point)
+    }
+
+    /// Raw mouse input (see [`cdp::Page::mouse`]); a click waits for any
+    /// navigation it starts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mouse(
+        &self,
+        action: &str,
+        at: Option<(f64, f64)>,
+        button: &str,
+        count: u32,
+        steps: u32,
+        delta: (f64, f64),
+        timeout_ms: Option<f64>,
+    ) -> Result<serde_json::Value> {
+        let (_, timeout) = self.element_budget(timeout_ms);
+        let page = self.active_tab();
+        let before = page.activity();
+        let r = page.mouse(action, at, button, count, steps, delta, timeout)?;
+        if action == "click" {
+            page.navigation_started_since(before, NAV_GRACE);
+            self.settle_for(timeout_ms);
+        }
+        Ok(r)
+    }
+
+    /// Where `mouse` goes for a target: `dx`,`dy` from its top-left corner,
+    /// or its center, in top-level viewport pixels; scrolled into view
+    /// first when that point is out of it. Fails when the point can't be
+    /// brought into the viewport, or the element is in a cross-origin frame.
+    pub fn mouse_point(&self, target: &Target, d: Option<(f64, f64)>, timeout_ms: Option<f64>) -> Result<(f64, f64)> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let (dx, dy) = match d {
+            Some((x, y)) => (serde_json::json!(x), serde_json::json!(y)),
+            None => (serde_json::Value::Null, serde_json::Value::Null),
+        };
+        let v = self.active_tab().on_element(target, "mouse", cdp::page_js::MOUSE_AT, &[dx, dy], wait, timeout)?;
+        if v.get("xframe").is_some() {
+            bail!("the element is in a cross-origin frame: aim with viewport coordinates (`get box` of its frame, plus the offset)");
+        }
+        let (x, y) = (v["x"].as_f64().unwrap_or(0.0), v["y"].as_f64().unwrap_or(0.0));
+        if v.get("outside").is_some() {
+            bail!(
+                "the point ({x:.0}, {y:.0}) is outside the viewport ({}x{}) even with the element scrolled into view: \
+                 an offset beyond the element?",
+                v["width"],
+                v["height"]
+            );
+        }
+        Ok((x, y))
+    }
+
+    /// The viewport's size in CSS pixels.
+    pub fn viewport_size(&self) -> Result<(f64, f64)> {
+        let v: Vec<f64> = self.evaluate("[innerWidth, innerHeight]")?;
+        Ok((v.first().copied().unwrap_or(0.0), v.get(1).copied().unwrap_or(0.0)))
     }
 
     pub fn hover(&self, target: &Target, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
@@ -1311,16 +1915,144 @@ impl BrowserSession {
         self.active_tab().fill(target, value, wait, timeout)
     }
 
-    pub fn select(&self, target: &Target, values: &[String], timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+    /// `fill --keys`: select what the field holds and type over it, key by
+    /// key; Backspace clears it for an empty value.
+    pub fn fill_keys(&self, target: &Target, value: &str, timeout_ms: Option<f64>) -> Result<()> {
         let (wait, timeout) = self.element_budget(timeout_ms);
-        let chosen = self.active_tab().select(target, values, wait, timeout)?;
+        let page = self.active_tab();
+        if page.on_element(target, "fill", cdp::page_js::FOCUS_SELECT_ALL, &[], wait, timeout)?
+            != serde_json::Value::Bool(true)
+        {
+            bail!("the field did not take focus (disabled, hidden, or not editable); nothing was typed");
+        }
+        if value.is_empty() {
+            page.press(None, "Backspace", wait, timeout)?;
+        } else {
+            page.type_text(None, value, wait, timeout)?;
+        }
+        self.settle_for(timeout_ms);
+        Ok(())
+    }
+
+    pub fn select(
+        &self,
+        target: &Target,
+        values: &[String],
+        add: bool,
+        timeout_ms: Option<f64>,
+    ) -> Result<serde_json::Value> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let chosen = match self.active_tab().select(target, values, add, wait, timeout) {
+            Err(e) if format!("{e:#}").contains("not a <select>") => {
+                self.select_combobox(target, values, timeout_ms)?
+            }
+            other => other?,
+        };
         self.settle_for(timeout_ms);
         Ok(chosen)
     }
 
+    /// `select` on a custom dropdown (an ARIA combobox: react-select and
+    /// the like), the way a user does it: focus its input, open it
+    /// (ArrowDown, or a click where that doesn't), find the option by its
+    /// visible text in whatever listbox opened (often a portal at the end of
+    /// `<body>`), typing to filter when it isn't listed, and click it.
+    fn select_combobox(
+        &self,
+        target: &Target,
+        values: &[String],
+        timeout_ms: Option<f64>,
+    ) -> Result<serde_json::Value> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let page = self.active_tab();
+        let mut chosen = Vec::new();
+        for value in values {
+            let started = std::time::Instant::now();
+            let prep = page.on_element(target, "select", cdp::page_js::COMBO_FOCUS, &[], wait, timeout)?;
+            if prep.get("combobox").and_then(serde_json::Value::as_bool) != Some(true) {
+                bail!(
+                    "the element is {}, not a <select> or a combobox (role=combobox, aria-haspopup=listbox); \
+                     click it and pick the option by ref from `ax`",
+                    prep.get("tag").and_then(serde_json::Value::as_str).unwrap_or("something else")
+                );
+            }
+            let listbox = prep.get("listbox").cloned().unwrap_or(serde_json::Value::Null);
+            let find = |typed: bool| -> Result<serde_json::Value> {
+                page.evaluate(
+                    &format!(
+                        "({})({}, {}, {}, {})",
+                        cdp::page_js::COMBO_PICK,
+                        serde_json::json!(value),
+                        listbox,
+                        serde_json::json!(typed),
+                        cdp::DEEP
+                    ),
+                    timeout,
+                )
+            };
+            let keys = prep.get("keys").and_then(serde_json::Value::as_bool) == Some(true);
+            let mut opened = prep.get("expanded").and_then(serde_json::Value::as_bool) == Some(true);
+            let (mut tried_keys, mut tried_click, mut typed) = (false, false, false);
+            let mut last = std::time::Instant::now();
+            let mut opened_at: Option<std::time::Instant> = opened.then(std::time::Instant::now);
+            let picked = loop {
+                if !opened && keys && !tried_keys {
+                    // Keys go to the focused input.
+                    page.press(None, "ArrowDown", wait, timeout)?;
+                    tried_keys = true;
+                    last = std::time::Instant::now();
+                } else if !opened && !tried_click && (!keys || last.elapsed() > Duration::from_millis(300)) {
+                    // A widget that ignores ArrowDown opens on a click.
+                    self.click_target(target, &cdp::ClickOptions::default(), timeout_ms)?;
+                    tried_click = true;
+                    last = std::time::Instant::now();
+                }
+                let found = find(typed)?;
+                opened = found.get("open").and_then(serde_json::Value::as_bool) == Some(true);
+                if opened && opened_at.is_none() {
+                    opened_at = Some(std::time::Instant::now());
+                }
+                if found.get("picked").and_then(serde_json::Value::as_bool) == Some(true) {
+                    break found;
+                }
+                if keys && !typed && opened_at.is_some_and(|t| t.elapsed() > Duration::from_millis(300)) {
+                    // The open list doesn't have it: type to filter, as a
+                    // user does with a long or lazily loaded list.
+                    page.type_text(None, value, wait, timeout)?;
+                    typed = true;
+                    continue;
+                }
+                if started.elapsed() >= wait {
+                    let seen = found.get("options").cloned().unwrap_or_default();
+                    bail!(
+                        "no option {value:?} in the {} (options seen: {seen})",
+                        if opened { "open listbox" } else { "combobox: it didn't open on ArrowDown or a click" }
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let token = picked.get("token").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+            self.click_target(
+                &Target::Selector(format!("[data-nv-pick=\"{token}\"]")),
+                &cdp::ClickOptions::default(),
+                timeout_ms,
+            )
+            .map_err(|e| anyhow::anyhow!("clicking option {value:?}: {e:#}"))?;
+            let _ = page.evaluate(
+                &format!(
+                    "() => {{ for (const e of {}.all('[data-nv-pick=\"{token}\"]')) e.removeAttribute('data-nv-pick'); return true; }}",
+                    cdp::DEEP
+                ),
+                timeout,
+            );
+            chosen.push(picked.get("label").cloned().unwrap_or(serde_json::Value::Null));
+        }
+        Ok(serde_json::Value::Array(chosen))
+    }
+
     pub fn press(&self, target: Option<&Target>, key: &str, timeout_ms: Option<f64>) -> Result<()> {
         let (wait, timeout) = self.element_budget(timeout_ms);
-        let generation = self.active_tab().nav_generation();
+        let before = self.active_tab().activity();
         // Modifiers held with `keydown` apply, as on a real keyboard.
         let held = self.held.lock().unwrap().clone();
         let chord = held
@@ -1334,7 +2066,7 @@ impl BrowserSession {
         if may_navigate {
             // Enter in a form submits it (implicit submission); on a link
             // it follows it.
-            self.active_tab().navigation_started(generation, NAV_GRACE);
+            self.active_tab().navigation_started_since(before, NAV_GRACE);
         }
         self.settle_for(timeout_ms);
         Ok(())
@@ -1368,8 +2100,22 @@ impl BrowserSession {
     /// Survives navigations (the predicate is re-evaluated in each new
     /// document); returns the waited milliseconds.
     pub fn wait_until(&self, js_predicate: &str, what: &str, timeout_ms: Option<f64>) -> Result<f64> {
+        self.wait_until_or_in_frames(js_predicate, false, what, timeout_ms)
+    }
+
+    /// [`Self::wait_until`], also satisfied when the predicate holds inside a
+    /// cross-origin frame (`in_frames`: a single `--text`/`--selector` wait,
+    /// for text a payment or login frame shows).
+    pub fn wait_until_or_in_frames(
+        &self,
+        js_predicate: &str,
+        in_frames: bool,
+        what: &str,
+        timeout_ms: Option<f64>,
+    ) -> Result<f64> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let started = std::time::Instant::now();
+        let mut polls = 0u32;
         loop {
             // A navigation in flight: wait for it, but never past this
             // op's own budget.
@@ -1377,6 +2123,11 @@ impl BrowserSession {
             if let Ok(true) = self.active_tab().check(js_predicate, timeout) {
                 return Ok((started.elapsed().as_secs_f64() * 1000.0).round());
             }
+            // Frames are listed only after a miss, and every few polls.
+            if in_frames && polls.is_multiple_of(3) && self.active_tab().true_in_a_frame(js_predicate, timeout) {
+                return Ok((started.elapsed().as_secs_f64() * 1000.0).round());
+            }
+            polls += 1;
             if started.elapsed() >= wait {
                 bail!("wait: {what} not met within {} ms", wait.as_millis());
             }
@@ -1384,9 +2135,35 @@ impl BrowserSession {
         }
     }
 
+    /// [`BrowserSession::wait_until_or_in_frames`] inside the one frame a
+    /// `--frame` chain names.
+    pub fn wait_until_in_frame(
+        &self,
+        chain: &str,
+        js_predicate: &str,
+        what: &str,
+        timeout_ms: Option<f64>,
+    ) -> Result<f64> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        let started = std::time::Instant::now();
+        loop {
+            self.settle_within(wait.saturating_sub(started.elapsed()));
+            match self.active_tab().check_in_frame(chain, js_predicate, timeout) {
+                Ok(true) => return Ok((started.elapsed().as_secs_f64() * 1000.0).round()),
+                Err(e) if format!("{e:#}").contains("not a frame") => return Err(e),
+                _ => {}
+            }
+            if started.elapsed() >= wait {
+                bail!("wait: {what} in frame {chain:?} not met within {} ms", wait.as_millis());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Click the first element matching `selector`.
     pub fn click(&self, selector: &str, timeout_ms: Option<f64>) -> Result<()> {
-        self.click_target(&Target::Selector(selector.to_string()), timeout_ms).map(|_| ())
+        self.click_target(&Target::Selector(selector.to_string()), &cdp::ClickOptions::default(), timeout_ms)
+            .map(|_| ())
     }
 
     /// Fill the first matching field with `value`.
@@ -1396,7 +2173,7 @@ impl BrowserSession {
 
     /// Click the node with this `backendNodeId` (an `ax` ref).
     pub fn click_ref(&self, backend_node_id: u64, timeout_ms: Option<f64>) -> Result<()> {
-        self.click_target(&Target::Ref(backend_node_id), timeout_ms).map(|_| ())
+        self.click_target(&Target::Ref(backend_node_id), &cdp::ClickOptions::default(), timeout_ms).map(|_| ())
     }
 
     /// Fill the node with this `backendNodeId` (an `ax` ref) with `value`.
@@ -1444,6 +2221,15 @@ impl BrowserSession {
         self.browser.ws_url().to_string()
     }
 
+    /// The active tab's own endpoint (`ws://host:port/devtools/page/<id>`),
+    /// for another session to `--attach` to and work in that very tab; none
+    /// over the pipe transport.
+    pub fn page_endpoint(&self) -> Option<String> {
+        let ws = self.endpoint();
+        let (hostport, _) = ws.strip_prefix("ws://")?.split_once("/devtools/")?;
+        Some(format!("ws://{hostport}/devtools/page/{}", self.active_tab().target_id()))
+    }
+
     /// Shut the browser down. (Lightpanda is now launched directly as
     /// `lightpanda serve` and reaped like Chrome; the old shim's `--stop`
     /// cleanup step no longer applies — the real binary has no such flag.)
@@ -1451,7 +2237,17 @@ impl BrowserSession {
         // Never panic from close: a panicking shutdown turns a successful
         // session into a failed process exit.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.browser.close();
+            // A browser navigera doesn't own keeps running: take the
+            // context `reset` opened in it away first. A fork only closes
+            // its own context.
+            if let (true, Some(context)) = (self.attached || !self.owner, self.context.as_deref()) {
+                let _ = self.browser.dispose_context(context);
+                // Its routes, answers and downloads go with it.
+                self.browser.shared().drop_scope(context);
+            }
+            if self.owner {
+                self.browser.close();
+            }
         }));
     }
 
@@ -1463,6 +2259,26 @@ impl BrowserSession {
     /// The launched executable (browser binary or `lightpanda`).
     pub fn executable(&self) -> &str {
         &self.exe
+    }
+
+    /// The user data directory of a `--profile` browser.
+    pub fn profile_dir(&self) -> Option<&std::path::Path> {
+        self.profile_dir.as_deref()
+    }
+
+    /// The browser binary of a `--profile` browser.
+    pub fn profile_executable(&self) -> Option<&str> {
+        self.profile_exe.as_deref()
+    }
+
+    /// The navigation timeout this session was given, in ms.
+    pub fn timeout_ms(&self) -> f64 {
+        self.timeout_ms
+    }
+
+    /// Every tab's current URL, in tab order.
+    pub fn tab_urls(&self) -> Vec<String> {
+        self.pages.iter().map(|p| p.url(self.timeout(None)).unwrap_or_default()).collect()
     }
 }
 

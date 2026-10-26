@@ -106,8 +106,8 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_click",
-            "Click an element with a real mouse event; waits for it to appear and for any navigation it starts.",
-            object(action(json!({})), &[]),
+            "Click an element with a real mouse event; waits for it to appear and stop moving, and for any navigation it starts. Fails, naming it, if something covers the element.",
+            object(action(json!({"button": {"type": "string", "enum": ["left", "right", "middle"]}})), &[]),
             false,
         ),
         tool(
@@ -135,6 +135,25 @@ fn tools() -> Vec<Value> {
             false,
         ),
         tool("browser_hover", "Move the mouse over an element (hover menus).", object(action(json!({})), &[]), false),
+        tool(
+            "browser_mouse",
+            "Raw mouse at a point, for what has no element to aim at (a canvas, a map, a game): move, down, up, \
+             click, wheel. x/y are viewport CSS pixels (as in a screenshot), or from the target's top-left corner \
+             when one is given; for wheel they are the scroll deltas. The pointer stays where it went and held \
+             buttons stay held, so down, moves, up drags or draws.",
+            object(
+                action(json!({
+                    "action": {"type": "string", "enum": ["move", "down", "up", "click", "wheel"]},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                    "count": {"type": "integer", "description": "Clicks (2: a double click)"},
+                    "steps": {"type": "integer", "description": "Moves in between, for a smooth path"},
+                })),
+                &["action"],
+            ),
+            false,
+        ),
         tool(
             "browser_scroll",
             "Scroll the page by pixels or to top/bottom (loads more of infinite lists), or bring an element into view.",
@@ -187,6 +206,14 @@ fn tools() -> Vec<Value> {
                 })]),
                 &["action"],
             ),
+            false,
+        ),
+        tool(
+            "browser_handoff",
+            "Hand the browser to the person (show: it comes on screen with the same tabs and sign-ins, for a \
+             login, a 2FA prompt or a CAPTCHA you cannot do) and take it back (hide: headless again). Tell the \
+             person what to do, then wait for the page they will reach (browser_wait_for) before going on.",
+            object(props(&[json!({"action": {"type": "string", "enum": ["show", "hide"]}})]), &["action"]),
             false,
         ),
         tool(
@@ -341,6 +368,7 @@ fn plan(name: &str, arguments: &Value) -> Result<Plan, String> {
             single("select", args)
         }
         "browser_hover" => single("hover", args),
+        "browser_mouse" => single("mouse", args),
         "browser_scroll" => single("scroll", args),
         "browser_wait_for" => single("wait", args),
         "browser_find" => {
@@ -362,6 +390,13 @@ fn plan(name: &str, arguments: &Value) -> Result<Plan, String> {
                 other => return Err(format!("browser_tabs: unknown action {other:?} (list|new|select|close)")),
             };
             single(op_name, args)
+        }
+        "browser_handoff" => {
+            let action = args.remove("action").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+            if !matches!(action.as_str(), "show" | "hide") {
+                return Err(format!("browser_handoff: unknown action {action:?} (show|hide)"));
+            }
+            single(&action, args)
         }
         "browser_history" => {
             let action = args.remove("action").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
@@ -528,7 +563,12 @@ impl Server<'_> {
         }
         if plan.snapshot {
             match self.run(&json!({"op": "ax", "format": "text"})) {
-                Ok(outcome) => text.push(describe(&outcome.result)),
+                Ok(outcome) => {
+                    text.push(describe(&outcome.result));
+                    // A long tree is a preview while a decision model is on,
+                    // and its note says how to read the rest.
+                    text.extend(notes(&[], &[], &outcome.notes));
+                }
                 Err(e) => text.push(format!("snapshot failed: {e}")),
             }
         }
@@ -675,6 +715,7 @@ mod tests {
                 "browser_navigate" => json!({"url": "example.com"}),
                 "browser_tabs" => json!({"action": "list"}),
                 "browser_history" => json!({"action": "back"}),
+                "browser_handoff" => json!({"action": "show"}),
                 "browser_run" => json!({"steps": [{"op": "click", "ref": 3}]}),
                 "browser_resize" => json!({"width": 800, "height": 600}),
                 _ => json!({}),
