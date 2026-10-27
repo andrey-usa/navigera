@@ -388,7 +388,11 @@ pub fn client(config: &SessionConfig, name: &str, command: &Command, output: &mu
             if !tail.is_empty() {
                 error.push_str(&format!("\nlast lines of {}:\n{tail}", log_path.display()));
             }
-            print_json(output, &json!({ "id": null, "ok": false, "error": error }), config);
+            print_json(
+                output,
+                &json!({ "id": null, "ok": false, "error": crate::protocol::plain_error(&error) }),
+                config,
+            );
             return ExitCode::from(1);
         }
     };
@@ -503,7 +507,7 @@ fn running_engine(stream: Stream) -> Option<String> {
 }
 
 fn fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCode {
-    print_json(output, &json!({ "id": null, "ok": false, "error": error }), config);
+    print_json(output, &json!({ "id": null, "ok": false, "error": crate::protocol::plain_error(&error) }), config);
     ExitCode::from(1)
 }
 

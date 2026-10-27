@@ -20,6 +20,21 @@ All notable changes to this project are documented here. The format follows
   `--version`, and show `check` once with both of its forms. A usage error
   prints its usage once; an unknown command is matched only when it is
   close (`goot` → `goto`, not `bogus` → `focus`).
+- Errors say what happened and what to do next, in plain words:
+  - a failed `goto` says what Chrome's code means (the host name did not
+    resolve, nothing answered on that port, the server answered 404 with no
+    page and the tab now shows Chrome's error page) and keeps the code at the
+    end;
+  - a click on a word that is not a ref (`click abc`) says it was read as
+    CSS and that refs are the numbers in `ax`; `ref12` now reads as ref 12;
+  - a stale ref, a covered or hidden element, and a browser that went away
+    are described without DevTools terms (no "remote object", "CDP command",
+    "DOM events");
+  - `wait` timeouts name `--timeout-ms`, `tab-select` says which tab numbers
+    there are, `set viewport` says what was missing;
+  - the op is named once (`click selector "abc": …`, not
+    `click selector "abc": click: …`), and the `(os error 2)` suffix is gone.
+- Every MCP tool parameter has a description.
 
 ## [0.7.0] - 2026-10-27
 

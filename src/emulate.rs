@@ -126,7 +126,11 @@ pub fn plan(
                     let (w, h) = wh.split_once('x').expect("checked");
                     (num(w, "width")? as u32, num(h, "height")? as u32)
                 }
-                _ => bail!("set viewport <width> <height> [--scale <dpr>] [--mobile] (or `off`)"),
+                [] => bail!("set viewport needs a width and a height, as in `set viewport 1280 720` (or `off`)"),
+                [one] => bail!(
+                    "set viewport needs a width and a height, as in `set viewport 1280 720` or `1280x720`; got only {one:?}"
+                ),
+                _ => bail!("set viewport takes a width and a height, as in `set viewport 1280 720`; got {}", values.join(" ")),
             };
             let scale = scale.unwrap_or(1.0);
             Plan {

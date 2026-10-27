@@ -58,7 +58,7 @@ fn de_ref<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
 /// `"12"`, `"@12"`, `"ref=12"`, `"[ref=12]"`, `"e12"` -> 12.
 pub fn parse_ref(raw: &str) -> Option<u64> {
     let s = raw.trim().trim_start_matches('[').trim_end_matches(']');
-    let s = s.strip_prefix("ref=").unwrap_or(s);
+    let s = s.strip_prefix("ref=").or_else(|| s.strip_prefix("ref")).unwrap_or(s);
     let s = s.strip_prefix('@').unwrap_or(s);
     let s = s.strip_prefix('e').unwrap_or(s);
     s.parse::<u64>().ok()
@@ -2583,7 +2583,7 @@ impl Driver {
         }
         let result = self.dispatch(command).map_err(|e| {
             let msg = format!("{e:#}");
-            if msg.contains("CDP connection closed") || msg.contains("CDP client is shut down") {
+            if msg.contains(crate::cdp::CONNECTION_CLOSED) {
                 let how = self.session.browser_exit().unwrap_or_else(|| "connection lost".into());
                 anyhow::anyhow!("{msg} — the browser is gone ({how}); run `quit`, then `start` again")
             } else {
@@ -2756,24 +2756,22 @@ impl Driver {
             Command::Click { target, timeout_ms, button, force } => {
                 let t = target.target("click")?;
                 let opts = crate::cdp::ClickOptions { button: button.clone().unwrap_or_default(), force: *force };
-                let point = s
-                    .click_target(&t, &opts, *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("click {}: {e:#}", t.label()))?;
+                let point = s.click_target(&t, &opts, *timeout_ms).map_err(|e| on_target("click", &t, e))?;
                 let mut state = self.state_json();
                 // Lightpanda lays nothing out, so a DOM-event click there is
                 // the normal case, not a sign of an overlay.
                 if point.get("synthetic").and_then(Value::as_bool) == Some(true) && !s.is_lightpanda() {
                     // The agent should know the click was not a real one.
                     state["synthetic_click"] = json!(if point.get("dropped").and_then(Value::as_bool) == Some(true) {
-                        "the browser did not deliver the mouse events (twice); dispatched DOM events instead"
+                        "the browser did not deliver the mouse events (twice); the click went to the element without the mouse"
                             .to_string()
                     } else if point.get("covered").and_then(Value::as_bool) == Some(true) {
                         format!(
-                            "element is covered by {}; dispatched DOM events instead (close the overlay if the click had no effect)",
+                            "element is covered by {}; the click went to the element without the mouse (close the cover if it had no effect)",
                             point.get("covered_by").and_then(Value::as_str).unwrap_or("another element")
                         )
                     } else {
-                        "element has no visible box; dispatched DOM events instead".to_string()
+                        "element has no visible box; the click went to the element without the mouse".to_string()
                     });
                 }
                 if let Some(trace) = point.get("effect_trace") {
@@ -2816,7 +2814,7 @@ impl Driver {
                     // down, up and wheel), scrolled into view if need be.
                     Some(t) => Some(
                         s.mouse_point(&t, point, *timeout_ms)
-                            .map_err(|e| anyhow::anyhow!("mouse {action} {}: {e:#}", t.label()))?,
+                            .map_err(|e| on_target(&format!("mouse {action}"), &t, e))?,
                     ),
                     None => {
                         // A click where the page can't be is a click on
@@ -2849,7 +2847,7 @@ impl Driver {
             }
             Command::Hover { target, timeout_ms } => {
                 let t = target.target("hover")?;
-                let point = s.hover(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("hover {}: {e:#}", t.label()))?;
+                let point = s.hover(&t, *timeout_ms).map_err(|e| on_target("hover", &t, e))?;
                 let mut state = self.state_json();
                 if point.get("synthetic").and_then(Value::as_bool) == Some(true) {
                     state["synthetic_hover"] = json!(
@@ -2861,17 +2859,15 @@ impl Driver {
             Command::Fill { target, value, timeout_ms, keys } => {
                 let t = target.target("fill")?;
                 if *keys {
-                    s.fill_keys(&t, value, *timeout_ms).map_err(|e| anyhow::anyhow!("fill {}: {e:#}", t.label()))?;
+                    s.fill_keys(&t, value, *timeout_ms).map_err(|e| on_target("fill", &t, e))?;
                 } else {
-                    s.fill_target(&t, value, *timeout_ms).map_err(|e| anyhow::anyhow!("fill {}: {e:#}", t.label()))?;
+                    s.fill_target(&t, value, *timeout_ms).map_err(|e| on_target("fill", &t, e))?;
                 }
                 Ok(self.state_json())
             }
             Command::Select { target, value, timeout_ms, add } => {
                 let t = target.target("select")?;
-                let chosen = s
-                    .select(&t, value, *add, *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("select {}: {e:#}", t.label()))?;
+                let chosen = s.select(&t, value, *add, *timeout_ms).map_err(|e| on_target("select", &t, e))?;
                 let mut state = self.state_json();
                 state["selected"] = chosen;
                 Ok(state)
@@ -2892,7 +2888,7 @@ impl Driver {
             }
             Command::Upload { target, files, timeout_ms } => {
                 let t = target.target("upload")?;
-                s.upload(&t, files, *timeout_ms).map_err(|e| anyhow::anyhow!("upload {}: {e:#}", t.label()))?;
+                s.upload(&t, files, *timeout_ms).map_err(|e| on_target("upload", &t, e))?;
                 Ok(json!({ "files": files.len() }))
             }
             Command::Wait { selector, text, url, gone, js, frame, ms, idle, timeout_ms, download } => {
@@ -3331,13 +3327,11 @@ impl Driver {
                 }
                 let t = target.target("get")?;
                 s.get_prop(&t, what, name_of.as_deref(), *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("get {what} {}: {e:#}", t.label()))
+                    .map_err(|e| on_target(&format!("get {what}"), &t, e))
             }
             Command::Is { state, target, timeout_ms } => {
                 let t = target.target("is")?;
-                Ok(json!(s
-                    .is_state(&t, state, *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("is {state} {}: {e:#}", t.label()))?))
+                Ok(json!(s.is_state(&t, state, *timeout_ms).map_err(|e| on_target(&format!("is {state}"), &t, e))?))
             }
             Command::Drag { from, to, timeout_ms } => {
                 let (f, t) = (from.target("drag")?, to.target("drag")?);
@@ -3796,12 +3790,41 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 1_000_000.0).round() / 1000.0
 }
 
+/// `click ref 12: …`, naming the op once: the finder's own `click: ` at the
+/// start of its error goes.
+fn on_target(op: &str, t: &Target, e: anyhow::Error) -> anyhow::Error {
+    let msg = format!("{e:#}");
+    let word = op.split(' ').next().unwrap_or(op);
+    let inner = msg.strip_prefix(word).and_then(|m| m.strip_prefix(": ")).unwrap_or(&msg);
+    anyhow::anyhow!("{op} {}: {inner}", t.label())
+}
+
+/// An error as a person reads it: without the ` (os error 2)` Rust adds to
+/// a system error, whose text already says what went wrong.
+pub fn plain_error(error: &str) -> String {
+    let mut out = String::with_capacity(error.len());
+    let mut rest = error;
+    while let Some(at) = rest.find(" (os error ") {
+        let tail = &rest[at + " (os error ".len()..];
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && tail[digits..].starts_with(')') {
+            out.push_str(&rest[..at]);
+            rest = &tail[digits + 1..];
+        } else {
+            out.push_str(&rest[..at + 1]);
+            rest = &rest[at + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn err_response(id: Value, error: String, started: Instant) -> Response {
     Response {
         id,
         ok: false,
         result: None,
-        error: Some(error),
+        error: Some(plain_error(&error)),
         dialogs: None,
         new_tabs: None,
         notes: None,
@@ -3941,7 +3964,7 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
         Local::InstallBrowser { product, channel, .. } => {
             let response = match crate::install::install(product, channel) {
                 Ok(result) => json!({ "id": null, "ok": true, "result": result }),
-                Err(e) => json!({ "id": null, "ok": false, "error": format!("install-browser: {e:#}") }),
+                Err(e) => json!({ "id": null, "ok": false, "error": plain_error(&format!("install-browser: {e:#}")) }),
             };
             if print_cli_response(output, &response, config) {
                 ExitCode::SUCCESS
@@ -3952,7 +3975,7 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
         Local::InstallSkill { dir } => {
             let response = match install_skill(dir) {
                 Ok(path) => json!({ "id": null, "ok": true, "result": { "installed": path } }),
-                Err(e) => json!({ "id": null, "ok": false, "error": format!("install-skill: {e:#}") }),
+                Err(e) => json!({ "id": null, "ok": false, "error": plain_error(&format!("install-skill: {e:#}")) }),
             };
             if print_cli_response(output, &response, config) {
                 ExitCode::SUCCESS
@@ -3965,6 +3988,28 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_error_reads_without_the_os_error_number() {
+        use super::plain_error;
+        assert_eq!(
+            plain_error("upload: /no/such.txt: No such file or directory (os error 2)"),
+            "upload: /no/such.txt: No such file or directory"
+        );
+        assert_eq!(plain_error("a (os error 13): b (os error 2)"), "a: b");
+        assert_eq!(plain_error("text (os error x) stays"), "text (os error x) stays");
+        assert_eq!(plain_error("no suffix"), "no suffix");
+    }
+
+    #[test]
+    fn a_mistyped_ref_word_still_parses_as_a_ref() {
+        use super::parse_ref;
+        for raw in ["12", "@12", "e12", "ref=12", "ref12", "[ref=12]"] {
+            assert_eq!(parse_ref(raw), Some(12), "{raw}");
+        }
+        assert_eq!(parse_ref("abc"), None);
+        assert_eq!(parse_ref("ref"), None);
+    }
+
     /// A link planted where a file is to be written (a cloned project's
     /// `.primavera`, a shared directory) is replaced, not followed.
     #[cfg(unix)]

@@ -321,7 +321,7 @@ fn a_hidden_control_fails_fast_and_its_card_works() {
     s.ok(&["goto", &format!("{}/card-radios", site.url)]);
     let started = std::time::Instant::now();
     let err = s.fails(&["click", "--selector", "#in-s"]);
-    assert!(err.contains("isn't visible"), "{err}");
+    assert!(err.contains("can't click"), "{err}");
     assert!(started.elapsed() < std::time::Duration::from_secs(3), "fails fast, not after the whole wait");
     assert_eq!(s.text(&["get", "text", "--selector", "#picked"]), "none");
     s.ok(&["click", "--role", "radio", "--name", "Medium"]);
@@ -608,7 +608,7 @@ fn frame_scopes_pick_the_frame_when_ids_repeat() {
     s.ok(&["wait", "--selector", "#name", "--frame", "#billing"]);
     s.ok(&["wait", "--text", "sent 4242424242424242", "--frame", "#card2"]);
     let err = s.fails(&["wait", "--text", "sent", "--frame", "#card", "--timeout-ms", "300"]);
-    assert!(err.contains("in frame \"#card\" not met"), "{err}");
+    assert!(err.contains("in frame \"#card\" not seen"), "{err}");
     // Mistakes say what's wrong.
     let err = s.fails(&["click", "--text", "Save", "--frame", "#nowhere", "--timeout-ms", "300"]);
     assert!(err.contains("no frame matches --frame \"#nowhere\""), "{err}");
@@ -632,7 +632,7 @@ fn a_page_that_stops_answering_costs_one_timeout_not_one_per_command() {
     let started = std::time::Instant::now();
     let err = s.fails(&["click", "--text", "Hold"]);
     let click = started.elapsed();
-    assert!(err.contains("timed out"), "{err}");
+    assert!(err.contains("did not answer"), "{err}");
     // One 10 s timeout for the press, then seconds for the clean-up (it
     // took two full timeouts, 20 s, when every command waited 10 s).
     assert!(click < std::time::Duration::from_secs(17), "click took {click:?}");

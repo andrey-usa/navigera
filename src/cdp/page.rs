@@ -890,7 +890,15 @@ const WAIT_FOR: &str = r#"async function (sel, ms, what, deepFn) {
         }
         el = el || (deep = deep || deepFn()).first(sel);
         if (el) return el;
-        if (Date.now() >= end) throw new Error(what + ': no element matches selector ' + JSON.stringify(sel) + ' within ' + ms + ' ms (run `ax` to see the page and act by --ref)');
+        if (Date.now() >= end) {
+            // A bare word that names no HTML element is most likely a mistyped
+            // ref (`click ref12`, `click abc`): a word that is not a number is
+            // read as CSS.
+            const word = /^[A-Za-z][A-Za-z0-9]*$/.test(sel) && document.createElement(sel) instanceof HTMLUnknownElement;
+            throw new Error(what + ': no element matches selector ' + JSON.stringify(sel) + ' within ' + ms + ' ms ' + (word
+                ? '(a word that is not a number is read as CSS; refs are the numbers in `ax`, as in `click 12`, and --text matches visible text)'
+                : '(run `ax` to see the page and act on a ref from it)'));
+        }
         await new Promise((r) => setTimeout(r, 50));
     }
 }"#;
@@ -1246,7 +1254,7 @@ const WAIT_TEXT: &str = r#"async function (text, ms, what, deep, mode) {
         // A <label> stands for its control (fill/select/upload need the input).
         if (best && best.tagName === 'LABEL' && best.control) return best.control;
         if (best) return best;
-        if (Date.now() >= end) throw new Error(what + ': no element with text ' + JSON.stringify(text) + ' within ' + ms + ' ms (run `ax` to see the page and act by --ref)');
+        if (Date.now() >= end) throw new Error(what + ': no element with text ' + JSON.stringify(text) + ' within ' + ms + ' ms (run `ax` to see the page and act on a ref from it)');
         await new Promise((r) => setTimeout(r, 100));
     }
 }"#;
@@ -1496,7 +1504,7 @@ fn finder_expr_in(target: &Target, wait_ms: u128, what: &str, mode: TextMode) ->
             format!("({WAIT_TEXT})({}, {wait_ms}, {}, {DEEP}, {})", json!(text), json!(what), mode as u8)
         }
         Target::Locator(loc) => format!("({WAIT_LOCATOR})({}, {wait_ms}, {}, {DEEP})", json!(loc), json!(what)),
-        Target::Ref(node) => format!("Promise.reject(new Error('{what}: ref {node} must be resolved through CDP'))"),
+        Target::Ref(node) => format!("Promise.reject(new Error('{what}: ref {node} could not be looked up in the page (a navigera bug)'))"),
     }
 }
 
@@ -1519,6 +1527,36 @@ fn http_origin(url: &str) -> Option<String> {
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
     (!host.is_empty()).then(|| format!("{scheme}://{}", host.to_ascii_lowercase()))
+}
+
+/// What a navigation's `net::ERR_…` code means to the person who asked for
+/// the page, with the code kept at the end for searching.
+fn net_error(code: &str) -> String {
+    let name = code.strip_prefix("net::").unwrap_or(code);
+    let meaning = match name {
+        "ERR_NAME_NOT_RESOLVED" => "the host name did not resolve; a typo, or no network?",
+        "ERR_CONNECTION_REFUSED" => "nothing answered on that port; is the server running?",
+        "ERR_CONNECTION_RESET" | "ERR_CONNECTION_CLOSED" | "ERR_EMPTY_RESPONSE" => {
+            "the server closed the connection without a page"
+        }
+        "ERR_CONNECTION_TIMED_OUT" | "ERR_TIMED_OUT" => "the server did not answer in time",
+        "ERR_INTERNET_DISCONNECTED" | "ERR_NETWORK_CHANGED" => "the network is down or changed",
+        "ERR_ADDRESS_UNREACHABLE" => "that address can't be reached from here",
+        "ERR_UNSAFE_PORT" => "Chrome refuses to open that port, one on its list of unsafe ports",
+        "ERR_HTTP_RESPONSE_CODE_FAILURE" => {
+            "the server answered with an error status and no page; the tab now shows Chrome's error page"
+        }
+        "ERR_TOO_MANY_REDIRECTS" => "the page redirects in a loop",
+        "ERR_BLOCKED_BY_CLIENT" => "the request was blocked by a request rule or an extension",
+        "ERR_BLOCKED_BY_RESPONSE" => "the site does not allow this page to be opened this way",
+        "ERR_FILE_NOT_FOUND" => "no such file",
+        "ERR_INVALID_URL" => "that is not a URL Chrome can open",
+        "ERR_ABORTED" => "the navigation was stopped before a page loaded",
+        "ERR_SSL_PROTOCOL_ERROR" => "the TLS handshake with the server failed",
+        n if n.starts_with("ERR_CERT_") => "the site's TLS certificate was not accepted",
+        _ => "the page could not be loaded",
+    };
+    format!("{meaning} ({code})")
 }
 
 /// A finder's "no element … within" (the element isn't there yet).
@@ -1710,7 +1748,7 @@ impl Page {
         let res = self.send_once(method, params, timeout);
         match &res {
             Ok(_) => self.stalled.store(false, Ordering::SeqCst),
-            Err(e) if format!("{e:#}").contains("CDP command timed out") => self.stalled.store(true, Ordering::SeqCst),
+            Err(e) if format!("{e:#}").contains(super::client::NO_ANSWER) => self.stalled.store(true, Ordering::SeqCst),
             Err(_) => {}
         }
         res
@@ -1798,15 +1836,15 @@ impl Page {
             // and every op after (the failure's screenshot, `url`, `ax`)
             // waits its whole timeout too. Stalled if even that goes
             // unanswered (see STALLED_WAIT).
-            if res.as_ref().is_err_and(|e| format!("{e:#}").contains("CDP command timed out")) {
+            if res.as_ref().is_err_and(|e| format!("{e:#}").contains(super::client::NO_ANSWER)) {
                 let stop = self.client.send("Page.stopLoading", json!({}), Some(&self.session_id), STALLED_WAIT).await;
                 if stop.is_err() {
                     self.stalled.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             }
-            let res = res.with_context(|| format!("navigate to {url}"))?;
+            let res = res?;
             if let Some(error) = res.get("errorText").and_then(Value::as_str) {
-                bail!("navigate to {url}: {error}");
+                bail!("{}", net_error(error));
             }
             if wait == "commit" {
                 if res.get("loaderId").is_some() {
@@ -1890,7 +1928,7 @@ impl Page {
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(e) => bail!("CDP event stream ended: {e}"),
+                Err(e) => bail!("{} (events: {e})", super::client::CLOSED),
             }
         }
     }
@@ -2484,7 +2522,7 @@ impl Page {
                 .map_err(|e| {
                     or_gone(e, || {
                         anyhow::anyhow!(
-                            "ref {backend_node_id} not found (stale after navigation or re-render? take a fresh `ax`)"
+                            "no element has that ref now (the page changed since `ax`, or the number is wrong); run `ax` for fresh refs"
                         )
                     })
                 })?;
@@ -2492,7 +2530,7 @@ impl Page {
                 .get("object")
                 .and_then(|o| o.get("objectId"))
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("ref {backend_node_id} has no JS object"))?
+                .ok_or_else(|| anyhow::anyhow!("that element is gone from the page; run `ax` for fresh refs"))?
                 .to_string();
             let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
             let res = self
@@ -2570,11 +2608,11 @@ impl Page {
         if point.get("hidden").and_then(Value::as_bool) == Some(true) {
             let instead = point.get("instead").and_then(Value::as_str);
             bail!(
-                "the element isn't visible where it is ({}): a user can't click it{}. \
-                 `--force` sends DOM events to it anyway",
+                "a user can't click the element: {}{}. \
+                 To click it anyway, --force sends the click to the element without the mouse",
                 match point.get("at").and_then(Value::as_str) {
-                    Some(at) => format!("a click there lands on {at}"),
-                    None => "no box on screen".to_string(),
+                    Some(at) => format!("it isn't visible, and a click at its place lands on {at}"),
+                    None => "it has no box on screen".to_string(),
                 },
                 instead.map(|i| format!("; click what stands for it: {i}")).unwrap_or_default()
             );
@@ -2583,8 +2621,9 @@ impl Page {
             && point.get("synthetic").and_then(Value::as_bool) != Some(true)
         {
             bail!(
-                "the element is covered by {} at its centre (waited {} ms; a user would click that instead). \
-                 Close or wait for it; `--force` sends DOM events to the element anyway",
+                "the element is covered by {} at its centre (waited {} ms; a user's click would land there). \
+                 Close it or wait for it to go; to click anyway, --force sends the click to the element \
+                 without the mouse",
                 point.get("covered_by").and_then(Value::as_str).unwrap_or("another element"),
                 settle
             );
@@ -2847,7 +2886,7 @@ impl Page {
         )?;
         if point.get("hidden").and_then(Value::as_bool) == Some(true) {
             bail!(
-                "the element isn't visible where it is; a user can't double-click it{}",
+                "a user can't double-click the element: it isn't visible at its place{}",
                 point.get("instead").and_then(Value::as_str).map(|i| format!(" (try {i})")).unwrap_or_default()
             );
         }
@@ -2855,7 +2894,7 @@ impl Page {
             && point.get("synthetic").and_then(Value::as_bool) != Some(true)
         {
             bail!(
-                "the element is covered by {} at its centre; close or wait for it",
+                "the element is covered by {} at its centre; close it or wait for it to go",
                 point.get("covered_by").and_then(Value::as_str).unwrap_or("another element")
             );
         }
@@ -3280,11 +3319,10 @@ impl Page {
                 if let Some(details) = res.get("exceptionDetails") {
                     bail!("{}", exception_message(details));
                 }
-                let object = res
-                    .get("result")
-                    .and_then(|r| r.get("objectId"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("upload: element has no remote object"))?;
+                let object =
+                    res.get("result").and_then(|r| r.get("objectId")).and_then(Value::as_str).ok_or_else(|| {
+                        anyhow::anyhow!("upload: the element is gone from the page; run `ax` for fresh refs")
+                    })?;
                 params["objectId"] = json!(object);
             }
         }
@@ -3673,15 +3711,15 @@ impl Page {
             .get("result")
             .and_then(|r| r.get("objectId"))
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("ax: scope element has no remote object"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("ax: the element to scope to is gone from the page; run `ax` for fresh refs")
+            })?
             .to_string();
         let described = self.send("DOM.describeNode", json!({ "objectId": object }), timeout);
         let _ = self.send("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-ax" }), timeout);
-        described?
-            .get("node")
-            .and_then(|n| n.get("backendNodeId"))
-            .and_then(Value::as_u64)
-            .ok_or_else(|| anyhow::anyhow!("ax: no backend node id for scope"))
+        described?.get("node").and_then(|n| n.get("backendNodeId")).and_then(Value::as_u64).ok_or_else(|| {
+            anyhow::anyhow!("ax: the element to scope to is gone from the page; run `ax` for fresh refs")
+        })
     }
 
     /// Lightpanda gives every password field the value `*****`, typed into or
@@ -3944,6 +3982,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_navigation_error_says_what_it_means_and_keeps_its_code() {
+        let e = net_error("net::ERR_NAME_NOT_RESOLVED");
+        assert!(e.starts_with("the host name did not resolve;"), "{e}");
+        assert!(e.ends_with("(net::ERR_NAME_NOT_RESOLVED)"), "{e}");
+        assert!(net_error("net::ERR_CERT_DATE_INVALID").contains("certificate"));
+        // Callers that look for the code still find it.
+        assert!(net_error("net::ERR_ABORTED").contains("ERR_ABORTED"));
+        assert_eq!(net_error("net::ERR_SOMETHING_NEW"), "the page could not be loaded (net::ERR_SOMETHING_NEW)");
+    }
 
     #[test]
     fn keys_and_chords_resolve() {

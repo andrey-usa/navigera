@@ -99,7 +99,7 @@ impl Browser {
             }
         };
         crate::timing::log(&format!("[browser] lightpanda serve on 127.0.0.1:{port} -> {ws_url}"));
-        let client = handle.block_on(CdpClient::connect(&ws_url)).context("CDP connect to lightpanda")?;
+        let client = handle.block_on(CdpClient::connect(&ws_url)).context("connect to lightpanda")?;
         let shared = Arc::new(Shared::default());
         shared.single_target.store(true, std::sync::atomic::Ordering::Relaxed);
         events::spawn(handle, &client, Arc::clone(&shared));
@@ -128,7 +128,7 @@ impl Browser {
                 let _guard = handle.enter();
                 handle.block_on(CdpClient::connect_pipe(launched.from_browser, launched.to_browser))
             }
-            .context("CDP pipe connect")?;
+            .context("connect to the browser over its pipe")?;
             let mut browser =
                 Self::finish(handle, client, Some(launched.child), Some(launched.profile_dir), "pipe".into());
             browser.stderr = Some(launched.stderr);
@@ -139,7 +139,7 @@ impl Browser {
                 .context("launch chrome")?;
         crate::timing::record("devtools_url", started);
         let connect_started = std::time::Instant::now();
-        let client = handle.block_on(CdpClient::connect(&ws_url)).context("CDP connect")?;
+        let client = handle.block_on(CdpClient::connect(&ws_url)).context("connect to the browser")?;
         crate::timing::record("ws_connect", connect_started);
         let mut browser = Self::finish(handle, client, Some(child), Some(profile_dir), ws_url);
         browser.job = job;
@@ -503,7 +503,7 @@ impl Browser {
                 .send("Target.activateTarget", json!({ "targetId": target_id }), None, Duration::from_secs(3))
                 .await
             {
-                Err(e) if format!("{e:#}").contains("timed out") => {
+                Err(e) if format!("{e:#}").contains(super::client::NO_ANSWER) => {
                     eprintln!("[browser] activating tab {target_id} took over 3 s; going on");
                     Ok(())
                 }

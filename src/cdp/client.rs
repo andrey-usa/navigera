@@ -24,6 +24,12 @@ type Responder = oneshot::Sender<Result<Value, String>>;
 /// command still waiting when its tab's session ends fails with.
 pub const SESSION_GONE: &str = "Session with given id not found";
 
+/// Start of the error for a command the browser did not answer in time.
+pub const NO_ANSWER: &str = "the browser did not answer";
+
+/// Start of the error for a connection to the browser that has ended.
+pub const CLOSED: &str = "the connection to the browser closed";
+
 /// A command waiting for its answer, and the tab session it went to.
 type Pending = HashMap<u64, (Option<String>, Responder)>;
 
@@ -55,7 +61,7 @@ fn close_all(closed: &AtomicBool, pending: &Mutex<Pending>) {
     closed.store(true, Ordering::SeqCst);
     let mut pending = pending.lock().unwrap();
     for (_, (_, responder)) in pending.drain() {
-        let _ = responder.send(Err("CDP connection closed".to_string()));
+        let _ = responder.send(Err(CLOSED.to_string()));
     }
 }
 
@@ -78,8 +84,8 @@ impl CdpClient {
     pub async fn connect_within(ws_url: &str, bound: Duration) -> Result<Self> {
         let (ws, _) = tokio::time::timeout(bound, tokio_tungstenite::connect_async(ws_url))
             .await
-            .map_err(|_| anyhow::anyhow!("CDP websocket connect to {ws_url} timed out"))?
-            .with_context(|| format!("CDP websocket connect to {ws_url}"))?;
+            .map_err(|_| anyhow::anyhow!("could not connect to the browser at {ws_url} within {} s", bound.as_secs()))?
+            .with_context(|| format!("connect to the browser at {ws_url}"))?;
         let (mut sink, mut stream) = ws.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, _) = broadcast::channel::<Value>(512);
@@ -214,14 +220,14 @@ impl CdpClient {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         if self.inner.closed.load(Ordering::SeqCst) {
-            anyhow::bail!("CDP connection closed during {method}");
+            anyhow::bail!("{CLOSED} ({method})");
         }
         self.inner.pending.lock().unwrap().insert(id, (session_id.map(str::to_string), tx));
         // The transport may have closed (and drained `pending`) between the
         // check and the insert.
         if self.inner.closed.load(Ordering::SeqCst) {
             self.inner.pending.lock().unwrap().remove(&id);
-            anyhow::bail!("CDP connection closed during {method}");
+            anyhow::bail!("{CLOSED} ({method})");
         }
 
         let mut msg = serde_json::json!({
@@ -235,18 +241,18 @@ impl CdpClient {
         if let Some(writer) = self.inner.writer.lock().unwrap().as_ref() {
             if writer.send(msg.to_string()).is_err() {
                 self.inner.pending.lock().unwrap().remove(&id);
-                anyhow::bail!("CDP client is shut down");
+                anyhow::bail!("{CLOSED} ({method})");
             }
         } else {
             self.inner.pending.lock().unwrap().remove(&id);
-            anyhow::bail!("CDP client is shut down");
+            anyhow::bail!("{CLOSED} ({method})");
         }
 
         let response = tokio::time::timeout(timeout, rx)
             .await
-            .map_err(|_| anyhow::anyhow!("CDP command timed out: {method}"))?
-            .map_err(|_| anyhow::anyhow!("CDP connection closed during {method}"))?;
-        response.map_err(|e| anyhow::anyhow!("CDP error in {method}: {e}"))
+            .map_err(|_| anyhow::anyhow!("{NO_ANSWER} within {} ms ({method})", timeout.as_millis()))?
+            .map_err(|_| anyhow::anyhow!("{CLOSED} ({method})"))?;
+        response.map_err(|e| anyhow::anyhow!("the browser refused {method}: {e}"))
     }
 
     /// How many events have been broadcast to subscribers so far.
@@ -271,12 +277,12 @@ impl CdpClient {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(e) => anyhow::bail!("CDP event stream ended: {e}"),
+                    Err(e) => anyhow::bail!("{CLOSED} (events: {e})"),
                 }
             }
         })
         .await
-        .map_err(|_| anyhow::anyhow!("timed out waiting for CDP event"))?
+        .map_err(|_| anyhow::anyhow!("{NO_ANSWER}: the event waited for did not come"))?
     }
 
     /// Stop the pump task; the websocket closes when the task drops it.

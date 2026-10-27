@@ -956,7 +956,7 @@ impl BrowserSession {
     /// Switch the active tab by zero-based index.
     pub fn select_page(&mut self, index: usize) -> Result<()> {
         if index >= self.pages.len() {
-            bail!("no tab {index} (have {})", self.pages.len());
+            bail!("no tab {index}; {}", tab_range(self.pages.len()));
         }
         self.active = index;
         self.bring_to_front()
@@ -973,7 +973,7 @@ impl BrowserSession {
             bail!("refusing to close the session's only tab; use `quit` instead");
         }
         if index >= self.pages.len() {
-            bail!("no tab {index} (have {})", self.pages.len());
+            bail!("no tab {index}; {}", tab_range(self.pages.len()));
         }
         let timeout = self.timeout(None);
         self.pages[index].close_target(timeout)?;
@@ -1710,15 +1710,27 @@ impl BrowserSession {
                     // turned into a download (saved: `downloads` lists it).
                     // Trying again would fetch it again: a download link
                     // downloaded the file four times.
-                    if msg.contains("ERR_ABORTED") {
-                        let status = self
-                            .requests(false)
+                    let status = || {
+                        self.requests(false)
                             .into_iter()
                             .filter(|r| r.n > requests_before && r.kind == "Document")
                             .filter_map(|r| r.status)
-                            .next_back();
-                        if let Some(code @ (204 | 205)) = status {
-                            bail!("{msg}: the server answered {code} (no content), so the browser stays on the page it was on");
+                            .next_back()
+                    };
+                    if msg.contains("ERR_HTTP_RESPONSE_CODE_FAILURE") {
+                        if let Some(code) = status() {
+                            bail!(
+                                "the server answered {code} with no page; the tab now shows Chrome's error page \
+                                 (net::ERR_HTTP_RESPONSE_CODE_FAILURE)"
+                            );
+                        }
+                    }
+                    if msg.contains("ERR_ABORTED") {
+                        if let Some(code @ (204 | 205)) = status() {
+                            bail!(
+                                "the server answered {code} (no content), so the browser stays on the page it was on \
+                                 (net::ERR_ABORTED)"
+                            );
                         }
                         let end = std::time::Instant::now() + Duration::from_secs(1);
                         loop {
@@ -2070,7 +2082,7 @@ impl BrowserSession {
             }
             polls += 1;
             if started.elapsed() >= wait {
-                bail!("wait: {what} not met within {} ms", wait.as_millis());
+                bail!("wait: {what} not seen within {} ms (wait longer with --timeout-ms)", wait.as_millis());
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -2095,7 +2107,10 @@ impl BrowserSession {
                 _ => {}
             }
             if started.elapsed() >= wait {
-                bail!("wait: {what} in frame {chain:?} not met within {} ms", wait.as_millis());
+                bail!(
+                    "wait: {what} in frame {chain:?} not seen within {} ms (wait longer with --timeout-ms)",
+                    wait.as_millis()
+                );
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -2225,6 +2240,15 @@ impl BrowserSession {
 
 // Re-exported for the rare caller that still names the engine explicitly.
 pub use cdp::{Browser as CdpBrowser, Page as CdpPage};
+
+/// Which tab numbers there are, for an error naming one that isn't.
+fn tab_range(count: usize) -> String {
+    match count {
+        0 => "there are no tabs (`tab-new` opens one)".to_string(),
+        1 => "the one tab is tab 0 (`tab-list` shows it)".to_string(),
+        n => format!("tabs are numbered 0 to {} (`tab-list` shows them)", n - 1),
+    }
+}
 
 #[cfg(test)]
 mod tests {
