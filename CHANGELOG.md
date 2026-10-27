@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `--help` and `help <command>` fit 80 columns, list `-s`, `--wait-ms` and
+  `--version`, and show `check` once with both of its forms. A usage error
+  prints its usage once; an unknown command is matched only when it is
+  close (`goot` → `goto`, not `bogus` → `focus`).
+
 ## [0.7.0] - 2026-10-27
 
 Refs on what a page made clickable: a `<div>` row with a click handler, a

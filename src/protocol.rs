@@ -976,22 +976,21 @@ pub struct ParsedArgs {
 const OPS: &[(&str, &str, &str)] = &[
     ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless]] [--natural] [--download-dir <dir>]", "spawn a detached session server + headless browser (needs --session); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
-    ("ax", "[--selector <css> | <ref>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json]", "accessibility snapshot: indented tree, [ref=N] on actionable nodes"),
-    ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button right|middle] [--force]", "trusted mouse click once the element stops moving; refuses an element covered by another (--force: DOM events anyway); waits for any navigation it starts"),
+    ("ax", "[--selector <css> | <ref>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json]", "accessibility snapshot: indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N)"),
+    ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
     ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys]", "set an input/textarea's value; --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
     ("type", "<text> [--selector <css> | --ref <n>]", "type key by key into the target or the focused element"),
     ("press", "<key> [--selector <css> | --ref <n>]", "press a key or chord: Enter, Tab, Escape, ArrowDown, Control+a"),
     ("select", "<ref> <option>... | --selector <css> --value <option> [--add]", "choose <select> option(s) by value or label (whitespace-insensitive); --add keeps the options already chosen"),
     ("hover", "<ref> | --selector <css> | --text <t>", "move the mouse over an element (hover menus)"),
-    ("mouse", "move <x> <y> [--steps n] | down | up | click <x> <y> [--count 2] | wheel <dx> <dy>  [--button right|middle] [<target>]", "raw mouse at a point, for what has no element to aim at (a canvas, a map, a game): viewport CSS pixels (as in a screenshot), or from the target's top-left corner (scrolled into view if need be; down, up and wheel with a target go to its center); the pointer stays where it went and held buttons stay held, so down, moves, up drags or draws; a click outside the viewport is refused"),
+    ("mouse", "move <x> <y> [--steps n] | down | up | click <x> <y> [--count 2] | wheel <dx> <dy> [--button left|right|middle] [<target>]", "raw mouse at a point, for what has no element to aim at (a canvas, a map, a game): viewport CSS pixels (as in a screenshot), or from the target's top-left corner (scrolled into view if need be; down, up and wheel with a target go to its center); the pointer stays where it went and held buttons stay held, so down, moves, up drags or draws; a click outside the viewport is refused"),
     ("scroll", "[--by <px> | --to top|bottom] [<ref> | --selector <css>]", "scroll the page, or an element into view"),
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
     ("eval", "<js> | --file <path.js> | -", "evaluate JS (arrow functions are called); prints the JSON result; `-` reads the script from stdin"),
     ("text", "--selector <css>", "textContent of the first match"),
-    ("find", "<description>", "the element a description means, chosen by a decision model (TYPESAFE_API_KEY); element ops also take --find <description>"),
-    ("check", "<yes/no question>", "probability that the answer about the page is yes, from a decision model (TYPESAFE_API_KEY)"),
+    ("find", "<description>", "the element a description means, chosen by a decision model (set TYPESAFE_API_KEY; README: Decisions by a fast model); element ops also take --find <description>"),
     ("title", "", "page title"),
     ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
     ("errors", "[--limit <n>] [--clear] [--json]", "only the errors: exceptions, console.error, failed loads"),
@@ -1009,15 +1008,15 @@ const OPS: &[(&str, &str, &str)] = &[
     ("dblclick", "<target>", "trusted double click"),
     ("drag", "<from> <to> | --from-text <t> --to-text <t>", "drag one element onto another (each a ref or CSS selector): HTML5 drag and drop for a draggable source, a held mouse moved across otherwise"),
     ("focus", "<target>", "focus an element"),
-    ("check", "<target> | <yes/no question>", "check a checkbox/radio/switch (clicks only if needed); with a question instead of a target, the decision model's yes/no"),
+    ("check", "<target> | <yes/no question>", "check a checkbox, radio or switch (clicks only if needed). With a question instead of a target: the probability that the answer about the page is yes, from a decision model (set TYPESAFE_API_KEY)"),
     ("uncheck", "<target>", "uncheck a checkbox/switch"),
     ("keydown", "<key>", "hold a key (Shift, Control, a character) until keyup"),
     ("keyup", "<key>", "release a held key"),
     ("insert-text", "<text> [<target>]", "insert text at the caret in one go (paste/IME), no key events"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
-    ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
-    ("locate", "<target>", "the locators that find an element again, most stable first, each checked on the page (for turning refs into tests)"),
-    ("history", "[--clear]", "the actions this session ran, a ref's with the locators of its element (`primavera from-session` reads it)"),
+    ("status", "", "the session's engine, browser executable, how it is connected (a private pipe or a DevTools port) and its tabs"),
+    ("locate", "<target>", "the locators that find an element again, most stable first, each checked on the page (to turn refs into tests)"),
+    ("history", "[--clear]", "the actions this session ran, a ref's with the locators of its element (primavera, the test runner built on navigera, turns it into a test with `from-session`)"),
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
@@ -1039,48 +1038,105 @@ const OPS: &[(&str, &str, &str)] = &[
     ("install-skill", "[--dir <skills dir>] [--claude | --continue] [--global]", "install the skill for agents (default ./.agents/skills, read by Cline and Kilo; --claude: ./.claude/skills; --continue: ./.continue/skills)"),
 ];
 
+/// `text` after `prefix`, in lines of at most 80 columns; lines after the
+/// first start with `indent` spaces.
+fn wrapped(prefix: &str, text: &str, indent: usize) -> String {
+    const WIDTH: usize = 80;
+    let mut out = String::new();
+    let mut line = prefix.to_string();
+    let mut fresh = true;
+    for word in text.split_whitespace() {
+        if !fresh && line.chars().count() + 1 + word.chars().count() > WIDTH {
+            out.push_str(line.trim_end());
+            out.push('\n');
+            line = " ".repeat(indent);
+            fresh = true;
+        }
+        if !fresh {
+            line.push(' ');
+        }
+        line.push_str(word);
+        fresh = false;
+    }
+    out.push_str(line.trim_end());
+    out.push('\n');
+    out
+}
+
 /// Help text for `--help` / argument errors.
 pub fn usage(program: &str) -> String {
     let mut out = format!(
-        "navigera {} — drive headless Chrome over CDP, one shell command per step.\n\n\
+        "navigera {}: drive Chrome from the shell, one command per step, over the\n\
+         Chrome DevTools Protocol (CDP).\n\n\
          AGENT LOOP:\n  \
-         {program} --session s start\n  \
-         {program} --session s goto https://example.com\n  \
-         {program} --session s ax                     # read: tree with [ref=N]\n  \
-         {program} --session s click 12               # act on a ref\n  \
-         {program} --session s fill 31 \"hello\"\n  \
-         {program} --session s quit\n\n\
+         {program} -s s start\n  \
+         {program} -s s goto https://example.com\n  \
+         {program} -s s ax                     # read: tree with [ref=N]\n  \
+         {program} -s s click 12               # act on a ref\n  \
+         {program} -s s fill 31 \"hello\"\n  \
+         {program} -s s quit\n\n\
          COMMANDS:\n",
         env!("CARGO_PKG_VERSION")
     );
     for (name, args, what) in OPS {
-        out.push_str(&format!("  {name:<13} {args}\n  {:<13} {what}\n", ""));
+        out.push_str(&wrapped(&format!("  {name:<13} "), args, 16));
+        out.push_str(&wrapped(&" ".repeat(16), what, 16));
     }
-    out.push_str(&format!(
-        "\nGLOBAL FLAGS (before or after the command):\n  \
-         --session <name>       warm browser behind a local socket ($NAVIGERA_SESSION)\n  \
-         --raw                  print only the result (strings unquoted); errors on stderr\n  \
-         --timeout-ms <ms>      navigation/command timeout (default {DEFAULT_TIMEOUT_MS}); per op: element wait (default 5000)\n  \
-         --chromium <path>      browser binary ($CHROME_BIN); --engine lightpanda ($NAVIGERA_ENGINE); --headed\n  \
-         --transport ws         CDP over a DevTools port instead of a private pipe (to attach DevTools; Windows default)\n  \
-         --idle-timeout-s <s>   session server idle shutdown (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never)\n  \
-         --attach [chrome|edge|<dir>|<port>]  with `start`: use your running browser (Chrome 144+: chrome://inspect/#remote-debugging); never closes it\n  \
-         --profile <name>       with `start`: persistent visible navigera browser, kept open between sessions (--headless to hide)\n  \
-         --from <browser|dir>   with --profile: first copy your own browser's sign-ins into it (cookies, site storage, saved logins); --from-profile <dir|name|email>\n  \
-         --natural              look like the browser it is: no HeadlessChrome user agent, a real screen size ($NAVIGERA_NATURAL=1)\n  \
-         --pretty               pretty-print JSON\n\n\
-         Output: one JSON object per command, {{\"ok\":true,\"result\":…}} or {{\"ok\":false,\"error\":…}}; exit 1 on error.\n\
-         Without --session each command launches and closes its own browser (one-shot).\n\
-         Programs: `{program} serve` reads JSON commands on stdin, e.g. {{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}}.\n\
-         More: `{program} help <command>`, `{program} skill`."
-    ));
-    out
+    out.push_str("\nGLOBAL FLAGS (before or after the command):\n");
+    let flags: &[(&str, String)] = &[
+        ("-s, --session <name>", "a warm browser behind a local socket ($NAVIGERA_SESSION)".into()),
+        ("--raw", "print only the result (strings unquoted); errors on stderr".into()),
+        ("--timeout-ms <ms>", format!("navigation and command timeout (default {DEFAULT_TIMEOUT_MS})")),
+        (
+            "--wait-ms <ms>",
+            "how long an element command waits for its element (default 5000): on `start`, for the session; on one command, for that command".into(),
+        ),
+        ("--chromium <path>", "the browser binary ($CHROME_BIN); --engine lightpanda ($NAVIGERA_ENGINE); --headed".into()),
+        ("--transport ws", "talk to the browser over a DevTools port instead of a private pipe (to open DevTools on it; the Windows default)".into()),
+        ("--idle-timeout-s <s>", format!("the session server shuts down after this long idle (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never)")),
+        (
+            "--attach [chrome|edge|<dir>|<port>]",
+            "with `start`: use your running browser and never close it. Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there".into(),
+        ),
+        ("--profile <name>", "with `start`: a persistent visible navigera browser, kept open between sessions (--headless to hide it)".into()),
+        (
+            "--from <browser|dir>",
+            "with --profile: first copy your own browser's sign-ins into it (cookies, site storage, saved logins); --from-profile <dir|name|email> picks the profile".into(),
+        ),
+        ("--natural", "look like the browser it is: no HeadlessChrome user agent, a real screen size ($NAVIGERA_NATURAL=1)".into()),
+        ("--pretty", "pretty-print JSON".into()),
+        ("-V, --version", "print the version".into()),
+    ];
+    for (flag, what) in flags {
+        if flag.len() <= 22 {
+            out.push_str(&wrapped(&format!("  {flag:<22} "), what, 25));
+        } else {
+            out.push_str(&format!("  {flag}\n"));
+            out.push_str(&wrapped(&" ".repeat(25), what, 25));
+        }
+    }
+    out.push('\n');
+    for paragraph in [
+        "Output: one JSON object per command, {\"ok\":true,\"result\":…} or {\"ok\":false,\"error\":…}; exit 1 on error.".to_string(),
+        "Without --session each command launches and closes its own browser (one-shot).".to_string(),
+        format!("Programs: `{program} serve` reads JSON commands on stdin, e.g. {{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}}."),
+        format!("More: `{program} help <command>`, `{program} skill`."),
+    ] {
+        out.push_str(&wrapped("", &paragraph, 0));
+    }
+    out.trim_end().to_string()
 }
 
-/// `help <op>`.
+/// `help <op>`: its usage line and what it does.
 pub fn op_help(program: &str, op: &str) -> Option<String> {
-    let (name, args, what) = OPS.iter().find(|(n, ..)| *n == op)?;
-    Some(format!("usage: {program} [--session <s>] {name} {args}\n{what}"))
+    let (_, _, what) = OPS.iter().find(|(n, ..)| *n == op)?;
+    Some(format!("{}\n{}", op_usage(program, op)?, wrapped("", what, 0).trim_end()))
+}
+
+/// The usage line of `op`, for errors (`usage: navigera … <op> <args>`).
+fn op_usage(program: &str, op: &str) -> Option<String> {
+    let (name, args, _) = OPS.iter().find(|(n, ..)| *n == op)?;
+    Some(wrapped(&format!("usage: {program} [-s <session>] {name} "), args, 7).trim_end().to_string())
 }
 
 /// Nearest known command for a typo, plus aliases other agent CLIs use.
@@ -1114,24 +1170,36 @@ fn suggest(op: &str) -> Option<&'static str> {
     if let Some((_, to)) = aliases.iter().find(|(a, _)| a.eq_ignore_ascii_case(op)) {
         return Some(to);
     }
+    // Edits between two words, a swap of neighbours counting as one.
     fn dist(a: &str, b: &str) -> usize {
-        let b: Vec<char> = b.chars().collect();
-        let mut prev: Vec<usize> = (0..=b.len()).collect();
-        for (i, ca) in a.chars().enumerate() {
-            let mut cur = vec![i + 1];
-            for (j, cb) in b.iter().enumerate() {
-                cur.push((prev[j] + usize::from(ca != *cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
-            }
-            prev = cur;
+        let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+        let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+        for (i, row) in d.iter_mut().enumerate() {
+            row[0] = i;
         }
-        prev[b.len()]
+        for (j, cell) in d[0].iter_mut().enumerate() {
+            *cell = j;
+        }
+        for i in 1..=a.len() {
+            for j in 1..=b.len() {
+                let cost = usize::from(a[i - 1] != b[j - 1]);
+                d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+                if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                    d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+                }
+            }
+        }
+        d[a.len()][b.len()]
     }
+    // One edit for a short word, two from six letters on: "bogus" is
+    // nothing like "focus".
+    let most = if op.chars().count() >= 6 { 2 } else { 1 };
     let extra: &[(&str, &str)] = &[("navigate", "goto"), ("snapshot", "ax"), ("evaluate", "eval"), ("close", "quit")];
     OPS.iter()
         .map(|(n, ..)| (*n, *n))
         .chain(aliases.iter().chain(extra.iter()).copied())
         .map(|(name, to)| (to, dist(&op.to_ascii_lowercase(), name)))
-        .filter(|(_, d)| *d <= 2)
+        .filter(|(_, d)| *d <= most)
         .min_by_key(|(_, d)| *d)
         .map(|(n, _)| n)
 }
@@ -1423,10 +1491,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     };
     if op == "-h" || op == "--help" || op == "help" {
         return match args.front() {
-            Some(topic) => op_help(&program, topic)
-                .map(ArgsError::Help)
-                .map(Err)
-                .unwrap_or_else(|| invalid(format!("no command {topic:?}; see `{program} --help`"))),
+            Some(topic) => op_help(&program, topic).map(ArgsError::Help).map(Err).unwrap_or_else(|| {
+                let hint = suggest(topic).map(|s| format!(" — did you mean `{s}`?")).unwrap_or_default();
+                invalid(format!("unknown command {topic:?}{hint}\n(`{program} --help` lists them)"))
+            }),
             None => Err(ArgsError::Help(usage(&program))),
         };
     }
@@ -1504,7 +1572,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
 
     let timeout_ms = num_flag(&mut args, "--timeout-ms")?;
     let need = |name: &str, what: &str| {
-        ArgsError::Invalid(format!("{op} needs {what}; usage: {}", op_help(&program, name).unwrap_or_default()))
+        ArgsError::Invalid(format!("{op} needs {what}\n{}", op_usage(&program, name).unwrap_or_default()))
     };
     let command = match op.as_str() {
         "open" => Command::Open {
@@ -2002,15 +2070,16 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         },
         unknown => {
             let hint = suggest(unknown).map(|s| format!(" — did you mean `{s}`?")).unwrap_or_default();
+            let names = OPS.iter().map(|(n, ..)| *n).collect::<Vec<_>>().join(", ");
             return invalid(format!(
-                "unknown command {unknown:?}{hint}\ncommands: {}\n(`{program} --help` for usage)",
-                OPS.iter().map(|(n, ..)| *n).collect::<Vec<_>>().join(", ")
+                "unknown command {unknown:?}{hint}\n{}(`{program} --help` for usage)",
+                wrapped("commands: ", &names, 10)
             ));
         }
     };
     if let Some(extra) = args.front() {
         let hint = if extra.starts_with("--") {
-            format!("; usage: {}", op_help(&program, &op).unwrap_or_default())
+            format!("\n{}", op_usage(&program, &op).unwrap_or_default())
         } else {
             " (quote arguments that contain spaces)".to_string()
         };
@@ -4088,6 +4157,25 @@ mod tests {
         match parse_args(argv(&["navigera", "evaluat"])).expect_err("typo") {
             ArgsError::Invalid(message) => assert!(message.contains("did you mean `eval`"), "{message}"),
             other => panic!("{other:?}"),
+        }
+        // A swap is one edit; a word that is nothing like a command gets no
+        // guess.
+        assert_eq!(suggest("goot"), Some("goto"));
+        assert_eq!(suggest("bogus"), None);
+        match parse_args(argv(&["navigera", "fill"])).expect_err("no value") {
+            ArgsError::Invalid(message) => {
+                assert_eq!(message.matches("usage:").count(), 1, "{message}");
+                assert!(message.lines().all(|l| l.chars().count() <= 80), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The help fits 80 columns, names each command once and lists the
+        // flags the skill uses.
+        let help = usage("navigera");
+        assert!(help.lines().all(|l| l.chars().count() <= 80 && !l.ends_with(' ')), "{help}");
+        assert_eq!(help.lines().filter(|l| l.starts_with("  check ")).count(), 1, "{help}");
+        for flag in ["-s, --session", "--wait-ms", "--version"] {
+            assert!(help.contains(flag), "{flag}: {help}");
         }
 
         let missing = parse_args(argv(&["navigera", "goto"])).expect_err("missing url");
