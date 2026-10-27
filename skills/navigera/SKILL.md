@@ -137,7 +137,7 @@ page "Checkout — Acme" http://shop.test/checkout
 | `scroll [--by 800 \| --to bottom] [<ref>]` | scroll the page (infinite lists load more) or bring a ref into view; `--selector "#list"` scrolls inside a box |
 | `upload <ref> <file>…` | set an `<input type=file>` |
 | `wait --text "Saved" \| --selector <css> \| --url <part> \| --gone <css> \| --js "<expr>" \| --ms 500` | wait for a condition (up to 5 s, or `--wait-ms`) |
-| `eval "<js>"` | run JavaScript in the page (arrow functions are called), result as JSON; `--file f.js` or `-` (stdin) |
+| `eval "<js>"` | run JavaScript in the page (an expression, an arrow function, or statements with `await` and `return`), result as JSON; `--file f.js` or `-` (stdin) |
 | `back` / `forward` / `reload` | history |
 | `screenshot [file.png] [--full-page]` | PNG of the viewport or the whole page |
 | `tab-new [url]`, `tab-list`, `tab-select <i or id>`, `tab-close [<i>]` | tabs; an id from `tab-list` stays right as tabs open and close |

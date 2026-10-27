@@ -41,6 +41,13 @@ All notable changes to this project are documented here. The format follows
   names each field of what `status` prints, and `help ax` says a target (a
   ref or any locator) scopes the tree to that element.
 
+### Added
+
+- `eval` runs statements too, with `await` and `return` at the top level
+  (`const r = await fetch('/api/cart'); r.status`, or a body that ends in
+  `return`): what was one expression or an arrow function before; a probe
+  written either way works the first time.
+
 ### Fixed
 
 - `wait --text … --wait-ms <ms>` waits that long; `--wait-ms` was accepted

@@ -1805,6 +1805,34 @@ impl Page {
         self.evaluate_raw(&wrapped, timeout)
     }
 
+    /// Run `source` as a script, as a console does: statements (`a(); b`),
+    /// `let`, and `await` at the top level, the last expression's value
+    /// the result (a function it ends with is called). For what
+    /// [`Self::evaluate`] can't parse as one expression.
+    pub fn evaluate_script(&self, source: &str, timeout: Duration) -> Result<Value> {
+        let res = self.send(
+            "Runtime.evaluate",
+            json!({
+                "expression": source,
+                "returnByValue": true,
+                "awaitPromise": true,
+                "replMode": true,
+            }),
+            timeout,
+        )?;
+        if let Some(details) = res.get("exceptionDetails") {
+            bail!("{}", exception_message(details));
+        }
+        let value = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null);
+        Ok(value)
+    }
+
+    /// Run `source` as the body of an async function: `return` gives the
+    /// result.
+    pub fn evaluate_body(&self, source: &str, timeout: Duration) -> Result<Value> {
+        self.evaluate_raw(&format!("(async () => {{\n{source}\n}})()"), timeout)
+    }
+
     fn evaluate_raw(&self, expression: &str, timeout: Duration) -> Result<Value> {
         let res = self.send(
             "Runtime.evaluate",

@@ -988,7 +988,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
-    ("eval", "<js> | --file <path.js> | -", "evaluate JS (arrow functions are called); prints the JSON result; `-` reads the script from stdin"),
+    ("eval", "<js> | --file <path.js> | -", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin"),
     ("text", "--selector <css>", "textContent of the first match"),
     ("find", "<description>", "the element a description means, chosen by a decision model (set TYPESAFE_API_KEY; README: Decisions by a fast model); element ops also take --find <description>"),
     ("title", "", "page title"),
@@ -3046,8 +3046,7 @@ impl Driver {
                 Ok(json!(text))
             }
             Command::Eval { expression, timeout_ms } => {
-                let value: Value =
-                    s.evaluate_with_timeout(expression, *timeout_ms).map_err(|e| anyhow::anyhow!("eval: {e:#}"))?;
+                let value = s.evaluate_user(expression, *timeout_ms).map_err(|e| anyhow::anyhow!("eval: {e:#}"))?;
                 Ok(value)
             }
             Command::Title {} => {

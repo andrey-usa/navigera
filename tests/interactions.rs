@@ -113,6 +113,22 @@ impl Drop for Session {
     }
 }
 
+/// `eval` takes what people type: an expression, an arrow function,
+/// statements with the last value the answer, top-level `await`, or a body
+/// that `return`s.
+#[test]
+fn eval_takes_statements_await_and_a_body() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("eval", &[]);
+    s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+    assert_eq!(s.ok(&["eval", "document.title"]), "hidden layers");
+    assert_eq!(s.ok(&["eval", "() => 40 + 2"]), 42);
+    assert_eq!(s.ok(&["eval", "const n = 40; n + 2"]), 42);
+    assert_eq!(s.ok(&["eval", "const r = await fetch(location.href); r.status"]), 200);
+    assert_eq!(s.ok(&["eval", "const n = 6 * 7; return n"]), 42);
+    assert!(s.fails(&["eval", "((("]).contains("SyntaxError"));
+}
+
 #[test]
 fn a_covered_element_is_not_clicked_unless_forced() {
     let (true, Some(site)) = (chrome(), site()) else { return };

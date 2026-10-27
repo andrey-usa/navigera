@@ -98,7 +98,7 @@ another process are reachable by ref only.
 | `upload` | target, file path(s) (positional or `--file`) | `{files}` |
 | `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--idle` (no fetch/XHR for 500 ms; also `--load networkidle`), `--download [<glob>]` (a finished download whose file name matches), `--ms <n>`; `--timeout-ms` | state + `waited_ms` (+ `download`); `--ms` alone: `{waited_ms}` |
 | `downloads` | `--clear`, `--json`, `--dir <path>` | `#n state bytes path (url)` per file the pages downloaded, saved under `--download-dir` with the name the page gave it (`report (2).csv` if taken). With `--attach` the browser keeps its own download folder and `path` is empty. `--dir` saves this session's downloads in `<path>` from now on (created if missing; kept across `reset`), apart from other sessions' and returns `{dir}` |
-| `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value (an arrow function is called; promises are awaited) |
+| `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value: an expression's, an arrow function's (it is called), or for statements the last expression's; `await` works at the top level, and a body that `return`s gives what it returns; promises are awaited |
 | `text` | `--selector <css>` | `textContent` or `null` |
 | `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
 | `check` | `<yes/no question>` (no target given) | `{question, yes, answer}`: the probability the answer is yes |

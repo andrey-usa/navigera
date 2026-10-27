@@ -1784,6 +1784,29 @@ impl BrowserSession {
         Ok(serde_json::from_value(value)?)
     }
 
+    /// `eval` as a person types it: one expression (an arrow function is
+    /// called); else the source run as a script, statements and top-level
+    /// `await` included, its last expression the result; else as the body
+    /// of a function that `return`s its answer.
+    pub fn evaluate_user(&self, source: &str, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+        let tab = self.active_tab();
+        let timeout = self.timeout(timeout_ms);
+        let first = match tab.evaluate(source, timeout) {
+            Err(e) if is_syntax_error(&format!("{e:#}")) => e,
+            other => return other,
+        };
+        match tab.evaluate_script(source, timeout) {
+            Err(e) if is_syntax_error(&format!("{e:#}")) => {}
+            other => return other,
+        }
+        match tab.evaluate_body(source, timeout) {
+            Err(e) if is_syntax_error(&format!("{e:#}")) => {}
+            other => return other,
+        }
+        // No form parses: the expression's error says more.
+        Err(first)
+    }
+
     /// Click the element `target` names (trusted mouse click when hittable).
     /// If the click starts a navigation, waits for the new document.
     pub fn click_target(
@@ -2248,6 +2271,11 @@ fn tab_range(count: usize) -> String {
         1 => "the one tab is tab 0 (`tab-list` shows it)".to_string(),
         n => format!("tabs are numbered 0 to {} (`tab-list` shows them)", n - 1),
     }
+}
+
+/// A parse error, as V8 words it: the source isn't one expression.
+fn is_syntax_error(message: &str) -> bool {
+    message.contains("SyntaxError")
 }
 
 #[cfg(test)]
