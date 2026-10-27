@@ -11,20 +11,20 @@ All notable changes to this project are documented here. The format follows
 - `ax` gives a ref to what a user could click that the accessibility tree
   doesn't call actionable: elements with a click, mousedown or mouseup
   handler of their own and the outermost element of a `cursor: pointer`
-  area (`clickable [ref=N]: <text>` for a `<div>` row or card, an icon
-  `<span>`), where a user's click can land: not an empty box, not
-  `pointer-events: none`, not fully transparent (an ad's click guard),
-  not inside another site's frame. An actionable node with no name or text shows its `#id` or
-  `.class`, so two blank buttons can be told apart. A container listening
-  for its children's clicks isn't marked; a list or table listening for
-  its items' clicks gives each item or row the ref (one ref on the list
-  would click whichever item is in the middle). Not marked either: what is
-  inside a link or button (which has the ref and gets the click), a
-  `role=button` or `role=link` included, what is under `aria-hidden` or
-  `inert` or `visibility: hidden` (a control shown on hover), and an element with no name, text, `#id`
-  or `.class` to tell it by (a hidden menu's 287 blank tiles on one shop's
-  home page). A label whose control is hidden is what a user clicks, so
-  it gets the ref. One `DOMSnapshot` call, Chrome only.
+  area. A `<div>` row or card, or an icon `<span>`, prints as
+  `clickable [ref=N]: <text>`; an actionable node with no name or text
+  shows its `#id` or `.class`, so two blank buttons can be told apart. A
+  list or table listening for its items' clicks gives each item or row the
+  ref (one ref on the list would click whichever item is in the middle).
+  Only what a user's click can land on and tell apart is marked: not an
+  empty box, `pointer-events: none`, something fully transparent (an ad's
+  click guard), `visibility: hidden` (a control shown on hover), under
+  `aria-hidden` or `inert`, inside another site's frame, inside a link or
+  button (including `role=button` and `role=link`; they have the ref and
+  get the click), or with no name, text, `#id` or `.class` (a hidden
+  menu's 287 blank tiles on one shop's home page). A label whose control
+  is hidden is what a user clicks, so it gets the ref. One `DOMSnapshot`
+  call, Chrome only.
 
 ### Fixed
 
