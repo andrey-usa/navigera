@@ -24,7 +24,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | `--raw` | print only the result (strings unquoted, e.g. the `ax` tree). Errors go to stderr as `error: …`, notes (dialogs, new tabs, an exception the page threw, an engine difference) as `note: …` |
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
-| `--wait-ms <ms>` | element ops' wait when they name no timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
+| `--wait-ms <ms>` | element ops' wait when they name no timeout, and on one `wait` for a condition, its timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
 | `--download-dir <dir>` | where downloaded files go (`$NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own in `navigera-<uid>` under the system temp directory, which only you can enter) |
 | `--chromium <path>` | browser binary (also `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`) |
 | `--engine chrome\|lightpanda` (`$NAVIGERA_ENGINE`), `--headed` | engine; visible window |
@@ -39,8 +39,8 @@ and `new_tabs` (tabs the page opened, now in the tab list). The exit code is
 
 **Targets.** Element commands take exactly one target:
 
-- a ref from `ax` as the first argument (`click 12`; `@12`, `e12` and
-  `ref=12` also work) or `--ref 12`;
+- a ref from `ax` as the first argument (`click 12`; `@12`, `e12`,
+  `ref12` and `ref=12` also work) or `--ref 12`;
 - `--selector <css>`: the first match a user could reach (when the first
   one is parked off the page and another isn't, the other). `host >>>
   inner` crosses shadow roots: `inner` inside the open shadow root of an

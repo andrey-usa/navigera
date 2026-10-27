@@ -136,7 +136,7 @@ page "Checkout — Acme" http://shop.test/checkout
 | `hover <ref>` | move the mouse over an element (hover menus) |
 | `scroll [--by 800 \| --to bottom] [<ref>]` | scroll the page (infinite lists load more) or bring a ref into view; `--selector "#list"` scrolls inside a box |
 | `upload <ref> <file>…` | set an `<input type=file>` |
-| `wait --text "Saved" \| --selector <css> \| --url <part> \| --gone <css> \| --js "<expr>" \| --ms 500` | wait for a condition (up to 5 s) |
+| `wait --text "Saved" \| --selector <css> \| --url <part> \| --gone <css> \| --js "<expr>" \| --ms 500` | wait for a condition (up to 5 s, or `--wait-ms`) |
 | `eval "<js>"` | run JavaScript in the page (arrow functions are called), result as JSON; `--file f.js` or `-` (stdin) |
 | `back` / `forward` / `reload` | history |
 | `screenshot [file.png] [--full-page]` | PNG of the viewport or the whole page |
@@ -218,7 +218,7 @@ for it. Upload only files the user named.
 | error | do this |
 |---|---|
 | `no element matches selector … / no element with text …` | `ax` to see what is really there; act by ref |
-| `ref N not found (stale …)` | take a fresh `ax` |
+| `no element has that ref now` | take a fresh `ax` |
 | `timed out … waiting for load` | a slow resource: `goto <url> --wait domcontentloaded`, then `wait --text …` |
 | `select: element is … not a <select>` | `click` the dropdown, `ax`, then click the option by ref |
 | `no navigera session at …` | `navigera -s <name> start`; the error says why the last one stopped |
