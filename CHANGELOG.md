@@ -16,8 +16,15 @@ All notable changes to this project are documented here. The format follows
   `pointer-events: none`, not fully transparent (an ad's click guard),
   not inside another site's frame. An actionable node with no name or text shows its `#id` or
   `.class`, so two blank buttons can be told apart. A container listening
-  for its children's clicks isn't marked. One `DOMSnapshot` call, Chrome
-  only.
+  for its children's clicks isn't marked; a list or table listening for
+  its items' clicks gives each item or row the ref (one ref on the list
+  would click whichever item is in the middle). One `DOMSnapshot` call,
+  Chrome only.
+
+### Fixed
+
+- `click` on a table row whose middle falls between two cells clicks a
+  cell of the row, instead of refusing the row as hidden behind its table.
 
 ## [0.6.2] - 2026-10-26
 

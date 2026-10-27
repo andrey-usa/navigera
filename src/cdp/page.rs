@@ -421,9 +421,20 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             const l = labels.find((l) => { const b = l.getBoundingClientRect(); return b.width > 0 && b.height > 0; });
             if (l) { box = l; l.scrollIntoView(Object.assign({ behavior: 'instant' }, align)); r = l.getBoundingClientRect(); }
         }
-        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        let x = r.left + r.width / 2, y = r.top + r.height / 2;
         const root = box.getRootNode(), doc = box.ownerDocument;
-        hit = (r.width > 0 && r.height > 0) ? (root.elementFromPoint ? root.elementFromPoint(x, y) : doc.elementFromPoint(x, y)) : null;
+        const at = (x, y) => root.elementFromPoint ? root.elementFromPoint(x, y) : doc.elementFromPoint(x, y);
+        hit = (r.width > 0 && r.height > 0) ? at(x, y) : null;
+        // A row's middle can fall between its cells, on the table: try the
+        // middles of its own parts before calling it hidden.
+        if (hit && box === el && hit !== el && hit.contains(el)) {
+            for (const part of Array.from(el.children).slice(0, 8)) {
+                const b = part.getBoundingClientRect();
+                if (!(b.width > 0 && b.height > 0)) continue;
+                const px = b.left + b.width / 2, py = b.top + b.height / 2, h = at(px, py);
+                if (h && (h === el || el.contains(h))) { hit = h; x = px; y = py; break; }
+            }
+        }
         if (hit && (hit === el || el.contains(hit) || (hit.shadowRoot && hit.shadowRoot.contains(el)) || onLabel(hit))) {
             const p = topLevel(doc, x, y);
             if (p) {
@@ -3364,7 +3375,9 @@ impl Page {
     /// what a user's click could land on counts: an element with a box of
     /// some size, not `pointer-events: none`, not fully transparent (nor
     /// inside something that is), in a document of the page's own origin
-    /// (an ad's or a widget's frame is someone else's). Also `#id` /
+    /// (an ad's or a widget's frame is someone else's). A list or table
+    /// that listens for its items' clicks marks the items, not itself: its
+    /// own ref would click whichever item is in the middle. Also `#id` /
     /// `.class` for each element, to tell apart actionable elements that
     /// have no name or text.
     fn clickables(&self, timeout: Duration) -> ax::Clickables {
@@ -3399,8 +3412,26 @@ impl Page {
                     .map(|v| v.as_i64().unwrap_or(-1))
                     .collect()
             };
-            let (parents, types, backends, names) =
-                (ints("parentIndex"), ints("nodeType"), ints("backendNodeId"), ints("nodeName"));
+            let (parents, types, backends, names, values) =
+                (ints("parentIndex"), ints("nodeType"), ints("backendNodeId"), ints("nodeName"), ints("nodeValue"));
+            let mut children: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+            // Elements with text of their own somewhere inside.
+            let mut texted = std::collections::HashSet::new();
+            for (i, &parent) in parents.iter().enumerate() {
+                if types.get(i) == Some(&1) && parent >= 0 {
+                    children.entry(parent).or_default().push(i as i64);
+                }
+                let value = values.get(i).and_then(|&v| strings.get(v as usize)).copied().unwrap_or("");
+                if types.get(i) == Some(&3) && !value.trim().is_empty() {
+                    let mut at = parent;
+                    for _ in 0..64 {
+                        if at < 0 || !texted.insert(at) {
+                            break;
+                        }
+                        at = parents.get(at as usize).copied().unwrap_or(-1);
+                    }
+                }
+            }
             let listening: std::collections::HashSet<i64> = nodes
                 .get("isClickable")
                 .and_then(|c| c.get("index"))
@@ -3436,7 +3467,66 @@ impl Page {
                 }
                 false
             };
+            let tag_of = |i: i64| names.get(i as usize).and_then(|&n| strings.get(n as usize)).copied().unwrap_or("");
             let attributes = nodes.get("attributes").and_then(Value::as_array);
+            let attr_of = |i: i64, name: &str| -> &str {
+                let pairs = attributes.and_then(|a| a.get(i as usize)).and_then(Value::as_array);
+                let pairs = pairs.map(|a| a.as_slice()).unwrap_or(&[]);
+                pairs.chunks(2).find(|p| text(p.first()) == name).map(|p| text(p.get(1))).unwrap_or("")
+            };
+            let first_class = |i: i64| attr_of(i, "class").split_whitespace().next().unwrap_or("");
+            // A list item or table row by its tag or role. The parts of one
+            // row (its cells, a name beside a date) do what the row does.
+            let item = |i: i64| {
+                matches!(tag_of(i), "LI" | "TR")
+                    || matches!(
+                        attr_of(i, "role"),
+                        "listitem"
+                            | "row"
+                            | "option"
+                            | "menuitem"
+                            | "menuitemradio"
+                            | "menuitemcheckbox"
+                            | "tab"
+                            | "treeitem"
+                    )
+            };
+            let boxed = |i: &i64| boxes.get(i).is_some_and(|b| b.3);
+            // The items of a list or rows of a table that `i` holds (through
+            // wrappers of one child each): two or more list items or rows of
+            // one tag and class, most of its children, each with text.
+            let items = |mut i: i64| -> Option<Vec<i64>> {
+                for _ in 0..4 {
+                    let kids: Vec<i64> = children.get(&i).into_iter().flatten().copied().filter(boxed).collect();
+                    match kids.as_slice() {
+                        [] => return None,
+                        [only] => i = *only,
+                        _ => {
+                            let mut groups: std::collections::HashMap<(&str, &str), Vec<i64>> =
+                                std::collections::HashMap::new();
+                            for &k in &kids {
+                                groups.entry((tag_of(k), first_class(k))).or_default().push(k);
+                            }
+                            let group = groups.into_values().max_by_key(Vec::len)?;
+                            let listed = group.len() >= 2
+                                && group.len() * 2 > kids.len()
+                                && group.iter().all(|&k| item(k) && texted.contains(&k));
+                            return listed.then_some(group);
+                        }
+                    }
+                }
+                None
+            };
+            // A user's click could land on it. A label clicks its control,
+            // which has a ref of its own.
+            let landable = |i: i64| {
+                let Some(&(_, events, _, area)) = boxes.get(&i) else { return false };
+                !foreign
+                    && !matches!(tag_of(i), "HTML" | "BODY" | "LABEL")
+                    && events != "none"
+                    && area
+                    && !transparent(i)
+            };
             for (i, &backend) in backends.iter().enumerate() {
                 if types.get(i) != Some(&1) {
                     continue;
@@ -3454,20 +3544,23 @@ impl Page {
                 {
                     out.hints.insert(backend, format!(".{class}"));
                 }
-                let tag = names.get(i).and_then(|&n| strings.get(n as usize)).copied().unwrap_or("");
-                // A label clicks its control, which has a ref of its own.
-                let Some(&(_, events, _, area)) = boxes.get(&index) else { continue };
-                if foreign
-                    || matches!(tag, "HTML" | "BODY" | "LABEL")
-                    || events == "none"
-                    || !area
-                    || transparent(index)
-                {
+                if !landable(index) {
                     continue;
                 }
                 let parent = parents.get(i).copied().unwrap_or(-1);
                 if listening.contains(&index) || (pointer(index) && !pointer(parent)) {
-                    out.nodes.insert(backend);
+                    match items(index) {
+                        Some(items) => out.nodes.extend(
+                            items
+                                .into_iter()
+                                .filter(|&k| landable(k))
+                                .filter_map(|k| backends.get(k as usize))
+                                .map(|&b| b as u64),
+                        ),
+                        None => {
+                            out.nodes.insert(backend);
+                        }
+                    }
                 }
             }
         }

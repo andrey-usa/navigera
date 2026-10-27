@@ -805,3 +805,46 @@ fn what_a_page_made_clickable_has_a_ref_that_clicks() {
     s.ok(&["click", &row]);
     assert_eq!(s.ok(&["title"]), "open KelceyQuisque");
 }
+
+#[test]
+fn a_list_that_listens_for_its_items_marks_the_items() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("delegated", &[]);
+    // One listener on the list or table, for whichever item is clicked: a
+    // ref on the list would click the middle item. A row's own listener,
+    // and a button made of an icon and a label, stay one ref.
+    let page = "<title>Fruit</title>\
+        <ul onclick=\"if (event.target.tagName == 'LI') document.title = 'picked ' + event.target.textContent\">\
+        <li>Apple</li><li>Banana</li><li>Cherry</li></ul>\
+        <table onclick=\"const r = event.target.closest('tr'); if (r) document.title = 'row ' + r.rowIndex\">\
+        <tr><td>a</td><td>1</td></tr><tr><td>b</td><td>2</td></tr></table>\
+        <table><tr onclick=\"document.title = 'own row'\"><td>x</td><td>y</td></tr></table>\
+        <div onclick=\"document.title = 'saved'\"><span class=icon></span><span>Save</span></div>";
+    s.ok(&["goto", &format!("data:text/html,{page}")]);
+    let ax = s.text(&["ax"]);
+    // The tree, without its first line (the page's URL holds the markup).
+    let tree: Vec<&str> = ax.lines().skip(1).collect();
+    let ref_in = |line: &str| line.split("ref=").nth(1).and_then(|r| r.split(']').next()).unwrap().to_string();
+    let ref_of = |what: &str| {
+        ref_in(tree.iter().find(|l| l.contains(what) && l.contains("ref=")).unwrap_or_else(|| panic!("{what}: {ax}")))
+    };
+    assert!(!tree.iter().any(|l| l.trim_start().starts_with("- list [")), "{ax}");
+    assert_eq!(tree.iter().filter(|l| l.contains("listitem") && l.contains("ref=")).count(), 3, "{ax}");
+    // An item's ref is on its listitem line, above its text.
+    let item_ref = |fruit: &str| {
+        let at = tree.iter().position(|l| l.contains(&format!("text: {fruit}"))).unwrap();
+        ref_in(tree[..at].iter().rfind(|l| l.contains("listitem")).unwrap())
+    };
+    s.ok(&["click", &item_ref("Cherry")]);
+    assert_eq!(s.ok(&["title"]), "picked Cherry");
+    s.ok(&["click", &item_ref("Apple")]);
+    assert_eq!(s.ok(&["title"]), "picked Apple");
+    s.ok(&["click", &ref_of("b 2")]);
+    assert_eq!(s.ok(&["title"]), "row 1");
+    assert_eq!(tree.iter().filter(|l| l.contains("x y") && l.contains("ref=")).count(), 1, "{ax}");
+    assert_eq!(tree.iter().filter(|l| l.contains("Save") && l.contains("ref=")).count(), 1, "{ax}");
+    s.ok(&["click", &ref_of("Save")]);
+    assert_eq!(s.ok(&["title"]), "saved");
+}

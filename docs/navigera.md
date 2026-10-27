@@ -175,7 +175,9 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   click can land: a box of some size, not `pointer-events: none`, not fully
   transparent, not in another site's frame such as an ad): a `<div>` row
   or card prints as `clickable [ref=N]: <its text>`, a role it has (`row`)
-  keeps it. A container that holds other actionable nodes isn't one. An
+  keeps it. A container that holds other actionable nodes isn't one, and a
+  list or table that listens for its items' clicks gives each item or row
+  the ref instead (one ref on the list would click its middle item). An
   actionable node with no name or text shows its `#id` or `.class`
   (`clickable #send-forward [ref=19]`, `button #close [ref=7]`). Use
   `--refs all` to get one on every node.
