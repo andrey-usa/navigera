@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-27
+
+Refs on what a page made clickable: a `<div>` row with a click handler, a
+card with `cursor: pointer`, an icon `<span>`, which agents had no ref for and
+dug through the DOM with `eval` to reach.
+
 ### Added
 
 - `ax` gives a ref to what a user could click that the accessibility tree
@@ -509,6 +515,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.7.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.0
 [0.6.2]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.2
 [0.6.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.1
 [0.6.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.0
