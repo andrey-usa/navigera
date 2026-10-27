@@ -35,8 +35,10 @@ All notable changes to this project are documented here. The format follows
   - the op is named once (`click selector "abc": …`, not
     `click selector "abc": click: …`), and the `(os error 2)` suffix is gone.
 - Every MCP tool parameter has a description.
-- `help status` names each field of what `status` prints, and `help ax`
-  says a target (a ref or any locator) scopes the tree to that element.
+- `help <command>` explains each flag in a line and shows examples that run
+  as shown (each was run against a public practice site). `help status`
+  names each field of what `status` prints, and `help ax` says a target (a
+  ref or any locator) scopes the tree to that element.
 
 ### Fixed
 

@@ -1004,7 +1004,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
     ("get", "text|value|html|outer|box|checked|attr <name>|style <prop> <target> | count <css> | title | url", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --near <text>, --nth; --frame <css> to look only inside that frame)"),
-    ("is", "visible|hidden|enabled|disabled|checked|editable|focused <target>", "true/false; a missing element is not visible"),
+    ("is", "<state> <target>", "true/false: whether the element is visible, hidden, enabled, disabled, checked, editable or focused; a missing element is not visible"),
     ("dblclick", "<target>", "trusted double click"),
     ("drag", "<from> <to> | --from-text <t> --to-text <t>", "drag one element onto another (each a ref or CSS selector): HTML5 drag and drop for a draggable source, a held mouse moved across otherwise"),
     ("focus", "<target>", "focus an element"),
@@ -1127,10 +1127,38 @@ pub fn usage(program: &str) -> String {
     out.trim_end().to_string()
 }
 
-/// `help <op>`: its usage line and what it does.
+/// `help <op>`: its usage line, what it does, a line per flag, and
+/// examples that run as shown.
 pub fn op_help(program: &str, op: &str) -> Option<String> {
     let (_, _, what) = OPS.iter().find(|(n, ..)| *n == op)?;
-    Some(format!("{}\n{}", op_usage(program, op)?, wrapped("", what, 0).trim_end()))
+    let mut out = format!("{}\n{}", op_usage(program, op)?, wrapped("", what, 0));
+    if let Some((_, examples, flags)) = crate::help_examples::EXAMPLES.iter().find(|(n, ..)| *n == op) {
+        if !flags.is_empty() {
+            out.push_str("\nflags:\n");
+            for (flag, what) in *flags {
+                if flag.chars().count() <= 22 {
+                    out.push_str(&wrapped(&format!("  {flag:<22} "), what, 25));
+                } else {
+                    out.push_str(&format!("  {flag}\n"));
+                    out.push_str(&wrapped(&" ".repeat(25), what, 25));
+                }
+            }
+        }
+        if !examples.is_empty() {
+            out.push_str("\nexamples:\n");
+            for (cmd, comment) in *examples {
+                let cmd = cmd.replace("navigera ", &format!("{program} "));
+                if comment.is_empty() {
+                    out.push_str(&format!("  {cmd}\n"));
+                } else if cmd.chars().count() + comment.chars().count() + 6 <= 80 {
+                    out.push_str(&format!("  {cmd}  # {comment}\n"));
+                } else {
+                    out.push_str(&format!("  # {comment}\n  {cmd}\n"));
+                }
+            }
+        }
+    }
+    Some(out.trim_end().to_string())
 }
 
 /// The usage line of `op`, for errors (`usage: navigera … <op> <args>`).
@@ -4222,6 +4250,49 @@ mod tests {
         let parsed = parse_args(argv(&["navigera", "serve", "--timeout-ms", "5000"])).expect("valid invocation");
         assert!(parsed.command.is_none());
         assert_eq!(parsed.config.timeout_ms, 5000.0);
+    }
+
+    #[test]
+    fn every_command_has_help_with_examples_that_parse() {
+        // Words as a shell splits them: quotes kept together, quotes dropped.
+        fn words(line: &str) -> Vec<String> {
+            let (mut out, mut cur, mut quote, mut any) = (Vec::new(), String::new(), None, false);
+            for c in line.chars() {
+                match (quote, c) {
+                    (None, '"' | '\'') => (quote, any) = (Some(c), true),
+                    (Some(q), c) if c == q => quote = None,
+                    (None, c) if c.is_whitespace() => {
+                        if any {
+                            out.push(std::mem::take(&mut cur));
+                        }
+                        any = false;
+                    }
+                    (_, c) => (cur, any) = (cur + &c.to_string(), true),
+                }
+            }
+            if any {
+                out.push(cur);
+            }
+            out
+        }
+        for (op, ..) in OPS {
+            let help = op_help("navigera", op).expect("help");
+            for line in help.lines() {
+                assert!(line.chars().count() <= 80, "help {op}: {} columns: {line}", line.chars().count());
+            }
+            let (_, examples, _) = crate::help_examples::EXAMPLES
+                .iter()
+                .find(|(n, ..)| n == op)
+                .unwrap_or_else(|| panic!("no examples for {op}"));
+            assert!(!examples.is_empty(), "{op}");
+            for (cmd, _) in examples.iter().filter(|(c, _)| !c.contains('|')) {
+                let argv = words(cmd);
+                assert_eq!(argv.first().map(String::as_str), Some("navigera"), "{cmd}");
+                if let Err(ArgsError::Invalid(e)) = parse_args(argv.clone()) {
+                    panic!("help {op}: `{cmd}` doesn't parse: {e}");
+                }
+            }
+        }
     }
 
     #[test]
