@@ -119,6 +119,9 @@ pub struct Options {
 pub struct Clickables {
     pub nodes: std::collections::HashSet<u64>,
     pub hints: HashMap<u64, String>,
+    /// The page's own text of a marked element, for one the tree shows
+    /// without any (a label Chrome leaves out with its hidden control).
+    pub texts: HashMap<u64, String>,
 }
 
 /// One frame's AX nodes, spliced under the AX node of its owner element
@@ -246,13 +249,27 @@ impl<'a> Tree<'a> {
     }
 
     /// A wrapper the page made clickable, that holds nothing else to act on
-    /// (a listener on a container is the page listening for its children).
+    /// (a listener on a container is the page listening for its children),
+    /// with something to tell it by: a name, text or its `#id` / `.class`.
+    /// A run of blank `clickable` lines (a hidden menu's tiles) is nothing
+    /// an agent can choose between.
     fn is_clickable(&self, node: &'a Value) -> bool {
         let Some(id) = node.get("backendDOMNodeId").and_then(Value::as_u64) else { return false };
-        self.opts.clicks.nodes.contains(&id)
-            && !INTERACTIVE.contains(&Self::role(node))
-            && Self::role(node) != "LabelText"
-            && !self.holds_actionable(node, 0)
+        if !self.opts.clicks.nodes.contains(&id)
+            || INTERACTIVE.contains(&Self::role(node))
+            || self.holds_actionable(node, 0)
+        {
+            return false;
+        }
+        if !text_of(node, "name").is_empty()
+            || self.opts.clicks.hints.contains_key(&id)
+            || self.opts.clicks.texts.contains_key(&id)
+        {
+            return true;
+        }
+        let mut text = Vec::new();
+        self.descendant_text(node, &mut text, 0);
+        text.iter().any(|t| !t.trim().is_empty())
     }
 
     fn holds_actionable(&self, node: &'a Value, depth: usize) -> bool {
@@ -397,6 +414,19 @@ impl<'a> Tree<'a> {
         if !name.is_empty() {
             line.push(' ');
             line.push_str(&quote(&clip(&name, 150)));
+        } else if let Some(text) = node
+            .get("backendDOMNodeId")
+            .and_then(Value::as_u64)
+            .filter(|_| clickable)
+            .and_then(|id| self.opts.clicks.texts.get(&id))
+            .filter(|_| {
+                let mut seen = Vec::new();
+                self.descendant_text(node, &mut seen, 0);
+                seen.iter().all(|t| t.trim().is_empty())
+            })
+        {
+            line.push(' ');
+            line.push_str(&quote(&clip(text, 150)));
         }
         let mut tags = Self::states(node, &role);
         if let Some(id) = node.get("backendDOMNodeId").and_then(Value::as_u64) {
@@ -741,6 +771,7 @@ mod tests {
             hints: [(2, "#app".to_string()), (6, "#send-forward".to_string()), (7, "#button-1".to_string())]
                 .into_iter()
                 .collect(),
+            ..Clickables::default()
         };
         let out = render("page \"Inbox\"", &nodes, &[], &Options { clicks, ..Options::default() });
         assert_eq!(

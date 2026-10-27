@@ -3415,6 +3415,8 @@ impl Page {
             let (parents, types, backends, names, values) =
                 (ints("parentIndex"), ints("nodeType"), ints("backendNodeId"), ints("nodeName"), ints("nodeValue"));
             let mut children: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+            // Each element's own text nodes, in order.
+            let mut own_text: std::collections::HashMap<i64, Vec<&str>> = std::collections::HashMap::new();
             // Elements with text of their own somewhere inside.
             let mut texted = std::collections::HashSet::new();
             for (i, &parent) in parents.iter().enumerate() {
@@ -3423,6 +3425,7 @@ impl Page {
                 }
                 let value = values.get(i).and_then(|&v| strings.get(v as usize)).copied().unwrap_or("");
                 if types.get(i) == Some(&3) && !value.trim().is_empty() {
+                    own_text.entry(parent).or_default().push(value);
                     let mut at = parent;
                     for _ in 0..64 {
                         if at < 0 || !texted.insert(at) {
@@ -3517,15 +3520,87 @@ impl Page {
                 }
                 None
             };
-            // A user's click could land on it. A label clicks its control,
-            // which has a ref of its own.
+            let has_attr = |i: i64, name: &str| {
+                let pairs = attributes.and_then(|a| a.get(i as usize)).and_then(Value::as_array);
+                pairs.map(|a| a.as_slice()).unwrap_or(&[]).chunks(2).any(|p| text(p.first()) == name)
+            };
+            // `i` and its ancestors, nearest first.
+            let parent_of: &[i64] = &parents;
+            let up = move |mut i: i64| {
+                std::iter::from_fn(move || {
+                    let at = i;
+                    i = parent_of.get(at as usize).copied().unwrap_or(-1);
+                    (at >= 0).then_some(at)
+                })
+                .take(64)
+            };
+            // Kept from the user on purpose: `aria-hidden` or `inert`, on it
+            // or around it (the page behind a modal, a menu toggle's real
+            // checkbox).
+            let hidden = |i: i64| up(i).any(|a| attr_of(a, "aria-hidden").trim() == "true" || has_attr(a, "inert"));
+            // Inside a link or a button, which has a ref of its own and is
+            // where the click goes (an image card in an article link).
+            let in_control = |i: i64| {
+                up(i).skip(1).any(|a| match tag_of(a) {
+                    "A" => has_attr(a, "href"),
+                    "BUTTON" => true,
+                    _ => false,
+                })
+            };
+            let by_id: std::collections::HashMap<&str, i64> = (0..names.len() as i64)
+                .filter(|&i| types.get(i as usize) == Some(&1))
+                .map(|i| (attr_of(i, "id"), i))
+                .filter(|(id, _)| !id.is_empty())
+                .collect();
+            // A label clicks its control, which has a ref of its own, unless
+            // the control is hidden: then the label is what a user clicks.
+            let control_hidden = |label: i64| {
+                let control = by_id.get(attr_of(label, "for")).copied().or_else(|| {
+                    let mut stack = vec![(label, 0)];
+                    while let Some((at, depth)) = stack.pop() {
+                        for &k in children.get(&at).into_iter().flatten() {
+                            if matches!(tag_of(k), "INPUT" | "SELECT" | "TEXTAREA") {
+                                return Some(k);
+                            }
+                            if depth < 8 {
+                                stack.push((k, depth + 1));
+                            }
+                        }
+                    }
+                    None
+                });
+                control.is_some_and(|c| hidden(c) || !boxed(&c) || transparent(c))
+            };
+            // A user's click could land on it.
             let landable = |i: i64| {
                 let Some(&(_, events, _, area)) = boxes.get(&i) else { return false };
+                let tag = tag_of(i);
                 !foreign
-                    && !matches!(tag_of(i), "HTML" | "BODY" | "LABEL")
+                    && !matches!(tag, "HTML" | "BODY")
+                    && (tag != "LABEL" || control_hidden(i))
                     && events != "none"
                     && area
                     && !transparent(i)
+                    && !hidden(i)
+                    && !in_control(i)
+            };
+            // An element's text, its descendants' included, cut short.
+            let text_in = |i: i64| -> String {
+                let mut words = String::new();
+                let mut stack = vec![(i, 0)];
+                while let Some((at, depth)) = stack.pop() {
+                    for value in own_text.get(&at).into_iter().flatten() {
+                        words.push(' ');
+                        words.push_str(value.trim());
+                    }
+                    if words.len() > 80 || depth >= 8 {
+                        continue;
+                    }
+                    for &k in children.get(&at).into_iter().flatten().rev() {
+                        stack.push((k, depth + 1));
+                    }
+                }
+                words.split_whitespace().collect::<Vec<_>>().join(" ")
             };
             for (i, &backend) in backends.iter().enumerate() {
                 if types.get(i) != Some(&1) {
@@ -3559,6 +3634,10 @@ impl Page {
                         ),
                         None => {
                             out.nodes.insert(backend);
+                            let words = text_in(index);
+                            if !words.is_empty() {
+                                out.texts.insert(backend, words);
+                            }
                         }
                     }
                 }

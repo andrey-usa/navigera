@@ -18,8 +18,12 @@ All notable changes to this project are documented here. The format follows
   `.class`, so two blank buttons can be told apart. A container listening
   for its children's clicks isn't marked; a list or table listening for
   its items' clicks gives each item or row the ref (one ref on the list
-  would click whichever item is in the middle). One `DOMSnapshot` call,
-  Chrome only.
+  would click whichever item is in the middle). Not marked either: what is
+  inside a link or button (which has the ref and gets the click), what is
+  under `aria-hidden` or `inert`, and an element with no name, text, `#id`
+  or `.class` to tell it by (a hidden menu's 287 blank tiles on one shop's
+  home page). A label whose control is hidden is what a user clicks, so
+  it gets the ref. One `DOMSnapshot` call, Chrome only.
 
 ### Fixed
 

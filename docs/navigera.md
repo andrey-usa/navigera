@@ -177,8 +177,11 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   or card prints as `clickable [ref=N]: <its text>`, a role it has (`row`)
   keeps it. A container that holds other actionable nodes isn't one, and a
   list or table that listens for its items' clicks gives each item or row
-  the ref instead (one ref on the list would click its middle item). An
-  actionable node with no name or text shows its `#id` or `.class`
+  the ref instead (one ref on the list would click its middle item). What
+  is inside a link or button, or under `aria-hidden` or `inert`, isn't
+  marked, nor is an element with nothing to tell it by; a label whose
+  control is hidden is. An actionable node with no name or text shows its
+  `#id` or `.class`
   (`clickable #send-forward [ref=19]`, `button #close [ref=7]`). Use
   `--refs all` to get one on every node.
 - States are shown in brackets: `checked`, `disabled`, `expanded` or

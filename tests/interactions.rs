@@ -848,3 +848,35 @@ fn a_list_that_listens_for_its_items_marks_the_items() {
     s.ok(&["click", &ref_of("Save")]);
     assert_eq!(s.ok(&["title"]), "saved");
 }
+
+#[test]
+fn clickable_refs_skip_what_a_user_cant_tell_apart_or_reach() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("clickable-real", &[]);
+    // An image card inside an article link (the link has the ref); a
+    // handler kept from the user with aria-hidden; a row of blank tiles
+    // with nothing to tell them by. A menu label whose real checkbox is
+    // hidden is the thing a user clicks, so it gets the ref.
+    let tile = "<div style=\"display:inline-block;width:20px;height:20px;cursor:pointer\"></div>";
+    let page = format!(
+        "<title>News</title>\
+        <a href=\"%23story\"><div class=card onclick=\"void 0\"><span>Story picture</span></div>Story</a>\
+        <div aria-hidden=true><span onclick=\"document.title = 'hidden'\">Behind the modal</span></div>\
+        <div>{tile}{tile}{tile}</div>\
+        <input type=checkbox id=menu aria-hidden=true tabindex=-1 style=\"position:absolute;opacity:0\" onchange=\"document.title = 'menu ' + this.checked\">\
+        <label for=menu style=cursor:pointer>Menu</label>"
+    );
+    s.ok(&["goto", &format!("data:text/html,{page}")]);
+    let ax = s.text(&["ax"]);
+    let tree: Vec<&str> = ax.lines().skip(1).collect();
+    let clickable: Vec<&&str> = tree.iter().filter(|l| l.contains("clickable")).collect();
+    assert!(!clickable.iter().any(|l| l.contains("Story picture") || l.contains(".card")), "{ax}");
+    assert!(!clickable.iter().any(|l| l.contains("Behind the modal")), "{ax}");
+    assert!(!tree.iter().any(|l| l.trim() == "- clickable" || l.trim_start().starts_with("- clickable [ref=")), "{ax}");
+    let menu = clickable.iter().find(|l| l.contains("Menu")).unwrap_or_else(|| panic!("no ref on the label: {ax}"));
+    let menu = menu.split("ref=").nth(1).and_then(|r| r.split(']').next()).unwrap();
+    s.ok(&["click", menu]);
+    assert_eq!(s.ok(&["title"]), "menu true");
+}
