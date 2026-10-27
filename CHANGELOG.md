@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- A file navigera writes where you name it (`network --body-file`, `--har`,
+  `screenshot`, `pdf`, `state save`, `install-skill`) no longer follows a
+  link already at that path: a link planted there (in a cloned project, or
+  in a shared directory) is replaced by the file instead of having its
+  target overwritten.
+
 ### Changed
 
 - `--help` and `help <command>` fit 80 columns, list `-s`, `--wait-ms` and

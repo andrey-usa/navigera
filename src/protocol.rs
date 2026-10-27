@@ -2103,8 +2103,33 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
     let path = std::path::Path::new(dir).join("navigera");
     std::fs::create_dir_all(&path)?;
     let file = path.join("SKILL.md");
-    std::fs::write(&file, SKILL_MD)?;
+    write_own(&file, SKILL_MD.as_bytes())?;
     Ok(file.display().to_string())
+}
+
+/// Write `bytes` to `path` as a file of its own. A link already at `path`
+/// is taken out first, so the write can't land where a link someone else
+/// planted there points (a cloned project's, another user's in a shared
+/// directory); the file is then created new, so a link put back in between
+/// fails the write instead of being followed. A plain file is replaced.
+pub fn write_own(path: impl AsRef<std::path::Path>, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = path.as_ref();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            std::fs::remove_file(path)?;
+            options.create_new(true);
+        }
+        Ok(_) => {
+            options.truncate(true);
+        }
+        Err(_) => {
+            options.create_new(true);
+        }
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// A live browser plus the policy defaults the model gets for free.
@@ -2290,7 +2315,7 @@ impl Driver {
                         body.clone().into_bytes()
                     };
                     if let Some(path) = body_file {
-                        std::fs::write(path, &bytes).map_err(|e| anyhow::anyhow!("network --body-file {path}: {e}"))?;
+                        write_own(path, &bytes).map_err(|e| anyhow::anyhow!("network --body-file {path}: {e}"))?;
                         out["body_file"] = json!(path);
                         out["body_bytes"] = json!(bytes.len());
                     } else if base64 {
@@ -2326,7 +2351,7 @@ impl Driver {
             .collect();
         if let Some(path) = har {
             let har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
-            std::fs::write(path, serde_json::to_vec_pretty(&har)?)
+            write_own(path, &serde_json::to_vec_pretty(&har)?)
                 .map_err(|e| anyhow::anyhow!("network --har {path}: {e}"))?;
             return Ok(json!({ "har": path, "entries": picked.len() }));
         }
@@ -3133,7 +3158,7 @@ impl Driver {
                 let state = self.session.storage_state()?;
                 let (cookies, origins) =
                     (state["cookies"].as_array().map_or(0, Vec::len), state["origins"].as_array().map_or(0, Vec::len));
-                std::fs::write(path, serde_json::to_string_pretty(&state)? + "\n")
+                write_own(path, (serde_json::to_string_pretty(&state)? + "\n").as_bytes())
                     .map_err(|e| anyhow::anyhow!("state save {path}: {e}"))?;
                 Ok(json!({ "saved": path, "cookies": cookies, "origins": origins }))
             }
@@ -3155,7 +3180,7 @@ impl Driver {
                     )
                 });
                 let bytes = s.pdf(*landscape, *background).map_err(|e| anyhow::anyhow!("pdf: {e:#}"))?;
-                std::fs::write(&path, &bytes).map_err(|e| anyhow::anyhow!("pdf: writing {path}: {e:#}"))?;
+                write_own(&path, &bytes).map_err(|e| anyhow::anyhow!("pdf: writing {path}: {e:#}"))?;
                 let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
                 Ok(json!({ "path": path, "bytes": bytes.len() }))
             }
@@ -3426,7 +3451,7 @@ impl Driver {
                 });
                 let bytes =
                     s.screenshot_png(full_page.unwrap_or(false)).map_err(|e| anyhow::anyhow!("screenshot: {e:#}"))?;
-                std::fs::write(&path, &bytes).map_err(|e| anyhow::anyhow!("screenshot: writing {path}: {e:#}"))?;
+                write_own(&path, &bytes).map_err(|e| anyhow::anyhow!("screenshot: writing {path}: {e:#}"))?;
                 // Report where it really went (a relative path is relative
                 // to this process, which may not be the caller's directory).
                 let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
@@ -3940,6 +3965,27 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
 
 #[cfg(test)]
 mod tests {
+    /// A link planted where a file is to be written (a cloned project's
+    /// `.primavera`, a shared directory) is replaced, not followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_written_where_a_link_was_replaces_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere.txt");
+        std::fs::write(&target, "keep me").unwrap();
+        let path = dir.path().join("body.txt");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        super::write_own(&path, b"the body").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "the body");
+        // A plain file is replaced, and a new one created.
+        super::write_own(&path, b"again").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "again");
+        super::write_own(dir.path().join("new.txt"), b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("new.txt")).unwrap(), "new");
+    }
+
     #[test]
     fn numbers_come_back_as_the_page_wrote_them() {
         // serde_json's default float parsing is off by one ulp for about a
