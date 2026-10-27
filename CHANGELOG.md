@@ -35,6 +35,13 @@ All notable changes to this project are documented here. The format follows
   - the op is named once (`click selector "abc": …`, not
     `click selector "abc": click: …`), and the `(os error 2)` suffix is gone.
 - Every MCP tool parameter has a description.
+- `help status` names each field of what `status` prints, and `help ax`
+  says a target (a ref or any locator) scopes the tree to that element.
+
+### Fixed
+
+- `wait --text … --wait-ms <ms>` waits that long; `--wait-ms` was accepted
+  and ignored on `wait`, which then waited its default 5 s.
 
 ## [0.7.0] - 2026-10-27
 

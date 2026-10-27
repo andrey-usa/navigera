@@ -976,7 +976,7 @@ pub struct ParsedArgs {
 const OPS: &[(&str, &str, &str)] = &[
     ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless]] [--natural] [--download-dir <dir>]", "spawn a detached session server + headless browser (needs --session); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
-    ("ax", "[--selector <css> | <ref>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json]", "accessibility snapshot: indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N)"),
+    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json]", "accessibility snapshot: indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
     ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys]", "set an input/textarea's value; --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
     ("type", "<text> [--selector <css> | --ref <n>]", "type key by key into the target or the focused element"),
@@ -1014,7 +1014,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("keyup", "<key>", "release a held key"),
     ("insert-text", "<text> [<target>]", "insert text at the caret in one go (paste/IME), no key events"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
-    ("status", "", "the session's engine, browser executable, how it is connected (a private pipe or a DevTools port) and its tabs"),
+    ("status", "", "the session as JSON: version, engine, executable (the browser binary), endpoint (\"pipe\": a private pipe; else the DevTools address), attached (true: a browser that stays open when the session quits, from --attach or --profile), tab (the active one), tabs, url, title"),
     ("locate", "<target>", "the locators that find an element again, most stable first, each checked on the page (to turn refs into tests)"),
     ("history", "[--clear]", "the actions this session ran, a ref's with the locators of its element (primavera, the test runner built on navigera, turns it into a test with `from-session`)"),
     ("back", "", "history back"),
@@ -2086,9 +2086,11 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         return invalid(format!("unexpected argument {extra:?} for `{op}`{hint}"));
     }
     // `--wait-ms` on one command: that op's element wait, unless it names
-    // its own timeout.
+    // its own timeout. `wait` for a condition counts: accepted and ignored,
+    // the flag read as working when it didn't.
+    let waits = command.clone().target_mut().is_some() || matches!(&command, Command::Wait { ms: None, .. });
     let command = match config.wait_ms {
-        Some(ms) if command.clone().target_mut().is_some() && op_timeout_ms(&command).is_none() => {
+        Some(ms) if waits && op_timeout_ms(&command).is_none() => {
             let mut v = serde_json::to_value(&command).map_err(|e| ArgsError::Invalid(e.to_string()))?;
             v["timeout_ms"] = json!(ms);
             serde_json::from_value(v).unwrap_or(command)
@@ -4220,6 +4222,28 @@ mod tests {
         let parsed = parse_args(argv(&["navigera", "serve", "--timeout-ms", "5000"])).expect("valid invocation");
         assert!(parsed.command.is_none());
         assert_eq!(parsed.config.timeout_ms, 5000.0);
+    }
+
+    #[test]
+    fn wait_for_a_condition_takes_wait_ms_as_its_timeout() {
+        let wait = |extra: &[&str]| {
+            let mut a = vec!["navigera", "-s", "x", "wait", "--text", "Saved"];
+            a.extend_from_slice(extra);
+            match parse_args(argv(&a)).expect("parses").command {
+                Some(Command::Wait { timeout_ms, ms, .. }) => (timeout_ms, ms),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(wait(&["--wait-ms", "300"]).0, Some(300.0));
+        // Its own timeout wins; a plain sleep has nothing to time out.
+        assert_eq!(wait(&["--wait-ms", "300", "--timeout-ms", "900"]).0, Some(900.0));
+        match parse_args(argv(&["navigera", "-s", "x", "wait", "--ms", "50", "--wait-ms", "300"]))
+            .expect("parses")
+            .command
+        {
+            Some(Command::Wait { timeout_ms, ms, .. }) => assert_eq!((timeout_ms, ms), (None, Some(50.0))),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
