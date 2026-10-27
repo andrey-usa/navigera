@@ -2800,6 +2800,8 @@ impl Driver {
                             "element is covered by {}; the click went to the element without the mouse (close the cover if it had no effect)",
                             point.get("covered_by").and_then(Value::as_str).unwrap_or("another element")
                         )
+                    } else if *force {
+                        "--force: the click went to the element without the mouse".to_string()
                     } else {
                         "element has no visible box; the click went to the element without the mouse".to_string()
                     });

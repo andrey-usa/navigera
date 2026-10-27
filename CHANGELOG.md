@@ -23,8 +23,9 @@ All notable changes to this project are documented here. The format follows
 - Errors say what happened and what to do next, in plain words:
   - a failed `goto` says what Chrome's code means (the host name did not
     resolve, nothing answered on that port, the server answered 404 with no
-    page and the tab now shows Chrome's error page) and keeps the code at the
-    end;
+    page and the tab now shows Chrome's error page; chrome-headless-shell
+    shows a blank page there instead, and `goto` succeeds) and keeps the
+    code at the end;
   - a click on a word that is not a ref (`click abc`) says it was read as
     CSS and that refs are the numbers in `ax`; `ref12` now reads as ref 12;
   - a stale ref, a covered or hidden element, and a browser that went away
@@ -44,6 +45,8 @@ All notable changes to this project are documented here. The format follows
 
 - `wait --text … --wait-ms <ms>` waits that long; `--wait-ms` was accepted
   and ignored on `wait`, which then waited its default 5 s.
+- `click --force` on a covered element said the element had "no visible
+  box"; the result now says the click was forced.
 
 ## [0.7.0] - 2026-10-27
 
