@@ -3382,7 +3382,8 @@ impl Page {
     /// have no name or text.
     fn clickables(&self, timeout: Duration) -> ax::Clickables {
         let mut out = ax::Clickables::default();
-        let params = json!({ "computedStyles": ["cursor", "pointer-events", "opacity"], "includeDOMRects": true });
+        let params =
+            json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility"], "includeDOMRects": true });
         let Ok(snap) = self.send("DOMSnapshot.captureSnapshot", params, timeout) else {
             return out;
         };
@@ -3444,7 +3445,8 @@ impl Page {
                 .filter_map(Value::as_i64)
                 .collect();
             let layout = &doc["layout"];
-            // Per laid-out node: (cursor, pointer-events, opacity, has an area).
+            // Per laid-out node: (cursor, pointer-events, opacity, has an area,
+            // visibility).
             let mut boxes = std::collections::HashMap::new();
             let styles = layout.get("styles").and_then(Value::as_array);
             let bounds = layout.get("bounds").and_then(Value::as_array);
@@ -3455,7 +3457,7 @@ impl Page {
                     .and_then(Value::as_array)
                     .map(|r| r.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
                     .is_some_and(|r| r.len() == 4 && r[2] > 0.0 && r[3] > 0.0);
-                boxes.insert(node.as_i64().unwrap_or(-1), (style(0), style(1), style(2), area));
+                boxes.insert(node.as_i64().unwrap_or(-1), (style(0), style(1), style(2), area, style(3)));
             }
             let pointer = |i: i64| boxes.get(&i).is_some_and(|b| b.0 == "pointer");
             let transparent = |mut i: i64| {
@@ -3539,12 +3541,18 @@ impl Page {
             // checkbox).
             let hidden = |i: i64| up(i).any(|a| attr_of(a, "aria-hidden").trim() == "true" || has_attr(a, "inert"));
             // Inside a link or a button, which has a ref of its own and is
-            // where the click goes (an image card in an article link).
+            // where the click goes (an image card in an article link, a
+            // toolbar icon in a `role=button`).
             let in_control = |i: i64| {
-                up(i).skip(1).any(|a| match tag_of(a) {
-                    "A" => has_attr(a, "href"),
-                    "BUTTON" => true,
-                    _ => false,
+                up(i).skip(1).any(|a| {
+                    matches!(
+                        attr_of(a, "role").trim(),
+                        "button" | "link" | "menuitem" | "menuitemcheckbox" | "menuitemradio" | "tab" | "option"
+                    ) || match tag_of(a) {
+                        "A" => has_attr(a, "href"),
+                        "BUTTON" => true,
+                        _ => false,
+                    }
                 })
             };
             let by_id: std::collections::HashMap<&str, i64> = (0..names.len() as i64)
@@ -3573,13 +3581,14 @@ impl Page {
             };
             // A user's click could land on it.
             let landable = |i: i64| {
-                let Some(&(_, events, _, area)) = boxes.get(&i) else { return false };
+                let Some(&(_, events, _, area, visibility)) = boxes.get(&i) else { return false };
                 let tag = tag_of(i);
                 !foreign
                     && !matches!(tag, "HTML" | "BODY")
                     && (tag != "LABEL" || control_hidden(i))
                     && events != "none"
                     && area
+                    && matches!(visibility, "" | "visible")
                     && !transparent(i)
                     && !hidden(i)
                     && !in_control(i)

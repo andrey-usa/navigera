@@ -865,6 +865,8 @@ fn clickable_refs_skip_what_a_user_cant_tell_apart_or_reach() {
         <a href=\"%23story\"><div class=card onclick=\"void 0\"><span>Story picture</span></div>Story</a>\
         <div aria-hidden=true><span onclick=\"document.title = 'hidden'\">Behind the modal</span></div>\
         <div>{tile}{tile}{tile}</div>\
+        <div role=button tabindex=0 aria-label=\"Insert page\"><span class=icon onclick=\"void 0\">+</span></div>\
+        <span class=stepper style=\"visibility:hidden\" onclick=\"void 0\">Up</span>\
         <input type=checkbox id=menu aria-hidden=true tabindex=-1 style=\"position:absolute;opacity:0\" onchange=\"document.title = 'menu ' + this.checked\">\
         <label for=menu style=cursor:pointer>Menu</label>"
     );
@@ -874,6 +876,9 @@ fn clickable_refs_skip_what_a_user_cant_tell_apart_or_reach() {
     let clickable: Vec<&&str> = tree.iter().filter(|l| l.contains("clickable")).collect();
     assert!(!clickable.iter().any(|l| l.contains("Story picture") || l.contains(".card")), "{ax}");
     assert!(!clickable.iter().any(|l| l.contains("Behind the modal")), "{ax}");
+    // Inside a role=button, which has the ref; hidden until hovered.
+    assert!(!clickable.iter().any(|l| l.contains(".icon") || l.contains(".stepper") || l.contains("Up")), "{ax}");
+    assert!(tree.iter().any(|l| l.contains("button \"Insert page\"") && l.contains("ref=")), "{ax}");
     assert!(!tree.iter().any(|l| l.trim() == "- clickable" || l.trim_start().starts_with("- clickable [ref=")), "{ax}");
     let menu = clickable.iter().find(|l| l.contains("Menu")).unwrap_or_else(|| panic!("no ref on the label: {ax}"));
     let menu = menu.split("ref=").nth(1).and_then(|r| r.split(']').next()).unwrap();
