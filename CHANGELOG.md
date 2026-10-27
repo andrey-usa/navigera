@@ -31,6 +31,8 @@ dug through the DOM with `eval` to reach.
   menu's 287 blank tiles on one shop's home page). A label whose control
   is hidden is what a user clicks, so it gets the ref. One `DOMSnapshot`
   call, Chrome only.
+- The skill says what a `clickable` line is and to click it by ref
+  before reaching for `eval`.
 
 ### Fixed
 
