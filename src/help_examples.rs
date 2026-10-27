@@ -4,7 +4,11 @@
 //! (the page it needs open first); `navigera` in one stands for the program
 //! name help is printed under.
 
-pub const EXAMPLES: &[(&str, &[(&str, &str)], &[(&str, &str)])] = &[
+/// A command, its examples (`(command line, comment)`) and its flags
+/// (`(flag, what it does)`).
+pub type Help = (&'static str, &'static [(&'static str, &'static str)], &'static [(&'static str, &'static str)]);
+
+pub const EXAMPLES: &[Help] = &[
     (
         "start",
         &[("navigera -s s start", ""), ("navigera -s s start --natural", "browser that looks less headless")],
