@@ -831,13 +831,17 @@ fn render_inner(
         }
     }
     let fetch_failed = tree.fetch_failed;
+    let lazy = tree.fetch.is_some();
     let total = tree.lines.len();
     let mut lines = tree.lines;
     let mut truncated = 0;
     if opts.limit > 0 && total > opts.limit {
         truncated = total - opts.limit;
         lines.truncate(opts.limit);
-        lines.push(format!("… {truncated} more lines (scope with `ax --selector <css>`, or raise `--limit`)"));
+        // A lazy walk stopped a line past the limit, so how many lines the
+        // whole tree has is not known: no count, rather than a wrong one.
+        let more = if lazy { "more lines".to_string() } else { format!("{truncated} more lines") };
+        lines.push(format!("… {more} (scope with `ax --selector <css>`, or raise `--limit`)"));
     }
     (Rendered { lines: lines.len(), text: lines.join("\n"), truncated }, fetch_failed)
 }
