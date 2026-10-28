@@ -59,6 +59,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `ax` read the page's whole accessibility tree to print at most its
+  limit, and Chrome's full-tree call grows faster than the page: 8000 list
+  items took 13 s and 32000 timed out. The tree is now fetched from the
+  root down, children on demand, and the walk stops at the limit (2000
+  items 1.24 s -> 0.78 s, 8000 13.0 s -> 2.3 s, 32000 6.8 s, on Chromium
+  141). Output under the limit is byte-identical; over it, the last line
+  says more lines are not shown, without a count the walk no longer
+  learns. `--limit 0`, `--format json` and `--max-depth` read the whole
+  tree as before, and a browser without the calls falls back to it.
 - A locator by role and name (`--role button --name …`), by label, or by
   text read every candidate's `el.labels`, which scans the whole document
   on its first read for each element: quadratic. On a page of 8000
