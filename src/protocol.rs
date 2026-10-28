@@ -150,7 +150,10 @@ impl TargetArgs {
         }
     }
 
-    fn unframed(&self, op: &str) -> anyhow::Result<Option<Target>> {
+    /// What is wrong with these flags together, told from the words alone:
+    /// checked when the command is parsed (a typo costs no browser), and
+    /// again when it runs.
+    fn conflict(&self) -> Option<&'static str> {
         let given = [
             self.node_ref.is_some(),
             self.text.is_some(),
@@ -160,23 +163,29 @@ impl TargetArgs {
         .iter()
         .filter(|b| **b)
         .count();
+        let counted = self.locator() || self.selector.is_some();
         if given > 1 {
-            anyhow::bail!("{op}: give only one of ref, --text, --find, or --selector/--role/--name/--label/--placeholder/--testid");
+            Some("give only one of ref, --text, --find, or --selector/--role/--name/--label/--placeholder/--testid")
+        } else if self.near.is_some() && !counted {
+            Some("--near narrows --role/--name, --label, --placeholder, --testid or --selector to the match in the part of the page that shows the text")
+        } else if self.nth.is_some() && !counted {
+            Some(
+                "--nth picks among the matches of --selector, --role, --label, --placeholder or --testid; --text \
+                 takes the one best match (the second of two buttons: --role button --name \"…\" --nth 1)",
+            )
+        } else {
+            None
+        }
+    }
+
+    fn unframed(&self, op: &str) -> anyhow::Result<Option<Target>> {
+        if let Some(m) = self.conflict() {
+            anyhow::bail!("{op}: {m}");
         }
         if self.find.is_some() {
             anyhow::bail!("{op}: --find was not resolved to an element");
         }
-        if self.near.is_some() && !self.locator() && self.selector.is_none() {
-            anyhow::bail!(
-                "{op}: --near narrows --role/--name, --label, --placeholder, --testid or --selector to the match in the part of the page that shows the text"
-            );
-        }
         if self.locator() || self.nth.is_some() || self.near.is_some() {
-            if self.nth.is_some() && !self.locator() && self.selector.is_none() {
-                anyhow::bail!(
-                    "{op}: --nth picks among the matches of --selector, --role, --label, --placeholder or --testid"
-                );
-            }
             return Ok(Some(Target::Locator(crate::cdp::Locator {
                 role: self.role.clone(),
                 name: self.name.clone(),
@@ -1403,7 +1412,10 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
         },
         frame: str_flag(args, "--frame")?,
     };
-    if positional_target && t == TargetArgs::default() {
+    // A bare first word is the target when no flag names one; `--nth`,
+    // `--near` and `--frame` only narrow it (`click .row --nth 2`).
+    let named = t.node_ref.is_some() || t.text.is_some() || t.find.is_some() || t.selector.is_some() || t.locator();
+    if positional_target && !named {
         if let Some(first) = args.front().filter(|a| !a.starts_with("--")).cloned() {
             args.pop_front();
             match parse_ref(&first) {
@@ -2011,6 +2023,12 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         }
         "set" | "emulate" => {
             let what = positional(&mut args).ok_or_else(|| need("set", "what to set"))?;
+            if !SETTINGS.contains(&what.as_str()) {
+                return invalid(format!(
+                    "{op}: unknown setting {what:?}; settings: viewport, device, media, geo, offline, headers, ua, \
+                     locale, timezone, credentials"
+                ));
+            }
             let scale = num_flag(&mut args, "--scale")?;
             let mobile = extract_present(&mut args, "--mobile");
             let accuracy = num_flag(&mut args, "--accuracy")?;
@@ -2112,6 +2130,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             " (quote arguments that contain spaces)".to_string()
         };
         return invalid(format!("unexpected argument {extra:?} for `{op}`{hint}"));
+    }
+    if let Some(m) = command.clone().target_mut().and_then(|t| t.conflict()) {
+        return invalid(format!("{op}: {m}"));
     }
     // `--wait-ms` on one command: that op's element wait, unless it names
     // its own timeout. `wait` for a condition counts: accepted and ignored,
@@ -3589,6 +3610,27 @@ impl Command {
     }
 }
 
+/// What `set` sets, with the other names each goes by.
+const SETTINGS: &[&str] = &[
+    "viewport",
+    "device",
+    "media",
+    "geo",
+    "geolocation",
+    "location",
+    "offline",
+    "headers",
+    "header",
+    "ua",
+    "user-agent",
+    "useragent",
+    "locale",
+    "timezone",
+    "tz",
+    "credentials",
+    "auth",
+];
+
 /// What every op says once the session's only tab has closed.
 fn tab_closed_message(target: &str) -> String {
     let short: String = target.chars().take(8).collect();
@@ -4411,12 +4453,21 @@ mod tests {
 
     #[test]
     fn click_targets_are_exclusive() {
-        let both =
-            parse_args(argv(&["navigera", "click", "--ref", "1", "--selector", "a"])).expect("parses").command.unwrap();
-        let mut driver_free = match both {
-            Command::Click { target, .. } => target,
-            _ => unreachable!(),
+        // Told when the words are parsed, before any browser.
+        let invalid = |words: &[&str]| match parse_args(argv(words)) {
+            Err(ArgsError::Invalid(m)) => m,
+            other => panic!("{words:?} parsed: {:?}", other.map(|p| p.command)),
         };
+        let m = invalid(&["navigera", "click", "--ref", "1", "--selector", "a"]);
+        assert!(m.contains("click: give only one of"), "{m}");
+        let m = invalid(&["navigera", "click", "--text", "Add", "--nth", "1"]);
+        assert!(m.contains("--text takes the one best match"), "{m}");
+        let m = invalid(&["navigera", "hover", "--text", "Add", "--near", "Tea"]);
+        assert!(m.contains("--near narrows"), "{m}");
+        assert!(parse_args(argv(&["navigera", "click", ".row", "--nth", "2"])).is_ok());
+        assert!(parse_args(argv(&["navigera", "click", "--role", "button", "--nth", "-1"])).is_ok());
+        // And again when a command comes as JSON (a session client, MCP).
+        let mut driver_free = TargetArgs { node_ref: Some(1), selector: Some("a".into()), ..TargetArgs::default() };
         assert!(driver_free.target("click").is_err(), "selector and ref are mutually exclusive");
         driver_free = TargetArgs::default();
         assert!(driver_free.target("click").is_err(), "a target is required");
@@ -4424,6 +4475,20 @@ mod tests {
             p.command,
             Some(Command::Fill { ref target, .. }) if *target == TargetArgs::default()
         )));
+    }
+
+    #[test]
+    fn set_names_its_settings_when_given_another() {
+        match parse_args(argv(&["navigera", "set", "WHO", "=", "x"])) {
+            Err(ArgsError::Invalid(m)) => {
+                assert!(m.contains("set: unknown setting \"WHO\"; settings: viewport"), "{m}")
+            }
+            other => panic!("parsed: {:?}", other.map(|p| p.command)),
+        }
+        for ok in [["set", "viewport", "800x600"], ["set", "tz", "UTC"], ["emulate", "device", "iPhone"]] {
+            let words: Vec<&str> = std::iter::once("navigera").chain(ok).collect();
+            assert!(parse_args(argv(&words)).is_ok(), "{ok:?}");
+        }
     }
 
     #[test]

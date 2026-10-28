@@ -8,7 +8,20 @@ use std::process::ExitCode;
 use crate::protocol::{self, ArgsError};
 
 /// Run the CLI on `args` (the program name first, as `std::env::args()`).
+/// How this binary was called (`navigera`, or `primavera navigera` from
+/// inside primavera), for the commands a message tells to run.
+static PROGRAM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub(crate) fn program() -> &'static str {
+    PROGRAM.get().map_or("navigera", String::as_str)
+}
+
 pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
+    let args: Vec<String> = args.into_iter().collect();
+    if let Some(first) = args.first() {
+        let name = std::path::Path::new(first).file_name().map_or(first.clone(), |f| f.to_string_lossy().into_owned());
+        let _ = PROGRAM.set(name);
+    }
     // Panics now go to stderr, which stays clean: Chrome's own stderr is piped
     // (and drained) inside the launch, so its DBus noise can't mask our output.
     let parsed = match protocol::parse_args(args) {

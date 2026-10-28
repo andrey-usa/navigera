@@ -33,6 +33,12 @@ All notable changes to this project are documented here. The format follows
     "DOM events");
   - `wait` timeouts name `--timeout-ms`, `tab-select` says which tab numbers
     there are, `set viewport` says what was missing;
+  - flags that can't go together (`--text` with `--nth`, a ref with
+    `--selector`, `--near` with no locator) and a `set` of an unknown
+    setting are refused when the command is read, with exit 2 and before
+    any browser; `--nth` with `--text` says how to count instead;
+  - a missing session says to start it the way navigera was called
+    (`primavera navigera -s <name> start` from inside primavera);
   - the op is named once (`click selector "abc": …`, not
     `click selector "abc": click: …`), and the `(os error 2)` suffix is gone.
 - Every MCP tool parameter has a description.
@@ -54,6 +60,8 @@ All notable changes to this project are documented here. The format follows
   and ignored on `wait`, which then waited its default 5 s.
 - `click --force` on a covered element said the element had "no visible
   box"; the result now says the click was forced.
+- A bare target with `--nth`, `--near` or `--frame` (`click .row --nth 2`)
+  was refused as an unexpected argument; it is the target.
 
 ## [0.7.0] - 2026-10-27
 

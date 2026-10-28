@@ -718,9 +718,15 @@ fn locate_and_history_turn_refs_into_locators() {
     click.extend(flags.iter().map(String::as_str));
     s.ok(&click);
     assert_eq!(s.ok(&["eval", "window.added"]), 2);
-    // --near on its own is refused: it narrows a locator.
-    let (ok, r) = s.run(&["click", "--near", "Brass Widget"]);
-    assert!(!ok && r.to_string().contains("--near narrows"), "{r}");
+    // --near on its own is refused when the words are read (exit 2, no
+    // browser asked): it narrows a locator.
+    let out = Command::new(tool_exe())
+        .args(["--session", &s.name, "click", "--near", "Brass Widget"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run navigera");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.code() == Some(2) && err.contains("--near narrows"), "{err}");
     // A select inside its label is named by the label's words, not its options.
     s.ok(&["eval", "(document.body.insertAdjacentHTML('beforeend', '<label>Size <select><option>Small</option><option>Large</option></select></label>'), 1)"]);
     let size = ref_of(&s, "combobox \"Size\"");

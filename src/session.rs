@@ -378,8 +378,9 @@ pub fn client(config: &SessionConfig, name: &str, command: &Command, output: &mu
         Ok(stream) => stream,
         Err(e) => {
             let mut error = format!(
-                "no navigera session at {} ({e}); start one with `navigera --session {name} start`",
-                path.display()
+                "no navigera session at {} ({e}); start one with `{} -s {name} start`",
+                path.display(),
+                crate::cli::program()
             );
             // A session that ran before says why it stopped (idle timeout,
             // browser crash, quit) in its log, which outlives the socket.
