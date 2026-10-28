@@ -3907,6 +3907,107 @@ impl Page {
     /// tree with `[ref=N]` on actionable nodes, iframes included. `json`
     /// keeps the older flat `[{ref, role, name, value?}]` list.
     pub fn ax_tree(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        // The text tree stops at the output limit, so on a large page it
+        // need not read the whole tree: fetch lazily from the root and
+        // stop. Anything the lazy path cannot serve (JSON, a depth cap,
+        // no limit, a browser without the lazy calls) reads the full tree
+        // exactly as before, and a failed lazy fetch falls back to it.
+        if !opts.json && opts.max_depth.is_none() && opts.limit > 0 && !self.shared.is_single_target() {
+            if let Ok(text) = self.ax_tree_lazy(timeout, opts) {
+                return Ok(text);
+            }
+        }
+        self.ax_tree_full(timeout, opts)
+    }
+
+    /// Text tree from a lazy fetch: the root (or the partial tree around
+    /// a scope) plus children on demand, in sibling windows, until the
+    /// output limit is reached. Errors, and any failed child fetch, bail
+    /// so [`Self::ax_tree`] falls back to the full tree.
+    fn ax_tree_lazy(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        // getRootAXNode and getChildAXNodes answer -32000 until the domain
+        // is enabled; getFullAXTree does not need it, so without this the
+        // lazy path bailed on its first call and silently read the whole
+        // tree (the bench numbers for the first lazy build were full-tree
+        // numbers, not lazy ones).
+        self.send("Accessibility.enable", json!({}), timeout)?;
+        let root_backend_id = match &opts.scope {
+            Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
+            None => None,
+        };
+        // The page's root, for the header line (and, unscoped, the seed).
+        let main_root = self.send("Accessibility.getRootAXNode", json!({}), timeout)?;
+        let main_root = main_root.get("node").cloned().unwrap_or(Value::Null);
+        let (seed, scoped_backend) = match root_backend_id {
+            Some(backend) => {
+                let res = self.send("Accessibility.getPartialAXTree", json!({ "backendNodeId": backend }), timeout)?;
+                let nodes = res.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+                if !nodes.iter().any(|n| n.get("backendDOMNodeId").and_then(Value::as_u64) == Some(backend)) {
+                    bail!("partial AX tree has no node for the scope");
+                }
+                (nodes, Some(backend))
+            }
+            None => (vec![main_root.clone()], None),
+        };
+        let frames = self.frame_trees(timeout);
+        let clicks = self.clickables(timeout);
+        let title = ax_str(&main_root, "name").to_string();
+        let url = main_root
+            .get("properties")
+            .and_then(Value::as_array)
+            .and_then(|props| props.iter().find(|p| p.get("name").and_then(Value::as_str) == Some("url")))
+            .and_then(|p| p.get("value").and_then(|v| v.get("value")).and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string();
+        let origin = url
+            .find("://")
+            .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
+            .unwrap_or_default();
+        let client = self.client.clone();
+        let session = self.session_id.clone();
+        let handle = self.handle.clone();
+        let fetch: ax::AxFetch = Box::new(move |parents: &[String]| {
+            let futs = parents.iter().map(|id| {
+                // CDP names the parameter `id`, not `nodeId` (Chrome 156
+                // rejects `nodeId` with -32602, which used to fail every
+                // lazy fetch and fall back to the full tree).
+                client.send("Accessibility.getChildAXNodes", json!({ "id": id }), Some(&session), timeout)
+            });
+            let results = handle.block_on(futures_util::future::join_all(futs));
+            let mut nodes = Vec::new();
+            let mut failed = false;
+            for r in results {
+                match r {
+                    Ok(v) => {
+                        if let Some(arr) = v.get("nodes").and_then(Value::as_array) {
+                            nodes.extend(arr.iter().cloned());
+                        }
+                    }
+                    Err(_) => failed = true,
+                }
+            }
+            (nodes, failed)
+        });
+        let (rendered, failed) = ax::render_lazy(
+            &format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default()),
+            &seed,
+            &frames,
+            &ax::Options {
+                all_refs: opts.all_refs,
+                limit: opts.limit,
+                root_backend_id: scoped_backend,
+                origin,
+                clicks,
+            },
+            fetch,
+        );
+        if failed {
+            bail!("lazy AX fetch failed");
+        }
+        Ok(Value::String(rendered.text))
+    }
+
+    fn ax_tree_full(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
         let mut params = json!({});
         if let Some(d) = opts.max_depth {
             params["depth"] = json!(d);
