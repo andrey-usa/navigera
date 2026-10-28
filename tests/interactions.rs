@@ -127,6 +127,11 @@ fn eval_takes_statements_await_and_a_body() {
     assert_eq!(s.ok(&["eval", "const r = await fetch(location.href); r.status"]), 200);
     assert_eq!(s.ok(&["eval", "const n = 6 * 7; return n"]), 42);
     assert!(s.fails(&["eval", "((("]).contains("SyntaxError"));
+    // Text where CSS goes is said at once, with what to write instead.
+    let started = std::time::Instant::now();
+    let m = s.fails(&["click", "--selector", "35.75"]);
+    assert!(m.contains("\"35.75\" is not a CSS selector (--text \"35.75\""), "{m}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
 }
 
 #[test]

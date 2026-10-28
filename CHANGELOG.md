@@ -39,6 +39,9 @@ All notable changes to this project are documented here. The format follows
     any browser; `--nth` with `--text` says how to count instead;
   - a missing session says to start it the way navigera was called
     (`primavera navigera -s <name> start` from inside primavera);
+  - a selector that isn't CSS at all (`35.75`, `Total:`) is said at once,
+    with `--text` to use instead, not as the browser's `querySelector`
+    error after the wait;
   - the op is named once (`click selector "abc": …`, not
     `click selector "abc": click: …`), and the `(os error 2)` suffix is gone.
 - Every MCP tool parameter has a description.

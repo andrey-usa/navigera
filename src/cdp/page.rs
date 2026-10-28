@@ -872,6 +872,11 @@ const IDENTITY: &str = "function (el) { return el; }";
 const WAIT_FOR: &str = r#"async function (sel, ms, what, deepFn) {
     const end = Date.now() + ms;
     let deep = null;
+    // Not CSS at all (`35.75`, `Total:`): said at once, not after the wait.
+    if (!sel.includes('>>>')) {
+        try { document.createDocumentFragment().querySelector(sel); }
+        catch (_) { throw new Error(what + ': ' + JSON.stringify(sel) + ' is not a CSS selector (--text ' + JSON.stringify(sel) + ' matches what the page shows)'); }
+    }
     // Somewhere a user could see it: a box, not hidden, not parked at a
     // negative position no scrolling reaches (a decoy copy of an id).
     const reachable = (e) => {
