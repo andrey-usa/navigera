@@ -59,6 +59,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A locator by role and name (`--role button --name …`), by label, or by
+  text read every candidate's `el.labels`, which scans the whole document
+  on its first read for each element: quadratic. On a page of 8000
+  buttons the first such call took 4.4 s (12000: about 9 s); it now takes
+  under 50 ms, from one pass over the page's labels.
 - `wait --text … --wait-ms <ms>` waits that long; `--wait-ms` was accepted
   and ignored on `wait`, which then waited its default 5 s.
 - `click --force` on a covered element said the element had "no visible
