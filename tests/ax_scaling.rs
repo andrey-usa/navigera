@@ -116,22 +116,26 @@ impl Drop for Session {
     }
 }
 
+/// `ax` reads the tree only as far as it prints: four times the items cost
+/// about what the linear parts of a page cost (rendering, the clickables
+/// pass), not the full tree's faster growth (Chromium 141: 2000 items 1.2 s,
+/// 8000 13 s). Two sizes and a ratio, so a slow runner can't fail it; the
+/// whole-tree read is not timed beside it, because on a page this long it can
+/// take the browser down (it did on a Windows runner).
 #[test]
 fn ax_on_a_long_page_costs_what_it_prints() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("long-page");
-    s.ok(&["goto", &format!("{}/list?n=8000", site.url)]);
-    let (lazy_8000, tree) = s.timed_ax(&[]);
-    assert!(tree.contains("Item 0"), "ax must print the first items");
-    let (full_8000, _) = s.timed_ax(&["--limit", "0"]);
-    assert!(
-        lazy_8000 < full_8000.mul_f64(0.75),
-        "bounded ax on 8000 items ({lazy_8000:?}) must beat the whole-tree read ({full_8000:?})"
-    );
-    s.ok(&["goto", &format!("{}/list?n=2000", site.url)]);
-    let (lazy_2000, _) = s.timed_ax(&[]);
-    assert!(
-        lazy_8000 < lazy_2000.mul_f64(5.0),
-        "ax on 8000 items ({lazy_8000:?}) must stay within 5x of 2000 items ({lazy_2000:?})"
-    );
+    let timed = |n: usize| {
+        s.ok(&["goto", &format!("{}/list?n={n}", site.url)]);
+        let (took, tree) = s.timed_ax(&[]);
+        assert!(tree.contains("Item 0"), "ax must print the first items");
+        took
+    };
+    // The first `ax` of a session pays for the accessibility tree's first
+    // build; time after it.
+    timed(500);
+    let (small, large) = (timed(2000), timed(8000));
+    let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.001);
+    assert!(ratio < 8.0, "ax on 2000 items {small:?}, on 8000 {large:?}: {ratio:.1}x");
 }
