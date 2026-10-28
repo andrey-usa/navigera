@@ -6,6 +6,32 @@
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
+/// The rule-based network call and the older one a browser without it has.
+pub const BY_RULE: &str = "Network.emulateNetworkConditionsByRule";
+
+/// Whether a CDP error says the browser has no such method (-32601).
+pub fn method_missing(err: &str) -> bool {
+    err.contains("-32601") || err.contains("wasn't found")
+}
+
+/// `Network.emulateNetworkConditions` for a call to [`BY_RULE`]: the first
+/// rule's conditions (offline, latency, throughput), or no emulation for an
+/// empty list. The old call has no URL pattern; every request is affected,
+/// which is what `set offline` asks for anyway.
+pub fn without_rule(params: &Value) -> (&'static str, Value) {
+    let rule = params["matchedNetworkConditions"].get(0);
+    let get = |k: &str, d: Value| rule.and_then(|r| r.get(k)).cloned().unwrap_or(d);
+    (
+        "Network.emulateNetworkConditions",
+        json!({
+            "offline": get("offline", json!(false)),
+            "latency": get("latency", json!(0)),
+            "downloadThroughput": get("downloadThroughput", json!(-1)),
+            "uploadThroughput": get("uploadThroughput", json!(-1)),
+        }),
+    )
+}
+
 /// A device: viewport, pixel ratio, touch, user agent.
 pub struct Device {
     pub name: &'static str,
@@ -418,5 +444,21 @@ mod tests {
         let p = plan("offline", &v(&["off"]), None, false, None, true).unwrap();
         assert!(p.calls.is_empty() && p.reset.is_empty(), "nothing the engine would refuse");
         assert_eq!(plan("device", &v(&["Pixel 8"]), None, false, None, true).unwrap().calls.len(), 1);
+    }
+
+    #[test]
+    fn a_browser_without_the_rule_call_gets_the_older_one() {
+        let p = plan("offline", &v(&["on"]), None, false, None, false).unwrap();
+        let (m, params) = without_rule(&p.calls[0].1);
+        assert_eq!(m, "Network.emulateNetworkConditions");
+        assert_eq!(params, json!({"offline": true, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1}));
+        let (_, off) = without_rule(&p.reset[0].1);
+        assert_eq!(off["offline"], false);
+        assert_eq!(off["downloadThroughput"], -1);
+        let shown = r#"Network.emulateNetworkConditionsByRule: the browser refused Network.emulateNetworkConditionsByRule: {"code":-32601,"message":"'Network.emulateNetworkConditionsByRule' wasn't found"}"#;
+        assert!(method_missing(shown));
+        assert!(method_missing(r#"{"code":-32601}"#));
+        assert!(!method_missing("timed out"));
+        assert!(!method_missing(r#"{"code":-32602,"message":"Invalid parameters"}"#));
     }
 }

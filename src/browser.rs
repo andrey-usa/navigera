@@ -492,6 +492,9 @@ pub struct BrowserSession {
     /// `set …` overrides (keyed by what they set): applied to every open
     /// tab and replayed on tabs opened later.
     overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
+    /// The browser answered -32601 to `Network.emulateNetworkConditionsByRule`
+    /// (Chromium before it had the call): the older call is used from then on.
+    no_rule_call: std::sync::atomic::AtomicBool,
     /// `init-script` sources, run before the page's own scripts in every
     /// document of every tab; and per tab (target id) the identifiers to
     /// remove them by.
@@ -646,6 +649,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
@@ -724,6 +728,7 @@ impl BrowserSession {
             profile_exe,
             downloads_dir: None,
             overrides: Default::default(),
+            no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
@@ -944,6 +949,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: std::sync::Mutex::new(Vec::new()),
@@ -1184,7 +1190,7 @@ impl BrowserSession {
         let timeout = self.timeout(None);
         for page in &self.pages {
             for (method, params) in reset.iter().chain(calls.iter()) {
-                page.send_cdp(method, params.clone(), timeout).map_err(|e| anyhow::anyhow!("{method}: {e:#}"))?;
+                self.send_override(page, method, params, timeout)?;
             }
         }
         if calls.is_empty() {
@@ -1193,6 +1199,31 @@ impl BrowserSession {
             self.overrides.insert(kind, calls);
         }
         Ok(())
+    }
+
+    /// One CDP call of a `set` override. A browser that has no
+    /// `Network.emulateNetworkConditionsByRule` (-32601) gets
+    /// `Network.emulateNetworkConditions` instead, and is not asked the new
+    /// way again in this session.
+    fn send_override(&self, page: &Page, method: &str, params: &serde_json::Value, timeout: Duration) -> Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if method == crate::emulate::BY_RULE {
+            let old = || crate::emulate::without_rule(params);
+            if self.no_rule_call.load(Relaxed) {
+                let (m, p) = old();
+                return page.send_cdp(m, p, timeout).map(drop).map_err(|e| anyhow::anyhow!("{m}: {e:#}"));
+            }
+            return match page.send_cdp(method, params.clone(), timeout) {
+                Ok(_) => Ok(()),
+                Err(e) if crate::emulate::method_missing(&format!("{e:#}")) => {
+                    self.no_rule_call.store(true, Relaxed);
+                    let (m, p) = old();
+                    page.send_cdp(m, p, timeout).map(drop).map_err(|e| anyhow::anyhow!("{m}: {e:#}"))
+                }
+                Err(e) => Err(anyhow::anyhow!("{method}: {e:#}")),
+            };
+        }
+        page.send_cdp(method, params.clone(), timeout).map(drop).map_err(|e| anyhow::anyhow!("{method}: {e:#}"))
     }
 
     /// Read a property of the target element (`get`): text, value, attr,
@@ -1532,7 +1563,7 @@ impl BrowserSession {
         let timeout = self.timeout(None);
         for calls in self.overrides.values() {
             for (method, params) in calls {
-                if let Err(e) = page.send_cdp(method, params.clone(), timeout) {
+                if let Err(e) = self.send_override(page, method, params, timeout) {
                     eprintln!("[browser] {method} on a new tab: {e:#}");
                 }
             }
