@@ -158,6 +158,30 @@ pub const DEEP: &str = r#"(() => {
         return out;
     };
     const roots = () => { const out = []; for (const d of topDocs()) { out.push(d); shadows(d, out); } return out; };
+    // A wait's pause: until the frame after any of these roots changes, or
+    // `ms` at most. A poll alone sees a change half an interval late on
+    // average (25 ms of a 50 ms poll, 50 of 100); woken by the change it is
+    // under a millisecond. What no observer sees (a stylesheet rule starting
+    // to match, a hover, a frame out of reach, a background tab with no
+    // frames) still ends the pause at `ms`, so no wait is slower than the
+    // poll it replaces. The observer goes at the first change or the time.
+    const wake = (ms) => new Promise((resolve) => {
+        let mo = null, timer = 0, done = false;
+        const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            if (mo) mo.disconnect();
+            resolve();
+        };
+        timer = setTimeout(finish, ms);
+        try {
+            const frame = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(f, 0);
+            mo = new MutationObserver(() => { mo.disconnect(); frame(finish); });
+            const what = { subtree: true, childList: true, attributes: true, characterData: true };
+            for (const r of roots()) mo.observe(r, what);
+        } catch (_) {}
+    });
     const pierced = (sel) => {
         const [head, ...rest] = sel.split('>>>').map((s) => s.trim());
         let at = [];
@@ -175,6 +199,7 @@ pub const DEEP: &str = r#"(() => {
     return {
         roots,
         docs: topDocs,
+        wake,
         // The top document's own answer first: a plain query costs nothing
         // extra when the element is where it usually is.
         first(sel) {
@@ -904,7 +929,7 @@ const WAIT_FOR: &str = r#"async function (sel, ms, what, deepFn) {
                 ? '(a word that is not a number is read as CSS; refs are the numbers in `ax`, as in `click 12`, and --text matches visible text)'
                 : '(run `ax` to see the page and act on a ref from it)'));
         }
-        await new Promise((r) => setTimeout(r, 50));
+        await (deep = deep || deepFn()).wake(50);
     }
 }"#;
 
@@ -1039,7 +1064,7 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
             const desc = Object.entries(spec).map(([k, v]) => k + '=' + JSON.stringify(v)).join(' ');
             throw new Error(what + ': no element with ' + desc + ' within ' + ms + ' ms (' + found.length + ' matched; run `ax` to see the page)');
         }
-        await new Promise((r) => setTimeout(r, 50));
+        await deep.wake(50);
     }
 }"#;
 
@@ -1291,7 +1316,7 @@ const WAIT_TEXT: &str = r#"async function (text, ms, what, deep, mode) {
         if (best && best.tagName === 'LABEL' && best.control) return best.control;
         if (best) return best;
         if (Date.now() >= end) throw new Error(what + ': no element with text ' + JSON.stringify(text) + ' within ' + ms + ' ms (run `ax` to see the page and act on a ref from it)');
-        await new Promise((r) => setTimeout(r, 100));
+        await deep.wake(100);
     }
 }"#;
 

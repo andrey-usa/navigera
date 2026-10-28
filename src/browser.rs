@@ -99,6 +99,10 @@ fn chrome_flags() -> Vec<String> {
 
 const NO_SANDBOX: &str = "--no-sandbox";
 
+/// How long a `wait` watches in the page before it looks again from here
+/// (a navigation, cross-origin frames, the budget).
+const WATCH: Duration = Duration::from_millis(300);
+
 /// `--natural`: the browser looks like the browser it is, not like an
 /// automated one. Set once per process, before the browser starts.
 static NATURAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2110,10 +2114,11 @@ impl BrowserSession {
         self.active_tab().upload(target, files, wait, timeout)
     }
 
-    /// Poll `js_predicate` (an expression returning a boolean) every 100 ms
-    /// until true or `timeout_ms` (default: the element wait) runs out.
-    /// Survives navigations (the predicate is re-evaluated in each new
-    /// document); returns the waited milliseconds.
+    /// Wait until `js_predicate` (an expression returning a boolean) holds,
+    /// or `timeout_ms` (default: the element wait) runs out. It is checked
+    /// in the page on the frame after each change there, and at least every
+    /// 100 ms. Survives navigations (the predicate is re-evaluated in each
+    /// new document); returns the waited milliseconds.
     pub fn wait_until(&self, js_predicate: &str, what: &str, timeout_ms: Option<f64>) -> Result<f64> {
         self.wait_until_or_in_frames(js_predicate, false, what, timeout_ms)
     }
@@ -2130,23 +2135,39 @@ impl BrowserSession {
     ) -> Result<f64> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let started = std::time::Instant::now();
-        let mut polls = 0u32;
         loop {
             // A navigation in flight: wait for it, but never past this
             // op's own budget.
             self.settle_within(wait.saturating_sub(started.elapsed()));
-            if let Ok(true) = self.active_tab().check(js_predicate, timeout) {
+            // Up to WATCH in the page at a time, the predicate re-checked
+            // on the frame after each change there (`DEEP`'s wake) and at
+            // least every 100 ms: a change is seen within a frame, not half
+            // a poll later (50 ms on average when this slept 100 ms between
+            // checks). A navigation ends the watch with its document; the
+            // next one starts in the new document. The watch's own names
+            // start with `__nv`, so a `--js` expression still sees the page's.
+            let chunk = wait.saturating_sub(started.elapsed()).min(WATCH).as_millis();
+            let watched = format!(
+                "(async () => {{ const __nvDeep = {}, __nvEnd = Date.now() + {chunk}; \
+                 for (;;) {{ if (await ({js_predicate}\n)) return true; const __nvLeft = __nvEnd - Date.now(); \
+                 if (__nvLeft <= 0) return false; await __nvDeep.wake(Math.min(100, __nvLeft)); }} }})()",
+                crate::cdp::DEEP
+            );
+            match self.active_tab().check(&watched, timeout + WATCH) {
+                Ok(true) => return Ok((started.elapsed().as_secs_f64() * 1000.0).round()),
+                Ok(false) => {}
+                // The document went mid-watch, or the page threw: not a
+                // tight loop of retries.
+                Err(_) => std::thread::sleep(Duration::from_millis(25)),
+            }
+            // Cross-origin frames are looked into once per watch (every
+            // 300 ms, as every third poll was).
+            if in_frames && self.active_tab().true_in_a_frame(js_predicate, timeout) {
                 return Ok((started.elapsed().as_secs_f64() * 1000.0).round());
             }
-            // Frames are listed only after a miss, and every few polls.
-            if in_frames && polls.is_multiple_of(3) && self.active_tab().true_in_a_frame(js_predicate, timeout) {
-                return Ok((started.elapsed().as_secs_f64() * 1000.0).round());
-            }
-            polls += 1;
             if started.elapsed() >= wait {
                 bail!("wait: {what} not seen within {} ms (wait longer with --timeout-ms)", wait.as_millis());
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
     }
 

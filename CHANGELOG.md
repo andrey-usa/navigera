@@ -50,6 +50,15 @@ All notable changes to this project are documented here. The format follows
   names each field of what `status` prints, and `help ax` says a target (a
   ref or any locator) scopes the tree to that element.
 
+- Waits see a change within a frame of it. The `wait` command checked every
+  100 ms and the element waits under `click`, `fill`, `get` and the
+  locators every 50 ms (100 for `--text`), so they answered 25-50 ms late
+  on average; the page's changes now wake them (a MutationObserver), and
+  they still look at the old interval for what no observer sees (a
+  stylesheet rule starting to match, a hover, a background tab). An element
+  added 100-400 ms after the wait starts: seen 6 ms after it appears, not
+  58 (`wait --selector`, median), 5 not 34 (`--role --name`).
+
 ### Added
 
 - `eval` runs statements too, with `await` and `return` at the top level
