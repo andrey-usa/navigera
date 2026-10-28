@@ -407,6 +407,32 @@ fn a_hidden_control_fails_fast_and_its_card_works() {
     assert_eq!(s.text(&["get", "text", "--selector", "#picked"]), "m");
 }
 
+/// A button that exists but is shown later (a dialog opening by a class, a
+/// control made visible or clickable) is waited for, as a user would wait,
+/// not failed after a moment: the click lands once it shows.
+#[test]
+fn a_click_waits_for_a_button_shown_later() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("shown-later", &[]);
+    for (hide, show) in [
+        ("display:none", "display:block"),
+        ("visibility:hidden", "visibility:visible"),
+        ("pointer-events:none", "pointer-events:auto"),
+    ] {
+        s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+        s.ok(&[
+            "eval",
+            &format!(
+                "const b = document.createElement('button'); b.id = 'later'; b.textContent = 'Later'; \
+                 b.style.cssText = '{hide}'; b.onclick = () => {{ b.textContent = 'clicked'; }}; \
+                 document.body.prepend(b); setTimeout(() => {{ b.style.cssText = '{show}'; }}, 800); 1"
+            ),
+        ]);
+        s.ok(&["click", "--selector", "#later"]);
+        assert_eq!(s.text(&["get", "text", "--selector", "#later"]), "clicked", "{hide}");
+    }
+}
+
 #[test]
 fn select_works_on_an_aria_combobox() {
     let (true, Some(site)) = (chrome(), site()) else { return };

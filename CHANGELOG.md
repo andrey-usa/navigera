@@ -59,6 +59,14 @@ All notable changes to this project are documented here. The format follows
   added 100-400 ms after the wait starts: seen 6 ms after it appears, not
   58 (`wait --selector`, median), 5 not 34 (`--role --name`).
 
+- `click` waits for an element that is there but not shown yet, as long as
+  the element wait, as it already did for one under a closing overlay or
+  disabled: a dialog's button shown by a class after a second, a control
+  made visible (`visibility`) or clickable (`pointer-events`), one sliding
+  in from off-screen. It failed after 300 ms with "it has no box on
+  screen". An input hidden on purpose behind its label or card (a styled
+  radio) still fails at once, naming what to click instead.
+
 ### Added
 
 - `eval` runs statements too, with `await` and `return` at the top level

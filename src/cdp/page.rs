@@ -434,6 +434,25 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     const disabled = () => !!(el.disabled || el.closest('fieldset[disabled]'));
     while (!force && disabled() && Date.now() < deadline) await new Promise((res) => setTimeout(res, 50));
     if (!force && strict && disabled()) return { disabled: true };
+    const describe = (n) => {
+        if (!n) return null;
+        let s = n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') + (n.classList && n.classList.length ? '.' + n.classList[0] : '');
+        const t = (n.innerText || n.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        return t ? s + ' ' + JSON.stringify(t.slice(0, 40)) : s;
+    };
+    // What a user would click for a hidden control: its label, or the
+    // nearest ancestor that looks clickable and has a box.
+    const visibleFor = () => {
+        const sized = (n) => { const b = n.getBoundingClientRect(); return b.width >= 4 && b.height >= 4; };
+        const lab = labels.find(sized);
+        if (lab) return lab;
+        const CLICKY = 'a[href],button,label,summary,[role=button],[role=radio],[role=checkbox],[role=option],[role=tab],[role=switch],[role=menuitem],[onclick],[tabindex]';
+        for (let n = el.parentElement || (el.getRootNode() && el.getRootNode().host); n && n !== el.ownerDocument.body; n = n.parentElement || (n.getRootNode() && n.getRootNode().host)) {
+            if (!sized(n)) continue;
+            if (n.matches(CLICKY) || (el.ownerDocument.defaultView || window).getComputedStyle(n).cursor === 'pointer') return n;
+        }
+        return null;
+    };
     let hit = null, tries = 0;
     while (!force) {
         // Checked on every pass: an element that just appeared may only now
@@ -476,35 +495,22 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             // the caller asks CDP for the box instead.
             return { xframe: true, nav: mayNavigate(el) };
         }
-        // Covered (a toast, a closing overlay) or not laid out yet: try the
-        // other alignments at once, then give it a moment, like a user
-        // would. An element with no box at all rarely gets one, and one
-        // whose own ancestor answers the hit test is hidden on purpose (a
-        // styled control's real input): don't wait long for either.
+        // Covered (a toast, a closing overlay), not laid out yet, or not
+        // shown yet (the button of a dialog that is opening): try the other
+        // alignments at once, then give it a moment, as long as the element
+        // wait, as a user would wait for it. One hidden on purpose is not
+        // waited for long: its own ancestor answers the hit test (a styled
+        // control's real input, clipped to a pixel), or it has no box and
+        // something a user can click stands for it (its label or card).
+        // Hidden by `visibility` or `pointer-events`, it is waiting to be
+        // shown or enabled: waited for.
         if (hit && tries < ALIGN.length) continue;
-        const hiddenHere = !hit || hit.contains(el);
-        if (Date.now() >= deadline || (hiddenHere && Date.now() >= deadline - settleMs + 300)) break;
+        const st = (el.ownerDocument.defaultView || window).getComputedStyle(el);
+        const pending = st.visibility === 'hidden' || st.pointerEvents === 'none';
+        const onPurpose = hit ? hit.contains(el) && !pending : !!visibleFor();
+        if (Date.now() >= deadline || (onPurpose && Date.now() >= deadline - settleMs + 300)) break;
         await new Promise((res) => setTimeout(res, 100));
     }
-    const describe = (n) => {
-        if (!n) return null;
-        let s = n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') + (n.classList && n.classList.length ? '.' + n.classList[0] : '');
-        const t = (n.innerText || n.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
-        return t ? s + ' ' + JSON.stringify(t.slice(0, 40)) : s;
-    };
-    // What a user would click for a hidden control: its label, or the
-    // nearest ancestor that looks clickable and has a box.
-    const visibleFor = () => {
-        const sized = (n) => { const b = n.getBoundingClientRect(); return b.width >= 4 && b.height >= 4; };
-        const lab = labels.find(sized);
-        if (lab) return lab;
-        const CLICKY = 'a[href],button,label,summary,[role=button],[role=radio],[role=checkbox],[role=option],[role=tab],[role=switch],[role=menuitem],[onclick],[tabindex]';
-        for (let n = el.parentElement || (el.getRootNode() && el.getRootNode().host); n && n !== el.ownerDocument.body; n = n.parentElement || (n.getRootNode() && n.getRootNode().host)) {
-            if (!sized(n)) continue;
-            if (n.matches(CLICKY) || (el.ownerDocument.defaultView || window).getComputedStyle(n).cursor === 'pointer') return n;
-        }
-        return null;
-    };
     if (!force && strict && (!hit || hit.contains(el))) {
         // Hidden where it is: zero size, clipped, or under its own wrapper.
         // A user can't click it; they click what stands for it.
@@ -2701,6 +2707,9 @@ impl Page {
                  To click it anyway, --force sends the click to the element without the mouse",
                 match point.get("at").and_then(Value::as_str) {
                     Some(at) => format!("it isn't visible, and a click at its place lands on {at}"),
+                    // Nothing stands for it: it was waited for, as long as
+                    // the element wait.
+                    None if instead.is_none() => format!("it has no box on screen (waited {settle} ms for it to show)"),
                     None => "it has no box on screen".to_string(),
                 },
                 instead.map(|i| format!("; click what stands for it: {i}")).unwrap_or_default()
