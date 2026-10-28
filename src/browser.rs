@@ -1223,7 +1223,15 @@ impl BrowserSession {
                 Err(e) => Err(anyhow::anyhow!("{method}: {e:#}")),
             };
         }
-        page.send_cdp(method, params.clone(), timeout).map(drop).map_err(|e| anyhow::anyhow!("{method}: {e:#}"))
+        match page.send_cdp(method, params.clone(), timeout) {
+            Ok(_) => Ok(()),
+            // Such a browser lacks this one too; its `emulateNetworkConditions`
+            // already sets `navigator.onLine` and fires the event.
+            Err(e) if method == "Network.overrideNetworkState" && crate::emulate::method_missing(&format!("{e:#}")) => {
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("{method}: {e:#}")),
+        }
     }
 
     /// Read a property of the target element (`get`): text, value, attr,

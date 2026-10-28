@@ -65,6 +65,10 @@ All notable changes to this project are documented here. The format follows
   box"; the result now says the click was forced.
 - A bare target with `--nth`, `--near` or `--frame` (`click .row --nth 2`)
   was refused as an unexpected argument; it is the target.
+- `set offline` failed on Chrome before the rule-based network calls
+  (Chromium 141: `'Network.emulateNetworkConditionsByRule' wasn't
+  found`). Such a browser now gets `Network.emulateNetworkConditions`,
+  which also tells the page it is offline; newer browsers are unchanged.
 
 ## [0.7.0] - 2026-10-27
 
