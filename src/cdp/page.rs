@@ -957,6 +957,21 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
     const byIds = (el, attr) => (el.getAttribute(attr) || '').split(/\s+/).filter(Boolean)
         .map((id) => (el.getRootNode().getElementById ? el.getRootNode().getElementById(id) : document.getElementById(id)))
         .filter(Boolean).map((n) => n.textContent).join(' ');
+    // An element's <label>s, from one pass over the labels of the page.
+    // `el.labels` looks the whole document over on its first read for each
+    // element: asked of every candidate, that is quadratic (8000 buttons:
+    // 4.3 s on the first locator call, 3 ms this way).
+    let labelMap = null;
+    const labelsOf = (el) => {
+        if (!labelMap) {
+            labelMap = new Map();
+            for (const r of deep.roots()) for (const l of r.querySelectorAll('label')) {
+                const c = l.control;
+                if (c) { const a = labelMap.get(c); if (a) a.push(l); else labelMap.set(c, [l]); }
+            }
+        }
+        return labelMap.get(el) || [];
+    };
     const labelText = (el) => {
         const own = el.getAttribute('aria-label') || byIds(el, 'aria-labelledby');
         if (own) return own;
@@ -968,7 +983,8 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
             for (const x of c.querySelectorAll('select,textarea,datalist')) x.remove();
             return c.textContent;
         };
-        if (el.labels && el.labels.length) return [...el.labels].map(words).join(' ');
+        const ls = labelsOf(el);
+        if (ls.length) return ls.map(words).join(' ');
         return '';
     };
     const FROM_CONTENT = new Set(['button', 'link', 'heading', 'cell', 'columnheader', 'rowheader', 'option', 'tab',
@@ -987,6 +1003,7 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
     if (spec.describe) return { role: role(spec.describe), name: accName(spec.describe), label: labelText(spec.describe) };
     const end = Date.now() + ms;
     for (;;) {
+        labelMap = null;
         let found = [];
         for (const el of (spec.css ? deep.all(spec.css) : all())) {
             let score = 0, ok = true;
@@ -1170,7 +1187,20 @@ const WAIT_TEXT: &str = r#"async function (text, ms, what, deep, mode) {
     // showing "Add to cart" whose aria-label is "Add Carbon Gear to cart"
     // matches "Add to cart" by what it shows, and wins over the product card
     // around it that merely contains the phrase.
-    const readings = (el) => [el.getAttribute('aria-label'), el.labels && el.labels[0] && el.labels[0].innerText,
+    // The first <label> of an element, from one pass over the page's labels
+    // (`el.labels` scans the document per element on its first read).
+    let labelMap = null;
+    const firstLabel = (el) => {
+        if (!labelMap) {
+            labelMap = new Map();
+            for (const r of deep.roots()) for (const l of r.querySelectorAll('label')) {
+                const c = l.control;
+                if (c && !labelMap.has(c)) labelMap.set(c, l);
+            }
+        }
+        return labelMap.get(el);
+    };
+    const readings = (el) => [el.getAttribute('aria-label'), firstLabel(el) && firstLabel(el).innerText,
         el.value, el.getAttribute('placeholder'), el.getAttribute('title'), el.getAttribute('alt'),
         textLen(el) <= maxLen * 2 ? el.innerText : null];
     // The closest reading: exact, else the shortest that contains the phrase.
@@ -1239,6 +1269,7 @@ const WAIT_TEXT: &str = r#"async function (text, ms, what, deep, mode) {
     // best match.
     const end = Date.now() + ms;
     for (;;) {
+        labelMap = null;
         let best = null, bestScore = -1, bestExact = false;
         // Every document this script reaches; for the same quality of match,
         // the top one first.
