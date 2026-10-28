@@ -114,20 +114,30 @@ impl Drop for Session {
 }
 
 /// A locator by role and name, or by label, costs one pass over the page:
-/// on 12000 buttons the first call took about 9 s when each candidate's
-/// `el.labels` scanned the document; it now takes well under a second.
+/// each candidate's `el.labels` used to scan the document on its first read,
+/// so the first call on 12000 buttons took about 9 s. Timed at two sizes so a
+/// slow runner can't fail it: linear is about 4x for 4x the buttons,
+/// quadratic about 16x.
 #[test]
 fn a_locator_on_a_long_page_is_linear() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("long-page", &[]);
-    s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
-    s.ok(&["eval", "(() => { let h = '<label>Last <input id=last></label><ul>'; for (let i = 0; i < 12000; i++) h += '<li>Item ' + i + ' <button>Add ' + i + '</button></li>'; document.body.insertAdjacentHTML('beforeend', h + '</ul>'); return 1; })()"]);
-    let started = std::time::Instant::now();
-    assert_eq!(s.text(&["get", "text", "--role", "button", "--name", "Add 11999"]), "Add 11999");
-    s.ok(&["fill", "--label", "Last", "x"]);
-    assert_eq!(s.text(&["get", "value", "--selector", "#last"]), "x");
-    let took = started.elapsed();
-    assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+    let timed = |n: usize| {
+        s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+        s.ok(&["eval", &format!("(() => {{ let h = '<label>Last <input id=last></label><ul>'; for (let i = 0; i < {n}; i++) h += '<li>Item ' + i + ' <button>Add ' + i + '</button></li>'; document.body.insertAdjacentHTML('beforeend', h + '</ul>'); return 1; }})()")]);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            s.text(&["get", "text", "--role", "button", "--name", &format!("Add {}", n - 1)]),
+            format!("Add {}", n - 1)
+        );
+        s.ok(&["fill", "--label", "Last", "x"]);
+        assert_eq!(s.text(&["get", "value", "--selector", "#last"]), "x");
+        started.elapsed()
+    };
+    let (small, large) = (timed(3000), timed(12000));
+    let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.001);
+    assert!(ratio < 8.0, "3000 buttons {small:?}, 12000 {large:?}: {ratio:.1}x");
+    assert!(large < std::time::Duration::from_secs(30), "{large:?}");
 }
 
 /// `eval` takes what people type: an expression, an arrow function,
