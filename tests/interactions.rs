@@ -113,6 +113,85 @@ impl Drop for Session {
     }
 }
 
+/// A locator by role and name, or by label, costs one pass over the page:
+/// each candidate's `el.labels` used to scan the document on its first read,
+/// so the first call on 12000 buttons took about 9 s. Timed at two sizes so a
+/// slow runner can't fail it: linear is about 4x for 4x the buttons,
+/// quadratic about 16x.
+#[test]
+fn a_locator_on_a_long_page_is_linear() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("long-page", &[]);
+    let timed = |n: usize| {
+        s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+        s.ok(&["eval", &format!("(() => {{ let h = '<label>Last <input id=last></label><ul>'; for (let i = 0; i < {n}; i++) h += '<li>Item ' + i + ' <button>Add ' + i + '</button></li>'; document.body.insertAdjacentHTML('beforeend', h + '</ul>'); return 1; }})()")]);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            s.text(&["get", "text", "--role", "button", "--name", &format!("Add {}", n - 1)]),
+            format!("Add {}", n - 1)
+        );
+        s.ok(&["fill", "--label", "Last", "x"]);
+        assert_eq!(s.text(&["get", "value", "--selector", "#last"]), "x");
+        started.elapsed()
+    };
+    let (small, large) = (timed(3000), timed(12000));
+    let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.001);
+    assert!(ratio < 8.0, "3000 buttons {small:?}, 12000 {large:?}: {ratio:.1}x");
+    assert!(large < std::time::Duration::from_secs(30), "{large:?}");
+}
+
+/// A wait sees a change within a frame of it, not at its next poll. The
+/// page notes when the element was added and when the wait's own check
+/// first saw it: times in the page, so the test's commands don't count.
+/// Checking every 100 ms put that at 50 ms on average.
+#[test]
+fn a_wait_sees_a_change_within_a_frame() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("wake", &[]);
+    s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+    let mut after = Vec::new();
+    for i in 0..7 {
+        let delay = 120 + 37 * i;
+        s.ok(&[
+            "eval",
+            &format!(
+                "window.__seen = 0; document.querySelectorAll('.late').forEach((e) => e.remove()); \
+             setTimeout(() => {{ const p = document.createElement('p'); p.className = 'late'; \
+             p.textContent = 'late {i}'; document.body.append(p); window.__added = performance.now(); }}, {delay}); 1"
+            ),
+        ]);
+        s.ok(&[
+            "wait",
+            "--js",
+            "document.querySelector('.late') && (window.__seen = window.__seen || performance.now())",
+        ]);
+        after.push(s.ok(&["eval", "window.__seen - window.__added"]).as_f64().unwrap());
+    }
+    after.sort_by(f64::total_cmp);
+    assert!(after[3] < 35.0, "seen this many ms after the change: {after:?}");
+}
+
+/// `eval` takes what people type: an expression, an arrow function,
+/// statements with the last value the answer, top-level `await`, or a body
+/// that `return`s.
+#[test]
+fn eval_takes_statements_await_and_a_body() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("eval", &[]);
+    s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+    assert_eq!(s.ok(&["eval", "document.title"]), "hidden layers");
+    assert_eq!(s.ok(&["eval", "() => 40 + 2"]), 42);
+    assert_eq!(s.ok(&["eval", "const n = 40; n + 2"]), 42);
+    assert_eq!(s.ok(&["eval", "const r = await fetch(location.href); r.status"]), 200);
+    assert_eq!(s.ok(&["eval", "const n = 6 * 7; return n"]), 42);
+    assert!(s.fails(&["eval", "((("]).contains("SyntaxError"));
+    // Text where CSS goes is said at once, with what to write instead.
+    let started = std::time::Instant::now();
+    let m = s.fails(&["click", "--selector", "35.75"]);
+    assert!(m.contains("\"35.75\" is not a CSS selector (--text \"35.75\""), "{m}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+}
+
 #[test]
 fn a_covered_element_is_not_clicked_unless_forced() {
     let (true, Some(site)) = (chrome(), site()) else { return };
@@ -321,11 +400,37 @@ fn a_hidden_control_fails_fast_and_its_card_works() {
     s.ok(&["goto", &format!("{}/card-radios", site.url)]);
     let started = std::time::Instant::now();
     let err = s.fails(&["click", "--selector", "#in-s"]);
-    assert!(err.contains("isn't visible"), "{err}");
+    assert!(err.contains("can't click"), "{err}");
     assert!(started.elapsed() < std::time::Duration::from_secs(3), "fails fast, not after the whole wait");
     assert_eq!(s.text(&["get", "text", "--selector", "#picked"]), "none");
     s.ok(&["click", "--role", "radio", "--name", "Medium"]);
     assert_eq!(s.text(&["get", "text", "--selector", "#picked"]), "m");
+}
+
+/// A button that exists but is shown later (a dialog opening by a class, a
+/// control made visible or clickable) is waited for, as a user would wait,
+/// not failed after a moment: the click lands once it shows.
+#[test]
+fn a_click_waits_for_a_button_shown_later() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("shown-later", &[]);
+    for (hide, show) in [
+        ("display:none", "display:block"),
+        ("visibility:hidden", "visibility:visible"),
+        ("pointer-events:none", "pointer-events:auto"),
+    ] {
+        s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+        s.ok(&[
+            "eval",
+            &format!(
+                "const b = document.createElement('button'); b.id = 'later'; b.textContent = 'Later'; \
+                 b.style.cssText = '{hide}'; b.onclick = () => {{ b.textContent = 'clicked'; }}; \
+                 document.body.prepend(b); setTimeout(() => {{ b.style.cssText = '{show}'; }}, 800); 1"
+            ),
+        ]);
+        s.ok(&["click", "--selector", "#later"]);
+        assert_eq!(s.text(&["get", "text", "--selector", "#later"]), "clicked", "{hide}");
+    }
 }
 
 #[test]
@@ -608,7 +713,7 @@ fn frame_scopes_pick_the_frame_when_ids_repeat() {
     s.ok(&["wait", "--selector", "#name", "--frame", "#billing"]);
     s.ok(&["wait", "--text", "sent 4242424242424242", "--frame", "#card2"]);
     let err = s.fails(&["wait", "--text", "sent", "--frame", "#card", "--timeout-ms", "300"]);
-    assert!(err.contains("in frame \"#card\" not met"), "{err}");
+    assert!(err.contains("in frame \"#card\" not seen"), "{err}");
     // Mistakes say what's wrong.
     let err = s.fails(&["click", "--text", "Save", "--frame", "#nowhere", "--timeout-ms", "300"]);
     assert!(err.contains("no frame matches --frame \"#nowhere\""), "{err}");
@@ -632,7 +737,7 @@ fn a_page_that_stops_answering_costs_one_timeout_not_one_per_command() {
     let started = std::time::Instant::now();
     let err = s.fails(&["click", "--text", "Hold"]);
     let click = started.elapsed();
-    assert!(err.contains("timed out"), "{err}");
+    assert!(err.contains("did not answer"), "{err}");
     // One 10 s timeout for the press, then seconds for the clean-up (it
     // took two full timeouts, 20 s, when every command waited 10 s).
     assert!(click < std::time::Duration::from_secs(17), "click took {click:?}");
@@ -702,9 +807,15 @@ fn locate_and_history_turn_refs_into_locators() {
     click.extend(flags.iter().map(String::as_str));
     s.ok(&click);
     assert_eq!(s.ok(&["eval", "window.added"]), 2);
-    // --near on its own is refused: it narrows a locator.
-    let (ok, r) = s.run(&["click", "--near", "Brass Widget"]);
-    assert!(!ok && r.to_string().contains("--near narrows"), "{r}");
+    // --near on its own is refused when the words are read (exit 2, no
+    // browser asked): it narrows a locator.
+    let out = Command::new(tool_exe())
+        .args(["--session", &s.name, "click", "--near", "Brass Widget"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run navigera");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.code() == Some(2) && err.contains("--near narrows"), "{err}");
     // A select inside its label is named by the label's words, not its options.
     s.ok(&["eval", "(document.body.insertAdjacentHTML('beforeend', '<label>Size <select><option>Small</option><option>Large</option></select></label>'), 1)"]);
     let size = ref_of(&s, "combobox \"Size\"");
@@ -758,4 +869,130 @@ fn an_element_in_a_shadow_root_is_located_through_its_hosts() {
     );
     s.ok(&["click", "--selector", "#app >>> x-card:nth-of-type(2) >>> button"]);
     assert_eq!(s.ok(&["eval", "window.picked"]), "Brass");
+}
+
+#[test]
+fn what_a_page_made_clickable_has_a_ref_that_clicks() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("clickable", &[]);
+    let page = "<title>Inbox</title><style>.thread{cursor:pointer} #bar span{display:inline-block;width:20px;height:20px}</style>\
+        <div id=app><div class=thread><div>Kelcey</div><div>Quisque</div></div><div class=thread><div>Gilli</div><div>Quam.</div></div>\
+        <div id=bar><span id=close-forward></span><span id=send-forward></span></div></div>\
+        <label for=f style=cursor:pointer>Attachment</label><input type=file id=f>\
+        <div style=\"cursor:pointer;pointer-events:none\" onclick=\"document.title='passed through'\">Pass-through</div>\
+        <span id=empty onclick=\"document.title='empty'\"></span>\
+        <div id=guard style=\"position:absolute;left:0;top:600px;width:200px;height:100px;opacity:0\" onclick=\"document.title='guard'\"></div>\
+        <script>for (const t of document.querySelectorAll('.thread')) t.onclick = () => document.title = 'open ' + t.textContent;\
+        for (const id of ['close-forward', 'send-forward']) document.getElementById(id).onclick = () => document.title = id;\
+        document.getElementById('app').addEventListener('click', () => {});</script>";
+    s.ok(&["goto", &format!("data:text/html,{}", page.replace('#', "%23"))]);
+    let ax = s.text(&["ax"]);
+    let ref_of = |line_start: &str| -> String {
+        let line =
+            ax.lines().find(|l| l.trim_start().starts_with(line_start)).unwrap_or_else(|| panic!("{line_start}: {ax}"));
+        line.split("ref=")
+            .nth(1)
+            .and_then(|r| r.split(']').next())
+            .unwrap_or_else(|| panic!("no ref: {line}"))
+            .to_string()
+    };
+    // The row and the icon with no text get refs; the container that only
+    // listens for its children doesn't.
+    let row = ref_of("- clickable [ref=");
+    assert!(ax.contains("Gilli Quam."), "{ax}");
+    let send = ref_of("- clickable #send-forward");
+    assert!(!ax.contains("#app"), "{ax}");
+    // A label clicks its control, which is listed itself.
+    assert!(!ax.lines().any(|l| l.contains("clickable") && l.contains("Attachment")), "{ax}");
+    // What a user's click can't land on isn't offered: clicks pass
+    // through it, it has no size, or it can't be seen.
+    for what in ["Pass-through", "#empty", "#guard"] {
+        assert!(!ax.lines().any(|l| l.contains("clickable") && l.contains(what)), "{what}: {ax}");
+    }
+    s.ok(&["click", &send]);
+    assert_eq!(s.ok(&["title"]), "send-forward");
+    s.ok(&["click", &row]);
+    assert_eq!(s.ok(&["title"]), "open KelceyQuisque");
+}
+
+#[test]
+fn a_list_that_listens_for_its_items_marks_the_items() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("delegated", &[]);
+    // One listener on the list or table, for whichever item is clicked: a
+    // ref on the list would click the middle item. A row's own listener,
+    // and a button made of an icon and a label, stay one ref.
+    let page = "<title>Fruit</title>\
+        <ul onclick=\"if (event.target.tagName == 'LI') document.title = 'picked ' + event.target.textContent\">\
+        <li>Apple</li><li>Banana</li><li>Cherry</li></ul>\
+        <table onclick=\"const r = event.target.closest('tr'); if (r) document.title = 'row ' + r.rowIndex\">\
+        <tr><td>a</td><td>1</td></tr><tr><td>b</td><td>2</td></tr></table>\
+        <table><tr onclick=\"document.title = 'own row'\"><td>x</td><td>y</td></tr></table>\
+        <div onclick=\"document.title = 'saved'\"><span class=icon></span><span>Save</span></div>";
+    s.ok(&["goto", &format!("data:text/html,{page}")]);
+    let ax = s.text(&["ax"]);
+    // The tree, without its first line (the page's URL holds the markup).
+    let tree: Vec<&str> = ax.lines().skip(1).collect();
+    let ref_in = |line: &str| line.split("ref=").nth(1).and_then(|r| r.split(']').next()).unwrap().to_string();
+    let ref_of = |what: &str| {
+        ref_in(tree.iter().find(|l| l.contains(what) && l.contains("ref=")).unwrap_or_else(|| panic!("{what}: {ax}")))
+    };
+    assert!(!tree.iter().any(|l| l.trim_start().starts_with("- list [")), "{ax}");
+    assert_eq!(tree.iter().filter(|l| l.contains("listitem") && l.contains("ref=")).count(), 3, "{ax}");
+    // An item's ref is on its listitem line, above its text.
+    let item_ref = |fruit: &str| {
+        let at = tree.iter().position(|l| l.contains(&format!("text: {fruit}"))).unwrap();
+        ref_in(tree[..at].iter().rfind(|l| l.contains("listitem")).unwrap())
+    };
+    s.ok(&["click", &item_ref("Cherry")]);
+    assert_eq!(s.ok(&["title"]), "picked Cherry");
+    s.ok(&["click", &item_ref("Apple")]);
+    assert_eq!(s.ok(&["title"]), "picked Apple");
+    s.ok(&["click", &ref_of("b 2")]);
+    assert_eq!(s.ok(&["title"]), "row 1");
+    assert_eq!(tree.iter().filter(|l| l.contains("x y") && l.contains("ref=")).count(), 1, "{ax}");
+    assert_eq!(tree.iter().filter(|l| l.contains("Save") && l.contains("ref=")).count(), 1, "{ax}");
+    s.ok(&["click", &ref_of("Save")]);
+    assert_eq!(s.ok(&["title"]), "saved");
+}
+
+#[test]
+fn clickable_refs_skip_what_a_user_cant_tell_apart_or_reach() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("clickable-real", &[]);
+    // An image card inside an article link (the link has the ref); a
+    // handler kept from the user with aria-hidden; a row of blank tiles
+    // with nothing to tell them by. A menu label whose real checkbox is
+    // hidden is the thing a user clicks, so it gets the ref.
+    let tile = "<div style=\"display:inline-block;width:20px;height:20px;cursor:pointer\"></div>";
+    let page = format!(
+        "<title>News</title>\
+        <a href=\"%23story\"><div class=card onclick=\"void 0\"><span>Story picture</span></div>Story</a>\
+        <div aria-hidden=true><span onclick=\"document.title = 'hidden'\">Behind the modal</span></div>\
+        <div>{tile}{tile}{tile}</div>\
+        <div role=button tabindex=0 aria-label=\"Insert page\"><span class=icon onclick=\"void 0\">+</span></div>\
+        <span class=stepper style=\"visibility:hidden\" onclick=\"void 0\">Up</span>\
+        <input type=checkbox id=menu aria-hidden=true tabindex=-1 style=\"position:absolute;opacity:0\" onchange=\"document.title = 'menu ' + this.checked\">\
+        <label for=menu style=cursor:pointer>Menu</label>"
+    );
+    s.ok(&["goto", &format!("data:text/html,{page}")]);
+    let ax = s.text(&["ax"]);
+    let tree: Vec<&str> = ax.lines().skip(1).collect();
+    let clickable: Vec<&&str> = tree.iter().filter(|l| l.contains("clickable")).collect();
+    assert!(!clickable.iter().any(|l| l.contains("Story picture") || l.contains(".card")), "{ax}");
+    assert!(!clickable.iter().any(|l| l.contains("Behind the modal")), "{ax}");
+    // Inside a role=button, which has the ref; hidden until hovered.
+    assert!(!clickable.iter().any(|l| l.contains(".icon") || l.contains(".stepper") || l.contains("Up")), "{ax}");
+    assert!(tree.iter().any(|l| l.contains("button \"Insert page\"") && l.contains("ref=")), "{ax}");
+    assert!(!tree.iter().any(|l| l.trim() == "- clickable" || l.trim_start().starts_with("- clickable [ref=")), "{ax}");
+    let menu = clickable.iter().find(|l| l.contains("Menu")).unwrap_or_else(|| panic!("no ref on the label: {ax}"));
+    let menu = menu.split("ref=").nth(1).and_then(|r| r.split(']').next()).unwrap();
+    s.ok(&["click", menu]);
+    assert_eq!(s.ok(&["title"]), "menu true");
 }

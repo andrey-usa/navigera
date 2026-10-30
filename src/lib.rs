@@ -9,6 +9,7 @@ pub mod cdp;
 pub mod cli;
 pub mod decide;
 pub mod emulate;
+mod help_examples;
 pub mod install;
 pub mod mcp;
 pub mod proc;

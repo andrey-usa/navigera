@@ -530,8 +530,9 @@ pub(crate) fn http_get_body(host: &str, port: u16, path: &str) -> Result<String>
     write!(stream, "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n")?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut scan = BodyScan::new();
     loop {
-        if let Some(body) = complete_body(&buf) {
+        if let Some(body) = scan.feed(&buf) {
             return Ok(String::from_utf8_lossy(&body).into_owned());
         }
         let n = stream.read(&mut chunk)?;
@@ -550,33 +551,79 @@ pub(crate) fn http_get_body(host: &str, port: u16, path: &str) -> Result<String>
     Ok(body.to_string())
 }
 
+/// How the body of a response is framed, once the headers are in.
+enum Framing {
+    Length(usize),
+    Chunked,
+    Unknown,
+}
+
+/// Finds the end of a response body as the bytes arrive. Each call to
+/// [`BodyScan::feed`] takes the whole buffer so far but looks only at what is
+/// new: the header end is searched for from where the last search stopped
+/// (less three bytes, for a terminator split across reads), the headers are
+/// parsed once, and chunks already decoded are not decoded again. A body of
+/// n bytes read 4 KB at a time costs O(n), not O(n^2).
+struct BodyScan {
+    /// Where the next search for the header end starts.
+    searched: usize,
+    /// Index of the `\r\n\r\n` once found, and how the body is framed.
+    header_end: Option<(usize, Framing)>,
+    /// Chunked: the decoded body so far, and where the next chunk-size line
+    /// starts, counted from the start of the body.
+    decoded: Vec<u8>,
+    at: usize,
+}
+
+impl BodyScan {
+    fn new() -> Self {
+        BodyScan { searched: 0, header_end: None, decoded: Vec::new(), at: 0 }
+    }
+
+    fn feed(&mut self, buf: &[u8]) -> Option<Vec<u8>> {
+        if self.header_end.is_none() {
+            let end = buf[self.searched..].windows(4).position(|w| w == b"\r\n\r\n");
+            let Some(end) = end.map(|p| p + self.searched) else {
+                self.searched = buf.len().saturating_sub(3);
+                return None;
+            };
+            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+            let header =
+                |name: &str| head.lines().find_map(|line| line.strip_prefix(name)).map(|v| v.trim().to_string());
+            let framing = if let Some(len) = header("content-length:").and_then(|v| v.parse::<usize>().ok()) {
+                Framing::Length(len)
+            } else if header("transfer-encoding:").is_some_and(|v| v.contains("chunked")) {
+                Framing::Chunked
+            } else {
+                Framing::Unknown
+            };
+            self.header_end = Some((end, framing));
+        }
+        let (end, framing) = self.header_end.as_ref()?;
+        let body = &buf[end + 4..];
+        match framing {
+            Framing::Length(len) => (body.len() >= *len).then(|| body[..*len].to_vec()),
+            Framing::Unknown => None,
+            Framing::Chunked => loop {
+                let line_end = self.at + body.get(self.at..)?.windows(2).position(|w| w == b"\r\n")?;
+                let size_hex = String::from_utf8_lossy(&body[self.at..line_end]);
+                let size = usize::from_str_radix(size_hex.split(';').next()?.trim(), 16).ok()?;
+                let data = line_end + 2;
+                if size == 0 {
+                    return Some(std::mem::take(&mut self.decoded));
+                }
+                self.decoded.extend_from_slice(body.get(data..data + size)?);
+                self.at = data + size + 2;
+            },
+        }
+    }
+}
+
 /// The response body once `buf` holds all of it (by Content-Length or
 /// chunked encoding); `None` while more bytes are needed or the framing is
 /// unknown (then the caller reads to EOF).
 pub(crate) fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
-    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
-    let head = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
-    let body = &buf[header_end + 4..];
-    let header = |name: &str| head.lines().find_map(|line| line.strip_prefix(name)).map(|v| v.trim().to_string());
-    if let Some(len) = header("content-length:").and_then(|v| v.parse::<usize>().ok()) {
-        return (body.len() >= len).then(|| body[..len].to_vec());
-    }
-    if header("transfer-encoding:").is_some_and(|v| v.contains("chunked")) {
-        let mut out = Vec::new();
-        let mut at = 0;
-        loop {
-            let line_end = at + body.get(at..)?.windows(2).position(|w| w == b"\r\n")?;
-            let size_hex = String::from_utf8_lossy(&body[at..line_end]);
-            let size = usize::from_str_radix(size_hex.split(';').next()?.trim(), 16).ok()?;
-            let data = line_end + 2;
-            if size == 0 {
-                return Some(out);
-            }
-            out.extend_from_slice(body.get(data..data + size)?);
-            at = data + size + 2;
-        }
-    }
-    None
+    BodyScan::new().feed(buf)
 }
 
 #[cfg(test)]
@@ -611,6 +658,80 @@ mod tests {
         let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
         assert_eq!(complete_body(chunked).as_deref(), Some(&b"abcde"[..]));
         assert_eq!(complete_body(b"HTTP/1.1 200 OK\r\n\r\nbody"), None, "unframed: read to EOF");
+    }
+
+    /// The scan is fed the buffer as it grows, as `http_get_body` does, and
+    /// gives what a single look at the whole buffer gives, whatever the read
+    /// size (terminators split across reads included).
+    #[test]
+    fn a_scan_fed_piecemeal_matches_one_look() {
+        let body: Vec<u8> = (0..300_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut length = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        length.extend_from_slice(&body);
+        let mut chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        for part in body.chunks(7000) {
+            chunked.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+            chunked.extend_from_slice(part);
+            chunked.extend_from_slice(b"\r\n");
+        }
+        chunked.extend_from_slice(b"0\r\n\r\n");
+        for (name, resp) in [("length", &length), ("chunked", &chunked)] {
+            for step in [1usize, 3, 4, 5, 4096] {
+                // One byte at a time is slow on a big body: use the head and the end.
+                let resp: Vec<u8> = if step < 4 { resp[..200].to_vec() } else { resp.to_vec() };
+                let mut scan = BodyScan::new();
+                let mut got = None;
+                let mut buf = Vec::new();
+                for piece in resp.chunks(step) {
+                    buf.extend_from_slice(piece);
+                    // As `http_get_body` does: the first answer is the answer.
+                    got = scan.feed(&buf);
+                    if got.is_some() {
+                        break;
+                    }
+                }
+                let once = complete_body(&resp);
+                assert!(got == once, "{name}, read {step} at a time");
+                if step >= 4 {
+                    assert!(got.as_deref() == Some(&body[..]), "{name}, read {step} at a time");
+                }
+            }
+        }
+    }
+
+    /// A 1 MB body from a server, read 4 KB at a time, arrives whole, in
+    /// either framing.
+    #[test]
+    fn http_get_reads_a_megabyte_body() {
+        let body: String = (0..1_000_000u32).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+        for chunked in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let sent = body.clone();
+            let server = std::thread::spawn(move || {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut req = [0u8; 1024];
+                let _ = sock.read(&mut req);
+                if chunked {
+                    write!(sock, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+                    for part in sent.as_bytes().chunks(4000) {
+                        write!(sock, "{:x}\r\n", part.len()).unwrap();
+                        sock.write_all(part).unwrap();
+                        write!(sock, "\r\n").unwrap();
+                    }
+                    write!(sock, "0\r\n\r\n").unwrap();
+                } else {
+                    write!(sock, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", sent.len()).unwrap();
+                    sock.write_all(sent.as_bytes()).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(300)); // keep-alive: no close
+            });
+            let started = Instant::now();
+            let got = http_get_body("127.0.0.1", port, "/big").unwrap();
+            assert!(got == body, "{} bytes back, chunked {chunked}", got.len());
+            assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+            server.join().unwrap();
+        }
     }
 
     /// A keep-alive server that answers but never closes (lightpanda's

@@ -59,12 +59,11 @@ Chromium or Edge, or one it installed itself. For the fastest cold start,
 `navigera install-browser` downloads
 [chrome-headless-shell](https://developer.chrome.com/blog/chrome-headless-shell)
 from Google's [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
-into navigera's own cache: the same Chrome without its browser UI layer. In
-the benchmark it cut cold start from 0.32 s to 0.11 s and the scripted session
-from 0.66 s to 0.32 s. Once it is there, headless sessions use it and headed
-ones the system Chrome (`navigera install-browser chrome` puts the full
-Chrome there too, for a machine with none). Set `$CHROME_BIN` to choose
-explicitly.
+into navigera's own cache: the same Chrome without its browser UI layer, about
+three times faster to start (see [Benchmarks](#benchmarks)). Once it is there,
+headless sessions use it and headed ones the system Chrome (`navigera
+install-browser chrome` puts the full Chrome there too, for a machine with
+none). Set `$CHROME_BIN` to choose explicitly.
 
 ## Use (agents and people)
 
@@ -106,10 +105,10 @@ and the like, and `route` to fail or answer requests.
   `--raw`.
 - **Help:** `navigera help <command>`.
 - **Agent guide:** the version-matched guide is
-  [`skills/navigera/SKILL.md`](skills/navigera/SKILL.md),
+  [`skills/navigera/SKILL.md`](https://github.com/andrey-usa/navigera/blob/master/skills/navigera/SKILL.md),
   also printed by `navigera skill`.
-- **Reference:** [docs/navigera.md](docs/navigera.md) has the full
-  reference, and [llms.txt](llms.txt) is an index for LLMs.
+- **Reference:** [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md) has the full
+  reference, and [llms.txt](https://github.com/andrey-usa/navigera/blob/master/llms.txt) is an index for LLMs.
 
 **Hand the agent your browser.** Three ways, from most direct to most
 portable:
@@ -136,7 +135,7 @@ it is: no `HeadlessChrome` in the user agent (page, workers, request
 headers), and a real screen size. `navigator.webdriver` is false in every
 mode, and navigera never passes `--enable-automation`. It is not a CAPTCHA
 solver and fakes no fingerprint: it is a regular Chrome, run for you.
-Details: [docs/navigera.md](docs/navigera.md#browsers-and-engines).
+Details: [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md#browsers-and-engines).
 
 Programs can keep one browser on a pipe instead: `navigera serve` reads
 one JSON command per stdin line, for example
@@ -151,7 +150,7 @@ waits as the CLI and a smaller tool list than other browser MCP servers
 (about 14 KB; the numbers are in the benchmarks below). Add it as `{"command": "navigera", "args": ["mcp"]}`, or without
 installing anything as
 `{"command": "npx", "args": ["-y", "navigera", "mcp"]}`; per-client snippets
-are in [docs/navigera.md](docs/navigera.md#mcp-server-ide-agents). Agents that run
+are in [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md#mcp-server-ide-agents). Agents that run
 shell commands (Kilo, Cline CLI, Gemini CLI, Codex) can use the CLI and the
 skill directly: `navigera install-skill` writes it to `.agents/skills`, where
 they look for it.
@@ -182,7 +181,7 @@ pointed at. In the agent eval, Gemini CLI told to prefer `--find` on two large
 reference pages (56–95 KB trees) used about half the Gemini tokens of the runs
 that read the tree (114–119K against a median of 250K; small samples).
 Unprompted, it read the tree and never used the decider. Details and caveats:
-[docs/multi-model.md](docs/multi-model.md).
+[docs/multi-model.md](https://github.com/andrey-usa/navigera/blob/master/docs/multi-model.md).
 
 **Measured again (2026-10-21, run 39530836547).** On 78 decisions (50
 elements, 28 yes/no questions, public pages included), Jev got 50/50 and
@@ -225,7 +224,7 @@ CI, on 1.0.1 and the nightly. It is a different engine (one tab, no layout),
 so navigera fills in what its CDP leaves out: shadow roots and password
 fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
 The differences that remain are listed in
-[docs/navigera.md](docs/navigera.md#browsers-and-engines).
+[docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md#browsers-and-engines).
 
 ## Benchmarks
 
@@ -253,7 +252,7 @@ each driver. Fixtures are deterministic and local (500-card listing,
 Measured 2026-10-26 on GitHub-hosted `ubuntu-latest` (AMD EPYC 7763 64-Core Processor — 4 vCPU · Chrome 155.0.8059.39).
 Every driver produced byte-identical extracted data and counts (correctness
 gate); wall is best-of-N.
-The ladder reruns weekly ([`bench.yml`](.github/workflows/bench.yml)) against
+The ladder reruns weekly ([`bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/bench.yml)) against
 the latest contender releases. GitHub runners vary between runs, so compare
 rows within one run.
 
@@ -333,7 +332,7 @@ same tab), so it is listed apart from the Chrome-family ranking.
 
 Benchmarks time scripted steps. The agent eval asks the question that
 matters for agents: can a generic coding agent, given only the tool and its
-own documentation, finish real tasks? [`agent-eval.yml`](.github/workflows/agent-eval.yml)
+own documentation, finish real tasks? [`agent-eval.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/agent-eval.yml)
 runs [Gemini CLI](https://github.com/google-gemini/gemini-cli) headless on a
 free-tier API key against the local Acme Supply site, with **navigera**,
 **playwright-cli** and **agent-browser** in turn:
@@ -395,7 +394,7 @@ than every 0.2.1 run of the same task.
 The scripted session didn't slow down: 0.51 s vs 0.49 s, cold start 0.23 s
 both.
 
-**Natural checks** ([`agent-check.yml`](.github/workflows/agent-check.yml),
+**Natural checks** ([`agent-check.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/agent-check.yml),
 every master push, PRs and nightly): Gemini is told in plain words to buy
 something with navigera and its skill. On the local shop, once on Linux
 and once on Windows through PowerShell (real checks, judged from the
@@ -406,7 +405,7 @@ confirmation and the order total).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for building, the test suites, reading
+See [CONTRIBUTING.md](https://github.com/andrey-usa/navigera/blob/master/CONTRIBUTING.md) for building, the test suites, reading
 CI results, A/B benchmarks and releasing.
 
 ## Layout

@@ -158,6 +158,30 @@ pub const DEEP: &str = r#"(() => {
         return out;
     };
     const roots = () => { const out = []; for (const d of topDocs()) { out.push(d); shadows(d, out); } return out; };
+    // A wait's pause: until the frame after any of these roots changes, or
+    // `ms` at most. A poll alone sees a change half an interval late on
+    // average (25 ms of a 50 ms poll, 50 of 100); woken by the change it is
+    // under a millisecond. What no observer sees (a stylesheet rule starting
+    // to match, a hover, a frame out of reach, a background tab with no
+    // frames) still ends the pause at `ms`, so no wait is slower than the
+    // poll it replaces. The observer goes at the first change or the time.
+    const wake = (ms) => new Promise((resolve) => {
+        let mo = null, timer = 0, done = false;
+        const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            if (mo) mo.disconnect();
+            resolve();
+        };
+        timer = setTimeout(finish, ms);
+        try {
+            const frame = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(f, 0);
+            mo = new MutationObserver(() => { mo.disconnect(); frame(finish); });
+            const what = { subtree: true, childList: true, attributes: true, characterData: true };
+            for (const r of roots()) mo.observe(r, what);
+        } catch (_) {}
+    });
     const pierced = (sel) => {
         const [head, ...rest] = sel.split('>>>').map((s) => s.trim());
         let at = [];
@@ -175,6 +199,7 @@ pub const DEEP: &str = r#"(() => {
     return {
         roots,
         docs: topDocs,
+        wake,
         // The top document's own answer first: a plain query costs nothing
         // extra when the element is where it usually is.
         first(sel) {
@@ -409,47 +434,6 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     const disabled = () => !!(el.disabled || el.closest('fieldset[disabled]'));
     while (!force && disabled() && Date.now() < deadline) await new Promise((res) => setTimeout(res, 50));
     if (!force && strict && disabled()) return { disabled: true };
-    let hit = null, tries = 0;
-    while (!force) {
-        // Checked on every pass: an element that just appeared may only now
-        // be starting to slide in.
-        await settle();
-        const align = ALIGN[tries++ % ALIGN.length];
-        el.scrollIntoView(Object.assign({ behavior: 'instant' }, align));
-        let box = el, r = el.getBoundingClientRect();
-        if (!(r.width > 0 && r.height > 0)) {
-            const l = labels.find((l) => { const b = l.getBoundingClientRect(); return b.width > 0 && b.height > 0; });
-            if (l) { box = l; l.scrollIntoView(Object.assign({ behavior: 'instant' }, align)); r = l.getBoundingClientRect(); }
-        }
-        const x = r.left + r.width / 2, y = r.top + r.height / 2;
-        const root = box.getRootNode(), doc = box.ownerDocument;
-        hit = (r.width > 0 && r.height > 0) ? (root.elementFromPoint ? root.elementFromPoint(x, y) : doc.elementFromPoint(x, y)) : null;
-        if (hit && (hit === el || el.contains(hit) || (hit.shadowRoot && hit.shadowRoot.contains(el)) || onLabel(hit))) {
-            const p = topLevel(doc, x, y);
-            if (p) {
-                // Count the press reaching this document: Chrome can ack a
-                // dispatched mouse event it never delivered (see click()).
-                const w = doc.defaultView;
-                w.top.__nvSeen = 0;
-                for (const t of ['pointerdown', 'mousedown', 'mouseup', 'click'])
-                    w.addEventListener(t, () => { w.top.__nvSeen++; }, { capture: true, once: true });
-                if (effects) armEffects(w);
-                return Object.assign(p, { nav: mayNavigate(el), check: true, effects: !!effects });
-            }
-            // Inside a cross-origin frame: our coordinates are frame-local;
-            // the caller asks CDP for the box instead.
-            return { xframe: true, nav: mayNavigate(el) };
-        }
-        // Covered (a toast, a closing overlay) or not laid out yet: try the
-        // other alignments at once, then give it a moment, like a user
-        // would. An element with no box at all rarely gets one, and one
-        // whose own ancestor answers the hit test is hidden on purpose (a
-        // styled control's real input): don't wait long for either.
-        if (hit && tries < ALIGN.length) continue;
-        const hiddenHere = !hit || hit.contains(el);
-        if (Date.now() >= deadline || (hiddenHere && Date.now() >= deadline - settleMs + 300)) break;
-        await new Promise((res) => setTimeout(res, 100));
-    }
     const describe = (n) => {
         if (!n) return null;
         let s = n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') + (n.classList && n.classList.length ? '.' + n.classList[0] : '');
@@ -469,6 +453,64 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         }
         return null;
     };
+    let hit = null, tries = 0;
+    while (!force) {
+        // Checked on every pass: an element that just appeared may only now
+        // be starting to slide in.
+        await settle();
+        const align = ALIGN[tries++ % ALIGN.length];
+        el.scrollIntoView(Object.assign({ behavior: 'instant' }, align));
+        let box = el, r = el.getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) {
+            const l = labels.find((l) => { const b = l.getBoundingClientRect(); return b.width > 0 && b.height > 0; });
+            if (l) { box = l; l.scrollIntoView(Object.assign({ behavior: 'instant' }, align)); r = l.getBoundingClientRect(); }
+        }
+        let x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const root = box.getRootNode(), doc = box.ownerDocument;
+        const at = (x, y) => root.elementFromPoint ? root.elementFromPoint(x, y) : doc.elementFromPoint(x, y);
+        hit = (r.width > 0 && r.height > 0) ? at(x, y) : null;
+        // A row's middle can fall between its cells, on the table: try the
+        // middles of its own parts before calling it hidden.
+        if (hit && box === el && hit !== el && hit.contains(el)) {
+            for (const part of Array.from(el.children).slice(0, 8)) {
+                const b = part.getBoundingClientRect();
+                if (!(b.width > 0 && b.height > 0)) continue;
+                const px = b.left + b.width / 2, py = b.top + b.height / 2, h = at(px, py);
+                if (h && (h === el || el.contains(h))) { hit = h; x = px; y = py; break; }
+            }
+        }
+        if (hit && (hit === el || el.contains(hit) || (hit.shadowRoot && hit.shadowRoot.contains(el)) || onLabel(hit))) {
+            const p = topLevel(doc, x, y);
+            if (p) {
+                // Count the press reaching this document: Chrome can ack a
+                // dispatched mouse event it never delivered (see click()).
+                const w = doc.defaultView;
+                w.top.__nvSeen = 0;
+                for (const t of ['pointerdown', 'mousedown', 'mouseup', 'click'])
+                    w.addEventListener(t, () => { w.top.__nvSeen++; }, { capture: true, once: true });
+                if (effects) armEffects(w);
+                return Object.assign(p, { nav: mayNavigate(el), check: true, effects: !!effects });
+            }
+            // Inside a cross-origin frame: our coordinates are frame-local;
+            // the caller asks CDP for the box instead.
+            return { xframe: true, nav: mayNavigate(el) };
+        }
+        // Covered (a toast, a closing overlay), not laid out yet, or not
+        // shown yet (the button of a dialog that is opening): try the other
+        // alignments at once, then give it a moment, as long as the element
+        // wait, as a user would wait for it. One hidden on purpose is not
+        // waited for long: its own ancestor answers the hit test (a styled
+        // control's real input, clipped to a pixel), or it has no box and
+        // something a user can click stands for it (its label or card).
+        // Hidden by `visibility` or `pointer-events`, it is waiting to be
+        // shown or enabled: waited for.
+        if (hit && tries < ALIGN.length) continue;
+        const st = (el.ownerDocument.defaultView || window).getComputedStyle(el);
+        const pending = st.visibility === 'hidden' || st.pointerEvents === 'none';
+        const onPurpose = hit ? hit.contains(el) && !pending : !!visibleFor();
+        if (Date.now() >= deadline || (onPurpose && Date.now() >= deadline - settleMs + 300)) break;
+        await new Promise((res) => setTimeout(res, 100));
+    }
     if (!force && strict && (!hit || hit.contains(el))) {
         // Hidden where it is: zero size, clipped, or under its own wrapper.
         // A user can't click it; they click what stands for it.
@@ -861,6 +903,11 @@ const IDENTITY: &str = "function (el) { return el; }";
 const WAIT_FOR: &str = r#"async function (sel, ms, what, deepFn) {
     const end = Date.now() + ms;
     let deep = null;
+    // Not CSS at all (`35.75`, `Total:`): said at once, not after the wait.
+    if (!sel.includes('>>>')) {
+        try { document.createDocumentFragment().querySelector(sel); }
+        catch (_) { throw new Error(what + ': ' + JSON.stringify(sel) + ' is not a CSS selector (--text ' + JSON.stringify(sel) + ' matches what the page shows)'); }
+    }
     // Somewhere a user could see it: a box, not hidden, not parked at a
     // negative position no scrolling reaches (a decoy copy of an id).
     const reachable = (e) => {
@@ -879,8 +926,16 @@ const WAIT_FOR: &str = r#"async function (sel, ms, what, deepFn) {
         }
         el = el || (deep = deep || deepFn()).first(sel);
         if (el) return el;
-        if (Date.now() >= end) throw new Error(what + ': no element matches selector ' + JSON.stringify(sel) + ' within ' + ms + ' ms (run `ax` to see the page and act by --ref)');
-        await new Promise((r) => setTimeout(r, 50));
+        if (Date.now() >= end) {
+            // A bare word that names no HTML element is most likely a mistyped
+            // ref (`click ref12`, `click abc`): a word that is not a number is
+            // read as CSS.
+            const word = /^[A-Za-z][A-Za-z0-9]*$/.test(sel) && document.createElement(sel) instanceof HTMLUnknownElement;
+            throw new Error(what + ': no element matches selector ' + JSON.stringify(sel) + ' within ' + ms + ' ms ' + (word
+                ? '(a word that is not a number is read as CSS; refs are the numbers in `ax`, as in `click 12`, and --text matches visible text)'
+                : '(run `ax` to see the page and act on a ref from it)'));
+        }
+        await (deep = deep || deepFn()).wake(50);
     }
 }"#;
 
@@ -933,6 +988,21 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
     const byIds = (el, attr) => (el.getAttribute(attr) || '').split(/\s+/).filter(Boolean)
         .map((id) => (el.getRootNode().getElementById ? el.getRootNode().getElementById(id) : document.getElementById(id)))
         .filter(Boolean).map((n) => n.textContent).join(' ');
+    // An element's <label>s, from one pass over the labels of the page.
+    // `el.labels` looks the whole document over on its first read for each
+    // element: asked of every candidate, that is quadratic (8000 buttons:
+    // 4.3 s on the first locator call, 3 ms this way).
+    let labelMap = null;
+    const labelsOf = (el) => {
+        if (!labelMap) {
+            labelMap = new Map();
+            for (const r of deep.roots()) for (const l of r.querySelectorAll('label')) {
+                const c = l.control;
+                if (c) { const a = labelMap.get(c); if (a) a.push(l); else labelMap.set(c, [l]); }
+            }
+        }
+        return labelMap.get(el) || [];
+    };
     const labelText = (el) => {
         const own = el.getAttribute('aria-label') || byIds(el, 'aria-labelledby');
         if (own) return own;
@@ -944,7 +1014,8 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
             for (const x of c.querySelectorAll('select,textarea,datalist')) x.remove();
             return c.textContent;
         };
-        if (el.labels && el.labels.length) return [...el.labels].map(words).join(' ');
+        const ls = labelsOf(el);
+        if (ls.length) return ls.map(words).join(' ');
         return '';
     };
     const FROM_CONTENT = new Set(['button', 'link', 'heading', 'cell', 'columnheader', 'rowheader', 'option', 'tab',
@@ -963,6 +1034,7 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
     if (spec.describe) return { role: role(spec.describe), name: accName(spec.describe), label: labelText(spec.describe) };
     const end = Date.now() + ms;
     for (;;) {
+        labelMap = null;
         let found = [];
         for (const el of (spec.css ? deep.all(spec.css) : all())) {
             let score = 0, ok = true;
@@ -998,7 +1070,7 @@ const WAIT_LOCATOR: &str = r#"async function (spec, ms, what, deep) {
             const desc = Object.entries(spec).map(([k, v]) => k + '=' + JSON.stringify(v)).join(' ');
             throw new Error(what + ': no element with ' + desc + ' within ' + ms + ' ms (' + found.length + ' matched; run `ax` to see the page)');
         }
-        await new Promise((r) => setTimeout(r, 50));
+        await deep.wake(50);
     }
 }"#;
 
@@ -1146,7 +1218,20 @@ const WAIT_TEXT: &str = r#"async function (text, ms, what, deep, mode) {
     // showing "Add to cart" whose aria-label is "Add Carbon Gear to cart"
     // matches "Add to cart" by what it shows, and wins over the product card
     // around it that merely contains the phrase.
-    const readings = (el) => [el.getAttribute('aria-label'), el.labels && el.labels[0] && el.labels[0].innerText,
+    // The first <label> of an element, from one pass over the page's labels
+    // (`el.labels` scans the document per element on its first read).
+    let labelMap = null;
+    const firstLabel = (el) => {
+        if (!labelMap) {
+            labelMap = new Map();
+            for (const r of deep.roots()) for (const l of r.querySelectorAll('label')) {
+                const c = l.control;
+                if (c && !labelMap.has(c)) labelMap.set(c, l);
+            }
+        }
+        return labelMap.get(el);
+    };
+    const readings = (el) => [el.getAttribute('aria-label'), firstLabel(el) && firstLabel(el).innerText,
         el.value, el.getAttribute('placeholder'), el.getAttribute('title'), el.getAttribute('alt'),
         textLen(el) <= maxLen * 2 ? el.innerText : null];
     // The closest reading: exact, else the shortest that contains the phrase.
@@ -1215,6 +1300,7 @@ const WAIT_TEXT: &str = r#"async function (text, ms, what, deep, mode) {
     // best match.
     const end = Date.now() + ms;
     for (;;) {
+        labelMap = null;
         let best = null, bestScore = -1, bestExact = false;
         // Every document this script reaches; for the same quality of match,
         // the top one first.
@@ -1235,8 +1321,8 @@ const WAIT_TEXT: &str = r#"async function (text, ms, what, deep, mode) {
         // A <label> stands for its control (fill/select/upload need the input).
         if (best && best.tagName === 'LABEL' && best.control) return best.control;
         if (best) return best;
-        if (Date.now() >= end) throw new Error(what + ': no element with text ' + JSON.stringify(text) + ' within ' + ms + ' ms (run `ax` to see the page and act by --ref)');
-        await new Promise((r) => setTimeout(r, 100));
+        if (Date.now() >= end) throw new Error(what + ': no element with text ' + JSON.stringify(text) + ' within ' + ms + ' ms (run `ax` to see the page and act on a ref from it)');
+        await deep.wake(100);
     }
 }"#;
 
@@ -1485,7 +1571,7 @@ fn finder_expr_in(target: &Target, wait_ms: u128, what: &str, mode: TextMode) ->
             format!("({WAIT_TEXT})({}, {wait_ms}, {}, {DEEP}, {})", json!(text), json!(what), mode as u8)
         }
         Target::Locator(loc) => format!("({WAIT_LOCATOR})({}, {wait_ms}, {}, {DEEP})", json!(loc), json!(what)),
-        Target::Ref(node) => format!("Promise.reject(new Error('{what}: ref {node} must be resolved through CDP'))"),
+        Target::Ref(node) => format!("Promise.reject(new Error('{what}: ref {node} could not be looked up in the page (a navigera bug)'))"),
     }
 }
 
@@ -1497,6 +1583,47 @@ fn or_gone(e: anyhow::Error, otherwise: impl FnOnce() -> anyhow::Error) -> anyho
     } else {
         otherwise()
     }
+}
+
+/// `scheme://host[:port]` of an http(s) URL; none for `about:`, `data:`,
+/// `file:` and the like, whose documents belong to the page that made them.
+fn http_origin(url: &str) -> Option<String> {
+    let rest =
+        url.strip_prefix("https://").map(|r| ("https", r)).or_else(|| url.strip_prefix("http://").map(|r| ("http", r)));
+    let (scheme, rest) = rest?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
+    (!host.is_empty()).then(|| format!("{scheme}://{}", host.to_ascii_lowercase()))
+}
+
+/// What a navigation's `net::ERR_…` code means to the person who asked for
+/// the page, with the code kept at the end for searching.
+fn net_error(code: &str) -> String {
+    let name = code.strip_prefix("net::").unwrap_or(code);
+    let meaning = match name {
+        "ERR_NAME_NOT_RESOLVED" => "the host name did not resolve; a typo, or no network?",
+        "ERR_CONNECTION_REFUSED" => "nothing answered on that port; is the server running?",
+        "ERR_CONNECTION_RESET" | "ERR_CONNECTION_CLOSED" | "ERR_EMPTY_RESPONSE" => {
+            "the server closed the connection without a page"
+        }
+        "ERR_CONNECTION_TIMED_OUT" | "ERR_TIMED_OUT" => "the server did not answer in time",
+        "ERR_INTERNET_DISCONNECTED" | "ERR_NETWORK_CHANGED" => "the network is down or changed",
+        "ERR_ADDRESS_UNREACHABLE" => "that address can't be reached from here",
+        "ERR_UNSAFE_PORT" => "Chrome refuses to open that port, one on its list of unsafe ports",
+        "ERR_HTTP_RESPONSE_CODE_FAILURE" => {
+            "the server answered with an error status and no page; the tab now shows Chrome's error page"
+        }
+        "ERR_TOO_MANY_REDIRECTS" => "the page redirects in a loop",
+        "ERR_BLOCKED_BY_CLIENT" => "the request was blocked by a request rule or an extension",
+        "ERR_BLOCKED_BY_RESPONSE" => "the site does not allow this page to be opened this way",
+        "ERR_FILE_NOT_FOUND" => "no such file",
+        "ERR_INVALID_URL" => "that is not a URL Chrome can open",
+        "ERR_ABORTED" => "the navigation was stopped before a page loaded",
+        "ERR_SSL_PROTOCOL_ERROR" => "the TLS handshake with the server failed",
+        n if n.starts_with("ERR_CERT_") => "the site's TLS certificate was not accepted",
+        _ => "the page could not be loaded",
+    };
+    format!("{meaning} ({code})")
 }
 
 /// A finder's "no element … within" (the element isn't there yet).
@@ -1688,7 +1815,7 @@ impl Page {
         let res = self.send_once(method, params, timeout);
         match &res {
             Ok(_) => self.stalled.store(false, Ordering::SeqCst),
-            Err(e) if format!("{e:#}").contains("CDP command timed out") => self.stalled.store(true, Ordering::SeqCst),
+            Err(e) if format!("{e:#}").contains(super::client::NO_ANSWER) => self.stalled.store(true, Ordering::SeqCst),
             Err(_) => {}
         }
         res
@@ -1745,6 +1872,34 @@ impl Page {
         self.evaluate_raw(&wrapped, timeout)
     }
 
+    /// Run `source` as a script, as a console does: statements (`a(); b`),
+    /// `let`, and `await` at the top level, the last expression's value
+    /// the result (a function it ends with is called). For what
+    /// [`Self::evaluate`] can't parse as one expression.
+    pub fn evaluate_script(&self, source: &str, timeout: Duration) -> Result<Value> {
+        let res = self.send(
+            "Runtime.evaluate",
+            json!({
+                "expression": source,
+                "returnByValue": true,
+                "awaitPromise": true,
+                "replMode": true,
+            }),
+            timeout,
+        )?;
+        if let Some(details) = res.get("exceptionDetails") {
+            bail!("{}", exception_message(details));
+        }
+        let value = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null);
+        Ok(value)
+    }
+
+    /// Run `source` as the body of an async function: `return` gives the
+    /// result.
+    pub fn evaluate_body(&self, source: &str, timeout: Duration) -> Result<Value> {
+        self.evaluate_raw(&format!("(async () => {{\n{source}\n}})()"), timeout)
+    }
+
     fn evaluate_raw(&self, expression: &str, timeout: Duration) -> Result<Value> {
         let res = self.send(
             "Runtime.evaluate",
@@ -1776,15 +1931,15 @@ impl Page {
             // and every op after (the failure's screenshot, `url`, `ax`)
             // waits its whole timeout too. Stalled if even that goes
             // unanswered (see STALLED_WAIT).
-            if res.as_ref().is_err_and(|e| format!("{e:#}").contains("CDP command timed out")) {
+            if res.as_ref().is_err_and(|e| format!("{e:#}").contains(super::client::NO_ANSWER)) {
                 let stop = self.client.send("Page.stopLoading", json!({}), Some(&self.session_id), STALLED_WAIT).await;
                 if stop.is_err() {
                     self.stalled.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             }
-            let res = res.with_context(|| format!("navigate to {url}"))?;
+            let res = res?;
             if let Some(error) = res.get("errorText").and_then(Value::as_str) {
-                bail!("navigate to {url}: {error}");
+                bail!("{}", net_error(error));
             }
             if wait == "commit" {
                 if res.get("loaderId").is_some() {
@@ -1868,7 +2023,7 @@ impl Page {
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(e) => bail!("CDP event stream ended: {e}"),
+                Err(e) => bail!("{} (events: {e})", super::client::CLOSED),
             }
         }
     }
@@ -2462,7 +2617,7 @@ impl Page {
                 .map_err(|e| {
                     or_gone(e, || {
                         anyhow::anyhow!(
-                            "ref {backend_node_id} not found (stale after navigation or re-render? take a fresh `ax`)"
+                            "no element has that ref now (the page changed since `ax`, or the number is wrong); run `ax` for fresh refs"
                         )
                     })
                 })?;
@@ -2470,7 +2625,7 @@ impl Page {
                 .get("object")
                 .and_then(|o| o.get("objectId"))
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("ref {backend_node_id} has no JS object"))?
+                .ok_or_else(|| anyhow::anyhow!("that element is gone from the page; run `ax` for fresh refs"))?
                 .to_string();
             let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
             let res = self
@@ -2548,11 +2703,14 @@ impl Page {
         if point.get("hidden").and_then(Value::as_bool) == Some(true) {
             let instead = point.get("instead").and_then(Value::as_str);
             bail!(
-                "the element isn't visible where it is ({}): a user can't click it{}. \
-                 `--force` sends DOM events to it anyway",
+                "a user can't click the element: {}{}. \
+                 To click it anyway, --force sends the click to the element without the mouse",
                 match point.get("at").and_then(Value::as_str) {
-                    Some(at) => format!("a click there lands on {at}"),
-                    None => "no box on screen".to_string(),
+                    Some(at) => format!("it isn't visible, and a click at its place lands on {at}"),
+                    // Nothing stands for it: it was waited for, as long as
+                    // the element wait.
+                    None if instead.is_none() => format!("it has no box on screen (waited {settle} ms for it to show)"),
+                    None => "it has no box on screen".to_string(),
                 },
                 instead.map(|i| format!("; click what stands for it: {i}")).unwrap_or_default()
             );
@@ -2561,8 +2719,9 @@ impl Page {
             && point.get("synthetic").and_then(Value::as_bool) != Some(true)
         {
             bail!(
-                "the element is covered by {} at its centre (waited {} ms; a user would click that instead). \
-                 Close or wait for it; `--force` sends DOM events to the element anyway",
+                "the element is covered by {} at its centre (waited {} ms; a user's click would land there). \
+                 Close it or wait for it to go; to click anyway, --force sends the click to the element \
+                 without the mouse",
                 point.get("covered_by").and_then(Value::as_str).unwrap_or("another element"),
                 settle
             );
@@ -2825,7 +2984,7 @@ impl Page {
         )?;
         if point.get("hidden").and_then(Value::as_bool) == Some(true) {
             bail!(
-                "the element isn't visible where it is; a user can't double-click it{}",
+                "a user can't double-click the element: it isn't visible at its place{}",
                 point.get("instead").and_then(Value::as_str).map(|i| format!(" (try {i})")).unwrap_or_default()
             );
         }
@@ -2833,7 +2992,7 @@ impl Page {
             && point.get("synthetic").and_then(Value::as_bool) != Some(true)
         {
             bail!(
-                "the element is covered by {} at its centre; close or wait for it",
+                "the element is covered by {} at its centre; close it or wait for it to go",
                 point.get("covered_by").and_then(Value::as_str).unwrap_or("another element")
             );
         }
@@ -3258,11 +3417,10 @@ impl Page {
                 if let Some(details) = res.get("exceptionDetails") {
                     bail!("{}", exception_message(details));
                 }
-                let object = res
-                    .get("result")
-                    .and_then(|r| r.get("objectId"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("upload: element has no remote object"))?;
+                let object =
+                    res.get("result").and_then(|r| r.get("objectId")).and_then(Value::as_str).ok_or_else(|| {
+                        anyhow::anyhow!("upload: the element is gone from the page; run `ax` for fresh refs")
+                    })?;
                 params["objectId"] = json!(object);
             }
         }
@@ -3346,6 +3504,293 @@ impl Page {
         frames
     }
 
+    /// What a user could click that the accessibility tree doesn't call
+    /// actionable: elements with a click, mousedown or mouseup listener of
+    /// their own (Chrome's `isClickable`), and the outermost element of a
+    /// `cursor: pointer` area (a card, a row, an icon in a `<span>`). Only
+    /// what a user's click could land on counts: an element with a box of
+    /// some size, not `pointer-events: none`, not fully transparent (nor
+    /// inside something that is), in a document of the page's own origin
+    /// (an ad's or a widget's frame is someone else's). A list or table
+    /// that listens for its items' clicks marks the items, not itself: its
+    /// own ref would click whichever item is in the middle. Also `#id` /
+    /// `.class` for each element, to tell apart actionable elements that
+    /// have no name or text.
+    fn clickables(&self, timeout: Duration) -> ax::Clickables {
+        let mut out = ax::Clickables::default();
+        let params =
+            json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility"], "includeDOMRects": true });
+        let Ok(snap) = self.send("DOMSnapshot.captureSnapshot", params, timeout) else {
+            return out;
+        };
+        let strings: Vec<&str> = snap
+            .get("strings")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|v| v.as_str().unwrap_or(""))
+            .collect();
+        let text =
+            |i: Option<&Value>| i.and_then(Value::as_u64).and_then(|i| strings.get(i as usize).copied()).unwrap_or("");
+        let documents = snap.get("documents").and_then(Value::as_array).cloned().unwrap_or_default();
+        let page_origin = documents.first().and_then(|d| http_origin(text(d.get("documentURL"))));
+        for doc in &documents {
+            let nodes = &doc["nodes"];
+            let foreign = match (&page_origin, http_origin(text(doc.get("documentURL")))) {
+                (Some(page), Some(own)) => *page != own,
+                _ => false,
+            };
+            let ints = |key: &str| -> Vec<i64> {
+                nodes
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|v| v.as_i64().unwrap_or(-1))
+                    .collect()
+            };
+            let (parents, types, backends, names, values) =
+                (ints("parentIndex"), ints("nodeType"), ints("backendNodeId"), ints("nodeName"), ints("nodeValue"));
+            let mut children: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+            // Each element's own text nodes, in order.
+            let mut own_text: std::collections::HashMap<i64, Vec<&str>> = std::collections::HashMap::new();
+            // Elements with text of their own somewhere inside.
+            let mut texted = std::collections::HashSet::new();
+            for (i, &parent) in parents.iter().enumerate() {
+                if types.get(i) == Some(&1) && parent >= 0 {
+                    children.entry(parent).or_default().push(i as i64);
+                }
+                let value = values.get(i).and_then(|&v| strings.get(v as usize)).copied().unwrap_or("");
+                if types.get(i) == Some(&3) && !value.trim().is_empty() {
+                    own_text.entry(parent).or_default().push(value);
+                    let mut at = parent;
+                    for _ in 0..64 {
+                        if at < 0 || !texted.insert(at) {
+                            break;
+                        }
+                        at = parents.get(at as usize).copied().unwrap_or(-1);
+                    }
+                }
+            }
+            let listening: std::collections::HashSet<i64> = nodes
+                .get("isClickable")
+                .and_then(|c| c.get("index"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_i64)
+                .collect();
+            let layout = &doc["layout"];
+            // Per laid-out node: (cursor, pointer-events, opacity, has an area,
+            // visibility).
+            let mut boxes = std::collections::HashMap::new();
+            let styles = layout.get("styles").and_then(Value::as_array);
+            let bounds = layout.get("bounds").and_then(Value::as_array);
+            for (i, node) in layout.get("nodeIndex").and_then(Value::as_array).into_iter().flatten().enumerate() {
+                let style = |k: usize| text(styles.and_then(|s| s.get(i)).and_then(|s| s.get(k)));
+                let area = bounds
+                    .and_then(|b| b.get(i))
+                    .and_then(Value::as_array)
+                    .map(|r| r.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
+                    .is_some_and(|r| r.len() == 4 && r[2] > 0.0 && r[3] > 0.0);
+                boxes.insert(node.as_i64().unwrap_or(-1), (style(0), style(1), style(2), area, style(3)));
+            }
+            let pointer = |i: i64| boxes.get(&i).is_some_and(|b| b.0 == "pointer");
+            let transparent = |mut i: i64| {
+                for _ in 0..64 {
+                    if boxes.get(&i).is_some_and(|b| b.2 == "0") {
+                        return true;
+                    }
+                    match parents.get(i as usize) {
+                        Some(&p) if p >= 0 => i = p,
+                        _ => break,
+                    }
+                }
+                false
+            };
+            let tag_of = |i: i64| names.get(i as usize).and_then(|&n| strings.get(n as usize)).copied().unwrap_or("");
+            let attributes = nodes.get("attributes").and_then(Value::as_array);
+            let attr_of = |i: i64, name: &str| -> &str {
+                let pairs = attributes.and_then(|a| a.get(i as usize)).and_then(Value::as_array);
+                let pairs = pairs.map(|a| a.as_slice()).unwrap_or(&[]);
+                pairs.chunks(2).find(|p| text(p.first()) == name).map(|p| text(p.get(1))).unwrap_or("")
+            };
+            let first_class = |i: i64| attr_of(i, "class").split_whitespace().next().unwrap_or("");
+            // A list item or table row by its tag or role. The parts of one
+            // row (its cells, a name beside a date) do what the row does.
+            let item = |i: i64| {
+                matches!(tag_of(i), "LI" | "TR")
+                    || matches!(
+                        attr_of(i, "role"),
+                        "listitem"
+                            | "row"
+                            | "option"
+                            | "menuitem"
+                            | "menuitemradio"
+                            | "menuitemcheckbox"
+                            | "tab"
+                            | "treeitem"
+                    )
+            };
+            let boxed = |i: &i64| boxes.get(i).is_some_and(|b| b.3);
+            // The items of a list or rows of a table that `i` holds (through
+            // wrappers of one child each): two or more list items or rows of
+            // one tag and class, most of its children, each with text.
+            let items = |mut i: i64| -> Option<Vec<i64>> {
+                for _ in 0..4 {
+                    let kids: Vec<i64> = children.get(&i).into_iter().flatten().copied().filter(boxed).collect();
+                    match kids.as_slice() {
+                        [] => return None,
+                        [only] => i = *only,
+                        _ => {
+                            let mut groups: std::collections::HashMap<(&str, &str), Vec<i64>> =
+                                std::collections::HashMap::new();
+                            for &k in &kids {
+                                groups.entry((tag_of(k), first_class(k))).or_default().push(k);
+                            }
+                            let group = groups.into_values().max_by_key(Vec::len)?;
+                            let listed = group.len() >= 2
+                                && group.len() * 2 > kids.len()
+                                && group.iter().all(|&k| item(k) && texted.contains(&k));
+                            return listed.then_some(group);
+                        }
+                    }
+                }
+                None
+            };
+            let has_attr = |i: i64, name: &str| {
+                let pairs = attributes.and_then(|a| a.get(i as usize)).and_then(Value::as_array);
+                pairs.map(|a| a.as_slice()).unwrap_or(&[]).chunks(2).any(|p| text(p.first()) == name)
+            };
+            // `i` and its ancestors, nearest first.
+            let parent_of: &[i64] = &parents;
+            let up = move |mut i: i64| {
+                std::iter::from_fn(move || {
+                    let at = i;
+                    i = parent_of.get(at as usize).copied().unwrap_or(-1);
+                    (at >= 0).then_some(at)
+                })
+                .take(64)
+            };
+            // Kept from the user on purpose: `aria-hidden` or `inert`, on it
+            // or around it (the page behind a modal, a menu toggle's real
+            // checkbox).
+            let hidden = |i: i64| up(i).any(|a| attr_of(a, "aria-hidden").trim() == "true" || has_attr(a, "inert"));
+            // Inside a link or a button, which has a ref of its own and is
+            // where the click goes (an image card in an article link, a
+            // toolbar icon in a `role=button`).
+            let in_control = |i: i64| {
+                up(i).skip(1).any(|a| {
+                    matches!(
+                        attr_of(a, "role").trim(),
+                        "button" | "link" | "menuitem" | "menuitemcheckbox" | "menuitemradio" | "tab" | "option"
+                    ) || match tag_of(a) {
+                        "A" => has_attr(a, "href"),
+                        "BUTTON" => true,
+                        _ => false,
+                    }
+                })
+            };
+            let by_id: std::collections::HashMap<&str, i64> = (0..names.len() as i64)
+                .filter(|&i| types.get(i as usize) == Some(&1))
+                .map(|i| (attr_of(i, "id"), i))
+                .filter(|(id, _)| !id.is_empty())
+                .collect();
+            // A label clicks its control, which has a ref of its own, unless
+            // the control is hidden: then the label is what a user clicks.
+            let control_hidden = |label: i64| {
+                let control = by_id.get(attr_of(label, "for")).copied().or_else(|| {
+                    let mut stack = vec![(label, 0)];
+                    while let Some((at, depth)) = stack.pop() {
+                        for &k in children.get(&at).into_iter().flatten() {
+                            if matches!(tag_of(k), "INPUT" | "SELECT" | "TEXTAREA") {
+                                return Some(k);
+                            }
+                            if depth < 8 {
+                                stack.push((k, depth + 1));
+                            }
+                        }
+                    }
+                    None
+                });
+                control.is_some_and(|c| hidden(c) || !boxed(&c) || transparent(c))
+            };
+            // A user's click could land on it.
+            let landable = |i: i64| {
+                let Some(&(_, events, _, area, visibility)) = boxes.get(&i) else { return false };
+                let tag = tag_of(i);
+                !foreign
+                    && !matches!(tag, "HTML" | "BODY")
+                    && (tag != "LABEL" || control_hidden(i))
+                    && events != "none"
+                    && area
+                    && matches!(visibility, "" | "visible")
+                    && !transparent(i)
+                    && !hidden(i)
+                    && !in_control(i)
+            };
+            // An element's text, its descendants' included, cut short.
+            let text_in = |i: i64| -> String {
+                let mut words = String::new();
+                let mut stack = vec![(i, 0)];
+                while let Some((at, depth)) = stack.pop() {
+                    for value in own_text.get(&at).into_iter().flatten() {
+                        words.push(' ');
+                        words.push_str(value.trim());
+                    }
+                    if words.len() > 80 || depth >= 8 {
+                        continue;
+                    }
+                    for &k in children.get(&at).into_iter().flatten().rev() {
+                        stack.push((k, depth + 1));
+                    }
+                }
+                words.split_whitespace().collect::<Vec<_>>().join(" ")
+            };
+            for (i, &backend) in backends.iter().enumerate() {
+                if types.get(i) != Some(&1) {
+                    continue;
+                }
+                let index = i as i64;
+                let backend = backend as u64;
+                let attrs = attributes.and_then(|a| a.get(i)).and_then(Value::as_array);
+                let attr = |name: &str| {
+                    let pairs = attrs.map(|a| a.as_slice()).unwrap_or(&[]);
+                    pairs.chunks(2).find(|p| text(p.first()) == name).map(|p| text(p.get(1)).trim().to_string())
+                };
+                if let Some(id) = attr("id").filter(|id| !id.is_empty()) {
+                    out.hints.insert(backend, format!("#{id}"));
+                } else if let Some(class) = attr("class").and_then(|c| c.split_whitespace().next().map(str::to_string))
+                {
+                    out.hints.insert(backend, format!(".{class}"));
+                }
+                if !landable(index) {
+                    continue;
+                }
+                let parent = parents.get(i).copied().unwrap_or(-1);
+                if listening.contains(&index) || (pointer(index) && !pointer(parent)) {
+                    match items(index) {
+                        Some(items) => out.nodes.extend(
+                            items
+                                .into_iter()
+                                .filter(|&k| landable(k))
+                                .filter_map(|k| backends.get(k as usize))
+                                .map(|&b| b as u64),
+                        ),
+                        None => {
+                            out.nodes.insert(backend);
+                            let words = text_in(index);
+                            if !words.is_empty() {
+                                out.texts.insert(backend, words);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Backend node id of the element `target` names (for `ax --selector`).
     fn backend_id(&self, target: &Target, wait: Duration, timeout: Duration) -> Result<u64> {
         if let Target::Ref(node) = target {
@@ -3364,15 +3809,15 @@ impl Page {
             .get("result")
             .and_then(|r| r.get("objectId"))
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("ax: scope element has no remote object"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("ax: the element to scope to is gone from the page; run `ax` for fresh refs")
+            })?
             .to_string();
         let described = self.send("DOM.describeNode", json!({ "objectId": object }), timeout);
         let _ = self.send("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-ax" }), timeout);
-        described?
-            .get("node")
-            .and_then(|n| n.get("backendNodeId"))
-            .and_then(Value::as_u64)
-            .ok_or_else(|| anyhow::anyhow!("ax: no backend node id for scope"))
+        described?.get("node").and_then(|n| n.get("backendNodeId")).and_then(Value::as_u64).ok_or_else(|| {
+            anyhow::anyhow!("ax: the element to scope to is gone from the page; run `ax` for fresh refs")
+        })
     }
 
     /// Lightpanda gives every password field the value `*****`, typed into or
@@ -3496,6 +3941,107 @@ impl Page {
     /// tree with `[ref=N]` on actionable nodes, iframes included. `json`
     /// keeps the older flat `[{ref, role, name, value?}]` list.
     pub fn ax_tree(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        // The text tree stops at the output limit, so on a large page it
+        // need not read the whole tree: fetch lazily from the root and
+        // stop. Anything the lazy path cannot serve (JSON, a depth cap,
+        // no limit, a browser without the lazy calls) reads the full tree
+        // exactly as before, and a failed lazy fetch falls back to it.
+        if !opts.json && opts.max_depth.is_none() && opts.limit > 0 && !self.shared.is_single_target() {
+            if let Ok(text) = self.ax_tree_lazy(timeout, opts) {
+                return Ok(text);
+            }
+        }
+        self.ax_tree_full(timeout, opts)
+    }
+
+    /// Text tree from a lazy fetch: the root (or the partial tree around
+    /// a scope) plus children on demand, in sibling windows, until the
+    /// output limit is reached. Errors, and any failed child fetch, bail
+    /// so [`Self::ax_tree`] falls back to the full tree.
+    fn ax_tree_lazy(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        // getRootAXNode and getChildAXNodes answer -32000 until the domain
+        // is enabled; getFullAXTree does not need it, so without this the
+        // lazy path bailed on its first call and silently read the whole
+        // tree (the bench numbers for the first lazy build were full-tree
+        // numbers, not lazy ones).
+        self.send("Accessibility.enable", json!({}), timeout)?;
+        let root_backend_id = match &opts.scope {
+            Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
+            None => None,
+        };
+        // The page's root, for the header line (and, unscoped, the seed).
+        let main_root = self.send("Accessibility.getRootAXNode", json!({}), timeout)?;
+        let main_root = main_root.get("node").cloned().unwrap_or(Value::Null);
+        let (seed, scoped_backend) = match root_backend_id {
+            Some(backend) => {
+                let res = self.send("Accessibility.getPartialAXTree", json!({ "backendNodeId": backend }), timeout)?;
+                let nodes = res.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+                if !nodes.iter().any(|n| n.get("backendDOMNodeId").and_then(Value::as_u64) == Some(backend)) {
+                    bail!("partial AX tree has no node for the scope");
+                }
+                (nodes, Some(backend))
+            }
+            None => (vec![main_root.clone()], None),
+        };
+        let frames = self.frame_trees(timeout);
+        let clicks = self.clickables(timeout);
+        let title = ax_str(&main_root, "name").to_string();
+        let url = main_root
+            .get("properties")
+            .and_then(Value::as_array)
+            .and_then(|props| props.iter().find(|p| p.get("name").and_then(Value::as_str) == Some("url")))
+            .and_then(|p| p.get("value").and_then(|v| v.get("value")).and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string();
+        let origin = url
+            .find("://")
+            .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
+            .unwrap_or_default();
+        let client = self.client.clone();
+        let session = self.session_id.clone();
+        let handle = self.handle.clone();
+        let fetch: ax::AxFetch = Box::new(move |parents: &[String]| {
+            let futs = parents.iter().map(|id| {
+                // CDP names the parameter `id`, not `nodeId` (Chrome 156
+                // rejects `nodeId` with -32602, which used to fail every
+                // lazy fetch and fall back to the full tree).
+                client.send("Accessibility.getChildAXNodes", json!({ "id": id }), Some(&session), timeout)
+            });
+            let results = handle.block_on(futures_util::future::join_all(futs));
+            let mut nodes = Vec::new();
+            let mut failed = false;
+            for r in results {
+                match r {
+                    Ok(v) => {
+                        if let Some(arr) = v.get("nodes").and_then(Value::as_array) {
+                            nodes.extend(arr.iter().cloned());
+                        }
+                    }
+                    Err(_) => failed = true,
+                }
+            }
+            (nodes, failed)
+        });
+        let (rendered, failed) = ax::render_lazy(
+            &format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default()),
+            &seed,
+            &frames,
+            &ax::Options {
+                all_refs: opts.all_refs,
+                limit: opts.limit,
+                root_backend_id: scoped_backend,
+                origin,
+                clicks,
+            },
+            fetch,
+        );
+        if failed {
+            bail!("lazy AX fetch failed");
+        }
+        Ok(Value::String(rendered.text))
+    }
+
+    fn ax_tree_full(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
         let mut params = json!({});
         if let Some(d) = opts.max_depth {
             params["depth"] = json!(d);
@@ -3510,6 +4056,8 @@ impl Page {
             return Ok(flat_ax(&nodes, opts.all));
         }
         let frames = self.frame_trees(timeout);
+        // Lightpanda has no DOMSnapshot; its tree is printed as it comes.
+        let clicks = if self.shared.is_single_target() { ax::Clickables::default() } else { self.clickables(timeout) };
         let root = nodes.iter().find(|n| n.get("parentId").is_none());
         let title = root.map(|n| ax_str(n, "name").to_string()).unwrap_or_default();
         let url = root
@@ -3530,7 +4078,7 @@ impl Page {
             &format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default()),
             &nodes,
             &frames,
-            &ax::Options { all_refs: opts.all_refs, limit: opts.limit, root_backend_id, origin },
+            &ax::Options { all_refs: opts.all_refs, limit: opts.limit, root_backend_id, origin, clicks },
         );
         let mut text = rendered.text;
         // Lightpanda's tree stops at a shadow root; what is inside is read
@@ -3623,7 +4171,27 @@ fn flat_ax(nodes: &[Value], all: bool) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn http_origin_names_the_site_and_nothing_else() {
+        assert_eq!(super::http_origin("https://Shop.Example:8443/a?b#c").as_deref(), Some("https://shop.example:8443"));
+        assert_eq!(super::http_origin("http://user@127.0.0.1:8000").as_deref(), Some("http://127.0.0.1:8000"));
+        assert_eq!(super::http_origin("about:srcdoc"), None);
+        assert_eq!(super::http_origin("data:text/html,x"), None);
+        assert_eq!(super::http_origin("file:///tmp/x.html"), None);
+    }
+
     use super::*;
+
+    #[test]
+    fn a_navigation_error_says_what_it_means_and_keeps_its_code() {
+        let e = net_error("net::ERR_NAME_NOT_RESOLVED");
+        assert!(e.starts_with("the host name did not resolve;"), "{e}");
+        assert!(e.ends_with("(net::ERR_NAME_NOT_RESOLVED)"), "{e}");
+        assert!(net_error("net::ERR_CERT_DATE_INVALID").contains("certificate"));
+        // Callers that look for the code still find it.
+        assert!(net_error("net::ERR_ABORTED").contains("ERR_ABORTED"));
+        assert_eq!(net_error("net::ERR_SOMETHING_NEW"), "the page could not be loaded (net::ERR_SOMETHING_NEW)");
+    }
 
     #[test]
     fn keys_and_chords_resolve() {

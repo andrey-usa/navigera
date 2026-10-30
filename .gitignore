@@ -16,3 +16,4 @@ __pycache__/
 *_jar.txt
 /report.json
 /dump-*.html
+.primavera/

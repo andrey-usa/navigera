@@ -58,7 +58,7 @@ fn de_ref<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
 /// `"12"`, `"@12"`, `"ref=12"`, `"[ref=12]"`, `"e12"` -> 12.
 pub fn parse_ref(raw: &str) -> Option<u64> {
     let s = raw.trim().trim_start_matches('[').trim_end_matches(']');
-    let s = s.strip_prefix("ref=").unwrap_or(s);
+    let s = s.strip_prefix("ref=").or_else(|| s.strip_prefix("ref")).unwrap_or(s);
     let s = s.strip_prefix('@').unwrap_or(s);
     let s = s.strip_prefix('e').unwrap_or(s);
     s.parse::<u64>().ok()
@@ -150,7 +150,10 @@ impl TargetArgs {
         }
     }
 
-    fn unframed(&self, op: &str) -> anyhow::Result<Option<Target>> {
+    /// What is wrong with these flags together, told from the words alone:
+    /// checked when the command is parsed (a typo costs no browser), and
+    /// again when it runs.
+    fn conflict(&self) -> Option<&'static str> {
         let given = [
             self.node_ref.is_some(),
             self.text.is_some(),
@@ -160,23 +163,29 @@ impl TargetArgs {
         .iter()
         .filter(|b| **b)
         .count();
+        let counted = self.locator() || self.selector.is_some();
         if given > 1 {
-            anyhow::bail!("{op}: give only one of ref, --text, --find, or --selector/--role/--name/--label/--placeholder/--testid");
+            Some("give only one of ref, --text, --find, or --selector/--role/--name/--label/--placeholder/--testid")
+        } else if self.near.is_some() && !counted {
+            Some("--near narrows --role/--name, --label, --placeholder, --testid or --selector to the match in the part of the page that shows the text")
+        } else if self.nth.is_some() && !counted {
+            Some(
+                "--nth picks among the matches of --selector, --role, --label, --placeholder or --testid; --text \
+                 takes the one best match (the second of two buttons: --role button --name \"…\" --nth 1)",
+            )
+        } else {
+            None
+        }
+    }
+
+    fn unframed(&self, op: &str) -> anyhow::Result<Option<Target>> {
+        if let Some(m) = self.conflict() {
+            anyhow::bail!("{op}: {m}");
         }
         if self.find.is_some() {
             anyhow::bail!("{op}: --find was not resolved to an element");
         }
-        if self.near.is_some() && !self.locator() && self.selector.is_none() {
-            anyhow::bail!(
-                "{op}: --near narrows --role/--name, --label, --placeholder, --testid or --selector to the match in the part of the page that shows the text"
-            );
-        }
         if self.locator() || self.nth.is_some() || self.near.is_some() {
-            if self.nth.is_some() && !self.locator() && self.selector.is_none() {
-                anyhow::bail!(
-                    "{op}: --nth picks among the matches of --selector, --role, --label, --placeholder or --testid"
-                );
-            }
             return Ok(Some(Target::Locator(crate::cdp::Locator {
                 role: self.role.clone(),
                 name: self.name.clone(),
@@ -976,22 +985,21 @@ pub struct ParsedArgs {
 const OPS: &[(&str, &str, &str)] = &[
     ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless]] [--natural] [--download-dir <dir>]", "spawn a detached session server + headless browser (needs --session); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
-    ("ax", "[--selector <css> | <ref>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json]", "accessibility snapshot: indented tree, [ref=N] on actionable nodes"),
-    ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button right|middle] [--force]", "trusted mouse click once the element stops moving; refuses an element covered by another (--force: DOM events anyway); waits for any navigation it starts"),
+    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json]", "accessibility snapshot: indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
+    ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
     ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys]", "set an input/textarea's value; --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
     ("type", "<text> [--selector <css> | --ref <n>]", "type key by key into the target or the focused element"),
     ("press", "<key> [--selector <css> | --ref <n>]", "press a key or chord: Enter, Tab, Escape, ArrowDown, Control+a"),
     ("select", "<ref> <option>... | --selector <css> --value <option> [--add]", "choose <select> option(s) by value or label (whitespace-insensitive); --add keeps the options already chosen"),
     ("hover", "<ref> | --selector <css> | --text <t>", "move the mouse over an element (hover menus)"),
-    ("mouse", "move <x> <y> [--steps n] | down | up | click <x> <y> [--count 2] | wheel <dx> <dy>  [--button right|middle] [<target>]", "raw mouse at a point, for what has no element to aim at (a canvas, a map, a game): viewport CSS pixels (as in a screenshot), or from the target's top-left corner (scrolled into view if need be; down, up and wheel with a target go to its center); the pointer stays where it went and held buttons stay held, so down, moves, up drags or draws; a click outside the viewport is refused"),
+    ("mouse", "move <x> <y> [--steps n] | down | up | click <x> <y> [--count 2] | wheel <dx> <dy> [--button left|right|middle] [<target>]", "raw mouse at a point, for what has no element to aim at (a canvas, a map, a game): viewport CSS pixels (as in a screenshot), or from the target's top-left corner (scrolled into view if need be; down, up and wheel with a target go to its center); the pointer stays where it went and held buttons stay held, so down, moves, up drags or draws; a click outside the viewport is refused"),
     ("scroll", "[--by <px> | --to top|bottom] [<ref> | --selector <css>]", "scroll the page, or an element into view"),
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
-    ("eval", "<js> | --file <path.js> | -", "evaluate JS (arrow functions are called); prints the JSON result; `-` reads the script from stdin"),
+    ("eval", "<js> | --file <path.js> | -", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin"),
     ("text", "--selector <css>", "textContent of the first match"),
-    ("find", "<description>", "the element a description means, chosen by a decision model (TYPESAFE_API_KEY); element ops also take --find <description>"),
-    ("check", "<yes/no question>", "probability that the answer about the page is yes, from a decision model (TYPESAFE_API_KEY)"),
+    ("find", "<description>", "the element a description means, chosen by a decision model (set TYPESAFE_API_KEY; README: Decisions by a fast model); element ops also take --find <description>"),
     ("title", "", "page title"),
     ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
     ("errors", "[--limit <n>] [--clear] [--json]", "only the errors: exceptions, console.error, failed loads"),
@@ -1005,19 +1013,19 @@ const OPS: &[(&str, &str, &str)] = &[
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
     ("get", "text|value|html|outer|box|checked|attr <name>|style <prop> <target> | count <css> | title | url", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --near <text>, --nth; --frame <css> to look only inside that frame)"),
-    ("is", "visible|hidden|enabled|disabled|checked|editable|focused <target>", "true/false; a missing element is not visible"),
+    ("is", "<state> <target>", "true/false: whether the element is visible, hidden, enabled, disabled, checked, editable or focused; a missing element is not visible"),
     ("dblclick", "<target>", "trusted double click"),
     ("drag", "<from> <to> | --from-text <t> --to-text <t>", "drag one element onto another (each a ref or CSS selector): HTML5 drag and drop for a draggable source, a held mouse moved across otherwise"),
     ("focus", "<target>", "focus an element"),
-    ("check", "<target> | <yes/no question>", "check a checkbox/radio/switch (clicks only if needed); with a question instead of a target, the decision model's yes/no"),
+    ("check", "<target> | <yes/no question>", "check a checkbox, radio or switch (clicks only if needed). With a question instead of a target: the probability that the answer about the page is yes, from a decision model (set TYPESAFE_API_KEY)"),
     ("uncheck", "<target>", "uncheck a checkbox/switch"),
     ("keydown", "<key>", "hold a key (Shift, Control, a character) until keyup"),
     ("keyup", "<key>", "release a held key"),
     ("insert-text", "<text> [<target>]", "insert text at the caret in one go (paste/IME), no key events"),
     ("url", "", "active tab state {tab, tabs, url, title}"),
-    ("status", "", "the session's engine, browser executable, CDP endpoint and tab state"),
-    ("locate", "<target>", "the locators that find an element again, most stable first, each checked on the page (for turning refs into tests)"),
-    ("history", "[--clear]", "the actions this session ran, a ref's with the locators of its element (`primavera from-session` reads it)"),
+    ("status", "", "the session as JSON: version, engine, executable (the browser binary), endpoint (\"pipe\": a private pipe; else the DevTools address), attached (true: a browser that stays open when the session quits, from --attach or --profile), tab (the active one), tabs, url, title"),
+    ("locate", "<target>", "the locators that find an element again, most stable first, each checked on the page (to turn refs into tests)"),
+    ("history", "[--clear]", "the actions this session ran, a ref's with the locators of its element (primavera, the test runner built on navigera, turns it into a test with `from-session`)"),
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
@@ -1039,48 +1047,133 @@ const OPS: &[(&str, &str, &str)] = &[
     ("install-skill", "[--dir <skills dir>] [--claude | --continue] [--global]", "install the skill for agents (default ./.agents/skills, read by Cline and Kilo; --claude: ./.claude/skills; --continue: ./.continue/skills)"),
 ];
 
+/// `text` after `prefix`, in lines of at most 80 columns; lines after the
+/// first start with `indent` spaces.
+fn wrapped(prefix: &str, text: &str, indent: usize) -> String {
+    const WIDTH: usize = 80;
+    let mut out = String::new();
+    let mut line = prefix.to_string();
+    let mut fresh = true;
+    for word in text.split_whitespace() {
+        if !fresh && line.chars().count() + 1 + word.chars().count() > WIDTH {
+            out.push_str(line.trim_end());
+            out.push('\n');
+            line = " ".repeat(indent);
+            fresh = true;
+        }
+        if !fresh {
+            line.push(' ');
+        }
+        line.push_str(word);
+        fresh = false;
+    }
+    out.push_str(line.trim_end());
+    out.push('\n');
+    out
+}
+
 /// Help text for `--help` / argument errors.
 pub fn usage(program: &str) -> String {
     let mut out = format!(
-        "navigera {} — drive headless Chrome over CDP, one shell command per step.\n\n\
+        "navigera {}: drive Chrome from the shell, one command per step, over the\n\
+         Chrome DevTools Protocol (CDP).\n\n\
          AGENT LOOP:\n  \
-         {program} --session s start\n  \
-         {program} --session s goto https://example.com\n  \
-         {program} --session s ax                     # read: tree with [ref=N]\n  \
-         {program} --session s click 12               # act on a ref\n  \
-         {program} --session s fill 31 \"hello\"\n  \
-         {program} --session s quit\n\n\
+         {program} -s s start\n  \
+         {program} -s s goto https://example.com\n  \
+         {program} -s s ax                     # read: tree with [ref=N]\n  \
+         {program} -s s click 12               # act on a ref\n  \
+         {program} -s s fill 31 \"hello\"\n  \
+         {program} -s s quit\n\n\
          COMMANDS:\n",
         env!("CARGO_PKG_VERSION")
     );
     for (name, args, what) in OPS {
-        out.push_str(&format!("  {name:<13} {args}\n  {:<13} {what}\n", ""));
+        out.push_str(&wrapped(&format!("  {name:<13} "), args, 16));
+        out.push_str(&wrapped(&" ".repeat(16), what, 16));
     }
-    out.push_str(&format!(
-        "\nGLOBAL FLAGS (before or after the command):\n  \
-         --session <name>       warm browser behind a local socket ($NAVIGERA_SESSION)\n  \
-         --raw                  print only the result (strings unquoted); errors on stderr\n  \
-         --timeout-ms <ms>      navigation/command timeout (default {DEFAULT_TIMEOUT_MS}); per op: element wait (default 5000)\n  \
-         --chromium <path>      browser binary ($CHROME_BIN); --engine lightpanda ($NAVIGERA_ENGINE); --headed\n  \
-         --transport ws         CDP over a DevTools port instead of a private pipe (to attach DevTools; Windows default)\n  \
-         --idle-timeout-s <s>   session server idle shutdown (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never)\n  \
-         --attach [chrome|edge|<dir>|<port>]  with `start`: use your running browser (Chrome 144+: chrome://inspect/#remote-debugging); never closes it\n  \
-         --profile <name>       with `start`: persistent visible navigera browser, kept open between sessions (--headless to hide)\n  \
-         --from <browser|dir>   with --profile: first copy your own browser's sign-ins into it (cookies, site storage, saved logins); --from-profile <dir|name|email>\n  \
-         --natural              look like the browser it is: no HeadlessChrome user agent, a real screen size ($NAVIGERA_NATURAL=1)\n  \
-         --pretty               pretty-print JSON\n\n\
-         Output: one JSON object per command, {{\"ok\":true,\"result\":…}} or {{\"ok\":false,\"error\":…}}; exit 1 on error.\n\
-         Without --session each command launches and closes its own browser (one-shot).\n\
-         Programs: `{program} serve` reads JSON commands on stdin, e.g. {{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}}.\n\
-         More: `{program} help <command>`, `{program} skill`."
-    ));
-    out
+    out.push_str("\nGLOBAL FLAGS (before or after the command):\n");
+    let flags: &[(&str, String)] = &[
+        ("-s, --session <name>", "a warm browser behind a local socket ($NAVIGERA_SESSION)".into()),
+        ("--raw", "print only the result (strings unquoted); errors on stderr".into()),
+        ("--timeout-ms <ms>", format!("navigation and command timeout (default {DEFAULT_TIMEOUT_MS})")),
+        (
+            "--wait-ms <ms>",
+            "how long an element command waits for its element (default 5000): on `start`, for the session; on one command, for that command".into(),
+        ),
+        ("--chromium <path>", "the browser binary ($CHROME_BIN); --engine lightpanda ($NAVIGERA_ENGINE); --headed".into()),
+        ("--transport ws", "talk to the browser over a DevTools port instead of a private pipe (to open DevTools on it; the Windows default)".into()),
+        ("--idle-timeout-s <s>", format!("the session server shuts down after this long idle (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never)")),
+        (
+            "--attach [chrome|edge|<dir>|<port>]",
+            "with `start`: use your running browser and never close it. Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there".into(),
+        ),
+        ("--profile <name>", "with `start`: a persistent visible navigera browser, kept open between sessions (--headless to hide it)".into()),
+        (
+            "--from <browser|dir>",
+            "with --profile: first copy your own browser's sign-ins into it (cookies, site storage, saved logins); --from-profile <dir|name|email> picks the profile".into(),
+        ),
+        ("--natural", "look like the browser it is: no HeadlessChrome user agent, a real screen size ($NAVIGERA_NATURAL=1)".into()),
+        ("--pretty", "pretty-print JSON".into()),
+        ("-V, --version", "print the version".into()),
+    ];
+    for (flag, what) in flags {
+        if flag.len() <= 22 {
+            out.push_str(&wrapped(&format!("  {flag:<22} "), what, 25));
+        } else {
+            out.push_str(&format!("  {flag}\n"));
+            out.push_str(&wrapped(&" ".repeat(25), what, 25));
+        }
+    }
+    out.push('\n');
+    for paragraph in [
+        "Output: one JSON object per command, {\"ok\":true,\"result\":…} or {\"ok\":false,\"error\":…}; exit 1 on error.".to_string(),
+        "Without --session each command launches and closes its own browser (one-shot).".to_string(),
+        format!("Programs: `{program} serve` reads JSON commands on stdin, e.g. {{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}}."),
+        format!("More: `{program} help <command>`, `{program} skill`."),
+    ] {
+        out.push_str(&wrapped("", &paragraph, 0));
+    }
+    out.trim_end().to_string()
 }
 
-/// `help <op>`.
+/// `help <op>`: its usage line, what it does, a line per flag, and
+/// examples that run as shown.
 pub fn op_help(program: &str, op: &str) -> Option<String> {
-    let (name, args, what) = OPS.iter().find(|(n, ..)| *n == op)?;
-    Some(format!("usage: {program} [--session <s>] {name} {args}\n{what}"))
+    let (_, _, what) = OPS.iter().find(|(n, ..)| *n == op)?;
+    let mut out = format!("{}\n{}", op_usage(program, op)?, wrapped("", what, 0));
+    if let Some((_, examples, flags)) = crate::help_examples::EXAMPLES.iter().find(|(n, ..)| *n == op) {
+        if !flags.is_empty() {
+            out.push_str("\nflags:\n");
+            for (flag, what) in *flags {
+                if flag.chars().count() <= 22 {
+                    out.push_str(&wrapped(&format!("  {flag:<22} "), what, 25));
+                } else {
+                    out.push_str(&format!("  {flag}\n"));
+                    out.push_str(&wrapped(&" ".repeat(25), what, 25));
+                }
+            }
+        }
+        if !examples.is_empty() {
+            out.push_str("\nexamples:\n");
+            for (cmd, comment) in *examples {
+                let cmd = cmd.replace("navigera ", &format!("{program} "));
+                if comment.is_empty() {
+                    out.push_str(&format!("  {cmd}\n"));
+                } else if cmd.chars().count() + comment.chars().count() + 6 <= 80 {
+                    out.push_str(&format!("  {cmd}  # {comment}\n"));
+                } else {
+                    out.push_str(&format!("  # {comment}\n  {cmd}\n"));
+                }
+            }
+        }
+    }
+    Some(out.trim_end().to_string())
+}
+
+/// The usage line of `op`, for errors (`usage: navigera … <op> <args>`).
+fn op_usage(program: &str, op: &str) -> Option<String> {
+    let (name, args, _) = OPS.iter().find(|(n, ..)| *n == op)?;
+    Some(wrapped(&format!("usage: {program} [-s <session>] {name} "), args, 7).trim_end().to_string())
 }
 
 /// Nearest known command for a typo, plus aliases other agent CLIs use.
@@ -1114,24 +1207,36 @@ fn suggest(op: &str) -> Option<&'static str> {
     if let Some((_, to)) = aliases.iter().find(|(a, _)| a.eq_ignore_ascii_case(op)) {
         return Some(to);
     }
+    // Edits between two words, a swap of neighbours counting as one.
     fn dist(a: &str, b: &str) -> usize {
-        let b: Vec<char> = b.chars().collect();
-        let mut prev: Vec<usize> = (0..=b.len()).collect();
-        for (i, ca) in a.chars().enumerate() {
-            let mut cur = vec![i + 1];
-            for (j, cb) in b.iter().enumerate() {
-                cur.push((prev[j] + usize::from(ca != *cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
-            }
-            prev = cur;
+        let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+        let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+        for (i, row) in d.iter_mut().enumerate() {
+            row[0] = i;
         }
-        prev[b.len()]
+        for (j, cell) in d[0].iter_mut().enumerate() {
+            *cell = j;
+        }
+        for i in 1..=a.len() {
+            for j in 1..=b.len() {
+                let cost = usize::from(a[i - 1] != b[j - 1]);
+                d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+                if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                    d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+                }
+            }
+        }
+        d[a.len()][b.len()]
     }
+    // One edit for a short word, two from six letters on: "bogus" is
+    // nothing like "focus".
+    let most = if op.chars().count() >= 6 { 2 } else { 1 };
     let extra: &[(&str, &str)] = &[("navigate", "goto"), ("snapshot", "ax"), ("evaluate", "eval"), ("close", "quit")];
     OPS.iter()
         .map(|(n, ..)| (*n, *n))
         .chain(aliases.iter().chain(extra.iter()).copied())
         .map(|(name, to)| (to, dist(&op.to_ascii_lowercase(), name)))
-        .filter(|(_, d)| *d <= 2)
+        .filter(|(_, d)| *d <= most)
         .min_by_key(|(_, d)| *d)
         .map(|(n, _)| n)
 }
@@ -1307,7 +1412,10 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
         },
         frame: str_flag(args, "--frame")?,
     };
-    if positional_target && t == TargetArgs::default() {
+    // A bare first word is the target when no flag names one; `--nth`,
+    // `--near` and `--frame` only narrow it (`click .row --nth 2`).
+    let named = t.node_ref.is_some() || t.text.is_some() || t.find.is_some() || t.selector.is_some() || t.locator();
+    if positional_target && !named {
         if let Some(first) = args.front().filter(|a| !a.starts_with("--")).cloned() {
             args.pop_front();
             match parse_ref(&first) {
@@ -1423,10 +1531,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     };
     if op == "-h" || op == "--help" || op == "help" {
         return match args.front() {
-            Some(topic) => op_help(&program, topic)
-                .map(ArgsError::Help)
-                .map(Err)
-                .unwrap_or_else(|| invalid(format!("no command {topic:?}; see `{program} --help`"))),
+            Some(topic) => op_help(&program, topic).map(ArgsError::Help).map(Err).unwrap_or_else(|| {
+                let hint = suggest(topic).map(|s| format!(" — did you mean `{s}`?")).unwrap_or_default();
+                invalid(format!("unknown command {topic:?}{hint}\n(`{program} --help` lists them)"))
+            }),
             None => Err(ArgsError::Help(usage(&program))),
         };
     }
@@ -1504,7 +1612,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
 
     let timeout_ms = num_flag(&mut args, "--timeout-ms")?;
     let need = |name: &str, what: &str| {
-        ArgsError::Invalid(format!("{op} needs {what}; usage: {}", op_help(&program, name).unwrap_or_default()))
+        ArgsError::Invalid(format!("{op} needs {what}\n{}", op_usage(&program, name).unwrap_or_default()))
     };
     let command = match op.as_str() {
         "open" => Command::Open {
@@ -1915,6 +2023,12 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         }
         "set" | "emulate" => {
             let what = positional(&mut args).ok_or_else(|| need("set", "what to set"))?;
+            if !SETTINGS.contains(&what.as_str()) {
+                return invalid(format!(
+                    "{op}: unknown setting {what:?}; settings: viewport, device, media, geo, offline, headers, ua, \
+                     locale, timezone, credentials"
+                ));
+            }
             let scale = num_flag(&mut args, "--scale")?;
             let mobile = extract_present(&mut args, "--mobile");
             let accuracy = num_flag(&mut args, "--accuracy")?;
@@ -2002,24 +2116,30 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         },
         unknown => {
             let hint = suggest(unknown).map(|s| format!(" — did you mean `{s}`?")).unwrap_or_default();
+            let names = OPS.iter().map(|(n, ..)| *n).collect::<Vec<_>>().join(", ");
             return invalid(format!(
-                "unknown command {unknown:?}{hint}\ncommands: {}\n(`{program} --help` for usage)",
-                OPS.iter().map(|(n, ..)| *n).collect::<Vec<_>>().join(", ")
+                "unknown command {unknown:?}{hint}\n{}(`{program} --help` for usage)",
+                wrapped("commands: ", &names, 10)
             ));
         }
     };
     if let Some(extra) = args.front() {
         let hint = if extra.starts_with("--") {
-            format!("; usage: {}", op_help(&program, &op).unwrap_or_default())
+            format!("\n{}", op_usage(&program, &op).unwrap_or_default())
         } else {
             " (quote arguments that contain spaces)".to_string()
         };
         return invalid(format!("unexpected argument {extra:?} for `{op}`{hint}"));
     }
+    if let Some(m) = command.clone().target_mut().and_then(|t| t.conflict()) {
+        return invalid(format!("{op}: {m}"));
+    }
     // `--wait-ms` on one command: that op's element wait, unless it names
-    // its own timeout.
+    // its own timeout. `wait` for a condition counts: accepted and ignored,
+    // the flag read as working when it didn't.
+    let waits = command.clone().target_mut().is_some() || matches!(&command, Command::Wait { ms: None, .. });
     let command = match config.wait_ms {
-        Some(ms) if command.clone().target_mut().is_some() && op_timeout_ms(&command).is_none() => {
+        Some(ms) if waits && op_timeout_ms(&command).is_none() => {
             let mut v = serde_json::to_value(&command).map_err(|e| ArgsError::Invalid(e.to_string()))?;
             v["timeout_ms"] = json!(ms);
             serde_json::from_value(v).unwrap_or(command)
@@ -2034,8 +2154,33 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
     let path = std::path::Path::new(dir).join("navigera");
     std::fs::create_dir_all(&path)?;
     let file = path.join("SKILL.md");
-    std::fs::write(&file, SKILL_MD)?;
+    write_own(&file, SKILL_MD.as_bytes())?;
     Ok(file.display().to_string())
+}
+
+/// Write `bytes` to `path` as a file of its own. A link already at `path`
+/// is taken out first, so the write can't land where a link someone else
+/// planted there points (a cloned project's, another user's in a shared
+/// directory); the file is then created new, so a link put back in between
+/// fails the write instead of being followed. A plain file is replaced.
+pub fn write_own(path: impl AsRef<std::path::Path>, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = path.as_ref();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            std::fs::remove_file(path)?;
+            options.create_new(true);
+        }
+        Ok(_) => {
+            options.truncate(true);
+        }
+        Err(_) => {
+            options.create_new(true);
+        }
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// A live browser plus the policy defaults the model gets for free.
@@ -2221,7 +2366,7 @@ impl Driver {
                         body.clone().into_bytes()
                     };
                     if let Some(path) = body_file {
-                        std::fs::write(path, &bytes).map_err(|e| anyhow::anyhow!("network --body-file {path}: {e}"))?;
+                        write_own(path, &bytes).map_err(|e| anyhow::anyhow!("network --body-file {path}: {e}"))?;
                         out["body_file"] = json!(path);
                         out["body_bytes"] = json!(bytes.len());
                     } else if base64 {
@@ -2257,7 +2402,7 @@ impl Driver {
             .collect();
         if let Some(path) = har {
             let har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
-            std::fs::write(path, serde_json::to_vec_pretty(&har)?)
+            write_own(path, &serde_json::to_vec_pretty(&har)?)
                 .map_err(|e| anyhow::anyhow!("network --har {path}: {e}"))?;
             return Ok(json!({ "har": path, "entries": picked.len() }));
         }
@@ -2489,7 +2634,7 @@ impl Driver {
         }
         let result = self.dispatch(command).map_err(|e| {
             let msg = format!("{e:#}");
-            if msg.contains("CDP connection closed") || msg.contains("CDP client is shut down") {
+            if msg.contains(crate::cdp::CONNECTION_CLOSED) {
                 let how = self.session.browser_exit().unwrap_or_else(|| "connection lost".into());
                 anyhow::anyhow!("{msg} — the browser is gone ({how}); run `quit`, then `start` again")
             } else {
@@ -2662,24 +2807,24 @@ impl Driver {
             Command::Click { target, timeout_ms, button, force } => {
                 let t = target.target("click")?;
                 let opts = crate::cdp::ClickOptions { button: button.clone().unwrap_or_default(), force: *force };
-                let point = s
-                    .click_target(&t, &opts, *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("click {}: {e:#}", t.label()))?;
+                let point = s.click_target(&t, &opts, *timeout_ms).map_err(|e| on_target("click", &t, e))?;
                 let mut state = self.state_json();
                 // Lightpanda lays nothing out, so a DOM-event click there is
                 // the normal case, not a sign of an overlay.
                 if point.get("synthetic").and_then(Value::as_bool) == Some(true) && !s.is_lightpanda() {
                     // The agent should know the click was not a real one.
                     state["synthetic_click"] = json!(if point.get("dropped").and_then(Value::as_bool) == Some(true) {
-                        "the browser did not deliver the mouse events (twice); dispatched DOM events instead"
+                        "the browser did not deliver the mouse events (twice); the click went to the element without the mouse"
                             .to_string()
                     } else if point.get("covered").and_then(Value::as_bool) == Some(true) {
                         format!(
-                            "element is covered by {}; dispatched DOM events instead (close the overlay if the click had no effect)",
+                            "element is covered by {}; the click went to the element without the mouse (close the cover if it had no effect)",
                             point.get("covered_by").and_then(Value::as_str).unwrap_or("another element")
                         )
+                    } else if *force {
+                        "--force: the click went to the element without the mouse".to_string()
                     } else {
-                        "element has no visible box; dispatched DOM events instead".to_string()
+                        "element has no visible box; the click went to the element without the mouse".to_string()
                     });
                 }
                 if let Some(trace) = point.get("effect_trace") {
@@ -2722,7 +2867,7 @@ impl Driver {
                     // down, up and wheel), scrolled into view if need be.
                     Some(t) => Some(
                         s.mouse_point(&t, point, *timeout_ms)
-                            .map_err(|e| anyhow::anyhow!("mouse {action} {}: {e:#}", t.label()))?,
+                            .map_err(|e| on_target(&format!("mouse {action}"), &t, e))?,
                     ),
                     None => {
                         // A click where the page can't be is a click on
@@ -2755,7 +2900,7 @@ impl Driver {
             }
             Command::Hover { target, timeout_ms } => {
                 let t = target.target("hover")?;
-                let point = s.hover(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("hover {}: {e:#}", t.label()))?;
+                let point = s.hover(&t, *timeout_ms).map_err(|e| on_target("hover", &t, e))?;
                 let mut state = self.state_json();
                 if point.get("synthetic").and_then(Value::as_bool) == Some(true) {
                     state["synthetic_hover"] = json!(
@@ -2767,17 +2912,15 @@ impl Driver {
             Command::Fill { target, value, timeout_ms, keys } => {
                 let t = target.target("fill")?;
                 if *keys {
-                    s.fill_keys(&t, value, *timeout_ms).map_err(|e| anyhow::anyhow!("fill {}: {e:#}", t.label()))?;
+                    s.fill_keys(&t, value, *timeout_ms).map_err(|e| on_target("fill", &t, e))?;
                 } else {
-                    s.fill_target(&t, value, *timeout_ms).map_err(|e| anyhow::anyhow!("fill {}: {e:#}", t.label()))?;
+                    s.fill_target(&t, value, *timeout_ms).map_err(|e| on_target("fill", &t, e))?;
                 }
                 Ok(self.state_json())
             }
             Command::Select { target, value, timeout_ms, add } => {
                 let t = target.target("select")?;
-                let chosen = s
-                    .select(&t, value, *add, *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("select {}: {e:#}", t.label()))?;
+                let chosen = s.select(&t, value, *add, *timeout_ms).map_err(|e| on_target("select", &t, e))?;
                 let mut state = self.state_json();
                 state["selected"] = chosen;
                 Ok(state)
@@ -2798,7 +2941,7 @@ impl Driver {
             }
             Command::Upload { target, files, timeout_ms } => {
                 let t = target.target("upload")?;
-                s.upload(&t, files, *timeout_ms).map_err(|e| anyhow::anyhow!("upload {}: {e:#}", t.label()))?;
+                s.upload(&t, files, *timeout_ms).map_err(|e| on_target("upload", &t, e))?;
                 Ok(json!({ "files": files.len() }))
             }
             Command::Wait { selector, text, url, gone, js, frame, ms, idle, timeout_ms, download } => {
@@ -2924,8 +3067,7 @@ impl Driver {
                 Ok(json!(text))
             }
             Command::Eval { expression, timeout_ms } => {
-                let value: Value =
-                    s.evaluate_with_timeout(expression, *timeout_ms).map_err(|e| anyhow::anyhow!("eval: {e:#}"))?;
+                let value = s.evaluate_user(expression, *timeout_ms).map_err(|e| anyhow::anyhow!("eval: {e:#}"))?;
                 Ok(value)
             }
             Command::Title {} => {
@@ -3064,7 +3206,7 @@ impl Driver {
                 let state = self.session.storage_state()?;
                 let (cookies, origins) =
                     (state["cookies"].as_array().map_or(0, Vec::len), state["origins"].as_array().map_or(0, Vec::len));
-                std::fs::write(path, serde_json::to_string_pretty(&state)? + "\n")
+                write_own(path, (serde_json::to_string_pretty(&state)? + "\n").as_bytes())
                     .map_err(|e| anyhow::anyhow!("state save {path}: {e}"))?;
                 Ok(json!({ "saved": path, "cookies": cookies, "origins": origins }))
             }
@@ -3086,7 +3228,7 @@ impl Driver {
                     )
                 });
                 let bytes = s.pdf(*landscape, *background).map_err(|e| anyhow::anyhow!("pdf: {e:#}"))?;
-                std::fs::write(&path, &bytes).map_err(|e| anyhow::anyhow!("pdf: writing {path}: {e:#}"))?;
+                write_own(&path, &bytes).map_err(|e| anyhow::anyhow!("pdf: writing {path}: {e:#}"))?;
                 let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
                 Ok(json!({ "path": path, "bytes": bytes.len() }))
             }
@@ -3237,13 +3379,11 @@ impl Driver {
                 }
                 let t = target.target("get")?;
                 s.get_prop(&t, what, name_of.as_deref(), *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("get {what} {}: {e:#}", t.label()))
+                    .map_err(|e| on_target(&format!("get {what}"), &t, e))
             }
             Command::Is { state, target, timeout_ms } => {
                 let t = target.target("is")?;
-                Ok(json!(s
-                    .is_state(&t, state, *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("is {state} {}: {e:#}", t.label()))?))
+                Ok(json!(s.is_state(&t, state, *timeout_ms).map_err(|e| on_target(&format!("is {state}"), &t, e))?))
             }
             Command::Drag { from, to, timeout_ms } => {
                 let (f, t) = (from.target("drag")?, to.target("drag")?);
@@ -3357,7 +3497,7 @@ impl Driver {
                 });
                 let bytes =
                     s.screenshot_png(full_page.unwrap_or(false)).map_err(|e| anyhow::anyhow!("screenshot: {e:#}"))?;
-                std::fs::write(&path, &bytes).map_err(|e| anyhow::anyhow!("screenshot: writing {path}: {e:#}"))?;
+                write_own(&path, &bytes).map_err(|e| anyhow::anyhow!("screenshot: writing {path}: {e:#}"))?;
                 // Report where it really went (a relative path is relative
                 // to this process, which may not be the caller's directory).
                 let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
@@ -3469,6 +3609,27 @@ impl Command {
         c
     }
 }
+
+/// What `set` sets, with the other names each goes by.
+const SETTINGS: &[&str] = &[
+    "viewport",
+    "device",
+    "media",
+    "geo",
+    "geolocation",
+    "location",
+    "offline",
+    "headers",
+    "header",
+    "ua",
+    "user-agent",
+    "useragent",
+    "locale",
+    "timezone",
+    "tz",
+    "credentials",
+    "auth",
+];
 
 /// What every op says once the session's only tab has closed.
 fn tab_closed_message(target: &str) -> String {
@@ -3702,12 +3863,41 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 1_000_000.0).round() / 1000.0
 }
 
+/// `click ref 12: …`, naming the op once: the finder's own `click: ` at the
+/// start of its error goes.
+fn on_target(op: &str, t: &Target, e: anyhow::Error) -> anyhow::Error {
+    let msg = format!("{e:#}");
+    let word = op.split(' ').next().unwrap_or(op);
+    let inner = msg.strip_prefix(word).and_then(|m| m.strip_prefix(": ")).unwrap_or(&msg);
+    anyhow::anyhow!("{op} {}: {inner}", t.label())
+}
+
+/// An error as a person reads it: without the ` (os error 2)` Rust adds to
+/// a system error, whose text already says what went wrong.
+pub fn plain_error(error: &str) -> String {
+    let mut out = String::with_capacity(error.len());
+    let mut rest = error;
+    while let Some(at) = rest.find(" (os error ") {
+        let tail = &rest[at + " (os error ".len()..];
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && tail[digits..].starts_with(')') {
+            out.push_str(&rest[..at]);
+            rest = &tail[digits + 1..];
+        } else {
+            out.push_str(&rest[..at + 1]);
+            rest = &rest[at + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn err_response(id: Value, error: String, started: Instant) -> Response {
     Response {
         id,
         ok: false,
         result: None,
-        error: Some(error),
+        error: Some(plain_error(&error)),
         dialogs: None,
         new_tabs: None,
         notes: None,
@@ -3847,7 +4037,7 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
         Local::InstallBrowser { product, channel, .. } => {
             let response = match crate::install::install(product, channel) {
                 Ok(result) => json!({ "id": null, "ok": true, "result": result }),
-                Err(e) => json!({ "id": null, "ok": false, "error": format!("install-browser: {e:#}") }),
+                Err(e) => json!({ "id": null, "ok": false, "error": plain_error(&format!("install-browser: {e:#}")) }),
             };
             if print_cli_response(output, &response, config) {
                 ExitCode::SUCCESS
@@ -3858,7 +4048,7 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
         Local::InstallSkill { dir } => {
             let response = match install_skill(dir) {
                 Ok(path) => json!({ "id": null, "ok": true, "result": { "installed": path } }),
-                Err(e) => json!({ "id": null, "ok": false, "error": format!("install-skill: {e:#}") }),
+                Err(e) => json!({ "id": null, "ok": false, "error": plain_error(&format!("install-skill: {e:#}")) }),
             };
             if print_cli_response(output, &response, config) {
                 ExitCode::SUCCESS
@@ -3871,6 +4061,49 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_error_reads_without_the_os_error_number() {
+        use super::plain_error;
+        assert_eq!(
+            plain_error("upload: /no/such.txt: No such file or directory (os error 2)"),
+            "upload: /no/such.txt: No such file or directory"
+        );
+        assert_eq!(plain_error("a (os error 13): b (os error 2)"), "a: b");
+        assert_eq!(plain_error("text (os error x) stays"), "text (os error x) stays");
+        assert_eq!(plain_error("no suffix"), "no suffix");
+    }
+
+    #[test]
+    fn a_mistyped_ref_word_still_parses_as_a_ref() {
+        use super::parse_ref;
+        for raw in ["12", "@12", "e12", "ref=12", "ref12", "[ref=12]"] {
+            assert_eq!(parse_ref(raw), Some(12), "{raw}");
+        }
+        assert_eq!(parse_ref("abc"), None);
+        assert_eq!(parse_ref("ref"), None);
+    }
+
+    /// A link planted where a file is to be written (a cloned project's
+    /// `.primavera`, a shared directory) is replaced, not followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_written_where_a_link_was_replaces_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere.txt");
+        std::fs::write(&target, "keep me").unwrap();
+        let path = dir.path().join("body.txt");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        super::write_own(&path, b"the body").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "the body");
+        // A plain file is replaced, and a new one created.
+        super::write_own(&path, b"again").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "again");
+        super::write_own(dir.path().join("new.txt"), b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("new.txt")).unwrap(), "new");
+    }
+
     #[test]
     fn numbers_come_back_as_the_page_wrote_them() {
         // serde_json's default float parsing is off by one ulp for about a
@@ -4063,6 +4296,71 @@ mod tests {
     }
 
     #[test]
+    fn every_command_has_help_with_examples_that_parse() {
+        // Words as a shell splits them: quotes kept together, quotes dropped.
+        fn words(line: &str) -> Vec<String> {
+            let (mut out, mut cur, mut quote, mut any) = (Vec::new(), String::new(), None, false);
+            for c in line.chars() {
+                match (quote, c) {
+                    (None, '"' | '\'') => (quote, any) = (Some(c), true),
+                    (Some(q), c) if c == q => quote = None,
+                    (None, c) if c.is_whitespace() => {
+                        if any {
+                            out.push(std::mem::take(&mut cur));
+                        }
+                        any = false;
+                    }
+                    (_, c) => (cur, any) = (cur + &c.to_string(), true),
+                }
+            }
+            if any {
+                out.push(cur);
+            }
+            out
+        }
+        for (op, ..) in OPS {
+            let help = op_help("navigera", op).expect("help");
+            for line in help.lines() {
+                assert!(line.chars().count() <= 80, "help {op}: {} columns: {line}", line.chars().count());
+            }
+            let (_, examples, _) = crate::help_examples::EXAMPLES
+                .iter()
+                .find(|(n, ..)| n == op)
+                .unwrap_or_else(|| panic!("no examples for {op}"));
+            assert!(!examples.is_empty(), "{op}");
+            for (cmd, _) in examples.iter().filter(|(c, _)| !c.contains('|')) {
+                let argv = words(cmd);
+                assert_eq!(argv.first().map(String::as_str), Some("navigera"), "{cmd}");
+                if let Err(ArgsError::Invalid(e)) = parse_args(argv.clone()) {
+                    panic!("help {op}: `{cmd}` doesn't parse: {e}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wait_for_a_condition_takes_wait_ms_as_its_timeout() {
+        let wait = |extra: &[&str]| {
+            let mut a = vec!["navigera", "-s", "x", "wait", "--text", "Saved"];
+            a.extend_from_slice(extra);
+            match parse_args(argv(&a)).expect("parses").command {
+                Some(Command::Wait { timeout_ms, ms, .. }) => (timeout_ms, ms),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(wait(&["--wait-ms", "300"]).0, Some(300.0));
+        // Its own timeout wins; a plain sleep has nothing to time out.
+        assert_eq!(wait(&["--wait-ms", "300", "--timeout-ms", "900"]).0, Some(900.0));
+        match parse_args(argv(&["navigera", "-s", "x", "wait", "--ms", "50", "--wait-ms", "300"]))
+            .expect("parses")
+            .command
+        {
+            Some(Command::Wait { timeout_ms, ms, .. }) => assert_eq!((timeout_ms, ms), (None, Some(50.0))),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn help_and_invalid_invocations_are_distinguished() {
         let help = parse_args(argv(&["navigera", "--help"])).expect_err("help");
         assert!(matches!(help, ArgsError::Help(_)), "explicit help is Help, not Invalid: {help:?}");
@@ -4088,6 +4386,25 @@ mod tests {
         match parse_args(argv(&["navigera", "evaluat"])).expect_err("typo") {
             ArgsError::Invalid(message) => assert!(message.contains("did you mean `eval`"), "{message}"),
             other => panic!("{other:?}"),
+        }
+        // A swap is one edit; a word that is nothing like a command gets no
+        // guess.
+        assert_eq!(suggest("goot"), Some("goto"));
+        assert_eq!(suggest("bogus"), None);
+        match parse_args(argv(&["navigera", "fill"])).expect_err("no value") {
+            ArgsError::Invalid(message) => {
+                assert_eq!(message.matches("usage:").count(), 1, "{message}");
+                assert!(message.lines().all(|l| l.chars().count() <= 80), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The help fits 80 columns, names each command once and lists the
+        // flags the skill uses.
+        let help = usage("navigera");
+        assert!(help.lines().all(|l| l.chars().count() <= 80 && !l.ends_with(' ')), "{help}");
+        assert_eq!(help.lines().filter(|l| l.starts_with("  check ")).count(), 1, "{help}");
+        for flag in ["-s, --session", "--wait-ms", "--version"] {
+            assert!(help.contains(flag), "{flag}: {help}");
         }
 
         let missing = parse_args(argv(&["navigera", "goto"])).expect_err("missing url");
@@ -4136,12 +4453,21 @@ mod tests {
 
     #[test]
     fn click_targets_are_exclusive() {
-        let both =
-            parse_args(argv(&["navigera", "click", "--ref", "1", "--selector", "a"])).expect("parses").command.unwrap();
-        let mut driver_free = match both {
-            Command::Click { target, .. } => target,
-            _ => unreachable!(),
+        // Told when the words are parsed, before any browser.
+        let invalid = |words: &[&str]| match parse_args(argv(words)) {
+            Err(ArgsError::Invalid(m)) => m,
+            other => panic!("{words:?} parsed: {:?}", other.map(|p| p.command)),
         };
+        let m = invalid(&["navigera", "click", "--ref", "1", "--selector", "a"]);
+        assert!(m.contains("click: give only one of"), "{m}");
+        let m = invalid(&["navigera", "click", "--text", "Add", "--nth", "1"]);
+        assert!(m.contains("--text takes the one best match"), "{m}");
+        let m = invalid(&["navigera", "hover", "--text", "Add", "--near", "Tea"]);
+        assert!(m.contains("--near narrows"), "{m}");
+        assert!(parse_args(argv(&["navigera", "click", ".row", "--nth", "2"])).is_ok());
+        assert!(parse_args(argv(&["navigera", "click", "--role", "button", "--nth", "-1"])).is_ok());
+        // And again when a command comes as JSON (a session client, MCP).
+        let mut driver_free = TargetArgs { node_ref: Some(1), selector: Some("a".into()), ..TargetArgs::default() };
         assert!(driver_free.target("click").is_err(), "selector and ref are mutually exclusive");
         driver_free = TargetArgs::default();
         assert!(driver_free.target("click").is_err(), "a target is required");
@@ -4149,6 +4475,20 @@ mod tests {
             p.command,
             Some(Command::Fill { ref target, .. }) if *target == TargetArgs::default()
         )));
+    }
+
+    #[test]
+    fn set_names_its_settings_when_given_another() {
+        match parse_args(argv(&["navigera", "set", "WHO", "=", "x"])) {
+            Err(ArgsError::Invalid(m)) => {
+                assert!(m.contains("set: unknown setting \"WHO\"; settings: viewport"), "{m}")
+            }
+            other => panic!("parsed: {:?}", other.map(|p| p.command)),
+        }
+        for ok in [["set", "viewport", "800x600"], ["set", "tz", "UTC"], ["emulate", "device", "iPhone"]] {
+            let words: Vec<&str> = std::iter::once("navigera").chain(ok).collect();
+            assert!(parse_args(argv(&words)).is_ok(), "{ok:?}");
+        }
     }
 
     #[test]

@@ -107,6 +107,21 @@ pub struct Options {
     pub root_backend_id: Option<u64>,
     /// Page origin (`http://host:port`) for shortening same-origin link urls.
     pub origin: String,
+    /// What the page makes clickable beyond the tree's actionable roles.
+    pub clicks: Clickables,
+}
+
+/// Elements a user could click though the tree gives them no actionable
+/// role (a `<div>` row with a click handler, an icon `<span>`), by backend
+/// node id; and `#id` / `.class` per element, printed for actionable nodes
+/// with no name or text, so `[ref=7]` and `[ref=8]` aren't two blanks.
+#[derive(Clone, Debug, Default)]
+pub struct Clickables {
+    pub nodes: std::collections::HashSet<u64>,
+    pub hints: HashMap<u64, String>,
+    /// The page's own text of a marked element, for one the tree shows
+    /// without any (a label Chrome leaves out with its hidden control).
+    pub texts: HashMap<u64, String>,
 }
 
 /// One frame's AX nodes, spliced under the AX node of its owner element
@@ -172,24 +187,115 @@ fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
+/// Batch lazy fetch: given AX node ids, return the child node objects of
+/// those nodes (one `Accessibility.getChildAXNodes` per id, sent together),
+/// and whether any call failed. A failed call is not "no children": the
+/// caller falls back to the full tree rather than print a partial one.
+pub type AxFetch = Box<dyn FnMut(&[String]) -> (Vec<Value>, bool)>;
+
+/// How many siblings' children one lazy round trip prefetches: the walk
+/// visits siblings in order, so a window covers the next lines without
+/// fetching the whole list (a 32000-item list is one call for its items,
+/// then windows of their children).
+const LAZY_WINDOW: usize = 128;
+
+fn ax_id(node: &Value) -> &str {
+    node.get("nodeId").and_then(Value::as_str).unwrap_or("")
+}
+
+fn child_ids(node: &Value) -> Vec<String> {
+    node.get("childIds")
+        .and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(|id| id.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+fn backend_id(node: &Value) -> Option<u64> {
+    node.get("backendDOMNodeId").and_then(Value::as_u64)
+}
+
 struct Tree<'a> {
-    by_id: HashMap<&'a str, &'a Value>,
-    frame_root_ids: std::collections::HashSet<&'a str>,
-    frames: HashMap<u64, Vec<&'a Value>>,
+    /// Node objects by AX id, in first-seen order. Nodes are addressed by
+    /// index (not reference) so fetching more children mid-walk cannot
+    /// invalidate a node the walk already holds.
+    nodes: Vec<Value>,
+    by_id: HashMap<String, usize>,
+    by_backend: HashMap<u64, usize>,
+    frame_roots: HashMap<u64, Vec<usize>>,
+    frame_root_ids: std::collections::HashSet<usize>,
     opts: &'a Options,
     lines: Vec<String>,
+    fetch: Option<AxFetch>,
+    /// Nodes whose children the lazy fetch already asked for (a node the
+    /// browser answered without is not asked again).
+    fetched: std::collections::HashSet<usize>,
+    fetch_failed: bool,
+    /// The output limit was reached mid-walk: no more lines are printed.
+    stopped: bool,
+    /// Line indices whose node's children were cut off by the limit (the
+    /// trailing ':' the full walk would have added is fixed up at the end).
+    boundary: Vec<(usize, usize)>,
 }
 
 impl<'a> Tree<'a> {
-    fn children(&self, node: &'a Value) -> Vec<&'a Value> {
-        let mut out: Vec<&'a Value> = node
-            .get("childIds")
-            .and_then(Value::as_array)
-            .map(|ids| ids.iter().filter_map(|id| id.as_str().and_then(|id| self.by_id.get(id).copied())).collect())
-            .unwrap_or_default();
+    fn insert(&mut self, node: Value) -> usize {
+        let id = ax_id(&node).to_string();
+        if let Some(&i) = self.by_id.get(&id) {
+            return i;
+        }
+        let i = self.nodes.len();
+        if let Some(b) = backend_id(&node) {
+            self.by_backend.entry(b).or_insert(i);
+        }
+        self.by_id.insert(id, i);
+        self.nodes.push(node);
+        i
+    }
+
+    fn children(&mut self, idx: usize) -> Vec<usize> {
+        let ids = child_ids(&self.nodes[idx]);
+        if self.fetch.is_some() && ids.iter().any(|id| !self.by_id.contains_key(id)) {
+            // This node plus the siblings the walk visits next, in one
+            // round trip; siblings already fetched, or not yet known, wait.
+            let mut todo: Vec<String> = Vec::new();
+            if !self.fetched.contains(&idx) {
+                todo.push(ax_id(&self.nodes[idx]).to_string());
+            }
+            if let Some(parent) = self.nodes[idx].get("parentId").and_then(Value::as_str).map(str::to_string) {
+                if let Some(&p) = self.by_id.get(&parent) {
+                    let sibs = child_ids(&self.nodes[p]);
+                    if let Some(pos) = sibs.iter().position(|s| s == ax_id(&self.nodes[idx])) {
+                        for s in sibs.iter().skip(pos + 1).take(LAZY_WINDOW - 1) {
+                            if let Some(&si) = self.by_id.get(s) {
+                                if !self.fetched.contains(&si) {
+                                    todo.push(s.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !todo.is_empty() {
+                let done: Vec<usize> = todo.iter().filter_map(|id| self.by_id.get(id).copied()).collect();
+                if let Some(mut fetch) = self.fetch.take() {
+                    let (got, failed) = fetch(&todo);
+                    self.fetch = Some(fetch);
+                    if failed {
+                        self.fetch_failed = true;
+                    }
+                    for i in done {
+                        self.fetched.insert(i);
+                    }
+                    for n in got {
+                        self.insert(n);
+                    }
+                }
+            }
+        }
+        let mut out: Vec<usize> = ids.iter().filter_map(|id| self.by_id.get(id).copied()).collect();
         // An <iframe>'s document lives in another frame's tree.
-        if let Some(backend) = node.get("backendDOMNodeId").and_then(Value::as_u64) {
-            if let Some(roots) = self.frames.get(&backend) {
+        if let Some(backend) = backend_id(&self.nodes[idx]) {
+            if let Some(roots) = self.frame_roots.get(&backend) {
                 out.extend(roots.iter().copied());
             }
         }
@@ -200,30 +306,40 @@ impl<'a> Tree<'a> {
         field(node, "role").as_str().unwrap_or("")
     }
 
+    fn push_line(&mut self, line: String) {
+        self.lines.push(line);
+        // One line past the limit: the walk stops, and the truncation step
+        // still sees there was more (without it, a walk that ends exactly
+        // at the limit could not tell "done" from "cut off").
+        if self.opts.limit > 0 && self.lines.len() > self.opts.limit {
+            self.stopped = true;
+        }
+    }
+
     /// The node's name as the agent should read it. Some engines (Lightpanda)
     /// name a table, list or `<b>` with all of its text: that is content,
     /// not a label, and as a name it would hide the very text it repeats.
-    fn name(&self, node: &Value) -> String {
-        let name = text_of(node, "name");
-        let role = Self::role(node);
-        if name.is_empty() || NAME_FROM_CONTENT.contains(&role) || INTERACTIVE.contains(&role) {
+    fn name(&mut self, idx: usize) -> String {
+        let name = text_of(&self.nodes[idx], "name");
+        let role = Self::role(&self.nodes[idx]).to_string();
+        if name.is_empty() || NAME_FROM_CONTENT.contains(&role.as_str()) || INTERACTIVE.contains(&role.as_str()) {
             return name;
         }
         let mut text = Vec::new();
-        self.descendant_text(node, &mut text, 0);
+        self.descendant_text(idx, &mut text, 0);
         if !text.is_empty() && squash(&text.join(" ")) == name {
             return String::new();
         }
         name
     }
 
-    fn descendant_text(&self, node: &'a Value, out: &mut Vec<String>, depth: usize) {
+    fn descendant_text(&mut self, idx: usize, out: &mut Vec<String>, depth: usize) {
         if depth > 64 {
             return;
         }
-        for child in self.children(node) {
-            if Self::role(child) == "StaticText" {
-                let t = text_of(child, "name");
+        for child in self.children(idx) {
+            if Self::role(&self.nodes[child]) == "StaticText" {
+                let t = text_of(&self.nodes[child], "name");
                 if !t.is_empty() {
                     out.push(t);
                 }
@@ -233,26 +349,63 @@ impl<'a> Tree<'a> {
         }
     }
 
-    fn is_transparent(&self, node: &Value) -> bool {
-        if node.get("ignored").and_then(Value::as_bool).unwrap_or(false) {
+    /// A wrapper the page made clickable, that holds nothing else to act on
+    /// (a listener on a container is the page listening for its children),
+    /// with something to tell it by: a name, text or its `#id` / `.class`.
+    /// A run of blank `clickable` lines (a hidden menu's tiles) is nothing
+    /// an agent can choose between.
+    fn is_clickable(&mut self, idx: usize) -> bool {
+        let Some(id) = backend_id(&self.nodes[idx]) else { return false };
+        if !self.opts.clicks.nodes.contains(&id)
+            || INTERACTIVE.contains(&Self::role(&self.nodes[idx]))
+            || self.holds_actionable(idx, 0)
+        {
+            return false;
+        }
+        if !text_of(&self.nodes[idx], "name").is_empty()
+            || self.opts.clicks.hints.contains_key(&id)
+            || self.opts.clicks.texts.contains_key(&id)
+        {
             return true;
         }
-        let role = Self::role(node);
-        if role == "RootWebArea" && !self.is_frame_root(node) {
-            return true;
-        }
-        WRAPPERS.contains(&role) && self.name(node).is_empty() && !truthy(prop(node, "focusable"))
+        let mut text = Vec::new();
+        self.descendant_text(idx, &mut text, 0);
+        text.iter().any(|t| !t.trim().is_empty())
     }
 
-    fn is_frame_root(&self, node: &Value) -> bool {
+    fn holds_actionable(&mut self, idx: usize, depth: usize) -> bool {
+        depth < 64
+            && self.children(idx).into_iter().any(|child| {
+                let role = Self::role(&self.nodes[child]).to_string();
+                INTERACTIVE.contains(&role.as_str())
+                    || backend_id(&self.nodes[child]).is_some_and(|id| self.opts.clicks.nodes.contains(&id))
+                    || self.holds_actionable(child, depth + 1)
+            })
+    }
+
+    fn is_transparent(&mut self, idx: usize) -> bool {
+        if self.is_clickable(idx) {
+            return false;
+        }
+        if self.nodes[idx].get("ignored").and_then(Value::as_bool).unwrap_or(false) {
+            return true;
+        }
+        let role = Self::role(&self.nodes[idx]).to_string();
+        if role == "RootWebArea" && !self.is_frame_root(idx) {
+            return true;
+        }
+        WRAPPERS.contains(&role.as_str()) && self.name(idx).is_empty() && !truthy(prop(&self.nodes[idx], "focusable"))
+    }
+
+    fn is_frame_root(&self, idx: usize) -> bool {
         // Child-frame documents are rendered as `- document "Title":`.
-        node.get("nodeId").and_then(Value::as_str).is_some_and(|id| self.frame_root_ids.contains(id))
+        self.frame_root_ids.contains(&idx)
     }
 
     /// Children with transparent wrappers expanded in place.
-    fn effective_children(&self, node: &'a Value, out: &mut Vec<&'a Value>) {
-        for child in self.children(node) {
-            if SILENT.contains(&Self::role(child)) {
+    fn effective_children(&mut self, idx: usize, out: &mut Vec<usize>) {
+        for child in self.children(idx) {
+            if SILENT.contains(&Self::role(&self.nodes[child])) {
                 continue;
             }
             if self.is_transparent(child) {
@@ -263,8 +416,11 @@ impl<'a> Tree<'a> {
         }
     }
 
-    fn wants_ref(&self, node: &Value, role: &str) -> bool {
-        self.opts.all_refs || INTERACTIVE.contains(&role) || truthy(prop(node, "focusable"))
+    fn wants_ref(&mut self, idx: usize, role: &str) -> bool {
+        self.opts.all_refs
+            || INTERACTIVE.contains(&role)
+            || truthy(prop(&self.nodes[idx], "focusable"))
+            || self.is_clickable(idx)
     }
 
     fn states(node: &Value, role: &str) -> Vec<String> {
@@ -316,25 +472,31 @@ impl<'a> Tree<'a> {
         url.to_string()
     }
 
-    fn walk(&mut self, node: &'a Value, depth: usize, covered: &str) {
-        let role = Self::role(node).to_string();
+    fn walk(&mut self, idx: usize, depth: usize, covered: &str) {
+        if self.stopped {
+            return;
+        }
+        let role = Self::role(&self.nodes[idx]).to_string();
         if SILENT.contains(&role.as_str()) {
             return;
         }
-        if self.is_transparent(node) {
-            for child in self.children(node) {
+        if self.is_transparent(idx) {
+            for child in self.children(idx) {
+                if self.stopped {
+                    break;
+                }
                 self.walk(child, depth, covered);
             }
             return;
         }
         let indent = "  ".repeat(depth);
-        let name = self.name(node);
+        let name = self.name(idx);
 
         if role == "StaticText" {
             if name.is_empty() || (!covered.is_empty() && covered.contains(&name)) {
                 return;
             }
-            self.lines.push(format!("{indent}- text: {}", clip(&name, 300)));
+            self.push_line(format!("{indent}- text: {}", clip(&name, 300)));
             return;
         }
 
@@ -343,19 +505,51 @@ impl<'a> Tree<'a> {
         // ("Currency USD EUR GBP …"): those words come off the name.
         let mut options = Vec::new();
         if role == "combobox" || role == "listbox" {
-            collect_options(self, node, &mut options);
+            collect_options(self, idx, &mut options);
         }
         let name = without_options(name, &options);
 
-        let shown_role = if self.is_frame_root(node) { "document" } else { role.as_str() };
+        let clickable = self.is_clickable(idx);
+        let shown_role = if self.is_frame_root(idx) {
+            "document"
+        } else if clickable
+            && (WRAPPERS.contains(&role.as_str()) || self.nodes[idx].get("ignored") == Some(&Value::Bool(true)))
+        {
+            "clickable"
+        } else {
+            role.as_str()
+        };
         let mut line = format!("{indent}- {shown_role}");
         if !name.is_empty() {
             line.push(' ');
             line.push_str(&quote(&clip(&name, 150)));
+        } else if let Some(text) = backend_id(&self.nodes[idx])
+            .filter(|_| clickable)
+            .and_then(|id| self.opts.clicks.texts.get(&id))
+            .filter(|_| {
+                let mut seen = Vec::new();
+                self.descendant_text(idx, &mut seen, 0);
+                seen.iter().all(|t| t.trim().is_empty())
+            })
+        {
+            line.push(' ');
+            line.push_str(&quote(&clip(text, 150)));
         }
-        let mut tags = Self::states(node, &role);
-        if let Some(id) = node.get("backendDOMNodeId").and_then(Value::as_u64) {
-            if self.wants_ref(node, &role) {
+        let mut tags = Self::states(&self.nodes[idx], &role);
+        if let Some(id) = backend_id(&self.nodes[idx]) {
+            if self.wants_ref(idx, &role) {
+                // Nothing to read it by (an icon button, an empty `<span>`
+                // with a handler): say which element it is.
+                if name.is_empty() && text_of(&self.nodes[idx], "value").is_empty() {
+                    let mut text = Vec::new();
+                    self.descendant_text(idx, &mut text, 0);
+                    if let (true, Some(hint)) =
+                        (text.iter().all(|t| t.trim().is_empty()), self.opts.clicks.hints.get(&id))
+                    {
+                        line.push(' ');
+                        line.push_str(hint);
+                    }
+                }
                 tags.push(format!("ref={id}"));
             }
         }
@@ -364,12 +558,12 @@ impl<'a> Tree<'a> {
         }
         // A checkbox's or radio's state is [checked]; its value attribute
         // ("on" unless set, which Lightpanda reports) reads like a state.
-        let value = if CHECKABLE.contains(&role.as_str()) { String::new() } else { text_of(node, "value") };
+        let value = if CHECKABLE.contains(&role.as_str()) { String::new() } else { text_of(&self.nodes[idx], "value") };
         if !value.is_empty() && value != name {
             line.push_str(&format!(" value={}", quote(&clip(&value, 150))));
         }
         if role == "link" {
-            if let Some(Value::String(url)) = prop(node, "url") {
+            if let Some(Value::String(url)) = prop(&self.nodes[idx], "url") {
                 if !url.is_empty() && !url.starts_with("javascript:") {
                     line.push_str(&format!(" url={}", self.short_url(url)));
                 }
@@ -377,7 +571,7 @@ impl<'a> Tree<'a> {
         }
 
         let mut kids = Vec::new();
-        self.effective_children(node, &mut kids);
+        self.effective_children(idx, &mut kids);
 
         // <select>: list the options on the combobox line, not as a subtree.
         if (role == "combobox" || role == "listbox") && !options.is_empty() {
@@ -386,37 +580,37 @@ impl<'a> Tree<'a> {
             if options.len() > 25 {
                 line.push_str(&format!(", …(+{})", options.len() - 25));
             }
-            self.lines.push(line);
+            self.push_line(line);
             return;
         }
 
         // Unnamed node holding only text: inline it (`- paragraph: …`).
         let child_cover = if name.is_empty() { covered.to_string() } else { name.clone() };
-        if !kids.is_empty() && kids.iter().all(|k| Self::role(k) == "StaticText") {
+        if !kids.is_empty() && kids.iter().all(|k| Self::role(&self.nodes[*k]) == "StaticText") {
             let text: Vec<String> = kids
                 .iter()
-                .map(|k| text_of(k, "name"))
+                .map(|k| text_of(&self.nodes[*k], "name"))
                 .filter(|t| !t.is_empty() && !child_cover.contains(t.as_str()) && *t != value)
                 .collect();
             if !text.is_empty() {
                 line.push_str(&format!(": {}", clip(&text.join(" "), 300)));
             }
-            self.lines.push(line);
+            self.push_line(line);
             return;
         }
         // A named wrapper around one same-named actionable child (a heading
         // holding its link): one line, name printed once.
         if kids.len() == 1 && !name.is_empty() && !INTERACTIVE.contains(&role.as_str()) {
             let only = kids[0];
-            let only_role = Self::role(only).to_string();
-            if text_of(only, "name") == name && INTERACTIVE.contains(&only_role.as_str()) {
+            let only_role = Self::role(&self.nodes[only]).to_string();
+            if text_of(&self.nodes[only], "name") == name && INTERACTIVE.contains(&only_role.as_str()) {
                 let mut grand = Vec::new();
                 self.effective_children(only, &mut grand);
-                let leafish = grand.iter().all(|k| Self::role(k) == "StaticText");
+                let leafish = grand.iter().all(|k| Self::role(&self.nodes[*k]) == "StaticText");
                 if leafish {
                     let inner = self.describe(only, &only_role);
                     line.push_str(&format!(": {inner}"));
-                    self.lines.push(line);
+                    self.push_line(line);
                     return;
                 }
             }
@@ -424,26 +618,29 @@ impl<'a> Tree<'a> {
         // An unnamed table cell or list item around one control: one line
         // (Lightpanda leaves cells unnamed, so each checkbox in a table
         // took two lines where Chrome's tree takes one).
-        let controls: Vec<&Value> = kids.iter().copied().filter(|k| Self::role(k) != "StaticText").collect();
+        let controls: Vec<usize> =
+            kids.iter().copied().filter(|k| Self::role(&self.nodes[*k]) != "StaticText").collect();
         let echoes_only = controls.len() == 1 && {
             let control_name = self.name(controls[0]);
             kids.iter()
-                .filter(|k| Self::role(k) == "StaticText")
-                .all(|k| text_of(k, "name").trim().trim_end_matches(':') == control_name.trim())
+                .filter(|k| Self::role(&self.nodes[**k]) == "StaticText")
+                .all(|k| text_of(&self.nodes[*k], "name").trim().trim_end_matches(':') == control_name.trim())
         };
         if echoes_only && name.is_empty() && matches!(role.as_str(), "cell" | "gridcell" | "listitem") {
             let only = controls[0];
-            let only_role = Self::role(only).to_string();
+            let only_role = Self::role(&self.nodes[only]).to_string();
             let mut grand = Vec::new();
             self.effective_children(only, &mut grand);
-            if INTERACTIVE.contains(&only_role.as_str()) && grand.iter().all(|k| Self::role(k) == "StaticText") {
+            if INTERACTIVE.contains(&only_role.as_str())
+                && grand.iter().all(|k| Self::role(&self.nodes[*k]) == "StaticText")
+            {
                 let only_name = self.name(only);
                 let mut inner = self.describe(only, &only_role);
                 if !only_name.is_empty() {
                     inner.insert_str(only_role.len(), &format!(" {}", quote(&clip(&only_name, 150))));
                 }
                 line.push_str(&format!(": {inner}"));
-                self.lines.push(line);
+                self.push_line(line);
                 return;
             }
         }
@@ -458,7 +655,13 @@ impl<'a> Tree<'a> {
             return; // an empty live region / paragraph says nothing
         }
         let at = self.lines.len();
-        self.lines.push(line);
+        self.push_line(line);
+        if self.stopped {
+            // The limit cut inside this node's children: its line stays,
+            // and the trailing ':' is fixed up once the walk unwinds.
+            self.boundary.push((at, idx));
+            return;
+        }
         self.walk_kids(kids, depth + 1, &child_cover);
         if self.lines.len() > at + 1 {
             self.lines[at].push(':');
@@ -469,23 +672,27 @@ impl<'a> Tree<'a> {
 
     /// Walk sibling nodes, dropping label text that sits next to the control
     /// it names (`<label>Email <input>`): it is already the control's name.
-    fn walk_kids(&mut self, kids: Vec<&'a Value>, depth: usize, cover: &str) {
+    fn walk_kids(&mut self, kids: Vec<usize>, depth: usize, cover: &str) {
         let bare = |t: &str| t.trim_end_matches([':', '*', ' ']).to_string();
-        let sibling_names: Vec<String> = kids
+        let non_text: Vec<usize> =
+            kids.iter().copied().filter(|k| Self::role(&self.nodes[*k]) != "StaticText").collect();
+        let sibling_names: Vec<String> = non_text
             .iter()
-            .filter(|k| Self::role(k) != "StaticText")
             .map(|k| {
                 let mut options = Vec::new();
-                if matches!(Self::role(k), "combobox" | "listbox") {
-                    collect_options(self, k, &mut options);
+                if matches!(Self::role(&self.nodes[*k]), "combobox" | "listbox") {
+                    collect_options(self, *k, &mut options);
                 }
-                bare(&without_options(text_of(k, "name"), &options))
+                bare(&without_options(text_of(&self.nodes[*k], "name"), &options))
             })
             .filter(|n| !n.is_empty())
             .collect();
         for child in kids {
-            if Self::role(child) == "StaticText" {
-                let t = bare(&text_of(child, "name"));
+            if self.stopped {
+                break;
+            }
+            if Self::role(&self.nodes[child]) == "StaticText" {
+                let t = bare(&text_of(&self.nodes[child], "name"));
                 if !t.is_empty() && sibling_names.contains(&t) {
                     continue;
                 }
@@ -495,11 +702,11 @@ impl<'a> Tree<'a> {
     }
 
     /// `role [tags] url=…` for a child inlined after its same-named parent.
-    fn describe(&self, node: &Value, role: &str) -> String {
+    fn describe(&mut self, idx: usize, role: &str) -> String {
         let mut line = role.to_string();
-        let mut tags = Self::states(node, role);
-        if let Some(id) = node.get("backendDOMNodeId").and_then(Value::as_u64) {
-            if self.wants_ref(node, role) {
+        let mut tags = Self::states(&self.nodes[idx], role);
+        if let Some(id) = backend_id(&self.nodes[idx]) {
+            if self.wants_ref(idx, role) {
                 tags.push(format!("ref={id}"));
             }
         }
@@ -507,7 +714,7 @@ impl<'a> Tree<'a> {
             line.push_str(&format!(" [{}]", tags.join(", ")));
         }
         if role == "link" {
-            if let Some(Value::String(url)) = prop(node, "url") {
+            if let Some(Value::String(url)) = prop(&self.nodes[idx], "url") {
                 if !url.is_empty() && !url.starts_with("javascript:") {
                     line.push_str(&format!(" url={}", self.short_url(url)));
                 }
@@ -532,11 +739,11 @@ fn without_options(name: String, options: &[String]) -> String {
 /// Roles whose state is checked or not, shown as `[checked]`.
 const CHECKABLE: &[&str] = &["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"];
 
-fn collect_options(tree: &Tree<'_>, node: &Value, out: &mut Vec<String>) {
-    for child in tree.children(node) {
-        if Tree::role(child) == "option" {
-            let mut label = text_of(child, "name");
-            if truthy(prop(child, "selected")) {
+fn collect_options(tree: &mut Tree<'_>, idx: usize, out: &mut Vec<String>) {
+    for child in tree.children(idx) {
+        if Tree::role(&tree.nodes[child]) == "option" {
+            let mut label = text_of(&tree.nodes[child], "name");
+            if truthy(prop(&tree.nodes[child], "selected")) {
                 label.push_str(" (selected)");
             }
             out.push(label);
@@ -548,32 +755,59 @@ fn collect_options(tree: &Tree<'_>, node: &Value, out: &mut Vec<String>) {
 
 /// Render the main-frame `nodes` (plus child `frames`) as the text tree.
 pub fn render(header: &str, nodes: &[Value], frames: &[Frame], opts: &Options) -> Rendered {
-    let mut by_id: HashMap<&str, &Value> = HashMap::new();
+    render_inner(header, nodes, frames, opts, None).0
+}
+
+/// Render from a lazily fetched seed: `seed` holds the root (or, for a
+/// scope, the partial tree around it) and `fetch` supplies children on
+/// demand, so the walk stops at the output limit instead of reading the
+/// whole page. Returns whether any fetch failed: on failure the caller
+/// falls back to [`render`] rather than print a partial tree. Pages under
+/// the limit render byte-identical to [`render`]; over the limit, the
+/// boundary line may keep a container line whose children fall past the
+/// cut (the full walk would have decided it from those children).
+pub fn render_lazy(header: &str, seed: &[Value], frames: &[Frame], opts: &Options, fetch: AxFetch) -> (Rendered, bool) {
+    render_inner(header, seed, frames, opts, Some(fetch))
+}
+
+fn render_inner(
+    header: &str,
+    nodes: &[Value],
+    frames: &[Frame],
+    opts: &Options,
+    fetch: Option<AxFetch>,
+) -> (Rendered, bool) {
+    let mut tree = Tree {
+        nodes: Vec::new(),
+        by_id: HashMap::new(),
+        by_backend: HashMap::new(),
+        frame_roots: HashMap::new(),
+        frame_root_ids: std::collections::HashSet::new(),
+        opts,
+        lines: Vec::new(),
+        fetch,
+        fetched: std::collections::HashSet::new(),
+        fetch_failed: false,
+        stopped: false,
+        boundary: Vec::new(),
+    };
     for n in nodes.iter().chain(frames.iter().flat_map(|f| f.nodes.iter())) {
-        if let Some(id) = n.get("nodeId").and_then(Value::as_str) {
-            by_id.insert(id, n);
-        }
+        tree.insert(n.clone());
     }
-    let mut frame_roots: HashMap<u64, Vec<&Value>> = HashMap::new();
-    let mut frame_root_ids = std::collections::HashSet::new();
     for f in frames {
         if let Some(root) = f.nodes.iter().find(|n| n.get("parentId").is_none()) {
-            frame_roots.entry(f.owner_backend_id).or_default().push(root);
-            if let Some(id) = root.get("nodeId").and_then(Value::as_str) {
-                frame_root_ids.insert(id);
+            if let Some(&root_idx) = root.get("nodeId").and_then(Value::as_str).and_then(|id| tree.by_id.get(id)) {
+                tree.frame_roots.entry(f.owner_backend_id).or_default().push(root_idx);
+                tree.frame_root_ids.insert(root_idx);
             }
         }
     }
-    let mut tree = Tree { by_id, frame_root_ids, frames: frame_roots, opts, lines: Vec::new() };
     if !header.is_empty() {
         tree.lines.push(header.to_string());
     }
-    let start: Option<&Value> = match opts.root_backend_id {
-        Some(backend) => nodes
-            .iter()
-            .chain(frames.iter().flat_map(|f| f.nodes.iter()))
-            .find(|n| n.get("backendDOMNodeId").and_then(Value::as_u64) == Some(backend)),
-        None => nodes.iter().find(|n| n.get("parentId").is_none()),
+    let start: Option<usize> = match opts.root_backend_id {
+        Some(backend) => tree.by_backend.get(&backend).copied(),
+        None => tree.nodes.iter().position(|n| n.get("parentId").is_none()),
     };
     if let Some(root) = start {
         if tree.is_transparent(root) {
@@ -584,15 +818,32 @@ pub fn render(header: &str, nodes: &[Value], frames: &[Frame], opts: &Options) -
             tree.walk(root, 0, "");
         }
     }
+    // The limit cut inside a node's children: its line stays, and it gets
+    // the trailing ':' if it has children to print (in the full walk its
+    // children decide that; here only the immediate children are known,
+    // which is the same answer whenever any of them prints).
+    let boundary = std::mem::take(&mut tree.boundary);
+    for (at, idx) in boundary {
+        let mut kids = Vec::new();
+        tree.effective_children(idx, &mut kids);
+        if !kids.is_empty() && !tree.lines[at].ends_with(':') {
+            tree.lines[at].push(':');
+        }
+    }
+    let fetch_failed = tree.fetch_failed;
+    let lazy = tree.fetch.is_some();
     let total = tree.lines.len();
     let mut lines = tree.lines;
     let mut truncated = 0;
     if opts.limit > 0 && total > opts.limit {
         truncated = total - opts.limit;
         lines.truncate(opts.limit);
-        lines.push(format!("… {truncated} more lines (scope with `ax --selector <css>`, or raise `--limit`)"));
+        // A lazy walk stopped a line past the limit, so how many lines the
+        // whole tree has is not known: no count, rather than a wrong one.
+        let more = if lazy { "more lines".to_string() } else { format!("{truncated} more lines") };
+        lines.push(format!("… {more} (scope with `ax --selector <css>`, or raise `--limit`)"));
     }
-    Rendered { lines: lines.len(), text: lines.join("\n"), truncated }
+    (Rendered { lines: lines.len(), text: lines.join("\n"), truncated }, fetch_failed)
 }
 
 /// Lines for what [`crate::cdp::page`]'s `SHADOW_AX` found inside shadow
@@ -665,6 +916,35 @@ mod tests {
         ];
         let out = render("page \"Shop\"", &nodes, &[], &Options::default());
         assert_eq!(out.text, "page \"Shop\"\n- heading \"Widget\"\n- button \"Add to cart\" [ref=6]");
+    }
+
+    #[test]
+    fn what_the_page_made_clickable_gets_a_ref_and_a_container_does_not() {
+        let nodes = vec![
+            node("1", None, "RootWebArea", "Inbox", &["2"], 1),
+            // #app listens for its children's clicks: not a control itself.
+            node("2", Some("1"), "generic", "", &["3", "6", "7"], 2),
+            node("3", Some("2"), "generic", "", &["4", "5"], 3),
+            node("4", Some("3"), "StaticText", "Gilli", &[], 4),
+            node("5", Some("3"), "StaticText", "Quam.", &[], 5),
+            node("6", Some("2"), "generic", "", &[], 6),
+            node("7", Some("2"), "button", "", &[], 7),
+        ];
+        let clicks = Clickables {
+            nodes: [2, 3, 6].into_iter().collect(),
+            hints: [(2, "#app".to_string()), (6, "#send-forward".to_string()), (7, "#button-1".to_string())]
+                .into_iter()
+                .collect(),
+            ..Clickables::default()
+        };
+        let out = render("page \"Inbox\"", &nodes, &[], &Options { clicks, ..Options::default() });
+        assert_eq!(
+            out.text,
+            "page \"Inbox\"\n- clickable [ref=3]: Gilli Quam.\n- clickable #send-forward [ref=6]\n- button #button-1 [ref=7]"
+        );
+        // Without them, the row is bare text and the icon is not there.
+        let out = render("", &nodes, &[], &Options::default());
+        assert_eq!(out.text, "- text: Gilli\n- text: Quam.\n- button [ref=7]");
     }
 
     #[test]
@@ -760,5 +1040,96 @@ mod tests {
         assert!(text.contains("  - heading \"Prefs\" [level=3]\n"), "{text}");
         assert!(!text.contains("[ref="), "{text}");
         assert_eq!(render_shadow(&[]), "");
+    }
+
+    /// A lazy fetch over a map from parent id to child objects.
+    fn lazy_fetch(all: Vec<Value>) -> (AxFetch, std::rc::Rc<std::cell::Cell<usize>>) {
+        let by_parent: HashMap<String, Vec<Value>> = {
+            let mut m: HashMap<String, Vec<Value>> = HashMap::new();
+            for n in &all {
+                if let Some(p) = n.get("parentId").and_then(Value::as_str) {
+                    m.entry(p.to_string()).or_default().push(n.clone());
+                }
+            }
+            m
+        };
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let calls_in = calls.clone();
+        let fetch: AxFetch = Box::new(move |parents: &[String]| {
+            calls_in.set(calls_in.get() + 1);
+            let mut out = Vec::new();
+            for p in parents {
+                if let Some(kids) = by_parent.get(p) {
+                    out.extend(kids.iter().cloned());
+                }
+            }
+            (out, false)
+        });
+        (fetch, calls)
+    }
+
+    #[test]
+    fn lazy_render_matches_full_render_under_the_limit() {
+        let nodes = vec![
+            node("1", None, "RootWebArea", "Shop", &["2"], 1),
+            node("2", Some("1"), "generic", "", &["3", "6"], 2),
+            node("3", Some("2"), "heading", "Widget", &["4"], 3),
+            node("4", Some("3"), "StaticText", "Widget", &[], 4),
+            node("6", Some("2"), "button", "Add to cart", &["7"], 6),
+            node("7", Some("6"), "StaticText", "Add to cart", &[], 7),
+        ];
+        let full = render("page \"Shop\"", &nodes, &[], &Options::default());
+        let (fetch, _) = lazy_fetch(nodes.clone());
+        let (lazy, failed) = render_lazy("page \"Shop\"", &nodes[..1], &[], &Options::default(), fetch);
+        assert!(!failed);
+        assert_eq!(lazy.text, full.text, "lazy must match full under the limit");
+    }
+
+    #[test]
+    fn lazy_render_stops_fetching_past_the_limit() {
+        let item_ids: Vec<String> = (0..300).map(|i| format!("item{i}")).collect();
+        let item_refs: Vec<&str> = item_ids.iter().map(String::as_str).collect();
+        let mut nodes =
+            vec![node("1", None, "RootWebArea", "Big", &["2"], 1), node("2", Some("1"), "list", "", &item_refs, 2)];
+        for i in 0..300 {
+            nodes.push(node(
+                Box::leak(format!("item{i}").into_boxed_str()),
+                Some("2"),
+                "listitem",
+                "",
+                &[Box::leak(format!("text{i}").into_boxed_str())],
+                100 + i as u64,
+            ));
+            nodes.push(node(
+                Box::leak(format!("text{i}").into_boxed_str()),
+                Some(Box::leak(format!("item{i}").into_boxed_str())),
+                "StaticText",
+                &format!("Item {i}"),
+                &[],
+                1000 + i as u64,
+            ));
+        }
+        let opts = Options { limit: 5, ..Options::default() };
+        let full = render("", &nodes, &[], &opts);
+        let (fetch, calls) = lazy_fetch(nodes.clone());
+        let (lazy, failed) = render_lazy("", &nodes[..1], &[], &opts, fetch);
+        assert!(!failed);
+        // Same kept lines as the full walk; only the truncation count is
+        // unknowable without reading the whole page.
+        let full_kept: Vec<&str> = full.text.lines().take(5).collect();
+        let lazy_kept: Vec<&str> = lazy.text.lines().take(5).collect();
+        assert_eq!(lazy_kept, full_kept);
+        assert!(lazy.text.contains("more lines"));
+        // One call for the list's items, then windows of item children:
+        // far fewer than one call per item.
+        assert!(calls.get() < 20, "fetch batches: {} calls", calls.get());
+    }
+
+    #[test]
+    fn lazy_render_reports_a_failed_fetch() {
+        let nodes = [node("1", None, "RootWebArea", "Shop", &["2"], 1), node("2", Some("1"), "button", "Buy", &[], 2)];
+        let fetch: AxFetch = Box::new(|_| (Vec::new(), true));
+        let (_, failed) = render_lazy("", &nodes[..1], &[], &Options::default(), fetch);
+        assert!(failed);
     }
 }

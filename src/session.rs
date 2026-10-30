@@ -378,8 +378,9 @@ pub fn client(config: &SessionConfig, name: &str, command: &Command, output: &mu
         Ok(stream) => stream,
         Err(e) => {
             let mut error = format!(
-                "no navigera session at {} ({e}); start one with `navigera --session {name} start`",
-                path.display()
+                "no navigera session at {} ({e}); start one with `{} -s {name} start`",
+                path.display(),
+                crate::cli::program()
             );
             // A session that ran before says why it stopped (idle timeout,
             // browser crash, quit) in its log, which outlives the socket.
@@ -388,7 +389,11 @@ pub fn client(config: &SessionConfig, name: &str, command: &Command, output: &mu
             if !tail.is_empty() {
                 error.push_str(&format!("\nlast lines of {}:\n{tail}", log_path.display()));
             }
-            print_json(output, &json!({ "id": null, "ok": false, "error": error }), config);
+            print_json(
+                output,
+                &json!({ "id": null, "ok": false, "error": crate::protocol::plain_error(&error) }),
+                config,
+            );
             return ExitCode::from(1);
         }
     };
@@ -503,7 +508,7 @@ fn running_engine(stream: Stream) -> Option<String> {
 }
 
 fn fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCode {
-    print_json(output, &json!({ "id": null, "ok": false, "error": error }), config);
+    print_json(output, &json!({ "id": null, "ok": false, "error": crate::protocol::plain_error(&error) }), config);
     ExitCode::from(1)
 }
 

@@ -99,6 +99,10 @@ fn chrome_flags() -> Vec<String> {
 
 const NO_SANDBOX: &str = "--no-sandbox";
 
+/// How long a `wait` watches in the page before it looks again from here
+/// (a navigation, cross-origin frames, the budget).
+const WATCH: Duration = Duration::from_millis(300);
+
 /// `--natural`: the browser looks like the browser it is, not like an
 /// automated one. Set once per process, before the browser starts.
 static NATURAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -492,6 +496,9 @@ pub struct BrowserSession {
     /// `set …` overrides (keyed by what they set): applied to every open
     /// tab and replayed on tabs opened later.
     overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
+    /// The browser answered -32601 to `Network.emulateNetworkConditionsByRule`
+    /// (Chromium before it had the call): the older call is used from then on.
+    no_rule_call: std::sync::atomic::AtomicBool,
     /// `init-script` sources, run before the page's own scripts in every
     /// document of every tab; and per tab (target id) the identifiers to
     /// remove them by.
@@ -646,6 +653,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
@@ -724,6 +732,7 @@ impl BrowserSession {
             profile_exe,
             downloads_dir: None,
             overrides: Default::default(),
+            no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
@@ -944,6 +953,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: std::sync::Mutex::new(Vec::new()),
@@ -956,7 +966,7 @@ impl BrowserSession {
     /// Switch the active tab by zero-based index.
     pub fn select_page(&mut self, index: usize) -> Result<()> {
         if index >= self.pages.len() {
-            bail!("no tab {index} (have {})", self.pages.len());
+            bail!("no tab {index}; {}", tab_range(self.pages.len()));
         }
         self.active = index;
         self.bring_to_front()
@@ -973,7 +983,7 @@ impl BrowserSession {
             bail!("refusing to close the session's only tab; use `quit` instead");
         }
         if index >= self.pages.len() {
-            bail!("no tab {index} (have {})", self.pages.len());
+            bail!("no tab {index}; {}", tab_range(self.pages.len()));
         }
         let timeout = self.timeout(None);
         self.pages[index].close_target(timeout)?;
@@ -1184,7 +1194,7 @@ impl BrowserSession {
         let timeout = self.timeout(None);
         for page in &self.pages {
             for (method, params) in reset.iter().chain(calls.iter()) {
-                page.send_cdp(method, params.clone(), timeout).map_err(|e| anyhow::anyhow!("{method}: {e:#}"))?;
+                self.send_override(page, method, params, timeout)?;
             }
         }
         if calls.is_empty() {
@@ -1193,6 +1203,39 @@ impl BrowserSession {
             self.overrides.insert(kind, calls);
         }
         Ok(())
+    }
+
+    /// One CDP call of a `set` override. A browser that has no
+    /// `Network.emulateNetworkConditionsByRule` (-32601) gets
+    /// `Network.emulateNetworkConditions` instead, and is not asked the new
+    /// way again in this session.
+    fn send_override(&self, page: &Page, method: &str, params: &serde_json::Value, timeout: Duration) -> Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if method == crate::emulate::BY_RULE {
+            let old = || crate::emulate::without_rule(params);
+            if self.no_rule_call.load(Relaxed) {
+                let (m, p) = old();
+                return page.send_cdp(m, p, timeout).map(drop).map_err(|e| anyhow::anyhow!("{m}: {e:#}"));
+            }
+            return match page.send_cdp(method, params.clone(), timeout) {
+                Ok(_) => Ok(()),
+                Err(e) if crate::emulate::method_missing(&format!("{e:#}")) => {
+                    self.no_rule_call.store(true, Relaxed);
+                    let (m, p) = old();
+                    page.send_cdp(m, p, timeout).map(drop).map_err(|e| anyhow::anyhow!("{m}: {e:#}"))
+                }
+                Err(e) => Err(anyhow::anyhow!("{method}: {e:#}")),
+            };
+        }
+        match page.send_cdp(method, params.clone(), timeout) {
+            Ok(_) => Ok(()),
+            // Such a browser lacks this one too; its `emulateNetworkConditions`
+            // already sets `navigator.onLine` and fires the event.
+            Err(e) if method == "Network.overrideNetworkState" && crate::emulate::method_missing(&format!("{e:#}")) => {
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("{method}: {e:#}")),
+        }
     }
 
     /// Read a property of the target element (`get`): text, value, attr,
@@ -1532,7 +1575,7 @@ impl BrowserSession {
         let timeout = self.timeout(None);
         for calls in self.overrides.values() {
             for (method, params) in calls {
-                if let Err(e) = page.send_cdp(method, params.clone(), timeout) {
+                if let Err(e) = self.send_override(page, method, params, timeout) {
                     eprintln!("[browser] {method} on a new tab: {e:#}");
                 }
             }
@@ -1710,15 +1753,27 @@ impl BrowserSession {
                     // turned into a download (saved: `downloads` lists it).
                     // Trying again would fetch it again: a download link
                     // downloaded the file four times.
-                    if msg.contains("ERR_ABORTED") {
-                        let status = self
-                            .requests(false)
+                    let status = || {
+                        self.requests(false)
                             .into_iter()
                             .filter(|r| r.n > requests_before && r.kind == "Document")
                             .filter_map(|r| r.status)
-                            .next_back();
-                        if let Some(code @ (204 | 205)) = status {
-                            bail!("{msg}: the server answered {code} (no content), so the browser stays on the page it was on");
+                            .next_back()
+                    };
+                    if msg.contains("ERR_HTTP_RESPONSE_CODE_FAILURE") {
+                        if let Some(code) = status() {
+                            bail!(
+                                "the server answered {code} with no page; the tab now shows Chrome's error page \
+                                 (net::ERR_HTTP_RESPONSE_CODE_FAILURE)"
+                            );
+                        }
+                    }
+                    if msg.contains("ERR_ABORTED") {
+                        if let Some(code @ (204 | 205)) = status() {
+                            bail!(
+                                "the server answered {code} (no content), so the browser stays on the page it was on \
+                                 (net::ERR_ABORTED)"
+                            );
                         }
                         let end = std::time::Instant::now() + Duration::from_secs(1);
                         loop {
@@ -1770,6 +1825,29 @@ impl BrowserSession {
     pub fn evaluate_with_timeout<T: DeserializeOwned>(&self, expression: &str, timeout_ms: Option<f64>) -> Result<T> {
         let value = self.active_tab().evaluate(expression, self.timeout(timeout_ms))?;
         Ok(serde_json::from_value(value)?)
+    }
+
+    /// `eval` as a person types it: one expression (an arrow function is
+    /// called); else the source run as a script, statements and top-level
+    /// `await` included, its last expression the result; else as the body
+    /// of a function that `return`s its answer.
+    pub fn evaluate_user(&self, source: &str, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+        let tab = self.active_tab();
+        let timeout = self.timeout(timeout_ms);
+        let first = match tab.evaluate(source, timeout) {
+            Err(e) if is_syntax_error(&format!("{e:#}")) => e,
+            other => return other,
+        };
+        match tab.evaluate_script(source, timeout) {
+            Err(e) if is_syntax_error(&format!("{e:#}")) => {}
+            other => return other,
+        }
+        match tab.evaluate_body(source, timeout) {
+            Err(e) if is_syntax_error(&format!("{e:#}")) => {}
+            other => return other,
+        }
+        // No form parses: the expression's error says more.
+        Err(first)
     }
 
     /// Click the element `target` names (trusted mouse click when hittable).
@@ -2036,10 +2114,11 @@ impl BrowserSession {
         self.active_tab().upload(target, files, wait, timeout)
     }
 
-    /// Poll `js_predicate` (an expression returning a boolean) every 100 ms
-    /// until true or `timeout_ms` (default: the element wait) runs out.
-    /// Survives navigations (the predicate is re-evaluated in each new
-    /// document); returns the waited milliseconds.
+    /// Wait until `js_predicate` (an expression returning a boolean) holds,
+    /// or `timeout_ms` (default: the element wait) runs out. It is checked
+    /// in the page on the frame after each change there, and at least every
+    /// 100 ms. Survives navigations (the predicate is re-evaluated in each
+    /// new document); returns the waited milliseconds.
     pub fn wait_until(&self, js_predicate: &str, what: &str, timeout_ms: Option<f64>) -> Result<f64> {
         self.wait_until_or_in_frames(js_predicate, false, what, timeout_ms)
     }
@@ -2056,23 +2135,39 @@ impl BrowserSession {
     ) -> Result<f64> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let started = std::time::Instant::now();
-        let mut polls = 0u32;
         loop {
             // A navigation in flight: wait for it, but never past this
             // op's own budget.
             self.settle_within(wait.saturating_sub(started.elapsed()));
-            if let Ok(true) = self.active_tab().check(js_predicate, timeout) {
+            // Up to WATCH in the page at a time, the predicate re-checked
+            // on the frame after each change there (`DEEP`'s wake) and at
+            // least every 100 ms: a change is seen within a frame, not half
+            // a poll later (50 ms on average when this slept 100 ms between
+            // checks). A navigation ends the watch with its document; the
+            // next one starts in the new document. The watch's own names
+            // start with `__nv`, so a `--js` expression still sees the page's.
+            let chunk = wait.saturating_sub(started.elapsed()).min(WATCH).as_millis();
+            let watched = format!(
+                "(async () => {{ const __nvDeep = {}, __nvEnd = Date.now() + {chunk}; \
+                 for (;;) {{ if (await ({js_predicate}\n)) return true; const __nvLeft = __nvEnd - Date.now(); \
+                 if (__nvLeft <= 0) return false; await __nvDeep.wake(Math.min(100, __nvLeft)); }} }})()",
+                crate::cdp::DEEP
+            );
+            match self.active_tab().check(&watched, timeout + WATCH) {
+                Ok(true) => return Ok((started.elapsed().as_secs_f64() * 1000.0).round()),
+                Ok(false) => {}
+                // The document went mid-watch, or the page threw: not a
+                // tight loop of retries.
+                Err(_) => std::thread::sleep(Duration::from_millis(25)),
+            }
+            // Cross-origin frames are looked into once per watch (every
+            // 300 ms, as every third poll was).
+            if in_frames && self.active_tab().true_in_a_frame(js_predicate, timeout) {
                 return Ok((started.elapsed().as_secs_f64() * 1000.0).round());
             }
-            // Frames are listed only after a miss, and every few polls.
-            if in_frames && polls.is_multiple_of(3) && self.active_tab().true_in_a_frame(js_predicate, timeout) {
-                return Ok((started.elapsed().as_secs_f64() * 1000.0).round());
-            }
-            polls += 1;
             if started.elapsed() >= wait {
-                bail!("wait: {what} not met within {} ms", wait.as_millis());
+                bail!("wait: {what} not seen within {} ms (wait longer with --timeout-ms)", wait.as_millis());
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
@@ -2095,7 +2190,10 @@ impl BrowserSession {
                 _ => {}
             }
             if started.elapsed() >= wait {
-                bail!("wait: {what} in frame {chain:?} not met within {} ms", wait.as_millis());
+                bail!(
+                    "wait: {what} in frame {chain:?} not seen within {} ms (wait longer with --timeout-ms)",
+                    wait.as_millis()
+                );
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -2225,6 +2323,20 @@ impl BrowserSession {
 
 // Re-exported for the rare caller that still names the engine explicitly.
 pub use cdp::{Browser as CdpBrowser, Page as CdpPage};
+
+/// Which tab numbers there are, for an error naming one that isn't.
+fn tab_range(count: usize) -> String {
+    match count {
+        0 => "there are no tabs (`tab-new` opens one)".to_string(),
+        1 => "the one tab is tab 0 (`tab-list` shows it)".to_string(),
+        n => format!("tabs are numbered 0 to {} (`tab-list` shows them)", n - 1),
+    }
+}
+
+/// A parse error, as V8 words it: the source isn't one expression.
+fn is_syntax_error(message: &str) -> bool {
+    message.contains("SyntaxError")
+}
 
 #[cfg(test)]
 mod tests {

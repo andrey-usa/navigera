@@ -110,6 +110,9 @@ page "Checkout — Acme" http://shop.test/checkout
 - `[ref=N]` marks what you can act on: pass the number to `click`/`fill`/
   `select`/… (`@12`, `e12` and `ref=12` work too). Refs go stale when the
   page navigates or re-renders: take a fresh `ax` before using an old one.
+- `clickable [ref=N]: <text>` is something the page made clickable without
+  saying so (a row, a card, an icon): click it by ref like a button, before
+  reaching for `eval`. One with no text shows its `#id` or `.class`.
 - Nesting shows what belongs together (which "Add to cart" sits in which
   product). Iframes and open shadow DOM are included; links show their `url=`.
 - Collapsed or hidden content (closed `<details>`, hover menus, inactive
@@ -133,8 +136,8 @@ page "Checkout — Acme" http://shop.test/checkout
 | `hover <ref>` | move the mouse over an element (hover menus) |
 | `scroll [--by 800 \| --to bottom] [<ref>]` | scroll the page (infinite lists load more) or bring a ref into view; `--selector "#list"` scrolls inside a box |
 | `upload <ref> <file>…` | set an `<input type=file>` |
-| `wait --text "Saved" \| --selector <css> \| --url <part> \| --gone <css> \| --js "<expr>" \| --ms 500` | wait for a condition (up to 5 s) |
-| `eval "<js>"` | run JavaScript in the page (arrow functions are called), result as JSON; `--file f.js` or `-` (stdin) |
+| `wait --text "Saved" \| --selector <css> \| --url <part> \| --gone <css> \| --js "<expr>" \| --ms 500` | wait for a condition (up to 5 s, or `--wait-ms`) |
+| `eval "<js>"` | run JavaScript in the page (an expression, an arrow function, or statements with `await` and `return`), result as JSON; `--file f.js` or `-` (stdin) |
 | `back` / `forward` / `reload` | history |
 | `screenshot [file.png] [--full-page]` | PNG of the viewport or the whole page |
 | `tab-new [url]`, `tab-list`, `tab-select <i or id>`, `tab-close [<i>]` | tabs; an id from `tab-list` stays right as tabs open and close |
@@ -215,7 +218,7 @@ for it. Upload only files the user named.
 | error | do this |
 |---|---|
 | `no element matches selector … / no element with text …` | `ax` to see what is really there; act by ref |
-| `ref N not found (stale …)` | take a fresh `ax` |
+| `no element has that ref now` | take a fresh `ax` |
 | `timed out … waiting for load` | a slow resource: `goto <url> --wait domcontentloaded`, then `wait --text …` |
 | `select: element is … not a <select>` | `click` the dropdown, `ax`, then click the option by ref |
 | `no navigera session at …` | `navigera -s <name> start`; the error says why the last one stopped |

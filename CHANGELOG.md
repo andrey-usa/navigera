@@ -6,6 +6,130 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-30
+
+Refs on what a page made clickable: a `<div>` row with a click handler, a card
+with `cursor: pointer`, an icon `<span>`, which agents had no ref for and dug
+through the DOM with `eval` to reach. Waits woken by the page's changes
+instead of a timer, `ax` and the locators linear on long pages, and errors
+that say what happened and what to do next.
+
+### Security
+
+- A file navigera writes where you name it (`network --body-file`, `--har`,
+  `screenshot`, `pdf`, `state save`, `install-skill`) no longer follows a
+  link already at that path: a link planted there (in a cloned project, or
+  in a shared directory) is replaced by the file instead of having its
+  target overwritten.
+
+### Added
+
+- `ax` gives a ref to what a user could click that the accessibility tree
+  doesn't call actionable: elements with a click, mousedown or mouseup
+  handler of their own and the outermost element of a `cursor: pointer`
+  area. A `<div>` row or card, or an icon `<span>`, prints as
+  `clickable [ref=N]: <text>`; an actionable node with no name or text
+  shows its `#id` or `.class`, so two blank buttons can be told apart. A
+  list or table listening for its items' clicks gives each item or row the
+  ref (one ref on the list would click whichever item is in the middle).
+  Only what a user's click can land on and tell apart is marked: not an
+  empty box, `pointer-events: none`, something fully transparent (an ad's
+  click guard), `visibility: hidden` (a control shown on hover), under
+  `aria-hidden` or `inert`, inside another site's frame, inside a link or
+  button (including `role=button` and `role=link`; they have the ref and
+  get the click), or with no name, text, `#id` or `.class` (a hidden
+  menu's 287 blank tiles on one shop's home page). A label whose control
+  is hidden is what a user clicks, so it gets the ref. One `DOMSnapshot`
+  call, Chrome only.
+- The skill says what a `clickable` line is and to click it by ref
+  before reaching for `eval`.
+- `eval` runs statements too, with `await` and `return` at the top level
+  (`const r = await fetch('/api/cart'); r.status`, or a body that ends in
+  `return`): what was one expression or an arrow function before; a probe
+  written either way works the first time.
+
+### Changed
+
+- `--help` and `help <command>` fit 80 columns, list `-s`, `--wait-ms` and
+  `--version`, and show `check` once with both of its forms. A usage error
+  prints its usage once; an unknown command is matched only when it is
+  close (`goot` → `goto`, not `bogus` → `focus`).
+- Errors say what happened and what to do next, in plain words:
+  - a failed `goto` says what Chrome's code means (the host name did not
+    resolve, nothing answered on that port, the server answered 404 with no
+    page and the tab now shows Chrome's error page; chrome-headless-shell
+    shows a blank page there instead, and `goto` succeeds) and keeps the
+    code at the end;
+  - a click on a word that is not a ref (`click abc`) says it was read as
+    CSS and that refs are the numbers in `ax`; `ref12` now reads as ref 12;
+  - a stale ref, a covered or hidden element, and a browser that went away
+    are described without DevTools terms (no "remote object", "CDP command",
+    "DOM events");
+  - `wait` timeouts name `--timeout-ms`, `tab-select` says which tab numbers
+    there are, `set viewport` says what was missing;
+  - flags that can't go together (`--text` with `--nth`, a ref with
+    `--selector`, `--near` with no locator) and a `set` of an unknown
+    setting are refused when the command is read, with exit 2 and before
+    any browser; `--nth` with `--text` says how to count instead;
+  - a missing session says to start it the way navigera was called
+    (`primavera navigera -s <name> start` from inside primavera);
+  - a selector that isn't CSS at all (`35.75`, `Total:`) is said at once,
+    with `--text` to use instead, not as the browser's `querySelector`
+    error after the wait;
+  - the op is named once (`click selector "abc": …`, not
+    `click selector "abc": click: …`), and the `(os error 2)` suffix is gone.
+- Every MCP tool parameter has a description.
+- `help <command>` explains each flag in a line and shows examples that run
+  as shown (each was run against a public practice site). `help status`
+  names each field of what `status` prints, and `help ax` says a target (a
+  ref or any locator) scopes the tree to that element.
+
+- Waits see a change within a frame of it. The `wait` command checked every
+  100 ms and the element waits under `click`, `fill`, `get` and the
+  locators every 50 ms (100 for `--text`), so they answered 25-50 ms late
+  on average; the page's changes now wake them (a MutationObserver), and
+  they still look at the old interval for what no observer sees (a
+  stylesheet rule starting to match, a hover, a background tab). An element
+  added 100-400 ms after the wait starts: seen 6 ms after it appears, not
+  58 (`wait --selector`, median), 5 not 34 (`--role --name`).
+
+- `click` waits for an element that is there but not shown yet, as long as
+  the element wait, as it already did for one under a closing overlay or
+  disabled: a dialog's button shown by a class after a second, a control
+  made visible (`visibility`) or clickable (`pointer-events`), one sliding
+  in from off-screen. It failed after 300 ms with "it has no box on
+  screen". An input hidden on purpose behind its label or card (a styled
+  radio) still fails at once, naming what to click instead.
+
+### Fixed
+
+- `click` on a table row whose middle falls between two cells clicks a
+  cell of the row, instead of refusing the row as hidden behind its table.
+- `ax` read the page's whole accessibility tree to print at most its
+  limit, and Chrome's full-tree call grows faster than the page: 8000 list
+  items took 13 s and 32000 timed out. The tree is now fetched from the
+  root down, children on demand, and the walk stops at the limit (2000
+  items 1.24 s -> 0.78 s, 8000 13.0 s -> 2.3 s, 32000 6.8 s, on Chromium
+  141). Output under the limit is byte-identical; over it, the last line
+  says more lines are not shown, without a count the walk no longer
+  learns. `--limit 0`, `--format json` and `--max-depth` read the whole
+  tree as before, and a browser without the calls falls back to it.
+- A locator by role and name (`--role button --name …`), by label, or by
+  text read every candidate's `el.labels`, which scans the whole document
+  on its first read for each element: quadratic. On a page of 8000
+  buttons the first such call took 4.4 s (12000: about 9 s); it now takes
+  under 50 ms, from one pass over the page's labels.
+- `wait --text … --wait-ms <ms>` waits that long; `--wait-ms` was accepted
+  and ignored on `wait`, which then waited its default 5 s.
+- `click --force` on a covered element said the element had "no visible
+  box"; the result now says the click was forced.
+- A bare target with `--nth`, `--near` or `--frame` (`click .row --nth 2`)
+  was refused as an unexpected argument; it is the target.
+- `set offline` failed on Chrome before the rule-based network calls
+  (Chromium 141: `'Network.emulateNetworkConditionsByRule' wasn't
+  found`). Such a browser now gets `Network.emulateNetworkConditions`,
+  which also tells the page it is offline; newer browsers are unchanged.
+
 ## [0.6.2] - 2026-10-26
 
 A security fix to 0.6.1's MCP file limits: a link inside the working
@@ -484,6 +608,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.6.3]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.3
 [0.6.2]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.2
 [0.6.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.1
 [0.6.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.0

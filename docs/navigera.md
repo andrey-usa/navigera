@@ -24,7 +24,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | `--raw` | print only the result (strings unquoted, e.g. the `ax` tree). Errors go to stderr as `error: …`, notes (dialogs, new tabs, an exception the page threw, an engine difference) as `note: …` |
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
-| `--wait-ms <ms>` | element ops' wait when they name no timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
+| `--wait-ms <ms>` | element ops' wait when they name no timeout, and on one `wait` for a condition, its timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
 | `--download-dir <dir>` | where downloaded files go (`$NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own in `navigera-<uid>` under the system temp directory, which only you can enter) |
 | `--chromium <path>` | browser binary (also `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`) |
 | `--engine chrome\|lightpanda` (`$NAVIGERA_ENGINE`), `--headed` | engine; visible window |
@@ -39,8 +39,8 @@ and `new_tabs` (tabs the page opened, now in the tab list). The exit code is
 
 **Targets.** Element commands take exactly one target:
 
-- a ref from `ax` as the first argument (`click 12`; `@12`, `e12` and
-  `ref=12` also work) or `--ref 12`;
+- a ref from `ax` as the first argument (`click 12`; `@12`, `e12`,
+  `ref12` and `ref=12` also work) or `--ref 12`;
 - `--selector <css>`: the first match a user could reach (when the first
   one is parked off the page and another isn't, the other). `host >>>
   inner` crosses shadow roots: `inner` inside the open shadow root of an
@@ -98,7 +98,7 @@ another process are reachable by ref only.
 | `upload` | target, file path(s) (positional or `--file`) | `{files}` |
 | `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--idle` (no fetch/XHR for 500 ms; also `--load networkidle`), `--download [<glob>]` (a finished download whose file name matches), `--ms <n>`; `--timeout-ms` | state + `waited_ms` (+ `download`); `--ms` alone: `{waited_ms}` |
 | `downloads` | `--clear`, `--json`, `--dir <path>` | `#n state bytes path (url)` per file the pages downloaded, saved under `--download-dir` with the name the page gave it (`report (2).csv` if taken). With `--attach` the browser keeps its own download folder and `path` is empty. `--dir` saves this session's downloads in `<path>` from now on (created if missing; kept across `reset`), apart from other sessions' and returns `{dir}` |
-| `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value (an arrow function is called; promises are awaited) |
+| `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value: an expression's, an arrow function's (it is called), or for statements the last expression's; `await` works at the top level, and a body that `return`s gives what it returns; promises are awaited |
 | `text` | `--selector <css>` | `textContent` or `null` |
 | `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
 | `check` | `<yes/no question>` (no target given) | `{question, yes, answer}`: the probability the answer is yes |
@@ -160,7 +160,8 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   - button "Apply coupon" [ref=212]
 ```
 
-- The tree comes from one `Accessibility.getFullAXTree` call per frame.
+- The tree comes from one `Accessibility.getFullAXTree` call per frame, and
+  one `DOMSnapshot.captureSnapshot` for what is clickable (Chrome only).
   Same-origin and in-process iframes are spliced in under their `Iframe`
   node, and open shadow roots are included.
 - Wrapper nodes (`generic`, label boxes) are collapsed, and text that repeats
@@ -168,7 +169,21 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 - A named node with one same-named actionable child is printed on one line,
   for example `heading "X": link [ref=7]`.
 - `[ref=N]` (a backend DOM node id) appears on actionable nodes: interactive
-  roles and focusable elements. Use `--refs all` to get one on every node.
+  roles and focusable elements, and what the page made clickable without
+  saying so (an element with a click, mousedown or mouseup handler of its
+  own, or the outermost element of a `cursor: pointer` area, where a user's
+  click can land: a box of some size, not `pointer-events: none`, not fully
+  transparent, not in another site's frame such as an ad): a `<div>` row
+  or card prints as `clickable [ref=N]: <its text>`, a role it has (`row`)
+  keeps it. A container that holds other actionable nodes isn't one, and a
+  list or table that listens for its items' clicks gives each item or row
+  the ref instead (one ref on the list would click its middle item). What
+  is inside a link or button, or under `aria-hidden` or `inert`, isn't
+  marked, nor is an element with nothing to tell it by; a label whose
+  control is hidden is. An actionable node with no name or text shows its
+  `#id` or `.class`
+  (`clickable #send-forward [ref=19]`, `button #close [ref=7]`). Use
+  `--refs all` to get one on every node.
 - States are shown in brackets: `checked`, `disabled`, `expanded` or
   `collapsed`, `selected`, `required`, `invalid`, `level=N`.
 - Inputs show `value="…"`, links show `url=` (shortened to the path on the

@@ -98,6 +98,13 @@ def check_trace(lines, commands, types):
     return sorted(set(errors)), sorted(notes), seen
 
 
+# Deprecated names navigera sends only to a browser that lacks their
+# replacement (-32601 for the new call): kept for older Chrome, so the source
+# may name them. The runtime trace is still checked as usual.
+FALLBACKS = {
+    "Network.emulateNetworkConditions": "for Chrome without Network.emulateNetworkConditionsByRule",
+}
+
 DOMAIN_REF = re.compile(r'"([A-Z][A-Za-z]+)\.([a-z][A-Za-z]+)"|\b([A-Z][A-Za-z]+)\.([a-z][A-Za-z]+)\b')
 
 
@@ -134,9 +141,12 @@ def main() -> int:
     errors, notes, seen = check_trace(lines, commands, types)
 
     referenced = scan_source(Path(args.src), domains)
+    fallbacks = []
     for name, where in sorted(referenced.items()):
         if name not in commands and name not in events:
             errors.append(f"`{name}` ({where}) is neither a command nor an event in this protocol")
+        elif name in commands and commands[name].get("deprecated") and name in FALLBACKS:
+            fallbacks.append(f"`{name}` ({FALLBACKS[name]})")
         elif name in commands and commands[name].get("deprecated"):
             errors.append(f"`{name}` ({where}) is deprecated")
         elif name in events and events[name].get("deprecated"):
@@ -154,6 +164,8 @@ def main() -> int:
         out += ["No errors: every command, parameter and enum value is valid for this browser.", ""]
     if notes:
         out += ["Experimental commands in use: " + ", ".join(n.split(": ", 1)[1] for n in notes), ""]
+    if fallbacks:
+        out += ["Deprecated, sent only as a fallback: " + ", ".join(fallbacks), ""]
     if unexercised:
         out += ["Referenced in source but not exercised by the tests: " + ", ".join(f"`{n}`" for n in unexercised), ""]
     text = "\n".join(out)

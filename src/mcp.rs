@@ -91,7 +91,7 @@ pub fn tools() -> Vec<Value> {
             "Open a URL in the active tab and wait for it to load. `example.com` gets https://, `localhost:3000` http://.",
             object(
                 props(&[json!({
-                    "url": {"type": "string"},
+                    "url": {"type": "string", "description": "The address to open; a bare host gets https://"},
                     "wait": {"type": "string", "enum": ["load", "domcontentloaded", "commit"], "description": "Default load"},
                     "snapshot": snapshot_prop(),
                 })]),
@@ -109,31 +109,43 @@ pub fn tools() -> Vec<Value> {
         tool(
             "browser_click",
             "Click an element with a real mouse event; waits for it to appear and stop moving, and for any navigation it starts. Fails, naming it, if something covers the element.",
-            object(action(json!({"button": {"type": "string", "enum": ["left", "right", "middle"]}})), &[]),
+            object(
+                action(json!({"button": {"type": "string", "enum": ["left", "right", "middle"], "description": "Default left; right opens a context menu"}})),
+                &[],
+            ),
             false,
         ),
         tool(
             "browser_fill",
             "Set the value of an input or textarea (replaces its text).",
-            object(action(json!({"value": {"type": "string"}})), &["value"]),
+            object(action(json!({"value": {"type": "string", "description": "The text the field ends up with"}})), &["value"]),
             false,
         ),
         tool(
             "browser_type",
             "Type text key by key into the element (or the focused one); `submit` presses Enter after.",
-            object(action(json!({"value": {"type": "string"}, "submit": {"type": "boolean"}})), &["value"]),
+            object(
+                action(json!({
+                    "value": {"type": "string", "description": "The text to type"},
+                    "submit": {"type": "boolean", "description": "Press Enter after typing"},
+                })),
+                &["value"],
+            ),
             false,
         ),
         tool(
             "browser_press_key",
             "Press a key or chord: Enter, Tab, Escape, ArrowDown, Control+a.",
-            object(action(json!({"key": {"type": "string"}})), &["key"]),
+            object(action(json!({"key": {"type": "string", "description": "A key name or chord, e.g. Enter or Control+a"}})), &["key"]),
             false,
         ),
         tool(
             "browser_select_option",
             "Choose option(s) of a <select> by label or value.",
-            object(action(json!({"values": {"type": "array", "items": {"type": "string"}}})), &["values"]),
+            object(
+                action(json!({"values": {"type": "array", "items": {"type": "string"}, "description": "Option labels or values to select"}})),
+                &["values"],
+            ),
             false,
         ),
         tool("browser_hover", "Move the mouse over an element (hover menus).", object(action(json!({})), &[]), false),
@@ -145,10 +157,10 @@ pub fn tools() -> Vec<Value> {
              buttons stay held, so down, moves, up drags or draws.",
             object(
                 action(json!({
-                    "action": {"type": "string", "enum": ["move", "down", "up", "click", "wheel"]},
-                    "x": {"type": "number"},
-                    "y": {"type": "number"},
-                    "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                    "action": {"type": "string", "enum": ["move", "down", "up", "click", "wheel"], "description": "What the mouse does"},
+                    "x": {"type": "number", "description": "CSS pixels from the left (for wheel: the horizontal scroll)"},
+                    "y": {"type": "number", "description": "CSS pixels from the top (for wheel: the vertical scroll)"},
+                    "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "Default left"},
                     "count": {"type": "integer", "description": "Clicks (2: a double click)"},
                     "steps": {"type": "integer", "description": "Moves in between, for a smooth path"},
                 })),
@@ -160,7 +172,10 @@ pub fn tools() -> Vec<Value> {
             "browser_scroll",
             "Scroll the page by pixels or to top/bottom (loads more of infinite lists), or bring an element into view.",
             object(
-                action(json!({"by": {"type": "number"}, "to": {"type": "string", "enum": ["top", "bottom"]}})),
+                action(json!({
+                    "by": {"type": "number", "description": "Pixels down (negative: up)"},
+                    "to": {"type": "string", "enum": ["top", "bottom"], "description": "Scroll to the top or the bottom"},
+                })),
                 &[],
             ),
             false,
@@ -176,7 +191,7 @@ pub fn tools() -> Vec<Value> {
                     "url": {"type": "string", "description": "The URL contains this"},
                     "js": {"type": "string", "description": "This expression becomes truthy"},
                     "ms": {"type": "number", "description": "Just wait this long"},
-                    "timeout_ms": {"type": "number"},
+                    "timeout_ms": {"type": "number", "description": "Wait up to this long (default 5000)"},
                     "snapshot": snapshot_prop(),
                 })]),
                 &[],
@@ -187,13 +202,19 @@ pub fn tools() -> Vec<Value> {
             "browser_evaluate",
             "Run JavaScript in the page and return its JSON result; an arrow function is called, a promise awaited. \
              Use it to extract many items at once.",
-            object(props(&[json!({"expression": {"type": "string"}})]), &["expression"]),
+            object(
+                props(&[json!({"expression": {"type": "string", "description": "A JavaScript expression or arrow function"}})]),
+                &["expression"],
+            ),
             false,
         ),
         tool(
             "browser_screenshot",
             "A PNG of the viewport (or the whole page). Prefer browser_snapshot: text is far cheaper than an image.",
-            object(props(&[json!({"full_page": {"type": "boolean"}})]), &[]),
+            object(
+                props(&[json!({"full_page": {"type": "boolean", "description": "The whole page, not only what is in view"}})]),
+                &[],
+            ),
             true,
         ),
         tool(
@@ -202,8 +223,8 @@ pub fn tools() -> Vec<Value> {
              active automatically.",
             object(
                 props(&[json!({
-                    "action": {"type": "string", "enum": ["list", "new", "select", "close"]},
-                    "index": {"type": "integer"},
+                    "action": {"type": "string", "enum": ["list", "new", "select", "close"], "description": "What to do"},
+                    "index": {"type": "integer", "description": "For select and close: the tab's number in list, from 0"},
                     "url": {"type": "string", "description": "For new"},
                 })]),
                 &["action"],
@@ -215,7 +236,10 @@ pub fn tools() -> Vec<Value> {
             "Hand the browser to the person (show: it comes on screen with the same tabs and sign-ins, for a \
              login, a 2FA prompt or a CAPTCHA you cannot do) and take it back (hide: headless again). Tell the \
              person what to do, then wait for the page they will reach (browser_wait_for) before going on.",
-            object(props(&[json!({"action": {"type": "string", "enum": ["show", "hide"]}})]), &["action"]),
+            object(
+                props(&[json!({"action": {"type": "string", "enum": ["show", "hide"], "description": "show: to the person; hide: back to you"}})]),
+                &["action"],
+            ),
             false,
         ),
         tool(
@@ -223,7 +247,7 @@ pub fn tools() -> Vec<Value> {
             "Go back, forward, or reload the active tab.",
             object(
                 props(&[json!({
-                    "action": {"type": "string", "enum": ["back", "forward", "reload"]},
+                    "action": {"type": "string", "enum": ["back", "forward", "reload"], "description": "Where to go"},
                     "snapshot": snapshot_prop(),
                 })]),
                 &["action"],
@@ -234,13 +258,22 @@ pub fn tools() -> Vec<Value> {
             "browser_handle_dialog",
             "How future alert/confirm/prompt dialogs are answered (default: accept). Every dialog is reported in the \
              result of the action that opened it.",
-            object(props(&[json!({"accept": {"type": "boolean"}, "prompt_text": {"type": "string"}})]), &["accept"]),
+            object(
+                props(&[json!({
+                    "accept": {"type": "boolean", "description": "true: OK; false: Cancel"},
+                    "prompt_text": {"type": "string", "description": "What to answer a prompt() with"},
+                })]),
+                &["accept"],
+            ),
             false,
         ),
         tool(
             "browser_file_upload",
             "Set the files of an <input type=file>.",
-            object(action(json!({"paths": {"type": "array", "items": {"type": "string"}}})), &["paths"]),
+            object(
+                action(json!({"paths": {"type": "array", "items": {"type": "string"}, "description": "Files in the working directory"}})),
+                &["paths"],
+            ),
             false,
         ),
         tool(
@@ -251,7 +284,7 @@ pub fn tools() -> Vec<Value> {
              sure of; look before acting on anything uncertain.",
             object(
                 props(&[json!({
-                    "steps": {"type": "array", "items": {"type": "object"}},
+                    "steps": {"type": "array", "items": {"type": "object"}, "description": "The steps, each {\"op\": ..., fields}"},
                     "snapshot": {"type": "boolean", "description": "Return the snapshot after the last step (default true)"},
                 })]),
                 &["steps"],
@@ -276,7 +309,7 @@ pub fn tools() -> Vec<Value> {
              full with headers, post data and response body.",
             object(
                 props(&[json!({
-                    "n": {"type": "integer"},
+                    "n": {"type": "integer", "description": "One request in full: its #n in the list"},
                     "filter": {"type": "string", "description": "Only URLs containing this"},
                     "failed": {"type": "boolean", "description": "Only failures and HTTP errors"},
                 })]),
@@ -287,7 +320,13 @@ pub fn tools() -> Vec<Value> {
         tool(
             "browser_resize",
             "Set the viewport size of every tab.",
-            object(props(&[json!({"width": {"type": "integer"}, "height": {"type": "integer"}})]), &["width", "height"]),
+            object(
+                props(&[json!({
+                    "width": {"type": "integer", "description": "CSS pixels"},
+                    "height": {"type": "integer", "description": "CSS pixels"},
+                })]),
+                &["width", "height"],
+            ),
             false,
         ),
         tool(
@@ -302,7 +341,10 @@ pub fn tools() -> Vec<Value> {
             "browser_find",
             "Which element a description means, picked by a fast decision model from the whole page: returns its \
              ref, the probability, and the runners-up. Cheaper than reading a snapshot to find one element.",
-            object(props(&[json!({"description": {"type": "string"}})]), &["description"]),
+            object(
+                props(&[json!({"description": {"type": "string", "description": "The element in words, e.g. the search box"}})]),
+                &["description"],
+            ),
             true,
         ));
         list.push(tool(
@@ -310,7 +352,10 @@ pub fn tools() -> Vec<Value> {
             "The probability that the answer to a yes/no question about the page is yes (\"Did the order go \
              through?\", \"Is an error shown?\"), from a fast decision model. Cheaper than reading a snapshot \
              to verify one thing; near 0.5 means unsure, so look.",
-            object(props(&[json!({"question": {"type": "string"}})]), &["question"]),
+            object(
+                props(&[json!({"question": {"type": "string", "description": "A yes/no question about the page"}})]),
+                &["question"],
+            ),
             true,
         ));
     }
@@ -777,6 +822,16 @@ pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn W
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent reads the schema field by field: none is left unexplained.
+    #[test]
+    fn every_tool_parameter_says_what_it_is() {
+        for tool in tools() {
+            for (name, spec) in tool["inputSchema"]["properties"].as_object().unwrap() {
+                assert!(spec["description"].as_str().is_some_and(|d| !d.is_empty()), "{} {name}", tool["name"]);
+            }
+        }
+    }
 
     #[test]
     fn every_tool_has_a_valid_object_schema_and_a_plan() {
