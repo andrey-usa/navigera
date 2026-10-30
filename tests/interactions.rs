@@ -247,7 +247,10 @@ fn headless_reports_a_mouse_and_a_touch_device_reports_touch() {
     s.ok(&["set", "device", "off"]);
     s.ok(&["goto", "about:blank"]);
     assert!(mouse(), "after set device off: no mouse");
+    // Turning touch emulation off in headless leaves the current page with no
+    // pointer until the next one, as after `set device off`.
     s.ok(&["set", "device", "Desktop"]);
+    s.ok(&["goto", "about:blank"]);
     assert!(mouse(), "Desktop: no mouse");
 }
 
