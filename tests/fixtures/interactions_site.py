@@ -27,6 +27,8 @@ getting wrong, one page each, built the way those sites behave:
 /leader         two tabs of one site: the one opened with ?leader tells the
                 other on beforeunload, which takes over (a tab closed
                 without its unload path leaves the follower waiting)
+/poll           a page that polls one URL every 300 ms, forever
+/one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
 /drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
 /drag-pointer   the same list, each item made draggable on pointerdown (as
                 React Aria does)
@@ -55,6 +57,21 @@ if (location.search.includes('leader')) {
   role.textContent = 'follower';
   bc.onmessage = (e) => { if (e.data === 'bye') role.textContent = 'took over'; };
 }
+</script>""")
+
+PAGES["/poll"] = ("poll", "", """
+<p id=status>idle</p><button id=go>Go</button>
+<script>
+let n = 0;
+setInterval(() => fetch('/slow-echo?ms=5').then(() => { document.getElementById('status').textContent = 'polled ' + (++n); }), 300);
+</script>""")
+
+PAGES["/one-fetch"] = ("one fetch", "", """
+<ul id=list><li>Loading...</li></ul>
+<script>
+fetch('/slow-echo?ms=400').then(() => {
+  document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
+});
 </script>""")
 
 PAGES["/drag-native"] = ("drag native", "", """

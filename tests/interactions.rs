@@ -1171,3 +1171,45 @@ fn drag_without_a_drag_is_a_held_mouse() {
         assert!(out > 100.0, "{tag}: knob at {out}");
     }
 }
+
+/// How long `args` takes to run on the session, in ms (the CLI start-up is in
+/// it for every sample alike).
+fn timed(s: &Session, args: &[&str]) -> (f64, Value) {
+    let t = std::time::Instant::now();
+    let r = s.ok(args);
+    (t.elapsed().as_secs_f64() * 1000.0, r)
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+/// A snapshot waits for the network to go quiet so an SPA's "Loading..." list
+/// has landed, but a request repeated at a steady interval is a poll and
+/// doesn't hold it; `--no-wait` skips the wait.
+#[test]
+fn a_snapshot_does_not_wait_on_polls_and_no_wait_skips_the_wait() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("quiet", &[]);
+
+    // One fetch the server holds for 400 ms: the list is there, not "Loading...".
+    s.ok(&["goto", &format!("{}/one-fetch", site.url)]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Alpha") && !tree.contains("Loading"), "{tree}");
+    // --no-wait reads at once: the placeholder (the fetch is still out).
+    s.ok(&["goto", &format!("{}/one-fetch", site.url)]);
+    let early = s.text(&["ax", "--no-wait"]);
+    assert!(early.contains("Loading"), "{early}");
+
+    // A page polling every 300 ms: the wait never holds a snapshot for the
+    // 3 s cap. Let the polling settle first (two requests are not yet a poll).
+    s.ok(&["goto", &format!("{}/poll", site.url)]);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let waited: Vec<f64> = (0..5).map(|_| timed(&s, &["ax"]).0).collect();
+    let skipped: Vec<f64> = (0..5).map(|_| timed(&s, &["ax", "--no-wait"]).0).collect();
+    assert!(median(waited.clone()) < 1000.0, "ax on a polling page took {waited:?} ms");
+    assert!(median(skipped.clone()) < 1000.0, "ax --no-wait took {skipped:?} ms");
+    assert!(s.text(&["ax", "--no-wait"]).contains("polled"));
+    s.ok(&["screenshot", "--no-wait", "--path", &std::env::temp_dir().join("nv-quiet.png").display().to_string()]);
+}

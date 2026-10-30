@@ -75,7 +75,24 @@ pub struct NetState {
     pub pending: HashMap<String, std::time::Instant>,
     /// When the last fetch/XHR started or ended.
     pub last: Option<std::time::Instant>,
+    /// URL without its query string -> when its last requests started (the
+    /// last three), to tell a poll from data the page is waiting for.
+    pub starts: HashMap<String, Vec<std::time::Instant>>,
 }
+
+/// A request to a URL that has already been requested twice or more, at a
+/// steady interval (this gap within half to double the one before, at most
+/// [`POLL_MAX_INTERVAL`]), is a poll: it neither counts as pending nor moves
+/// the quiet clock. `starts` are the earlier starts of that URL, oldest first.
+fn is_poll(starts: &[std::time::Instant], now: std::time::Instant) -> bool {
+    let [.., a, b] = starts else { return false };
+    let before = b.duration_since(*a);
+    let gap = now.duration_since(*b);
+    before <= POLL_MAX_INTERVAL && gap >= before / 2 && gap <= before * 2
+}
+
+/// The longest gap between requests that still makes them a poll.
+const POLL_MAX_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Sessions on one browser (forks, or one session across `reset`s) each
 /// keep their own routes, HTTP credentials and dialog answer, keyed by the
@@ -640,8 +657,21 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                 let mut net = shared.net.lock().unwrap();
                 let state = net.entry(session.to_string()).or_default();
                 let now = std::time::Instant::now();
-                state.pending.entry(id.to_string()).or_insert(now);
-                state.last = Some(now);
+                let url = params.pointer("/request/url").and_then(Value::as_str).unwrap_or("");
+                let key = url.split(['?', '#']).next().unwrap_or("").to_string();
+                let mut poll = false;
+                if !key.is_empty() {
+                    let starts = state.starts.entry(key).or_default();
+                    poll = is_poll(starts, now);
+                    starts.push(now);
+                    if starts.len() > 3 {
+                        starts.remove(0);
+                    }
+                }
+                if !poll {
+                    state.pending.entry(id.to_string()).or_insert(now);
+                    state.last = Some(now);
+                }
             }
         }
         "Network.loadingFinished" | "Network.loadingFailed" => {
@@ -707,6 +737,8 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                     // The old document's requests die with it.
                     if let Some(net) = shared.net.lock().unwrap().get_mut(session) {
                         net.pending.clear();
+                        // A new document's requests are not the old one's polls.
+                        net.starts.clear();
                     }
                     state.loading = true;
                     state.dom_ready = false;
@@ -731,6 +763,25 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(base: std::time::Instant, ms: u64) -> std::time::Instant {
+        base + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn a_steady_repeat_is_a_poll_and_the_first_two_are_not() {
+        let t0 = std::time::Instant::now();
+        assert!(!is_poll(&[], at(t0, 300)));
+        assert!(!is_poll(&[t0], at(t0, 300)));
+        // Third request, 300 ms after a second that came 300 ms after the first.
+        assert!(is_poll(&[t0, at(t0, 300)], at(t0, 600)));
+        assert!(is_poll(&[t0, at(t0, 300)], at(t0, 750)));
+        // A burst after a steady run, or a long silence, is not.
+        assert!(!is_poll(&[t0, at(t0, 300)], at(t0, 310)));
+        assert!(!is_poll(&[t0, at(t0, 300)], at(t0, 3000)));
+        // Too slow to be a poll worth ignoring.
+        assert!(!is_poll(&[t0, at(t0, 20_000)], at(t0, 40_000)));
+    }
 
     #[test]
     fn globs() {

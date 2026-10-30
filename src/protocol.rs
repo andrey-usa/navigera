@@ -119,6 +119,10 @@ pub struct TargetArgs {
     /// `#outer >> #inner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
+    /// Skip the network-quiet wait a snapshot or `--find` makes before it
+    /// reads the page (`--no-wait`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_wait: bool,
 }
 
 impl TargetArgs {
@@ -408,6 +412,9 @@ pub enum Command {
         what: String,
         #[serde(default)]
         timeout_ms: Option<f64>,
+        /// Skip the network-quiet wait before reading (`--no-wait`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_wait: bool,
     },
     /// The probability that a yes/no question about the page is yes.
     #[serde(rename = "check")]
@@ -415,6 +422,9 @@ pub enum Command {
         question: String,
         #[serde(default)]
         timeout_ms: Option<f64>,
+        /// Skip the network-quiet wait before reading (`--no-wait`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_wait: bool,
     },
     /// Evaluate a JS expression; result must be JSON-serializable.
     #[serde(rename = "eval", alias = "evaluate")]
@@ -724,6 +734,9 @@ pub enum Command {
         path: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         full_page: Option<bool>,
+        /// Skip the network-quiet wait before reading (`--no-wait`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_wait: bool,
     },
     /// List open tabs: index, target id, and whether it is the active tab.
     #[serde(rename = "tab-list")]
@@ -985,7 +998,7 @@ pub struct ParsedArgs {
 const OPS: &[(&str, &str, &str)] = &[
     ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless]] [--natural] [--download-dir <dir>]", "spawn a detached session server + headless browser (needs --session); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
-    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json]", "accessibility snapshot: indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
+    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
     ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys]", "set an input/textarea's value; --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
     ("type", "<text> [--selector <css> | --ref <n>]", "type key by key into the target or the focused element"),
@@ -1029,7 +1042,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
-    ("screenshot", "[--path <f.png>] [--full-page]", "PNG of the viewport (or whole page)"),
+    ("screenshot", "[--path <f.png>] [--full-page] [--no-wait]", "PNG of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
     ("reset", "[--all]", "a clean slate in the same browser: a new browser context (no cookies, storage or cache from before) with one blank tab; the old tabs close (`set`, routes, credentials, init scripts, the dialog answer and `downloads --dir` stay; --all drops them too)"),
     ("tab-new", "[<url>]", "open a tab and make it active"),
     ("tab-list", "", "list tabs"),
@@ -1411,6 +1424,7 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
             None => None,
         },
         frame: str_flag(args, "--frame")?,
+        no_wait: extract_present(args, "--no-wait"),
     };
     // A bare first word is the target when no flag names one; `--nth`,
     // `--near` and `--frame` only narrow it (`click .row --nth 2`).
@@ -1791,10 +1805,14 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             },
             timeout_ms,
         },
-        "find" => Command::Find {
-            what: rest_words(&mut args).ok_or_else(|| need("find", "a description of the element"))?,
-            timeout_ms,
-        },
+        "find" => {
+            let no_wait = extract_present(&mut args, "--no-wait");
+            Command::Find {
+                what: rest_words(&mut args).ok_or_else(|| need("find", "a description of the element"))?,
+                timeout_ms,
+                no_wait,
+            }
+        }
         // `check <target>` checks a checkbox; `check <question>` asks the
         // decision model. A target is a ref or a targeting flag.
         "check" | "uncheck"
@@ -1820,10 +1838,14 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         {
             Command::SetChecked { checked: op == "check", target: target_args(&mut args, true)?, timeout_ms }
         }
-        "check" => Command::Check {
-            question: rest_words(&mut args).ok_or_else(|| need("check", "a yes/no question about the page"))?,
-            timeout_ms,
-        },
+        "check" => {
+            let no_wait = extract_present(&mut args, "--no-wait");
+            Command::Check {
+                question: rest_words(&mut args).ok_or_else(|| need("check", "a yes/no question about the page"))?,
+                timeout_ms,
+                no_wait,
+            }
+        }
         "get" => {
             let what = positional(&mut args).ok_or_else(|| need("get", "what to read"))?;
             match what.as_str() {
@@ -2113,6 +2135,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 None => positional(&mut args),
             },
             full_page: extract_present(&mut args, "--full-page").then_some(true),
+            no_wait: extract_present(&mut args, "--no-wait"),
         },
         unknown => {
             let hint = suggest(unknown).map(|s| format!(" — did you mean `{s}`?")).unwrap_or_default();
@@ -2587,10 +2610,11 @@ impl Driver {
             // Snapshots read what the page shows: give data it is still
             // fetching (an SPA's "Loading…" list) a moment to land, so the
             // agent doesn't spend a turn on a placeholder.
-            if matches!(
+            if (matches!(
                 command,
                 Command::Ax { .. } | Command::Screenshot { .. } | Command::Find { .. } | Command::Check { .. }
-            ) || command.find_target().is_some()
+            ) || command.find_target().is_some())
+                && !command.no_wait()
             {
                 self.session.network_quiet(NETWORK_QUIET, budget.min(NETWORK_QUIET_MAX));
             }
@@ -2761,13 +2785,13 @@ impl Driver {
     fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
         let s = &self.session;
         match command {
-            Command::Find { what, timeout_ms } => {
+            Command::Find { what, timeout_ms, .. } => {
                 let f = self.find(what, *timeout_ms)?;
                 let mut out = f.to_json();
                 out["sure"] = json!(f.p >= find_min());
                 Ok(out)
             }
-            Command::Check { question, timeout_ms } => {
+            Command::Check { question, timeout_ms, .. } => {
                 let decider =
                     crate::decide::Decider::from_env().ok_or_else(|| crate::decide::Decider::missing("check"))?;
                 let tree = self.page_tree(*timeout_ms)?;
@@ -3485,7 +3509,7 @@ impl Driver {
                 self.session.close_page(index).map_err(|e| anyhow::anyhow!("tab-close {index}: {e:#}"))?;
                 Ok(self.state_json())
             }
-            Command::Screenshot { path, full_page } => {
+            Command::Screenshot { path, full_page, .. } => {
                 let path = path.clone().unwrap_or_else(|| {
                     format!(
                         "shot-{}.png",
@@ -3592,6 +3616,16 @@ impl Command {
                 // What the agent waited for is when the test may go on.
                 | Command::Wait { .. }
         )
+    }
+
+    /// `--no-wait`: no network-quiet wait before this command reads the page.
+    fn no_wait(&self) -> bool {
+        match self {
+            Command::Screenshot { no_wait, .. } | Command::Find { no_wait, .. } | Command::Check { no_wait, .. } => {
+                *no_wait
+            }
+            _ => self.clone().target_mut().is_some_and(|t| t.no_wait),
+        }
     }
 
     /// The description given with `--find`, if any.
