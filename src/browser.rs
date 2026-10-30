@@ -1324,10 +1324,21 @@ impl BrowserSession {
             return Ok(false);
         }
         self.click_target(target, &cdp::ClickOptions::default(), timeout_ms)?;
-        if checked(self)? != want {
-            bail!("clicking it did not {} it", if want { "check" } else { "uncheck" });
+        // A controlled input commits its state after the click returns
+        // (a React onChange re-render), so one immediate re-read can call
+        // a working click a failure: re-read until it lands or the
+        // element's own budget runs out.
+        let (wait, _) = self.element_budget(timeout_ms);
+        let deadline = std::time::Instant::now() + wait.min(Duration::from_secs(5));
+        loop {
+            if checked(self)? == want {
+                return Ok(true);
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!("clicking it did not {} it", if want { "check" } else { "uncheck" });
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        Ok(true)
     }
 
     pub fn key_event(&self, key: &str, down: bool) -> Result<()> {

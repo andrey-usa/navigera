@@ -1245,3 +1245,26 @@ fn a_snapshot_does_not_wait_on_polls_and_no_wait_skips_the_wait() {
     assert!(s.text(&["ax", "--no-wait"]).contains("polled"));
     s.ok(&["screenshot", "--no-wait", "--path", &std::env::temp_dir().join("nv-quiet.png").display().to_string()]);
 }
+
+/// `check` on a controlled checkbox (the click's default is cancelled and the
+/// app commits the state later, as a React onChange re-render does) succeeds
+/// once the state lands, not only when it is already there as the click
+/// returns; one that never commits still fails, inside the element's budget.
+#[test]
+fn check_waits_for_a_late_commit() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("latecheck", &[]);
+    s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+    let page = |delay: &str| {
+        format!(
+            "document.body.innerHTML = '<label><input type=checkbox id=c> Forecast</label>'; \
+             document.getElementById('c').addEventListener('click', (e) => {{ e.preventDefault(); {delay} }}); 1"
+        )
+    };
+    s.ok(&["eval", &page("setTimeout(() => { document.getElementById('c').checked = true; }, 300);")]);
+    assert_eq!(s.ok(&["check", "--selector", "#c"])["changed"], true);
+    assert_eq!(s.ok(&["eval", "document.getElementById('c').checked"]), true);
+    s.ok(&["eval", &page("")]);
+    let error = s.fails(&["check", "--selector", "#c", "--timeout-ms", "1000"]);
+    assert!(error.contains("did not check it"), "{error}");
+}
