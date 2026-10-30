@@ -3074,8 +3074,8 @@ impl Page {
     /// mouse was a plain mouse drag and is released over `to`: `{from, to,
     /// path: "mouse"}`.
     ///
-    /// An engine that cannot intercept drags (no `Input.setInterceptDrags`)
-    /// gets the events a browser fires, dragstart through dragend, from the
+    /// An engine that cannot intercept drags (no `Input.setInterceptDrags`,
+    /// or one that never reports a drag) gets the events a browser fires, dragstart through dragend, from the
     /// page, for a `draggable` source (`{html5: true, dropped, path:
     /// "synthetic"}`), with one DataTransfer shared from start to drop.
     pub fn drag(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
@@ -3092,20 +3092,38 @@ impl Page {
                 // Whatever happened, Chrome gets its own drags back.
                 let _ = self.send("Input.setInterceptDrags", json!({ "enabled": false }), timeout);
                 self.moved_to(bx, by);
-                r
+                let r = r?;
+                // An engine can take the command and still never report a
+                // drag (Lightpanda): a source that is draggable after the
+                // held mouse gets the page-side drag.
+                if r["path"] == "mouse" {
+                    if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
+                        return Ok(synthetic);
+                    }
+                }
+                Ok(r)
             }
             Err(_) => {
-                let html5 = self.on_element(from, "drag", DRAG_IS_HTML5, &[], wait, timeout)?;
-                if html5 == Value::Bool(true) {
-                    self.on_element(from, "drag", DRAG_START, &[], wait, timeout)?;
-                    let dropped = self.on_element(to, "drag", DRAG_DROP, &[], wait, timeout)?;
-                    return Ok(json!({ "html5": true, "dropped": dropped, "path": "synthetic" }));
+                if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
+                    return Ok(synthetic);
                 }
                 self.moved_to(bx, by);
                 self.drag_mouse((ax, ay), (bx, by), timeout)?;
                 Ok(json!({ "from": { "x": ax, "y": ay }, "to": { "x": bx, "y": by }, "path": "mouse" }))
             }
         }
+    }
+
+    /// The page-side drag for a `draggable` source: the events a browser
+    /// fires, dragstart through dragend, with one DataTransfer shared from
+    /// start to drop. `None` when the source is not draggable.
+    fn drag_synthetic(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Option<Value>> {
+        if self.on_element(from, "drag", DRAG_IS_HTML5, &[], wait, timeout)? != Value::Bool(true) {
+            return Ok(None);
+        }
+        self.on_element(from, "drag", DRAG_START, &[], wait, timeout)?;
+        let dropped = self.on_element(to, "drag", DRAG_DROP, &[], wait, timeout)?;
+        Ok(Some(json!({ "html5": true, "dropped": dropped, "path": "synthetic" })))
     }
 
     /// Press at `a`, move in steps to `b`, release: the held mouse.
