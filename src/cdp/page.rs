@@ -697,17 +697,35 @@ const HOVER_PREP: &str = r#"async function (el, settleMs) {
     return { synthetic: true };
 }"#;
 
+/// What a user needs to type into a field: visible (a box, and not
+/// `visibility: hidden`; `opacity: 0` or a one-pixel box still count, as in
+/// Playwright), enabled and editable. Waits up to `settleMs` for all three,
+/// then throws naming the first that fails. `checkBox` is false where the
+/// engine has no layout (Lightpanda), so visibility can't be judged there.
+pub const FIELD_READY: &str = r#"async function (el, settleMs, checkBox) {
+    const why = () => {
+        if (checkBox) {
+            const r = el.getBoundingClientRect();
+            const v = (el.ownerDocument.defaultView || window).getComputedStyle(el).visibility;
+            if (!(r.width > 0 && r.height > 0) || v === 'hidden' || v === 'collapse') return 'not visible';
+        }
+        if (el.disabled || el.closest('fieldset[disabled]')) return 'disabled';
+        if (el.readOnly) return 'read-only (not editable)';
+        return '';
+    };
+    const end = Date.now() + (settleMs || 0);
+    while (why() && Date.now() < end) await new Promise((res) => setTimeout(res, 50));
+    const bad = why();
+    if (bad) throw new Error('fill: the field is ' + bad + "; a user can't type into it (waited " + (settleMs || 0) + ' ms; --force fills it anyway)');
+    return true;
+}"#;
+
 /// Fill `el` with `value`: native value setter (so React & co. see it) plus
 /// `input`/`change` events. Contenteditable hosts get their text replaced.
 /// A field whose centre is under something else (a sticky bar, an
 /// overlapping panel) is scrolled until it isn't, as a user would before
 /// typing; some pages check.
-const FILL_EL: &str = r#"async function (el, value, settleMs) {
-    // A disabled or read-only field takes no typing; wait for it to unlock.
-    const locked = () => !!(el.disabled || el.readOnly || el.closest('fieldset[disabled]'));
-    const end = Date.now() + (settleMs || 0);
-    while (locked() && Date.now() < end) await new Promise((res) => setTimeout(res, 50));
-    if (locked()) throw new Error('fill: the field is ' + (el.readOnly ? 'read-only' : 'disabled') + '; a user can\'t type into it');
+const FILL_EL: &str = r#"async function (el, value) {
     const covered = () => {
         const r = el.getBoundingClientRect();
         if (!(r.width > 0 && r.height > 0)) return false;
@@ -3432,9 +3450,21 @@ impl Page {
     }
 
     /// Set an input/textarea/contenteditable's value (native setter + events).
-    pub fn fill(&self, target: &Target, value: &str, wait: Duration, timeout: Duration) -> Result<()> {
-        let settle = json!(self.hit_settle_ms(wait));
-        self.on_element(target, "fill", FILL_EL, &[json!(value), settle], wait, timeout)?;
+    pub fn fill(&self, target: &Target, value: &str, force: bool, wait: Duration, timeout: Duration) -> Result<()> {
+        self.field_ready(target, force, wait, timeout)?;
+        self.on_element(target, "fill", FILL_EL, &[json!(value)], wait, timeout)?;
+        Ok(())
+    }
+
+    /// Wait for a field a user could type into (see [`FIELD_READY`]), unless
+    /// `force`. Waits as long as the element wait.
+    pub fn field_ready(&self, target: &Target, force: bool, wait: Duration, timeout: Duration) -> Result<()> {
+        if force {
+            return Ok(());
+        }
+        let settle = json!(wait.as_millis() as u64);
+        let check_box = json!(!self.shared.is_single_target());
+        self.on_element(target, "fill", FIELD_READY, &[settle, check_box], wait, timeout)?;
         Ok(())
     }
 

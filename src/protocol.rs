@@ -274,6 +274,9 @@ pub enum Command {
         /// app only takes what is typed (observable models).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         keys: bool,
+        /// Skip the wait for a visible, enabled, editable field.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
     },
     /// Move the mouse over the target (hover menus, tooltips).
     #[serde(rename = "hover")]
@@ -1000,7 +1003,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
     ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
-    ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys]", "set an input/textarea's value; --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
+    ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys] [--force]", "set an input/textarea's value once the field is visible, enabled and editable (waits for it; the timeout error names which check failed; --force skips the checks); --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
     ("type", "<text> [--selector <css> | --ref <n>]", "type key by key into the target or the focused element"),
     ("press", "<key> [--selector <css> | --ref <n>]", "press a key or chord: Enter, Tab, Escape, ArrowDown, Control+a"),
     ("select", "<ref> <option>... | --selector <css> --value <option> [--add]", "choose <select> option(s) by value or label (whitespace-insensitive); --add keeps the options already chosen"),
@@ -1687,6 +1690,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         }
         "fill" => {
             let keys = extract_present(&mut args, "--keys");
+            let force = extract_present(&mut args, "--force");
             let target = target_args(&mut args, true)?;
             let value = match str_flag(&mut args, "--value")? {
                 Some(v) => v,
@@ -1694,7 +1698,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                     positional(&mut args).ok_or_else(|| need("fill", "a value (`fill <ref> <value>` or --value)"))?
                 }
             };
-            Command::Fill { target, value, timeout_ms, keys }
+            Command::Fill { target, value, timeout_ms, keys, force }
         }
         "select" => {
             let add = extract_present(&mut args, "--add");
@@ -2933,12 +2937,12 @@ impl Driver {
                 }
                 Ok(state)
             }
-            Command::Fill { target, value, timeout_ms, keys } => {
+            Command::Fill { target, value, timeout_ms, keys, force } => {
                 let t = target.target("fill")?;
                 if *keys {
-                    s.fill_keys(&t, value, *timeout_ms).map_err(|e| on_target("fill", &t, e))?;
+                    s.fill_keys(&t, value, *force, *timeout_ms).map_err(|e| on_target("fill", &t, e))?;
                 } else {
-                    s.fill_target(&t, value, *timeout_ms).map_err(|e| on_target("fill", &t, e))?;
+                    s.fill_target(&t, value, *force, *timeout_ms).map_err(|e| on_target("fill", &t, e))?;
                 }
                 Ok(self.state_json())
             }
@@ -4242,6 +4246,7 @@ mod tests {
                 value: "hello world".into(),
                 timeout_ms: None,
                 keys: false,
+                force: false,
             }
         );
         assert_eq!(
@@ -4467,6 +4472,7 @@ mod tests {
                 value: "600-10070".into(),
                 timeout_ms: Some(10000.0),
                 keys: false,
+                force: false,
             }
         );
         let command: Command = serde_json::from_str(r#"{"op":"click","ref":"@e7"}"#).expect("string ref");

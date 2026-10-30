@@ -1940,16 +1940,17 @@ impl BrowserSession {
         self.active_tab().hover(target, wait, timeout)
     }
 
-    pub fn fill_target(&self, target: &Target, value: &str, timeout_ms: Option<f64>) -> Result<()> {
+    pub fn fill_target(&self, target: &Target, value: &str, force: bool, timeout_ms: Option<f64>) -> Result<()> {
         let (wait, timeout) = self.element_budget(timeout_ms);
-        self.active_tab().fill(target, value, wait, timeout)
+        self.active_tab().fill(target, value, force, wait, timeout)
     }
 
     /// `fill --keys`: select what the field holds and type over it, key by
     /// key; Backspace clears it for an empty value.
-    pub fn fill_keys(&self, target: &Target, value: &str, timeout_ms: Option<f64>) -> Result<()> {
+    pub fn fill_keys(&self, target: &Target, value: &str, force: bool, timeout_ms: Option<f64>) -> Result<()> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let page = self.active_tab();
+        page.field_ready(target, force, wait, timeout)?;
         if page.on_element(target, "fill", cdp::page_js::FOCUS_SELECT_ALL, &[], wait, timeout)?
             != serde_json::Value::Bool(true)
         {
@@ -2223,7 +2224,7 @@ impl BrowserSession {
 
     /// Fill the first matching field with `value`.
     pub fn fill(&self, selector: &str, value: &str, timeout_ms: Option<f64>) -> Result<()> {
-        self.fill_target(&Target::Selector(selector.to_string()), value, timeout_ms)
+        self.fill_target(&Target::Selector(selector.to_string()), value, false, timeout_ms)
     }
 
     /// Click the node with this `backendNodeId` (an `ax` ref).
@@ -2233,7 +2234,7 @@ impl BrowserSession {
 
     /// Fill the node with this `backendNodeId` (an `ax` ref) with `value`.
     pub fn fill_ref(&self, backend_node_id: u64, value: &str, timeout_ms: Option<f64>) -> Result<()> {
-        self.fill_target(&Target::Ref(backend_node_id), value, timeout_ms)
+        self.fill_target(&Target::Ref(backend_node_id), value, false, timeout_ms)
     }
 
     /// First element's text content for `selector`, if present.

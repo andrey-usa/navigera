@@ -657,6 +657,36 @@ fn clicks_only_claim_what_a_user_could_do() {
 }
 
 #[test]
+fn fill_waits_for_a_field_a_user_could_type_into() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("fillwait", &[]);
+    s.ok(&["goto", &format!("{}/fillwait", site.url)]);
+    let value = |sel: &str| s.text(&["eval", &format!("document.querySelector('{sel}').value")]);
+    // Shown / enabled 400 ms after load (checked first, before any other wait): filled once ready.
+    s.ok(&["fill", "--selector", "#later", "shown", "--timeout-ms", "3000"]);
+    assert_eq!(value("#later"), "shown");
+    s.ok(&["fill", "--selector", "#off", "enabled", "--timeout-ms", "3000"]);
+    assert_eq!(value("#off"), "enabled");
+    // Hidden: waits the whole timeout, then names the failed check.
+    for sel in ["#hidden", "#vis"] {
+        let t0 = std::time::Instant::now();
+        let err = s.fails(&["fill", "--selector", sel, "x", "--timeout-ms", "700"]);
+        assert!(err.contains("not visible"), "{err}");
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(650), "{:?}", t0.elapsed());
+        assert_eq!(value(sel), "");
+    }
+    // Read-only never changes: fails as not editable.
+    let err = s.fails(&["fill", "--selector", "#ro", "x", "--timeout-ms", "300"]);
+    assert!(err.contains("not editable"), "{err}");
+    // A transparent field is still one a user can click into.
+    s.ok(&["fill", "--selector", "#zero", "ok", "--timeout-ms", "1000"]);
+    assert_eq!(value("#zero"), "ok");
+    // --force skips the checks.
+    s.ok(&["fill", "--selector", "#hidden", "forced", "--force", "--timeout-ms", "300"]);
+    assert_eq!(value("#hidden"), "forced");
+}
+
+#[test]
 fn forms_inside_cross_origin_frames() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("xo", &[]);

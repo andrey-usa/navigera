@@ -496,6 +496,16 @@ setTimeout(() => { document.getElementById('unlock-later').disabled = false; }, 
 </script>""")
 
 
+PAGES["/fillwait"] = ("fillwait", "", """
+<input id=hidden style="display:none"> <input id=vis style="visibility:hidden">
+<input id=later style="display:none"> <input id=off disabled> <input id=ro readonly value=fixed>
+<input id=zero style="opacity:0">
+<script>
+setTimeout(() => { document.getElementById('later').style.display = ''; }, 400);
+setTimeout(() => { document.getElementById('off').disabled = false; }, 400);
+</script>""")
+
+
 PAGES["/effects"] = ("effects", "#strip{width:200px;overflow-x:auto;white-space:nowrap}#strip span{display:inline-block;width:150px}", """
 <button id=late>Close</button>
 <button id=noop>Does nothing</button>
