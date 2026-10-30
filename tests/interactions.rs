@@ -171,6 +171,55 @@ fn a_wait_sees_a_change_within_a_frame() {
     assert!(after[3] < 35.0, "seen this many ms after the change: {after:?}");
 }
 
+/// A wait inside a frame sees a change there within a frame of it, not at
+/// its next poll: an element added to the frame 120-340 ms after the wait
+/// starts, and the time from its adding to the wait's return (the clock is
+/// `Date.now`, one for both documents). Looking every 100 ms put that at 50
+/// ms on average, past the command's own round trip.
+#[test]
+fn a_wait_in_a_frame_sees_a_change_within_a_frame() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("framewake", &[]);
+    s.ok(&["goto", &format!("{}/iframe-form", site.url)]);
+    for (what, flag) in [("selector", "--selector"), ("text", "--text")] {
+        let mut after = Vec::new();
+        for i in 0..7 {
+            let delay = 120 + 37 * i;
+            let (selector, text) = (".late", format!("late {what} {i}"));
+            s.ok(&[
+                "eval",
+                &format!(
+                    "const d = document.getElementById('email-subscribe').contentDocument; \
+                     d.querySelectorAll('.late').forEach((e) => e.remove()); \
+                     setTimeout(() => {{ const p = d.createElement('p'); p.className = 'late'; \
+                     p.textContent = '{text}'; d.body.append(p); window.__added = Date.now(); }}, {delay}); 1"
+                ),
+            ]);
+            let target = if flag == "--selector" { selector.to_string() } else { text };
+            s.ok(&["wait", flag, &target, "--frame", "#email-subscribe"]);
+            after.push(s.ok(&["eval", "Date.now() - window.__added"]).as_f64().unwrap());
+        }
+        after.sort_by(f64::total_cmp);
+        assert!(after[3] < 35.0, "wait {flag} --frame saw it this many ms after it was added: {after:?}");
+    }
+}
+
+/// A frame of another origin is out of the observer's reach: a wait there
+/// still sees what appears in it (looking again every 100 ms), on the same
+/// site (another port) and across sites (its own process).
+#[test]
+fn a_wait_in_a_cross_origin_frame_still_sees_a_change() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("framewake-xo", &[]);
+    for page in ["/xo-parent", "/xo-parent?same-site"] {
+        s.ok(&["goto", &format!("{}{page}", site.url)]);
+        // The frame loads a page of its own origin whose button appears 300 ms later.
+        s.ok(&["eval", "const f = document.getElementById('card'); f.src = new URL(f.src).origin + '/slow?ms=300'; 1"]);
+        let waited = s.ok(&["wait", "--text", "Late button", "--frame", "#card", "--timeout-ms", "5000"]);
+        assert!(waited["waited_ms"].as_f64().unwrap() < 1500.0, "{page}: {waited}");
+    }
+}
+
 /// `eval` takes what people type: an expression, an arrow function,
 /// statements with the last value the answer, top-level `await`, or a body
 /// that `return`s.

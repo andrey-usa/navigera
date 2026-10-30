@@ -2184,10 +2184,16 @@ impl BrowserSession {
         let started = std::time::Instant::now();
         loop {
             self.settle_within(wait.saturating_sub(started.elapsed()));
-            match self.active_tab().check_in_frame(chain, js_predicate, timeout) {
+            // Up to WATCH in the frame at a time, woken by its changes (as
+            // `wait_until_or_in_frames` is in the page), then looked at again
+            // from here: a navigation, a frame that went or came, the budget.
+            let chunk = wait.saturating_sub(started.elapsed()).min(WATCH);
+            match self.active_tab().watch_in_frame(chain, js_predicate, chunk, timeout) {
                 Ok(true) => return Ok((started.elapsed().as_secs_f64() * 1000.0).round()),
                 Err(e) if format!("{e:#}").contains("not a frame") => return Err(e),
-                _ => {}
+                // The document went mid-watch: not a tight loop of retries.
+                Err(_) => std::thread::sleep(Duration::from_millis(25)),
+                Ok(false) => {}
             }
             if started.elapsed() >= wait {
                 bail!(
@@ -2195,7 +2201,6 @@ impl BrowserSession {
                     wait.as_millis()
                 );
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
     }
 

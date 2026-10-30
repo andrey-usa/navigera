@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `wait --frame` is woken by the frame's changes too, as the other waits
+  are, not only looked at every 100 ms. An element added to a same-origin
+  frame 100-400 ms after the wait starts: seen 4 ms after it appears, not
+  65 (`--selector`, median; `--text` 42 -> 4). A frame of another origin is
+  out of the observer's reach and is still looked at every 100 ms.
+
 ## [0.6.3] - 2026-10-30
 
 Refs on what a page made clickable: a `<div>` row with a click handler, a card

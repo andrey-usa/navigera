@@ -3459,6 +3459,33 @@ impl Page {
         }
     }
 
+    /// [`Page::check_in_frame`], watching in the frame for up to `chunk` at a
+    /// time: the predicate is checked again on the frame after each change
+    /// there (`DEEP`'s wake, scoped to the same frame) and at least every
+    /// 100 ms. False when the chunk ends unmet, or while the frame isn't
+    /// there. A frame of another origin is out of the observer's reach: it
+    /// is checked from here once and, unmet, waited on for the old 100 ms.
+    pub fn watch_in_frame(&self, chain: &str, js_predicate: &str, chunk: Duration, timeout: Duration) -> Result<bool> {
+        let watched = format!(
+            "(() => {{ const __nvStart = () => ({FRAME_DOC})({}); const __nvDeep = {DEEP}, __nvEnd = Date.now() + {}; \
+             return (async () => {{ for (;;) {{ if (await ({js_predicate}\n)) return true; const __nvLeft = __nvEnd - Date.now(); \
+             if (__nvLeft <= 0) return false; await __nvDeep.wake(Math.min(100, __nvLeft)); }} }})(); }})()",
+            json!(chain),
+            chunk.as_millis()
+        );
+        match self.check(&watched, timeout + chunk) {
+            Err(e) if format!("{e:#}").contains("(navigera:xo ") => {
+                let context = self.foreign_frame_context(chain, timeout)?;
+                let met = self.evaluate_in(context, &format!("!!({js_predicate})"), timeout)?.as_bool() == Some(true);
+                if !met {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(met)
+            }
+            other => other,
+        }
+    }
+
     /// PNG screenshot bytes; `full_page` captures beyond the viewport.
     pub fn screenshot_png(&self, timeout: Duration, full_page: bool) -> Result<Vec<u8>> {
         let mut params = json!({ "format": "png" });
