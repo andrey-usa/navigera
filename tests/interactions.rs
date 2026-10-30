@@ -172,15 +172,17 @@ fn a_wait_sees_a_change_within_a_frame() {
 }
 
 /// A wait inside a frame sees a change there within a frame of it, not at
-/// its next poll: an element added to the frame 120-360 ms after the wait
+/// its next poll: an element added to the frame 120-400 ms after the wait
 /// starts. The time from its adding to the next command's clock reading
 /// (`Date.now`, one clock for both documents) holds the wait's return and
 /// that command's start-up too, which is most of it on a slow or busy
-/// machine (Windows CI). So each sample is measured with a control: the
-/// same steps with a command that returns at once in place of the wait (the
-/// stamp is made by it), the time from its return to the next command's
-/// reading. The wake is the difference of the medians. Looking every 100
-/// ms put it near 50 ms.
+/// machine (Windows CI, 16 ms a command). So each sample is paired with a
+/// control on the same frame: the stamp is made by an `eval`, then the same
+/// wait, already satisfied, returns at once through the same return path,
+/// then the same reading. The control holds the commands' time and slightly
+/// more (one more start-up), so the wake is at most what the difference
+/// shows: the median of the per-sample differences. Looking every 100 ms put
+/// it near 50 ms.
 #[test]
 fn a_wait_in_a_frame_sees_a_change_within_a_frame() {
     let (true, Some(site)) = (chrome(), site()) else { return };
@@ -191,9 +193,9 @@ fn a_wait_in_a_frame_sees_a_change_within_a_frame() {
         v[v.len() / 2]
     };
     for (what, flag) in [("selector", "--selector"), ("text", "--text")] {
-        let (mut after, mut control) = (Vec::new(), Vec::new());
-        for i in 0..9 {
-            let delay = 120 + 30 * i;
+        let (mut seen, mut diff) = (Vec::new(), Vec::new());
+        for i in 0..15 {
+            let delay = 120 + 20 * i;
             let (selector, text) = (".late", format!("late {what} {i}"));
             s.ok(&[
                 "eval",
@@ -205,17 +207,21 @@ fn a_wait_in_a_frame_sees_a_change_within_a_frame() {
                 ),
             ]);
             let target = if flag == "--selector" { selector.to_string() } else { text };
-            s.ok(&["wait", flag, &target, "--frame", "#email-subscribe"]);
-            after.push(s.ok(&["eval", "Date.now() - window.__added"]).as_f64().unwrap());
-            // The control: a command that returns at once, then the same reading.
+            let wait = ["wait", flag, &target, "--frame", "#email-subscribe"];
+            s.ok(&wait);
+            let after = s.ok(&["eval", "Date.now() - window.__added"]).as_f64().unwrap();
+            // The control: the element is there now, so the same wait returns at once.
             s.ok(&["eval", "window.__added = Date.now(); 1"]);
-            control.push(s.ok(&["eval", "Date.now() - window.__added"]).as_f64().unwrap());
+            s.ok(&wait);
+            let own = s.ok(&["eval", "Date.now() - window.__added"]).as_f64().unwrap();
+            seen.push(after);
+            diff.push(after - own);
         }
-        let (after, control) = (median(&mut after), median(&mut control));
-        eprintln!("wait {flag} --frame: seen {after} ms after adding, {control} ms of it the commands' own");
+        let (seen, diff) = (median(&mut seen), median(&mut diff));
+        eprintln!("wait {flag} --frame: seen {seen} ms after adding, {diff} ms over the same commands with no wait");
         assert!(
-            after - control < 25.0,
-            "wait {flag} --frame saw it {after} ms after it was added, {control} ms of that its own commands (median of 9)"
+            diff < 25.0,
+            "wait {flag} --frame saw it {seen} ms after it was added, {diff} ms over its own commands (median of 15)"
         );
     }
 }
