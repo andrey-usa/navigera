@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-30
+
+Refs on what a page made clickable: a `<div>` row with a click handler, a card
+with `cursor: pointer`, an icon `<span>`, which agents had no ref for and dug
+through the DOM with `eval` to reach. Waits woken by the page's changes
+instead of a timer, `ax` and the locators linear on long pages, and errors
+that say what happened and what to do next.
+
 ### Security
 
 - A file navigera writes where you name it (`network --body-file`, `--har`,
@@ -13,6 +21,32 @@ All notable changes to this project are documented here. The format follows
   link already at that path: a link planted there (in a cloned project, or
   in a shared directory) is replaced by the file instead of having its
   target overwritten.
+
+### Added
+
+- `ax` gives a ref to what a user could click that the accessibility tree
+  doesn't call actionable: elements with a click, mousedown or mouseup
+  handler of their own and the outermost element of a `cursor: pointer`
+  area. A `<div>` row or card, or an icon `<span>`, prints as
+  `clickable [ref=N]: <text>`; an actionable node with no name or text
+  shows its `#id` or `.class`, so two blank buttons can be told apart. A
+  list or table listening for its items' clicks gives each item or row the
+  ref (one ref on the list would click whichever item is in the middle).
+  Only what a user's click can land on and tell apart is marked: not an
+  empty box, `pointer-events: none`, something fully transparent (an ad's
+  click guard), `visibility: hidden` (a control shown on hover), under
+  `aria-hidden` or `inert`, inside another site's frame, inside a link or
+  button (including `role=button` and `role=link`; they have the ref and
+  get the click), or with no name, text, `#id` or `.class` (a hidden
+  menu's 287 blank tiles on one shop's home page). A label whose control
+  is hidden is what a user clicks, so it gets the ref. One `DOMSnapshot`
+  call, Chrome only.
+- The skill says what a `clickable` line is and to click it by ref
+  before reaching for `eval`.
+- `eval` runs statements too, with `await` and `return` at the top level
+  (`const r = await fetch('/api/cart'); r.status`, or a body that ends in
+  `return`): what was one expression or an arrow function before; a probe
+  written either way works the first time.
 
 ### Changed
 
@@ -67,15 +101,10 @@ All notable changes to this project are documented here. The format follows
   screen". An input hidden on purpose behind its label or card (a styled
   radio) still fails at once, naming what to click instead.
 
-### Added
-
-- `eval` runs statements too, with `await` and `return` at the top level
-  (`const r = await fetch('/api/cart'); r.status`, or a body that ends in
-  `return`): what was one expression or an arrow function before; a probe
-  written either way works the first time.
-
 ### Fixed
 
+- `click` on a table row whose middle falls between two cells clicks a
+  cell of the row, instead of refusing the row as hidden behind its table.
 - `ax` read the page's whole accessibility tree to print at most its
   limit, and Chrome's full-tree call grows faster than the page: 8000 list
   items took 13 s and 32000 timed out. The tree is now fetched from the
@@ -100,39 +129,6 @@ All notable changes to this project are documented here. The format follows
   (Chromium 141: `'Network.emulateNetworkConditionsByRule' wasn't
   found`). Such a browser now gets `Network.emulateNetworkConditions`,
   which also tells the page it is offline; newer browsers are unchanged.
-
-## [0.7.0] - 2026-10-27
-
-Refs on what a page made clickable: a `<div>` row with a click handler, a
-card with `cursor: pointer`, an icon `<span>`, which agents had no ref for and
-dug through the DOM with `eval` to reach.
-
-### Added
-
-- `ax` gives a ref to what a user could click that the accessibility tree
-  doesn't call actionable: elements with a click, mousedown or mouseup
-  handler of their own and the outermost element of a `cursor: pointer`
-  area. A `<div>` row or card, or an icon `<span>`, prints as
-  `clickable [ref=N]: <text>`; an actionable node with no name or text
-  shows its `#id` or `.class`, so two blank buttons can be told apart. A
-  list or table listening for its items' clicks gives each item or row the
-  ref (one ref on the list would click whichever item is in the middle).
-  Only what a user's click can land on and tell apart is marked: not an
-  empty box, `pointer-events: none`, something fully transparent (an ad's
-  click guard), `visibility: hidden` (a control shown on hover), under
-  `aria-hidden` or `inert`, inside another site's frame, inside a link or
-  button (including `role=button` and `role=link`; they have the ref and
-  get the click), or with no name, text, `#id` or `.class` (a hidden
-  menu's 287 blank tiles on one shop's home page). A label whose control
-  is hidden is what a user clicks, so it gets the ref. One `DOMSnapshot`
-  call, Chrome only.
-- The skill says what a `clickable` line is and to click it by ref
-  before reaching for `eval`.
-
-### Fixed
-
-- `click` on a table row whose middle falls between two cells clicks a
-  cell of the row, instead of refusing the row as hidden behind its table.
 
 ## [0.6.2] - 2026-10-26
 
@@ -612,7 +608,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
-[0.7.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.0
+[0.6.3]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.3
 [0.6.2]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.2
 [0.6.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.1
 [0.6.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.0
