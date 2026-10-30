@@ -469,12 +469,18 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // match - the press must land where the element IS, and a deferred
         // (zero-delay) page commit can move it between one read and the
         // press. Bounded by the settle budget: past it, click the last read.
-        for (;;) {
-            await new Promise((res) => { requestAnimationFrame(() => res()); setTimeout(res, 100); });
+        // A match counts only with a frame between the reads: on a busy
+        // machine the 100 ms timer can win twice before the page's first
+        // frame, and two reads with no frame between them see nothing move.
+        // A hidden page draws no frames, and one that drew none for 500 ms
+        // isn't moving anything by frames either: the timer counts there.
+        for (let idle = 0; ; ) {
+            const framed = await new Promise((res) => { requestAnimationFrame(() => res(true)); setTimeout(() => res(false), 100); });
+            idle = framed ? 0 : idle + 1;
             const r2 = box.getBoundingClientRect();
             const same = r2.left === r.left && r2.top === r.top && r2.width === r.width && r2.height === r.height;
             r = r2;
-            if (same || Date.now() >= deadline) break;
+            if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= deadline) break;
         }
         let x = r.left + r.width / 2, y = r.top + r.height / 2;
         const root = box.getRootNode(), doc = box.ownerDocument;
