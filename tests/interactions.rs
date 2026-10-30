@@ -428,6 +428,38 @@ fn a_click_waits_for_a_sliding_modal_to_settle() {
 }
 
 #[test]
+fn a_click_waits_for_a_moving_target_to_stop() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("moving-target", &[]);
+    s.ok(&["goto", &format!("{}/moving-target", site.url)]);
+    s.ok(&["click", "--selector", "#mover"]);
+    let status = s.text(&["get", "text", "--selector", "#status"]);
+    // The button glides 40px a frame for 12 frames from x=60, then stops:
+    // settled box centre x is 60 + 12*40 + 34/2 = 557. A click read before
+    // it stopped lands on empty page and the status stays "waiting".
+    assert!(status.starts_with("ok "), "click did not land on the button: {status}");
+    let x: i32 = status
+        .strip_prefix("ok ")
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .expect("status carries the click x");
+    assert!((540..=574).contains(&x), "click x {x} is not the settled centre 557");
+}
+
+#[test]
+fn a_click_on_a_target_that_never_stops_still_lands() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("never-stops", &[]);
+    s.ok(&["goto", &format!("{}/never-stops", site.url)]);
+    s.ok(&["click", "--selector", "#drifter"]);
+    let status = s.text(&["get", "text", "--selector", "#status"]);
+    // The drift is +/-12px around x=200, the button 60px wide: a click at
+    // the last-read centre always lands on it once the settle budget ends
+    // the stability wait. Reaching here at all proves there is no hang.
+    assert!(status.starts_with("ok "), "click did not land on the button: {status}");
+}
+
+#[test]
 fn a_field_under_a_panel_is_uncovered_before_typing() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("overlap", &[]);

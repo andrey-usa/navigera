@@ -33,6 +33,10 @@ getting wrong, one page each, built the way those sites behave:
 /drag-pointer   the same list, each item made draggable on pointerdown (as
                 React Aria does)
 /drag-slider    a knob that follows a held mouse (no drag starts)
+/never-stops    a button that never stops drifting: the click still
+                happens once the settle budget runs out
+/moving-target  a button that glides to a stop over its first frames
+                (no CSS animation), reporting where it was clicked
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
 
@@ -44,6 +48,44 @@ from urllib.parse import parse_qs, urlparse
 HEAD = "<!doctype html><html><head><meta charset=utf-8><title>{title}</title><style>{style}</style></head><body>"
 
 PAGES = {}
+
+
+
+PAGES["/never-stops"] = ("never stops", "", """
+<p id=status>waiting</p>
+<button id=drifter style="position:absolute;left:200px;top:60px;width:60px;height:30px"
+  onclick="document.getElementById('status').textContent='ok '+event.clientX+' '+event.clientY">D</button>
+<script>
+// A perpetual small drift, no CSS animation: the box never reads the same
+// twice, so only the settle budget can end the wait - then the click must
+// still land on the button (the drift is smaller than the button).
+let dx = 0, dir = 1;
+const drift = () => {
+  dx += dir * 3;
+  if (Math.abs(dx) >= 12) dir = -dir;
+  document.getElementById('drifter').style.left = (200 + dx) + 'px';
+  requestAnimationFrame(drift);
+};
+requestAnimationFrame(drift);
+</script>""")
+
+PAGES["/moving-target"] = ("moving target", "", """
+<p id=status>waiting</p>
+<button id=mover style="position:absolute;left:60px;top:60px;width:34px;height:22px"
+  onclick="document.getElementById('status').textContent='ok '+event.clientX+' '+event.clientY">M</button>
+<script>
+// No CSS animation: a plain rAF glide, the shape a deferred page commit
+// takes. 40px a frame for 12 frames, then still - a one-read click lands
+// on empty page where the button used to be.
+let x = 60, frames = 0;
+const glide = () => {
+  if (frames++ >= 12) return;
+  x += 40;
+  document.getElementById('mover').style.left = x + 'px';
+  requestAnimationFrame(glide);
+};
+requestAnimationFrame(glide);
+</script>""")
 
 PAGES["/leader"] = ("leader", "", """
 <p id=role>waiting</p>
