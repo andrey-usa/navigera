@@ -4129,15 +4129,55 @@ impl Page {
         Ok(Value::String(text))
     }
 
-    /// Close this tab's target.
+    /// Close this tab the way a user (and Playwright) does: `Page.close` on
+    /// the page's own session, which runs the page's unload path, so a tab
+    /// that hands work to another tab from `beforeunload` gets to do it.
+    /// `Target.closeTarget` skips `beforeunload`. It stays as the fallback
+    /// when `Page.close` is refused or the tab is still there after a short
+    /// wait (a `beforeunload` dialog can hold the page open). The target list
+    /// decides whether the tab is gone, not the replies: the reply to
+    /// `Page.close` can be lost with the session it was sent on, and a
+    /// `closeTarget` that comes too late finds no target.
     pub fn close_target(&self, timeout: Duration) -> Result<()> {
         self.shared.unregister(&self.session_id);
         self.block_on(async {
-            self.client.send("Target.closeTarget", json!({ "targetId": self.target_id }), None, timeout).await?;
+            let polite =
+                self.client.send("Page.close", json!({}), Some(&self.session_id), timeout.min(CLOSE_WAIT)).await;
+            let started = std::time::Instant::now();
+            loop {
+                if !self.target_alive(timeout).await {
+                    return Ok(());
+                }
+                if polite.is_err() || started.elapsed() >= CLOSE_WAIT {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let forced =
+                self.client.send("Target.closeTarget", json!({ "targetId": self.target_id }), None, timeout).await;
+            if forced.is_err() && !self.target_alive(timeout).await {
+                return Ok(());
+            }
+            forced?;
             Ok(())
         })
     }
+
+    /// Is this tab's target still listed by the browser? Unknown counts as yes.
+    async fn target_alive(&self, timeout: Duration) -> bool {
+        match self.client.send("Target.getTargets", json!({}), None, timeout.min(CLOSE_WAIT)).await {
+            Ok(v) => v
+                .get("targetInfos")
+                .and_then(Value::as_array)
+                .map(|l| l.iter().any(|t| t.get("targetId").and_then(Value::as_str) == Some(self.target_id.as_str())))
+                .unwrap_or(true),
+            Err(_) => true,
+        }
+    }
 }
+
+/// How long `close_target` waits for the page to go after `Page.close`.
+const CLOSE_WAIT: Duration = Duration::from_millis(1500);
 
 /// AX roles an agent can act on; always kept by the flat JSON view.
 const AX_INTERACTIVE: &[&str] = ax::INTERACTIVE;

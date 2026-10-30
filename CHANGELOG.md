@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The format follows
   frame 100-400 ms after the wait starts: seen 4 ms after it appears, not
   65 (`--selector`, median; `--text` 42 -> 4). A frame of another origin is
   out of the observer's reach and is still looked at every 100 ms.
+- `tab-close` closes a tab the way a user does, with `Page.close` on the
+  page's own session, so the page runs its unload path (`beforeunload`,
+  `pagehide`) and a tab that hands work to another tab from it is heard at
+  once. `Target.closeTarget` skipped `beforeunload`. It stays as the
+  fallback when `Page.close` is refused or the tab is still there after 1.5 s.
 
 ## [0.6.3] - 2026-10-30
 

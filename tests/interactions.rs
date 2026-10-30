@@ -426,6 +426,23 @@ fn tabs_by_target_id_and_requests_since() {
     assert!(since.contains("/multi-select") && !since.contains("/right-click"), "{since}");
 }
 
+/// A tab closed with `tab-close` goes the way a user closes it: its page
+/// gets to run its unload path (`beforeunload` included), so a tab that
+/// hands work on from it (a leader telling the follower over a
+/// BroadcastChannel) is heard at once. `Target.closeTarget` skipped that
+/// path, and the follower never knew.
+#[test]
+fn closing_a_tab_lets_its_page_hand_over_to_another_tab() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("tabclose", &[]);
+    s.ok(&["goto", &format!("{}/leader?leader", site.url)]);
+    s.ok(&["tab-new", &format!("{}/leader", site.url)]);
+    s.ok(&["tab-select", "0"]);
+    s.ok(&["tab-close", "0"]);
+    let waited = s.ok(&["wait", "--text", "took over", "--timeout-ms", "2000"]);
+    assert!(waited["waited_ms"].as_f64().unwrap() < 2000.0, "the follower did not hear the leader go: {waited}");
+}
+
 #[test]
 fn an_op_after_a_late_reload_finds_the_next_page() {
     let (true, Some(site)) = (chrome(), site()) else { return };

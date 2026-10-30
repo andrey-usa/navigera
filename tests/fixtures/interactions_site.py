@@ -24,6 +24,9 @@ getting wrong, one page each, built the way those sites behave:
 /typed-only     an input whose app keeps only what was typed
 /lazy-box       a scrollable box that loads more when scrolled to its end
 /honesty        a decoy copy of an id, disabled and read-only controls
+/leader         two tabs of one site: the one opened with ?leader tells the
+                other on beforeunload, which takes over (a tab closed
+                without its unload path leaves the follower waiting)
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
 
@@ -35,6 +38,20 @@ from urllib.parse import parse_qs, urlparse
 HEAD = "<!doctype html><html><head><meta charset=utf-8><title>{title}</title><style>{style}</style></head><body>"
 
 PAGES = {}
+
+PAGES["/leader"] = ("leader", "", """
+<p id=role>waiting</p>
+<script>
+const bc = new BroadcastChannel('nv-leader');
+const role = document.getElementById('role');
+if (location.search.includes('leader')) {
+  role.textContent = 'leader';
+  addEventListener('beforeunload', () => bc.postMessage('bye'));
+} else {
+  role.textContent = 'follower';
+  bc.onmessage = (e) => { if (e.data === 'bye') role.textContent = 'took over'; };
+}
+</script>""")
 
 PAGES["/hidden-layers"] = ("hidden layers", "", """
 <div id=spot style="position:relative;height:60px">
