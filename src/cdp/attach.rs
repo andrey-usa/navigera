@@ -233,7 +233,7 @@ fn start_profile_browser(
         .arg("--no-default-browser-check")
         .arg("--disable-blink-features=AutomationControlled");
     if headless {
-        cmd.arg("--headless=new").arg("--window-size=1440,900");
+        cmd.arg("--headless=new").arg(super::transport::HEADLESS_MOUSE).arg("--window-size=1440,900");
     }
     cmd.args(extra);
     if no_sandbox {

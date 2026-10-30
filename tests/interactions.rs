@@ -226,6 +226,29 @@ fn a_wait_in_a_frame_sees_a_change_within_a_frame() {
     }
 }
 
+/// A headless Chrome has no pointing device and says so (`hover: none`,
+/// `pointer: none`), which leaves an app that gates its mouse handlers on
+/// hover inert. navigera's launch says there is a mouse, as a headed Chrome
+/// on a desktop does; a touch device still reports a coarse pointer and no
+/// hover, and the next page after
+/// `set device off` is back to the mouse.
+#[test]
+fn headless_reports_a_mouse_and_a_touch_device_reports_touch() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("pointer", &[]);
+    s.ok(&["goto", "about:blank"]);
+    let q = |query: &str| s.ok(&["eval", &format!("matchMedia('{query}').matches")]).as_bool().unwrap();
+    let mouse = || q("(hover: hover)") && q("(any-hover: hover)") && q("(pointer: fine)") && q("(any-pointer: fine)");
+    assert!(mouse(), "headless: no mouse");
+    s.ok(&["set", "device", "iPhone 15"]);
+    assert!(q("(pointer: coarse)") && q("(hover: none)") && !q("(hover: hover)"), "iPhone: not touch");
+    s.ok(&["set", "device", "off"]);
+    s.ok(&["goto", "about:blank"]);
+    assert!(mouse(), "after set device off: no mouse");
+}
+
 /// A frame of another origin is out of the observer's reach: a wait there
 /// still sees what appears in it (looking again every 100 ms), on the same
 /// site (another port) and across sites (its own process).

@@ -77,6 +77,17 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// What a headless Chrome says about its pointing device: none, so
+/// `(hover: none)` and `(pointer: none)` and an app that gates its mouse
+/// handlers on hover (Actual's `isTouchDevice()`) stays inert. This tells it
+/// there is a mouse (hover: hover, pointer: fine), as a headed Chrome on a
+/// desktop and Playwright's headless launch do (chromium.ts, the
+/// `--blink-settings` it adds with `--headless`). `set device` with a
+/// touch device still turns touch emulation on, which reports a coarse
+/// pointer.
+pub const HEADLESS_MOUSE: &str =
+    "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4";
+
 /// Launch `exe` headless (or headed) with a fresh profile; return the child,
 /// the profile dir (deleted on drop), and the browser-level WS debugger URL.
 pub fn launch_chrome(
@@ -89,7 +100,7 @@ pub fn launch_chrome(
 
     let mut cmd = Command::new(exe);
     if headless {
-        cmd.arg("--headless=new");
+        cmd.arg("--headless=new").arg(HEADLESS_MOUSE);
     }
     // `=0` lets Chrome pick a free port; we read it back from its stderr line. A
     // fixed port is only used by engines whose launcher needs it up front (e.g.
@@ -255,7 +266,7 @@ pub fn launch_chrome_pipe(exe: &str, headless: bool, chrome_flags: &[String]) ->
 
     let mut cmd = Command::new(exe);
     if headless {
-        cmd.arg("--headless=new");
+        cmd.arg("--headless=new").arg(HEADLESS_MOUSE);
     }
     cmd.arg("--remote-debugging-pipe")
         .arg(format!("--user-data-dir={}", profile_dir.path().display()))
