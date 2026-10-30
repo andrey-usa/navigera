@@ -29,6 +29,7 @@ getting wrong, one page each, built the way those sites behave:
                 without its unload path leaves the follower waiting)
 /poll           a page that polls one URL every 300 ms, forever
 /one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
+/big-table      a 2,000-row table, a button and a link in each row
 /drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
 /drag-pointer   the same list, each item made draggable on pointerdown (as
                 React Aria does)
@@ -114,6 +115,13 @@ PAGES["/one-fetch"] = ("one fetch", "", """
 fetch('/slow-echo?ms=400').then(() => {
   document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
 });
+</script>""")
+
+PAGES["/big-table"] = ("big table", "", """
+<table><tbody id=rows></tbody></table><p id=out></p>
+<script>
+rows.innerHTML = Array.from({length: 2000}, (_, i) =>
+  `<tr><td>Item ${i}</td><td><button onclick="out.textContent='edit ${i}'">Edit ${i}</button> <a href="#r${i}">View ${i}</a></td></tr>`).join('');
 </script>""")
 
 PAGES["/drag-native"] = ("drag native", "", """

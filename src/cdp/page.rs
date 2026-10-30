@@ -3730,8 +3730,10 @@ impl Page {
     /// have no name or text.
     fn clickables(&self, timeout: Duration) -> ax::Clickables {
         let mut out = ax::Clickables::default();
-        let params =
-            json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility"], "includeDOMRects": true });
+        // No `includeDOMRects`: `layout.bounds` (all this reads) is always
+        // there, and the extra offset/client/scroll rects were about two
+        // thirds of the call's time on a 2,000-row table.
+        let params = json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility"] });
         let Ok(snap) = self.send("DOMSnapshot.captureSnapshot", params, timeout) else {
             return out;
         };

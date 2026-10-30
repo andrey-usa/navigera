@@ -1268,3 +1268,20 @@ fn check_waits_for_a_late_commit() {
     let error = s.fails(&["check", "--selector", "#c", "--timeout-ms", "1000"]);
     assert!(error.contains("did not check it"), "{error}");
 }
+
+/// A snapshot of a big table with a limit prints only the first rows, says it
+/// cut the rest, and its refs work.
+#[test]
+fn ax_with_a_limit_on_a_big_table_stops_at_the_limit() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("bigtable", &[]);
+    s.ok(&["goto", &format!("{}/big-table", site.url)]);
+    let tree = s.text(&["ax", "--limit", "30"]);
+    assert!(tree.contains("Edit 0") && tree.contains("more lines"), "{tree}");
+    assert!(!tree.contains("Edit 1999"), "the limit cut nothing");
+    assert!(tree.lines().count() <= 32, "{} lines", tree.lines().count());
+    s.ok(&["click", "--role", "button", "--name", "Edit 7"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#out"]), "edit 7");
+    let r = s.ok(&["click", "--selector", "tr:nth-child(3) button"]);
+    assert!(r.is_object(), "{r}");
+}
