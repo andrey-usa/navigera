@@ -247,6 +247,8 @@ fn headless_reports_a_mouse_and_a_touch_device_reports_touch() {
     s.ok(&["set", "device", "off"]);
     s.ok(&["goto", "about:blank"]);
     assert!(mouse(), "after set device off: no mouse");
+    s.ok(&["set", "device", "Desktop"]);
+    assert!(mouse(), "Desktop: no mouse");
 }
 
 /// A frame of another origin is out of the observer's reach: a wait there

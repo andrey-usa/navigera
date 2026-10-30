@@ -200,10 +200,10 @@ pub fn plan(
                 // won't send a browser's user agent.
                 result["note"] = json!("lightpanda: viewport only (its own user agent, no touch)");
             } else {
-                calls.push((
-                    "Emulation.setTouchEmulationEnabled",
-                    json!({ "enabled": d.mobile, "maxTouchPoints": if d.mobile { 5 } else { 0 } }),
-                ));
+                // Chrome refuses `maxTouchPoints: 0` ("must be between 1 and
+                // 16"), so a desktop device turns touch off with no count.
+                let touch = if d.mobile { json!({ "enabled": true, "maxTouchPoints": 5 }) } else { json!({ "enabled": false }) };
+                calls.push(("Emulation.setTouchEmulationEnabled", touch));
                 if !d.ua.is_empty() {
                     calls.push(("Emulation.setUserAgentOverride", json!({ "userAgent": d.ua })));
                 }
