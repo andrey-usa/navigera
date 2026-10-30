@@ -1112,3 +1112,62 @@ fn clickable_refs_skip_what_a_user_cant_tell_apart_or_reach() {
     s.ok(&["click", menu]);
     assert_eq!(s.ok(&["title"]), "menu true");
 }
+
+/// Order of the list items on a drag page, e.g. "bca".
+fn list_order(s: &Session) -> String {
+    s.text(&["eval", "[...document.querySelectorAll('li')].map(l => l.id).join('')"])
+}
+
+/// `drag` drives a real drag: the browser starts it from the mouse press, and
+/// the drag events follow the pointer to the drop. Desktop and touch emulation.
+#[test]
+fn drag_runs_a_real_html5_drag() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    for (tag, mobile) in [("desk", false), ("mob", true)] {
+        let s = Session::start(&format!("dragn-{tag}"), &[]);
+        if mobile {
+            s.ok(&["set", "device", "iPhone 15"]);
+        }
+        for page in ["drag-native", "drag-pointer"] {
+            s.ok(&["goto", &format!("{}/{page}", site.url)]);
+            let r = s.ok(&["drag", "#a", "#c"]);
+            assert_eq!(r["drag"]["path"], "drag", "{tag} {page}: {r}");
+            assert_eq!(r["drag"]["html5"], true, "{tag} {page}: {r}");
+            assert_eq!(r["drag"]["dropped"], true, "{tag} {page}: {r}");
+            assert_eq!(list_order(&s), "bca", "{tag} {page}");
+            // The browser ran the whole drag: dragend fired, and dragenter
+            // followed the pointer over more than the target.
+            let log = s.text(&["get", "text", "--selector", "#log"]);
+            assert!(log.starts_with("start enter"), "{tag} {page}: {log}");
+            assert!(log.matches("enter").count() >= 2, "{tag} {page}: {log}");
+            assert!(log.ends_with("drop:a end"), "{tag} {page}: {log}");
+            // The mouse is released: a click right after is a plain click.
+            s.ok(&["click", "#b"]);
+        }
+        // Dropped on something that takes no drop: the drag ran, nothing landed.
+        s.ok(&["goto", &format!("{}/drag-native", site.url)]);
+        s.ok(&["eval", "document.getElementById('log').textContent = 'no drop here'"]);
+        let r = s.ok(&["drag", "#a", "#log"]);
+        assert_eq!(r["drag"]["path"], "drag", "{tag}: {r}");
+        assert_eq!(r["drag"]["dropped"], false, "{tag}: {r}");
+        assert_eq!(list_order(&s), "abc", "{tag}");
+    }
+}
+
+/// With no drag to start, `drag` is a held mouse: the knob follows it.
+#[test]
+fn drag_without_a_drag_is_a_held_mouse() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    for (tag, mobile) in [("desk", false), ("mob", true)] {
+        let s = Session::start(&format!("drags-{tag}"), &[]);
+        if mobile {
+            s.ok(&["set", "device", "iPhone 15"]);
+        }
+        s.ok(&["goto", &format!("{}/drag-slider", site.url)]);
+        let r = s.ok(&["drag", "#knob", "#track"]);
+        assert_eq!(r["drag"]["path"], "mouse", "{tag}: {r}");
+        assert!(r["drag"]["from"]["x"].is_number() && r["drag"]["to"]["x"].is_number(), "{tag}: {r}");
+        let out: f64 = s.text(&["get", "text", "--selector", "#out"]).parse().unwrap();
+        assert!(out > 100.0, "{tag}: knob at {out}");
+    }
+}

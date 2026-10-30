@@ -27,6 +27,10 @@ getting wrong, one page each, built the way those sites behave:
 /leader         two tabs of one site: the one opened with ?leader tells the
                 other on beforeunload, which takes over (a tab closed
                 without its unload path leaves the follower waiting)
+/drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
+/drag-pointer   the same list, each item made draggable on pointerdown (as
+                React Aria does)
+/drag-slider    a knob that follows a held mouse (no drag starts)
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
 
@@ -51,6 +55,72 @@ if (location.search.includes('leader')) {
   role.textContent = 'follower';
   bc.onmessage = (e) => { if (e.data === 'bye') role.textContent = 'took over'; };
 }
+</script>""")
+
+PAGES["/drag-native"] = ("drag native", "", """
+<style>li{padding:8px;margin:2px;border:1px solid #888;width:200px;list-style:none;background:#eee}</style>
+<ul id=list><li id=a>Alpha</li><li id=b>Beta</li><li id=c>Gamma</li></ul>
+<p id=log></p>
+<script>
+const log = [];
+const note = (t) => { log.push(t); document.getElementById('log').textContent = log.join(' '); };
+let moving = null;
+for (const li of document.querySelectorAll('li')) {
+  li.draggable = true;
+  li.addEventListener('dragstart', (e) => { moving = li; e.dataTransfer.setData('text/plain', li.id); e.dataTransfer.effectAllowed = 'move'; note('start'); });
+  li.addEventListener('dragenter', () => note('enter'));
+  li.addEventListener('dragover', (e) => e.preventDefault());
+  li.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData('text/plain');
+    const src = document.getElementById(id);
+    note('drop:' + id);
+    if (src && src !== li) li.after(src);
+  });
+  li.addEventListener('dragend', () => { note('end');  });
+}
+</script>""")
+
+PAGES["/drag-pointer"] = ("drag pointer", "", """
+<style>li{padding:8px;margin:2px;border:1px solid #888;width:200px;list-style:none;background:#eee}</style>
+<ul id=list><li id=a>Alpha</li><li id=b>Beta</li><li id=c>Gamma</li></ul>
+<p id=log></p>
+<script>
+const log = [];
+const note = (t) => { log.push(t); document.getElementById('log').textContent = log.join(' '); };
+let moving = null;
+for (const li of document.querySelectorAll('li')) {
+  li.addEventListener('pointerdown', () => { li.draggable = true; });
+  li.addEventListener('dragstart', (e) => { moving = li; e.dataTransfer.setData('text/plain', li.id); e.dataTransfer.effectAllowed = 'move'; note('start'); });
+  li.addEventListener('dragenter', () => note('enter'));
+  li.addEventListener('dragover', (e) => e.preventDefault());
+  li.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData('text/plain');
+    const src = document.getElementById(id);
+    note('drop:' + id);
+    if (src && src !== li) li.after(src);
+  });
+  li.addEventListener('dragend', () => { note('end'); li.draggable = false; });
+}
+</script>""")
+
+PAGES["/drag-slider"] = ("drag slider", "", """
+<div id=track style="position:relative;width:300px;height:20px;background:#ccc;margin:20px">
+  <div id=knob style="position:absolute;left:0;top:0;width:20px;height:20px;background:#33a"></div>
+</div>
+<p id=out>0</p>
+<script>
+const knob = document.getElementById('knob'), track = document.getElementById('track');
+let held = false;
+knob.addEventListener('mousedown', (e) => { held = true; e.preventDefault(); });
+addEventListener('mouseup', () => { held = false; });
+addEventListener('mousemove', (e) => {
+  if (!held) return;
+  const x = Math.max(0, Math.min(280, e.clientX - track.getBoundingClientRect().left - 10));
+  knob.style.left = x + 'px';
+  document.getElementById('out').textContent = Math.round(x);
+});
 </script>""")
 
 PAGES["/hidden-layers"] = ("hidden layers", "", """

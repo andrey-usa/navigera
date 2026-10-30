@@ -895,6 +895,9 @@ const DRAG_DROP: &str = r#"function (el) {
   return allowed;
 }"#;
 
+/// Mouse moves from the press to the target of a `drag`.
+const DRAG_STEPS: usize = 8;
+
 const IDENTITY: &str = "function (el) { return el; }";
 
 /// Auto-wait: resolve the first match for `sel`, polling every 50 ms for up
@@ -3056,20 +3059,26 @@ impl Page {
 
     /// Drag `from` onto `to`.
     ///
-    /// A `draggable` element is HTML5 drag and drop, which headless Chrome
-    /// does not start from synthetic mouse input: it gets the events a
-    /// browser fires, dragstart through dragend, with one DataTransfer shared
-    /// from start to drop (a stand-in where the engine has no DataTransfer).
-    /// Anything else gets a trusted press over `from`, a move in steps and a
-    /// release over `to`, which sliders and pointer-driven sortable lists
-    /// follow. Returns `{html5, dropped?}` or the two points.
+    /// The drag is a real one, as Playwright's: a trusted press over `from`
+    /// and moves in steps, with Chrome told to hand a drag it starts to us
+    /// (`Input.setInterceptDrags`). Chrome starts no native drag from
+    /// synthetic mouse input on its own; when the page makes the source
+    /// draggable (a `draggable` attribute, or one set on pointer down, as
+    /// React Aria does) it reports the drag it would have started
+    /// (`Input.dragIntercepted`), and the rest of the path is driven with
+    /// `Input.dispatchDragEvent`: enter and over at each point, drop at the
+    /// target. Returns `{html5: true, dropped, path: "drag"}`, `dropped`
+    /// being whether the page took the drop.
+    ///
+    /// No drag started (a slider, a pointer-driven sortable list): the held
+    /// mouse was a plain mouse drag and is released over `to`: `{from, to,
+    /// path: "mouse"}`.
+    ///
+    /// An engine that cannot intercept drags (no `Input.setInterceptDrags`)
+    /// gets the events a browser fires, dragstart through dragend, from the
+    /// page, for a `draggable` source (`{html5: true, dropped, path:
+    /// "synthetic"}`), with one DataTransfer shared from start to drop.
     pub fn drag(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
-        let html5 = self.on_element(from, "drag", DRAG_IS_HTML5, &[], wait, timeout)?;
-        if html5 == Value::Bool(true) {
-            self.on_element(from, "drag", DRAG_START, &[], wait, timeout)?;
-            let dropped = self.on_element(to, "drag", DRAG_DROP, &[], wait, timeout)?;
-            return Ok(json!({ "html5": true, "dropped": dropped }));
-        }
         let settle = json!(self.hit_settle_ms(wait));
         let a = self.on_element(from, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout)?;
         let b = self.on_element(to, "drag", HOVER_PREP, &[settle], wait, timeout)?;
@@ -3077,21 +3086,162 @@ impl Page {
         let (Some((ax, ay)), Some((bx, by))) = (point(&a), point(&b)) else {
             bail!("drag: no on-screen point for both elements (inside a cross-origin iframe?)");
         };
-        let mut events = vec![("mouseMoved", ax, ay, "none", 0), ("mousePressed", ax, ay, "left", 1)];
-        for i in 1..=8 {
-            let t = i as f64 / 8.0;
-            events.push(("mouseMoved", ax + (bx - ax) * t, ay + (by - ay) * t, "left", 1));
+        match self.send("Input.setInterceptDrags", json!({ "enabled": true }), timeout) {
+            Ok(_) => {
+                let r = self.drag_with_intercept((ax, ay), (bx, by), timeout);
+                // Whatever happened, Chrome gets its own drags back.
+                let _ = self.send("Input.setInterceptDrags", json!({ "enabled": false }), timeout);
+                self.moved_to(bx, by);
+                r
+            }
+            Err(_) => {
+                let html5 = self.on_element(from, "drag", DRAG_IS_HTML5, &[], wait, timeout)?;
+                if html5 == Value::Bool(true) {
+                    self.on_element(from, "drag", DRAG_START, &[], wait, timeout)?;
+                    let dropped = self.on_element(to, "drag", DRAG_DROP, &[], wait, timeout)?;
+                    return Ok(json!({ "html5": true, "dropped": dropped, "path": "synthetic" }));
+                }
+                self.moved_to(bx, by);
+                self.drag_mouse((ax, ay), (bx, by), timeout)?;
+                Ok(json!({ "from": { "x": ax, "y": ay }, "to": { "x": bx, "y": by }, "path": "mouse" }))
+            }
         }
-        events.push(("mouseReleased", bx, by, "left", 0));
-        self.moved_to(bx, by);
+    }
+
+    /// Press at `a`, move in steps to `b`, release: the held mouse.
+    fn drag_mouse(&self, a: (f64, f64), b: (f64, f64), timeout: Duration) -> Result<()> {
+        let mut events = vec![("mouseMoved", a.0, a.1, "none", 0), ("mousePressed", a.0, a.1, "left", 1)];
+        for i in 1..=DRAG_STEPS {
+            let t = i as f64 / DRAG_STEPS as f64;
+            events.push(("mouseMoved", a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, "left", 1));
+        }
+        events.push(("mouseReleased", b.0, b.1, "left", 0));
         for (kind, x, y, button, buttons) in events {
-            self.send(
-                "Input.dispatchMouseEvent",
-                json!({ "type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1 }),
-                timeout,
-            )?;
+            self.mouse_event(kind, x, y, button, buttons, timeout)?;
         }
-        Ok(json!({ "from": { "x": ax, "y": ay }, "to": { "x": bx, "y": by } }))
+        Ok(())
+    }
+
+    fn mouse_event(&self, kind: &str, x: f64, y: f64, button: &str, buttons: u8, timeout: Duration) -> Result<Value> {
+        self.send(
+            "Input.dispatchMouseEvent",
+            json!({ "type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1 }),
+            timeout,
+        )
+    }
+
+    /// The drag with `Input.setInterceptDrags` on: see [`Page::drag`].
+    fn drag_with_intercept(&self, a: (f64, f64), b: (f64, f64), timeout: Duration) -> Result<Value> {
+        let mut events = self.client.subscribe();
+        let session = self.session_id.clone();
+        // The drag Chrome would have started, if it has, from what has come in.
+        let intercepted = |events: &mut tokio::sync::broadcast::Receiver<Value>| -> Option<Value> {
+            loop {
+                match events.try_recv() {
+                    Ok(e)
+                        if e.get("method").and_then(Value::as_str) == Some("Input.dragIntercepted")
+                            && e.get("sessionId").and_then(Value::as_str) == Some(session.as_str()) =>
+                    {
+                        return Some(e["params"]["data"].clone());
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    Err(_) => return None,
+                }
+            }
+        };
+        self.mouse_event("mouseMoved", a.0, a.1, "none", 0, timeout)?;
+        self.mouse_event("mousePressed", a.0, a.1, "left", 1, timeout)?;
+        // A source the page made draggable (before this press or on it) gets
+        // time to start the drag; any other, no more than the event takes.
+        let expecting = self
+            .send(
+                "Runtime.evaluate",
+                json!({
+                    "expression": format!(
+                        "(() => {{ let e = document.elementFromPoint({}, {}); \
+                         while (e && e.shadowRoot && e.shadowRoot.elementFromPoint) {{ \
+                           const i = e.shadowRoot.elementFromPoint({}, {}); if (!i || i === e) break; e = i; }} \
+                         return !!(e && e.closest('[draggable=true]')); }})()",
+                        a.0, a.1, a.0, a.1
+                    ),
+                    "returnByValue": true,
+                }),
+                timeout,
+            )
+            .ok()
+            .and_then(|v| v["result"]["value"].as_bool())
+            .unwrap_or(false);
+        let patience = if expecting { Duration::from_millis(400) } else { Duration::from_millis(0) };
+        let mut data = None;
+        let mut path = Vec::new();
+        for i in 1..=DRAG_STEPS {
+            let t = i as f64 / DRAG_STEPS as f64;
+            let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+            if data.is_none() {
+                self.mouse_event("mouseMoved", x, y, "left", 1, timeout)?;
+                data = intercepted(&mut events);
+                if data.is_none() && !patience.is_zero() {
+                    data = self.block_on(async {
+                        let wait = async {
+                            loop {
+                                match events.recv().await {
+                                    Ok(e)
+                                        if e.get("method").and_then(Value::as_str) == Some("Input.dragIntercepted")
+                                            && e.get("sessionId").and_then(Value::as_str) == Some(session.as_str()) =>
+                                    {
+                                        return Some(e["params"]["data"].clone());
+                                    }
+                                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                    Err(_) => return None,
+                                }
+                            }
+                        };
+                        tokio::time::timeout(patience, wait).await.ok().flatten()
+                    });
+                }
+                if data.is_some() {
+                    self.drag_event("dragEnter", x, y, data.as_ref(), timeout)?;
+                }
+            } else {
+                path.push((x, y));
+            }
+        }
+        let Some(data) = data else {
+            // A drag may start with the last step: one more look, then it was a plain mouse drag.
+            std::thread::sleep(Duration::from_millis(30));
+            if let Some(data) = intercepted(&mut events) {
+                return self.finish_drag(&data, &[], b, timeout);
+            }
+            self.mouse_event("mouseReleased", b.0, b.1, "left", 0, timeout)?;
+            return Ok(json!({ "from": { "x": a.0, "y": a.1 }, "to": { "x": b.0, "y": b.1 }, "path": "mouse" }));
+        };
+        self.finish_drag(&data, &path, b, timeout)
+    }
+
+    /// The rest of an intercepted drag: over at each point, then the drop.
+    fn finish_drag(&self, data: &Value, path: &[(f64, f64)], b: (f64, f64), timeout: Duration) -> Result<Value> {
+        // Whether the page took the drop: Chrome sends `drop` only to a target
+        // that accepted the last `dragover`.
+        let _ = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": "window.__nvDropped = false; addEventListener('drop', () => { window.__nvDropped = true; }, { capture: true, once: true }); 1" }),
+            timeout,
+        );
+        for (x, y) in path {
+            self.drag_event("dragOver", *x, *y, Some(data), timeout)?;
+        }
+        self.drag_event("dragOver", b.0, b.1, Some(data), timeout)?;
+        self.drag_event("drop", b.0, b.1, Some(data), timeout)?;
+        let dropped = self
+            .send("Runtime.evaluate", json!({ "expression": "!!window.__nvDropped", "returnByValue": true }), timeout)
+            .ok()
+            .and_then(|v| v["result"]["value"].as_bool())
+            .unwrap_or(false);
+        Ok(json!({ "html5": true, "dropped": dropped, "path": "drag" }))
+    }
+
+    fn drag_event(&self, kind: &str, x: f64, y: f64, data: Option<&Value>, timeout: Duration) -> Result<Value> {
+        self.send("Input.dispatchDragEvent", json!({ "type": kind, "x": x, "y": y, "data": data }), timeout)
     }
 
     fn moved_to(&self, x: f64, y: f64) {
