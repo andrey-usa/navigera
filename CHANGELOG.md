@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `drag --to-at <x>,<y>` drops at that point of the target (CSS pixels from
+  its top-left corner; default its center), `--from-at` presses at that
+  point of the source, as Playwright's `targetPosition`/`sourcePosition`:
+  a drop near a list row's top edge lands before it.
 - Named sessions share one browser, each in a browser context of its own
   (tabs, cookies, storage, cache, downloads, permissions apart), so N
   parallel agents cost one browser plus a renderer each instead of N

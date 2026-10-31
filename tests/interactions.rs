@@ -1258,6 +1258,34 @@ fn a_stale_ref_fails_at_once_and_a_draggable_has_a_ref() {
     assert!(t.elapsed() < std::time::Duration::from_millis(2000), "took {:?}", t.elapsed());
 }
 
+/// `--from-at`/`--to-at` press and drop at a point of the element (from its
+/// top-left corner, as Playwright's sourcePosition/targetPosition); the
+/// default is its center.
+#[test]
+fn drag_presses_and_drops_where_asked() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("dragat", &[]);
+    for (args, drop) in [
+        (&[][..], "100,50"),
+        (&["--to-at", "20,5"][..], "20,5"),
+        (&["--to-at", "150,90", "--from-at", "10,10"][..], "150,90"),
+    ] {
+        s.ok(&["goto", &format!("{}/drag-position", site.url)]);
+        let mut cmd = vec!["drag", "#src", "#dst"];
+        cmd.extend_from_slice(args);
+        let r = s.ok(&cmd);
+        assert_eq!(r["drag"]["dropped"], true, "{args:?}: {r}");
+        let got = s.text(&["get", "text", "--selector", "#log"]);
+        let (gx, gy) =
+            got.split_once(',').map(|(x, y)| (x.parse::<f64>().unwrap(), y.parse::<f64>().unwrap())).unwrap();
+        let (wx, wy) =
+            drop.split_once(',').map(|(x, y)| (x.parse::<f64>().unwrap(), y.parse::<f64>().unwrap())).unwrap();
+        assert!((gx - wx).abs() <= 1.0 && (gy - wy).abs() <= 1.0, "{args:?}: dropped at {got}, wanted {drop}");
+    }
+    let press = s.text(&["eval", "document.getElementById('log').dataset.press"]);
+    assert_eq!(press, "10,10", "--from-at presses there");
+}
+
 /// With no drag to start, `drag` is a held mouse: the knob follows it.
 #[test]
 fn drag_without_a_drag_is_a_held_mouse() {

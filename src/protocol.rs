@@ -664,6 +664,14 @@ pub enum Command {
     Drag {
         from: TargetArgs,
         to: TargetArgs,
+        /// Where to press, from the source's top-left corner (CSS px);
+        /// default its center.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_at: Option<Box<[f64; 2]>>,
+        /// Where to drop, from the target's top-left corner (CSS px);
+        /// default its center.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_at: Option<Box<[f64; 2]>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<f64>,
     },
@@ -1048,7 +1056,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("get", "text|value|html|outer|box|checked|attr <name>|style <prop> <target> | count <css> | title | url", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --near <text>, --nth; --frame <css> to look only inside that frame)"),
     ("is", "<state> <target>", "true/false: whether the element is visible, hidden, enabled, disabled, checked, editable or focused; a missing element is not visible"),
     ("dblclick", "<target>", "trusted double click"),
-    ("drag", "<from> <to> | --from-text <t> --to-text <t>", "drag one element onto another (each a ref or CSS selector): HTML5 drag and drop for a draggable source, a held mouse moved across otherwise"),
+    ("drag", "<from> <to> | --from-text <t> --to-text <t> [--from-at <x>,<y>] [--to-at <x>,<y>]", "drag one element onto another (each a ref or CSS selector): HTML5 drag and drop for a draggable source, a held mouse moved across otherwise; --to-at drops at a point of the target (from its top-left corner), e.g. its top edge to land before it in a list"),
     ("focus", "<target>", "focus an element"),
     ("check", "<target> | <yes/no question>", "check a checkbox, radio or switch (clicks only if needed). With a question instead of a target: the probability that the answer about the page is yes, from a decision model (set NAVIGERA_DECIDER_KEY)"),
     ("uncheck", "<target>", "uncheck a checkbox/switch"),
@@ -1953,9 +1961,22 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 })
             };
             let (from_text, to_text) = (str_flag(&mut args, "--from-text")?, str_flag(&mut args, "--to-text")?);
+            let at = |flag: &str, args: &mut Args| -> Result<Option<Box<[f64; 2]>>, ArgsError> {
+                let Some(raw) = str_flag(args, flag)? else { return Ok(None) };
+                let parsed = raw
+                    .split_once(',')
+                    .and_then(|(x, y)| Some([x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?]))
+                    .filter(|p| p.iter().all(|v| v.is_finite()));
+                parsed.map(|p| Some(Box::new(p))).ok_or_else(|| {
+                    ArgsError::Invalid(format!(
+                        "{flag} takes <x>,<y> in CSS pixels from the element's top-left corner, got {raw:?}"
+                    ))
+                })
+            };
+            let (from_at, to_at) = (at("--from-at", &mut args)?, at("--to-at", &mut args)?);
             let from = side(from_text, &mut args)?;
             let to = side(to_text, &mut args)?;
-            Command::Drag { from, to, timeout_ms }
+            Command::Drag { from, to, from_at, to_at, timeout_ms }
         }
         "focus" => Command::Focus { target: target_args(&mut args, true)?, timeout_ms },
         "keydown" | "keyup" => {
@@ -3546,10 +3567,10 @@ impl Driver {
                 let t = target.target("is")?;
                 Ok(json!(s.is_state(&t, state, *timeout_ms).map_err(|e| on_target(&format!("is {state}"), &t, e))?))
             }
-            Command::Drag { from, to, timeout_ms } => {
+            Command::Drag { from, to, from_at, to_at, timeout_ms } => {
                 let (f, t) = (from.target("drag")?, to.target("drag")?);
                 let r = s
-                    .drag(&f, &t, *timeout_ms)
+                    .drag(&f, &t, from_at.as_deref().copied(), to_at.as_deref().copied(), *timeout_ms)
                     .map_err(|e| anyhow::anyhow!("drag {} to {}: {e:#}", f.label(), t.label()))?;
                 let mut out = self.state_json();
                 out["drag"] = r;
@@ -4522,6 +4543,23 @@ mod tests {
                     panic!("help {op}: `{cmd}` doesn't parse: {e}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn drag_takes_press_and_drop_points() {
+        let parsed =
+            parse_args(argv(&["navigera", "drag", "#a", "#b", "--to-at", "20,5", "--from-at", "1.5, 2"])).unwrap();
+        match parsed.command {
+            Some(Command::Drag { from_at, to_at, .. }) => {
+                assert_eq!(to_at.as_deref(), Some(&[20.0, 5.0]));
+                assert_eq!(from_at.as_deref(), Some(&[1.5, 2.0]));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_args(argv(&["navigera", "drag", "#a", "#b", "--to-at", "middle"])) {
+            Err(ArgsError::Invalid(e)) => assert!(e.contains("<x>,<y>"), "{e}"),
+            other => panic!("{other:?}"),
         }
     }
 

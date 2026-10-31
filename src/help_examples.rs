@@ -422,12 +422,15 @@ pub const EXAMPLES: &[Help] = &[
         &[
             ("navigera -s s drag --from-text \"A\" --to-text \"B\"", ""),
             ("navigera -s s drag \"#column-a\" \"#column-b\"", ""),
+            ("navigera -s s drag 12 14 --to-at 20,5", "drop near the top edge (before it, in a list)"),
         ],
         &[
             ("<from>", "the source: a ref or CSS selector"),
             ("<to>", "the target: a ref or CSS selector"),
             ("--from-text <t>", "the source, by its visible text"),
             ("--to-text <t>", "the target, by its visible text"),
+            ("--from-at <x>,<y>", "press here, in CSS px from the source's top-left (default: center)"),
+            ("--to-at <x>,<y>", "drop here, in CSS px from the target's top-left (default: center)"),
         ],
     ),
     (

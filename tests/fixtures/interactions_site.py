@@ -36,6 +36,7 @@ getting wrong, one page each, built the way those sites behave:
 /drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
 /drag-pointer   the same list, each item made draggable on pointerdown (as
                 React Aria does)
+/drag-position  a drop box that reports where in it the drop (and the press) landed
 /drag-slider    a knob that follows a held mouse (no drag starts)
 /never-stops    a button that never stops drifting: the click still
                 happens once the settle budget runs out
@@ -200,6 +201,25 @@ for (const li of document.querySelectorAll('li')) {
   });
   li.addEventListener('dragend', () => { note('end'); li.draggable = false; });
 }
+</script>""")
+
+PAGES["/drag-position"] = ("drag position", "#src{width:80px;height:30px;background:#cde}#dst{width:200px;height:100px;background:#eee;margin-top:40px}", """
+<div id=src draggable=true>drag me</div>
+<div id=dst>drop here</div>
+<p id=log></p>
+<script>
+const dst = document.getElementById('dst');
+document.getElementById('src').addEventListener('dragstart', (e) => {
+  e.dataTransfer.setData('text/plain', 'x');
+  const r = e.target.getBoundingClientRect();
+  document.getElementById('log').dataset.press = Math.round(e.clientX - r.left) + ',' + Math.round(e.clientY - r.top);
+});
+dst.addEventListener('dragover', (e) => e.preventDefault());
+dst.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const r = dst.getBoundingClientRect();
+  document.getElementById('log').textContent = Math.round(e.clientX - r.left) + ',' + Math.round(e.clientY - r.top);
+});
 </script>""")
 
 PAGES["/drag-slider"] = ("drag slider", "", """

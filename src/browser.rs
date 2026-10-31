@@ -1410,9 +1410,16 @@ impl BrowserSession {
 
     /// Drag `from` onto `to` (see [`cdp::Page::drag`]); waits for any
     /// navigation the drop starts.
-    pub fn drag(&self, from: &Target, to: &Target, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+    pub fn drag(
+        &self,
+        from: &Target,
+        to: &Target,
+        from_at: Option<[f64; 2]>,
+        to_at: Option<[f64; 2]>,
+        timeout_ms: Option<f64>,
+    ) -> Result<serde_json::Value> {
         let (wait, timeout) = self.element_budget(timeout_ms);
-        let r = self.active_tab().drag(from, to, wait, timeout)?;
+        let r = self.active_tab().drag(from, to, from_at, to_at, wait, timeout)?;
         self.settle_for(timeout_ms);
         Ok(r)
     }

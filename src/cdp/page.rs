@@ -699,7 +699,7 @@ const HOVER_PREP: &str = r#"async function (el, settleMs) {
                 ox += fr.left + fe.clientLeft; oy += fr.top + fe.clientTop;
                 w = w.parent;
             }
-            if (!Number.isNaN(ox)) return { x: x + ox, y: y + oy };
+            if (!Number.isNaN(ox)) return { x: x + ox, y: y + oy, w: r.width, h: r.height };
             return { xframe: true };
         }
         if (Date.now() >= deadline) break;
@@ -963,6 +963,17 @@ enum Held {
 
 fn drag_point(p: &Value) -> Option<(f64, f64)> {
     Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?))
+}
+
+/// An element's on-screen point (its center, from HOVER_PREP) moved to
+/// `at`, an offset from its top-left corner, as Playwright's
+/// `sourcePosition`/`targetPosition` are.
+fn at_offset(mut p: Value, at: Option<[f64; 2]>) -> Value {
+    let (Some([ox, oy]), Some((x, y))) = (at, drag_point(&p)) else { return p };
+    let (w, h) = (p["w"].as_f64().unwrap_or(0.0), p["h"].as_f64().unwrap_or(0.0));
+    p["x"] = json!(x - w / 2.0 + ox);
+    p["y"] = json!(y - h / 2.0 + oy);
+    p
 }
 
 const IDENTITY: &str = "function (el) { return el; }";
@@ -3192,10 +3203,22 @@ impl Page {
     /// Playwright does: scrolling it into view first could move the source
     /// out from under the press point, and the press would then land on (and
     /// drag) whatever had scrolled there.
-    pub fn drag(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
+    pub fn drag(
+        &self,
+        from: &Target,
+        to: &Target,
+        from_at: Option<[f64; 2]>,
+        to_at: Option<[f64; 2]>,
+        wait: Duration,
+        timeout: Duration,
+    ) -> Result<Value> {
         let settle = json!(self.hit_settle_ms(wait));
         let a = self.on_element(from, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout)?;
-        let resolve_to = || self.on_element(to, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout);
+        let resolve_to = || {
+            self.on_element(to, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout)
+                .map(|b| at_offset(b, to_at))
+        };
+        let a = at_offset(a, from_at);
         let Some((ax, ay)) = drag_point(&a) else {
             // No on-screen point for the source (a covered element, a frame
             // out of reach): a draggable source still gets the page-side drag.
@@ -4329,6 +4352,13 @@ impl Page {
     /// tree with `[ref=N]` on actionable nodes, iframes included. `json`
     /// keeps the older flat `[{ref, role, name, value?}]` list.
     pub fn ax_tree(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        let started = std::time::Instant::now();
+        let result = self.ax_tree_inner(timeout, opts);
+        crate::timing::record("ax_total", started);
+        result
+    }
+
+    fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
         // The text tree stops at the output limit, so on a large page it
         // need not read the whole tree: fetch lazily from the root and
         // stop. Anything the lazy path cannot serve (JSON, a depth cap,
@@ -4394,7 +4424,9 @@ impl Page {
             None => (vec![main_root.clone()], None),
         };
         let frames = self.frame_trees(timeout);
+        let started = std::time::Instant::now();
         let clicks = self.clickables(timeout);
+        crate::timing::record("ax_clickables", started);
         let title = ax_str(&main_root, "name").to_string();
         let url = main_root
             .get("properties")
@@ -4432,6 +4464,7 @@ impl Page {
             }
             (nodes, failed)
         });
+        let started = std::time::Instant::now();
         let (rendered, failed) = ax::render_lazy(
             &format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default()),
             &seed,
@@ -4445,6 +4478,7 @@ impl Page {
             },
             fetch,
         );
+        crate::timing::record("ax_lazy_walk", started);
         if failed {
             bail!("lazy AX fetch failed");
         }
@@ -4456,7 +4490,9 @@ impl Page {
         if let Some(d) = opts.max_depth {
             params["depth"] = json!(d);
         }
+        let started = std::time::Instant::now();
         let mut res = self.send("Accessibility.getFullAXTree", params, timeout)?;
+        crate::timing::record("ax_full_call", started);
         // Taken, not cloned: the reply is megabytes on a large page.
         let mut nodes = match res.get_mut("nodes").map(Value::take) {
             Some(Value::Array(nodes)) => nodes,
@@ -4469,9 +4505,13 @@ impl Page {
         if opts.json {
             return Ok(flat_ax(&nodes, opts.all));
         }
+        let started = std::time::Instant::now();
         let frames = self.frame_trees(timeout);
+        crate::timing::record("ax_frames", started);
         // Lightpanda has no DOMSnapshot; its tree is printed as it comes.
+        let started = std::time::Instant::now();
         let clicks = if self.shared.is_single_target() { ax::Clickables::default() } else { self.clickables(timeout) };
+        crate::timing::record("ax_clickables", started);
         let root = nodes.iter().find(|n| n.get("parentId").is_none());
         let title = root.map(|n| ax_str(n, "name").to_string()).unwrap_or_default();
         let url = root
@@ -4488,12 +4528,14 @@ impl Page {
             Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
             None => None,
         };
+        let started = std::time::Instant::now();
         let rendered = ax::render(
             &format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default()),
             &nodes,
             &frames,
             &ax::Options { all_refs: opts.all_refs, limit: opts.limit, root_backend_id, origin, clicks },
         );
+        crate::timing::record("ax_render", started);
         let mut text = rendered.text;
         // Lightpanda's tree stops at a shadow root; what is inside is read
         // from the page instead, without refs (see SHADOW_AX).
