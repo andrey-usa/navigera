@@ -3130,9 +3130,17 @@ impl Page {
     pub fn drag(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
         let settle = json!(self.hit_settle_ms(wait));
         let a = self.on_element(from, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout)?;
-        let b = self.on_element(to, "drag", HOVER_PREP, &[settle], wait, timeout)?;
+        let b = self.on_element(to, "drag", HOVER_PREP, &[settle], wait, timeout);
         let point = |p: &Value| Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?));
-        let (Some((ax, ay)), Some((bx, by))) = (point(&a), point(&b)) else {
+        let to_point = b.as_ref().ok().and_then(point);
+        let (Some((ax, ay)), Some((bx, by))) = (point(&a), to_point) else {
+            // No on-screen point for one of them (a drop zone that appears
+            // only once the drag starts, a covered target, a frame out of
+            // reach): a draggable source still gets the page-side drag.
+            if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
+                return Ok(synthetic);
+            }
+            b?;
             bail!("drag: no on-screen point for both elements (inside a cross-origin iframe?)");
         };
         match self.send("Input.setInterceptDrags", json!({ "enabled": true }), timeout) {
