@@ -616,11 +616,16 @@ impl<'a> Tree<'a> {
                 if name.is_empty() && text_of(&self.nodes[idx], "value").is_empty() {
                     let mut text = Vec::new();
                     self.descendant_text(idx, &mut text, 0);
-                    if let (true, Some(hint)) =
-                        (text.iter().all(|t| t.trim().is_empty()), self.opts.clicks.hints.get(&id))
-                    {
-                        line.push(' ');
-                        line.push_str(hint);
+                    if text.iter().all(|t| t.trim().is_empty()) {
+                        if let Some(hint) = self.opts.clicks.hints.get(&id) {
+                            line.push(' ');
+                            line.push_str(hint);
+                        }
+                        // `aria-describedby`: a tooltip kept elsewhere.
+                        let described = text_of(&self.nodes[idx], "description");
+                        if !described.is_empty() && !line.contains(&quote(&described)) {
+                            line.push_str(&format!(" description={}", quote_clip(&described, 60)));
+                        }
                     }
                 }
                 tags.push(format!("ref={id}"));

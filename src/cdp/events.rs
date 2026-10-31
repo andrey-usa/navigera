@@ -374,6 +374,19 @@ impl Shared {
         self.net.lock().unwrap().get_mut(session_id).map(|n| (n.live_pending(), n.last)).unwrap_or((0, None))
     }
 
+    /// Data requests in flight that started in the last 10 s, long ones
+    /// included: whether a cover over the page may be a loading overlay
+    /// about to go (a click waits for one; see `Page::click`).
+    pub fn fetching(&self, session_id: &str) -> usize {
+        let recent = |t: &std::time::Instant| t.elapsed() < Duration::from_secs(10);
+        self.net
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .map(|n| n.pending.values().filter(|p| recent(&p.0)).count())
+            .unwrap_or(0)
+    }
+
     /// (Requests started, requests in flight) on this tab, for the
     /// snapshot skip check: the first is the sequence a `wait` records.
     pub fn net_seq_pending(&self, session_id: &str) -> (u64, usize) {

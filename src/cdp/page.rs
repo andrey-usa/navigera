@@ -462,6 +462,33 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         }
         return null;
     };
+    // An element whose position never holds still (a perpetual drift)
+    // gets this long in all to stop, then is clicked where it was last
+    // read, not after the whole element wait.
+    let steadyBy = null;
+    // A cover that stays put and has controls of its own (a cookie banner,
+    // a dialog) waits for the user, not for time: it is reported after
+    // COVER_MS, not the whole element wait. One with nothing to click (a
+    // loading overlay) or still animating is waited for.
+    const COVER_MS = 1000;
+    const CONTROLS = 'button, a[href], input:not([type=hidden]), select, textarea, summary, [role=button], [role=link], [role=checkbox], [role=switch], [role=tab], [role=menuitem]';
+    const coverOf = (n) => {
+        let c = n;
+        while (c.parentElement && c.parentElement !== c.ownerDocument.body && !c.parentElement.contains(el)) c = c.parentElement;
+        return c;
+    };
+    const controlsOf = (c) => [c, ...c.querySelectorAll(CONTROLS)].filter((b) => {
+        if (!b.matches(CONTROLS)) return false;
+        const r = b.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    });
+    const animating = (c) => !!c.getAnimations && c.getAnimations({ subtree: true }).some((a) => {
+        const t = a.effect && a.effect.getComputedTiming ? a.effect.getComputedTiming() : {};
+        return a.playState === 'running' && Number.isFinite(t.endTime);
+    });
+    const label = (b) => (b.innerText || b.getAttribute('aria-label') || b.value || b.title || '').replace(/\s+/g, ' ').trim().slice(0, 30);
+    const started = Date.now();
+    let cover = null, coverSince = 0, persistent = false;
     let hit = null, tries = 0;
     while (!force) {
         // Checked on every pass: an element that just appeared may only now
@@ -483,6 +510,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // frame, and two reads with no frame between them see nothing move.
         // A hidden page draws no frames, and one that drew none for 500 ms
         // isn't moving anything by frames either: the timer counts there.
+        if (steadyBy === null) steadyBy = Date.now() + Math.min(1000, settleMs);
         for (let idle = 0; ; ) {
             const framed = await new Promise((res) => { requestAnimationFrame(() => res(true)); setTimeout(() => res(false), 100); });
             idle = framed ? 0 : idle + 1;
@@ -494,7 +522,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             const same = Math.abs((r2.left + r2.width / 2) - (r.left + r.width / 2)) < 1
                 && Math.abs((r2.top + r2.height / 2) - (r.top + r.height / 2)) < 1;
             r = r2;
-            if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= deadline) break;
+            if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= Math.min(deadline, steadyBy)) break;
         }
         let x = r.left + r.width / 2, y = r.top + r.height / 2;
         const root = box.getRootNode(), doc = box.ownerDocument;
@@ -536,6 +564,16 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // Hidden by `visibility` or `pointer-events`, it is waiting to be
         // shown or enabled: waited for.
         if (hit && tries < ALIGN.length) continue;
+        if (hit && strict && !hit.contains(el)) {
+            const c = coverOf(hit);
+            if (c !== cover) {
+                cover = c;
+                coverSince = Date.now();
+            } else if (Date.now() - coverSince >= COVER_MS && !animating(c) && controlsOf(c).length) {
+                persistent = true;
+                break;
+            }
+        } else cover = null;
         const st = (el.ownerDocument.defaultView || window).getComputedStyle(el);
         const pending = st.visibility === 'hidden' || st.pointerEvents === 'none';
         const onPurpose = hit ? hit.contains(el) && !pending : !!visibleFor();
@@ -551,7 +589,9 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // Under something else the whole time: a user would hit that
         // instead. Nothing was clicked.
         el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-        return { covered: true, covered_by: describe(hit) };
+        const c = coverOf(hit);
+        const controls = controlsOf(c).map(label).filter((t) => t).slice(0, 4);
+        return { covered: true, covered_by: describe(c), controls, persistent, waited: Date.now() - started };
     }
     const view = el.ownerDocument.defaultView;
     const b = button === 'right' ? 2 : button === 'middle' ? 1 : 0;
@@ -639,6 +679,88 @@ pub const MOUSE_AT: &str = r#"function (el, dx, dy) {
     }
     return p.inside ? { x: p.x, y: p.y } : { outside: true, x: p.x, y: p.y, width: (window.top || window).innerWidth, height: (window.top || window).innerHeight };
 }"#;
+
+/// Attributes pages put an icon button's tooltip in, most specific first
+/// (`title` names the element in Chrome's tree already, unless a label or
+/// text does: then it is the tooltip shown here).
+const TOOLTIP_ATTRS: &[&str] = &[
+    "data-tooltip",
+    "data-tip",
+    "data-title",
+    "data-bs-title",
+    "data-bs-original-title",
+    "data-original-title",
+    "mattooltip",
+    "data-hint",
+    "aria-description",
+    "title",
+];
+
+/// An icon font's class for one glyph (`fa-trash`, `bi-x-lg`,
+/// `icon-close`, `mdi-delete`), not a family or a size (`fa`, `fa-solid`,
+/// `fa-lg`, `material-icons`).
+fn icon_class(class: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "fa-",
+        "bi-",
+        "icon-",
+        "glyphicon-",
+        "mdi-",
+        "ti-",
+        "la-",
+        "ri-",
+        "codicon-",
+        "octicon-",
+        "lucide-",
+        "feather-",
+        "ion-",
+        "bx-",
+        "bxs-",
+        "ph-",
+        "tabler-",
+        "heroicon-",
+        "gg-",
+        "iconoir-",
+    ];
+    const NOT_A_GLYPH: &[&str] = &[
+        "fa-solid",
+        "fa-regular",
+        "fa-light",
+        "fa-thin",
+        "fa-duotone",
+        "fa-brands",
+        "fa-sharp",
+        "fa-fw",
+        "fa-lg",
+        "fa-sm",
+        "fa-xs",
+        "fa-xl",
+        "fa-spin",
+        "fa-pulse",
+        "fa-inverse",
+        "fa-border",
+        "fa-pull-left",
+        "fa-pull-right",
+        "fa-stack",
+        "fa-stack-1x",
+        "fa-stack-2x",
+        "fa-li",
+        "fa-ul",
+        "fa-flip",
+        "fa-beat",
+        "icon-button",
+        "icon-btn",
+        "icon-only",
+        "icon-small",
+        "icon-large",
+        "icon-sm",
+        "icon-lg",
+    ];
+    let lower = class.to_ascii_lowercase();
+    PREFIXES.iter().any(|p| lower.len() > p.len() && lower.starts_with(p))
+        && !NOT_A_GLYPH.contains(&lower.as_str())
+        && !(lower.starts_with("fa-") && lower[3..].trim_end_matches('x').chars().all(|c| c.is_ascii_digit()))
+}
 
 pub const GET_EL: &str = r#"function (el, what, name) {
     switch (what) {
@@ -2812,14 +2934,32 @@ impl Page {
         // Watch what the click changes (not on Lightpanda: no layout, so its
         // clicks are DOM events anyway).
         let effects = !self.shared.is_single_target() && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none();
-        let mut point = self.on_element(
-            target,
-            "click",
-            CLICK_PREP,
-            &[json!(false), settle.clone(), strict.clone(), button.clone(), json!(effects)],
-            wait,
-            timeout,
-        )?;
+        let started = std::time::Instant::now();
+        let prep = |settle: &Value| {
+            self.on_element(
+                target,
+                "click",
+                CLICK_PREP,
+                &[json!(false), settle.clone(), strict.clone(), button.clone(), json!(effects)],
+                wait,
+                timeout,
+            )
+        };
+        let mut point = prep(&settle)?;
+        // A cover with controls that stayed put is reported early, unless
+        // the page is still fetching: then it may be a loading overlay
+        // about to go, and the rest of the element wait is spent on it.
+        while point.get("persistent").and_then(Value::as_bool) == Some(true)
+            && self.shared.fetching(&self.session_id) > 0
+        {
+            let Some(left) = wait.checked_sub(started.elapsed()).filter(|l| *l > Duration::from_millis(200)) else {
+                break;
+            };
+            point = prep(&json!(left.as_millis() as u64))?;
+        }
+        if point.get("covered").and_then(Value::as_bool) == Some(true) {
+            point["waited"] = json!(started.elapsed().as_millis() as u64);
+        }
         if point.get("disabled").and_then(Value::as_bool) == Some(true) {
             bail!("the element is disabled (waited {settle} ms for it to be enabled); a user can't click it");
         }
@@ -2841,12 +2981,26 @@ impl Page {
         if point.get("covered").and_then(Value::as_bool) == Some(true)
             && point.get("synthetic").and_then(Value::as_bool) != Some(true)
         {
+            let controls: Vec<String> = point
+                .get("controls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|c| serde_json::to_string(c).unwrap_or_default())
+                .collect();
+            let persistent = point.get("persistent").and_then(Value::as_bool) == Some(true);
             bail!(
-                "the element is covered by {} at its centre (waited {} ms; a user's click would land there). \
-                 Close it or wait for it to go; to click anyway, --force sends the click to the element \
-                 without the mouse",
+                "the element is covered by {} at its centre ({} {} ms; a user's click would land there). \
+                 {}; to click anyway, --force sends the click to the element without the mouse",
                 point.get("covered_by").and_then(Value::as_str).unwrap_or("another element"),
-                settle
+                if persistent { "it stayed put with controls of its own for" } else { "waited" },
+                point.get("waited").and_then(Value::as_u64).unwrap_or(settle.as_u64().unwrap_or(0)),
+                if controls.is_empty() {
+                    "Close it or wait for it to go".to_string()
+                } else {
+                    format!("Close it with one of its controls ({}) or wait for it to go", controls.join(", "))
+                }
             );
         }
         if point.get("xframe").and_then(Value::as_bool) == Some(true) {
@@ -4154,6 +4308,64 @@ impl Page {
                 }
                 words.split_whitespace().collect::<Vec<_>>().join(" ")
             };
+            // What an element with no text is, by the page's own markup: a
+            // tooltip attribute, else its icon (an icon font's class, an SVG
+            // sprite's symbol, an image's file name), its own or inside it.
+            let icon_hint = |i: i64| -> Option<String> {
+                let short = |v: &str| {
+                    let v = v.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let cut: String = v.chars().take(60).collect();
+                    serde_json::to_string(&cut).unwrap_or_default()
+                };
+                for name in TOOLTIP_ATTRS {
+                    let v = attr_of(i, name).trim();
+                    if !v.is_empty() {
+                        return Some(format!("{name}={}", short(v)));
+                    }
+                }
+                let mut queue = std::collections::VecDeque::from([(i, 0)]);
+                let mut img = None;
+                let mut seen = 0;
+                while let Some((at, depth)) = queue.pop_front() {
+                    seen += 1;
+                    if seen > 24 {
+                        break;
+                    }
+                    let icon = attr_of(at, "data-icon").trim();
+                    if !icon.is_empty() {
+                        return Some(format!("icon={}", short(icon)));
+                    }
+                    if let Some(class) = attr_of(at, "class").split_whitespace().find(|c| icon_class(c)) {
+                        return Some(format!("icon={}", short(class)));
+                    }
+                    match tag_of(at) {
+                        "use" | "USE" => {
+                            let href = Some(attr_of(at, "href"))
+                                .filter(|h| !h.is_empty())
+                                .unwrap_or(attr_of(at, "xlink:href"));
+                            let symbol = href.rsplit(['#', '/']).next().unwrap_or("").trim();
+                            if !symbol.is_empty() {
+                                return Some(format!("icon={}", short(symbol)));
+                            }
+                        }
+                        "IMG" if img.is_none() => {
+                            let src = attr_of(at, "src");
+                            let file =
+                                src.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("").trim();
+                            if !file.is_empty() && !src.starts_with("data:") {
+                                img = Some(format!("img={}", short(file)));
+                            }
+                        }
+                        _ => {}
+                    }
+                    if depth < 4 {
+                        for &k in children.get(&at).into_iter().flatten() {
+                            queue.push_back((k, depth + 1));
+                        }
+                    }
+                }
+                img
+            };
             for (i, &backend) in backends.iter().enumerate() {
                 if types.get(i) != Some(&1) {
                     continue;
@@ -4165,12 +4377,18 @@ impl Page {
                     let pairs = attrs.map(|a| a.as_slice()).unwrap_or(&[]);
                     pairs.chunks(2).find(|p| text(p.first()) == name).map(|p| text(p.get(1)).trim().to_string())
                 };
-                if let Some(id) = attr("id").filter(|id| !id.is_empty()) {
-                    out.hints.insert(backend, format!("#{id}"));
-                } else if let Some(class) = attr("class").and_then(|c| c.split_whitespace().next().map(str::to_string))
-                {
-                    out.hints.insert(backend, format!(".{class}"));
-                }
+                let selector = if let Some(id) = attr("id").filter(|id| !id.is_empty()) {
+                    Some(format!("#{id}"))
+                } else {
+                    attr("class").and_then(|c| c.split_whitespace().next().map(|c| format!(".{c}")))
+                };
+                // With no text inside (an icon button): what the page says it is.
+                let what = if texted.contains(&index) { None } else { icon_hint(index) };
+                match (selector, what) {
+                    (Some(s), Some(w)) => out.hints.insert(backend, format!("{s} {w}")),
+                    (Some(h), None) | (None, Some(h)) => out.hints.insert(backend, h),
+                    (None, None) => None,
+                };
                 if !landable(index) {
                     continue;
                 }

@@ -15,8 +15,32 @@ All notable changes to this project are documented here. The format follows
 - A text, name or value cut in a snapshot now says how much it left out,
   and a cut text says which ref reads all of it:
   `… (+1979 chars: get text 8)`. A name's cut is noted outside its quotes.
+- A control with no name or text (an icon button) shows what the page
+  marks it with next to its `#id` or `.class`: a tooltip attribute
+  (`data-tooltip`, `title`, …), its icon (an icon font's class, an SVG
+  sprite's symbol, `data-icon`), its image's file name, or the
+  `aria-describedby` text: `button .icon-btn icon="fa-trash" [ref=7]`.
+  Two icon buttons of one class no longer read the same.
+- `quit --close-browser` on a session in the shared browser closes the
+  browser with it when no other session uses it, and otherwise says how
+  many do. It used to leave the browser to close after its grace period.
 
 ### Fixed
+
+- A click on an element that never stops moving (a perpetual drift) took
+  the whole element wait, 5 s, before clicking where it last was; it now
+  waits a second for it to hold still (about 1 s on such a button).
+- A click on an element under a cover that stays put with controls of its
+  own (a cookie banner, a dialog) fails after about a second instead of
+  5 s, naming the cover and its controls:
+  `covered by div#consent "We use cookies. Accept Reject" … Close it with
+  one of its controls ("Accept", "Reject")`. While the page still fetches,
+  a cover is waited for as before: a loading overlay with a Cancel button
+  goes when its data arrives, and the click then lands.
+- A session under a session directory with a long path (a deep
+  `$XDG_RUNTIME_DIR` or `$TMPDIR`) failed to start: the shared browser's
+  socket path did not fit a socket address. Such a session now takes a
+  browser of its own, and its log says why.
 
 - A long poll (a chat or notification request held open, reconnected when
   it ends) no longer holds snapshots for up to 3 s each cycle: a fetch/XHR

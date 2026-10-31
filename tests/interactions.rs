@@ -451,7 +451,9 @@ fn a_click_on_a_target_that_never_stops_still_lands() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("never-stops", &[]);
     s.ok(&["goto", &format!("{}/never-stops", site.url)]);
-    s.ok(&["click", "--selector", "#drifter"]);
+    let (ms, _) = timed(&s, &["click", "--selector", "#drifter"]);
+    // About a second for the drift to stop, not the whole element wait.
+    assert!(ms < 2500.0, "the click on a drifting button took {ms} ms");
     let status = s.text(&["get", "text", "--selector", "#status"]);
     // The drift is +/-12px around x=200, the button 60px wide: a click at
     // the last-read centre always lands on it once the settle budget ends
@@ -1520,5 +1522,60 @@ fn text_shares_lines_and_a_cut_says_how_to_read_the_rest() {
     for r in refs {
         let id: String = r.chars().take_while(char::is_ascii_digit).collect();
         assert_eq!(s.text(&["get", "text", &id]), long.trim(), "get text {id}");
+    }
+}
+
+/// A banner with controls of its own that stays over the button is said
+/// after about a second, naming its controls; an overlay over a page that
+/// is still fetching is waited for, as long as the element wait.
+#[test]
+fn a_cover_that_stays_is_said_quickly_and_a_loading_one_is_waited_for() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("covers", &[]);
+    s.ok(&["goto", &format!("{}/cookie-banner", site.url)]);
+    let t = std::time::Instant::now();
+    let err = s.fails(&["click", "--selector", "#buy"]);
+    let ms = t.elapsed().as_millis();
+    assert!(ms < 2500, "a banner that stays took {ms} ms to report");
+    assert!(err.contains("div#consent") && err.contains("\"Accept\", \"Reject\""), "{err}");
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "waiting");
+    s.ok(&["click", "--role", "button", "--name", "Accept"]);
+    s.ok(&["click", "--selector", "#buy"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "bought");
+
+    s.ok(&["goto", &format!("{}/loading-cover", site.url)]);
+    s.ok(&["click", "--selector", "#save"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "saved");
+}
+
+/// A control with no name or text says what the page marks it with: a
+/// tooltip attribute, its icon's class or sprite symbol, its image's file,
+/// or the description it points to.
+#[test]
+fn a_nameless_control_says_what_the_page_marks_it_with() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("icons", &[]);
+    let page = concat!(
+        "<title>icons</title>",
+        "<button class=icon-btn><i class='fa fa-solid fa-trash'></i></button>",
+        "<button class=icon-btn><svg width=16 height=16><use href='%23i-close'></use></svg></button>",
+        "<div role=button tabindex=0 class=tb data-tooltip=Archive><svg width=16 height=16></svg></div>",
+        "<a href='/x' class=nav><img src='/icons/home.png' width=16 height=16></a>",
+        "<span class=close onclick=1 title='Close panel' style='display:inline-block;width:16px;height:16px'></span>",
+        "<button class=x aria-describedby=tip><svg width=16 height=16></svg></button><div role=tooltip id=tip>Share</div>",
+    );
+    s.ok(&["goto", &format!("data:text/html,{page}")]);
+    let tree = s.text(&["ax"]);
+    for hint in [
+        "button .icon-btn icon=\"fa-trash\" [ref=",
+        "button .icon-btn icon=\"i-close\" [ref=",
+        "button .tb data-tooltip=\"Archive\" [ref=",
+        "link .nav img=\"home.png\" [ref=",
+        "clickable .close title=\"Close panel\" [ref=",
+        "button .x description=\"Share\" [ref=",
+    ] {
+        assert!(tree.contains(hint), "{hint}:\n{tree}");
     }
 }

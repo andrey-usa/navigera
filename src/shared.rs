@@ -77,7 +77,32 @@ pub fn wanted(config: &SessionConfig) -> bool {
         return false;
     }
     let transport = config.transport.clone().or_else(|| std::env::var("NAVIGERA_CDP_TRANSPORT").ok());
-    !(cfg!(unix) && transport.is_some_and(|t| t.trim() == "ws"))
+    if cfg!(unix) && transport.is_some_and(|t| t.trim() == "ws") {
+        return false;
+    }
+    socket_fits()
+}
+
+/// Does the host's socket path fit a Unix socket address? Under a session
+/// directory with a long path (a deep `$XDG_RUNTIME_DIR` or `$TMPDIR`) it
+/// would not bind, and the session takes a browser of its own instead.
+fn socket_fits() -> bool {
+    if !cfg!(unix) {
+        return true;
+    }
+    // The address holds the path and its NUL: 108 bytes on Linux, 104 on
+    // macOS and the BSDs.
+    let max = if cfg!(target_os = "linux") { 107 } else { 103 };
+    match paths(&"0".repeat(16)) {
+        Ok((socket, _, _)) if socket.as_os_str().len() > max => {
+            eprintln!(
+                "navigera: {} is too long for a socket address: this session has a browser of its own",
+                socket.display()
+            );
+            false
+        }
+        _ => true,
+    }
 }
 
 /// What a shared browser is launched as; sessions asking for the same
@@ -397,7 +422,7 @@ fn event(method: &str, params: Option<&RawValue>, session: Option<&str>) -> Stri
 
 /// The host's own method: close the browser as soon as no session uses it
 /// (`sessions --clean`), not after the grace period.
-const CLOSE_IF_UNUSED: &str = "Navigera.closeIfUnused";
+pub(crate) const CLOSE_IF_UNUSED: &str = "Navigera.closeIfUnused";
 
 /// Ask the host on `socket` to close its browser once it has no session.
 pub fn close_if_unused(socket: &Path) {
@@ -500,7 +525,13 @@ impl Router {
         };
         if method == CLOSE_IF_UNUSED {
             self.close_now = true;
-            client.send(answer(id, None, None, None));
+            // How many other clients use the browser: it closes once they
+            // and this one are gone.
+            let others = self.clients.len().saturating_sub(1);
+            let result = RawValue::from_string(format!("{{\"others\":{others}}}")).ok();
+            if let Some(client) = self.clients.get(&cid) {
+                client.send(answer(id, result.as_deref(), None, None));
+            }
             return;
         }
         if matches!(method, "Browser.close" | "Browser.crash" | "Browser.crashGpuProcess") {

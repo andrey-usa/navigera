@@ -138,7 +138,7 @@ another process are reachable by ref only.
 | `tab-select` | `<index>` (or `--index <n>`) or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |
 | `tab-close` | `[<index>]` (default: active) | state |
 | `dialog` | `--accept [--prompt-text t]` or `--dismiss` | `{dialogs: "accept"\|"dismiss"}` |
-| `quit` (`close`) | — | `{bye: true}`; a session server exits with its browser context (a browser of its own: with its browser). `--close-browser` on a shared browser closes the session's context only and says so |
+| `quit` (`close`) | — | `{bye: true}`; a session server exits with its browser context (a browser of its own: with its browser). `--close-browser` on a shared browser closes it with this session unless other sessions use it, and says which |
 | `skill` | — | prints the agent guide (SKILL.md) |
 | `install-browser` | `[chrome-headless-shell \| chrome] [--channel stable\|beta\|dev\|canary] [--where]` | downloads that Chrome from Google's Chrome for Testing into navigera's cache, used from then on (see Browsers and engines): `{installed, version}`; `--where` prints the directory |
 | `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
@@ -169,6 +169,12 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   node, and open shadow roots are included.
 - Wrapper nodes (`generic`, label boxes) are collapsed, and text that repeats
   an ancestor's name or a neighbouring control's label is dropped.
+- Adjacent text shares `- text:` lines of up to 300 characters (a grid of
+  `<div>` cells is a few lines, not one per cell); any other node between
+  texts starts a new line.
+- A text cut at 300 characters, or a name or value cut at 150, says how much
+  is left out, and a cut text names the ref that reads all of it:
+  `- text: Lorem ipsum dolor sit amet… (+1979 chars: get text 8)`.
 - A named node with one same-named actionable child is printed on one line,
   for example `heading "X": link [ref=7]`.
 - `[ref=N]` (a backend DOM node id) appears on actionable nodes: interactive
@@ -184,9 +190,13 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   is inside a link or button, or under `aria-hidden` or `inert`, isn't
   marked, nor is an element with nothing to tell it by; a label whose
   control is hidden is. An actionable node with no name or text shows its
-  `#id` or `.class`
-  (`clickable #send-forward [ref=19]`, `button #close [ref=7]`). Use
-  `--refs all` to get one on every node.
+  `#id` or `.class`, and what the page marks it with: a tooltip attribute
+  (`data-tooltip`, `title`, …), its icon (an icon font's class, an SVG
+  sprite's symbol, `data-icon`), its image's file name, or the
+  `aria-describedby` text
+  (`clickable #send-forward [ref=19]`, `button .icon-btn icon="fa-trash" [ref=7]`,
+  `link .nav img="home.png" [ref=9]`). Use `--refs all` to get one on every
+  node.
 - States are shown in brackets: `checked`, `disabled`, `expanded` or
   `collapsed`, `selected`, `required`, `invalid`, `level=N`.
 - Inputs show `value="…"`, links show `url=` (shortened to the path on the
@@ -219,11 +229,16 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   `DOM.getContentQuads`.
   - A styled checkbox or radio (the `<input>` hidden or covered by its own
     label's box) is clicked through its label, as a user would.
+  - An element that never holds still (a perpetual drift) gets a second
+    in all to stop, then is clicked where it was last read.
   - If something else covers the element's centre (a toast, a sticky
     header, an overlay), the element is tried at the edges of the viewport,
     then the click waits for the cover to go (up to the element wait). If it
-    stays covered the click fails and names the covering element: a user
-    would have clicked that instead. `click --force` sends DOM events to the
+    stays covered the click fails and names the covering element and its
+    controls: a user would have clicked that instead. A cover that stays put
+    with controls of its own (a cookie banner, a dialog) is reported after a
+    second, unless the page is still fetching (a loading overlay with a
+    Cancel button goes when its data arrives). `click --force` sends DOM events to the
     element regardless (`synthetic_click`). `fill` likewise scrolls a field
     out from under a panel before setting it.
   - A disabled control is waited for (up to the element wait) and then

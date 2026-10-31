@@ -44,6 +44,9 @@ getting wrong, one page each, built the way those sites behave:
                 happens once the settle budget runs out
 /moving-target  a button that glides to a stop over its first frames
                 (no CSS animation), reporting where it was clicked
+/cookie-banner  a button under a banner with Accept and Reject that stays
+/loading-cover  a button under an overlay with a Cancel button, removed when
+                a 2.5 s fetch returns
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
 
@@ -74,6 +77,27 @@ const drift = () => {
   requestAnimationFrame(drift);
 };
 requestAnimationFrame(drift);
+</script>""")
+
+PAGES["/cookie-banner"] = ("cookie banner", "", """
+<p id=status>waiting</p>
+<button id=buy onclick="document.getElementById('status').textContent='bought'">Buy</button>
+<div id=consent style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9">
+  <div style="background:#fff;margin:30vh auto;width:300px;padding:12px">
+    <p>We use cookies.</p>
+    <button onclick="document.getElementById('consent').remove()">Accept</button>
+    <button onclick="document.getElementById('consent').remove()">Reject</button>
+  </div>
+</div>""")
+
+PAGES["/loading-cover"] = ("loading cover", "", """
+<p id=status>waiting</p>
+<button id=save onclick="document.getElementById('status').textContent='saved'">Save</button>
+<div id=cover style="position:fixed;inset:0;background:rgba(255,255,255,.8);z-index:9">
+  <p>Loading...</p><button>Cancel</button>
+</div>
+<script>
+fetch('/hold?ms=2500').then(() => document.getElementById('cover').remove());
 </script>""")
 
 PAGES["/moving-target"] = ("moving target", "", """

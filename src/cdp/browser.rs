@@ -512,6 +512,13 @@ impl Browser {
         })
     }
 
+    /// On a shared browser's host: close the browser as soon as no client
+    /// uses it. Returns how many other clients use it now.
+    pub fn close_host_if_unused(&self) -> Result<usize> {
+        let r = self.block_on(self.client.send(crate::shared::CLOSE_IF_UNUSED, json!({}), None, CMD_TIMEOUT))?;
+        Ok(r.get("others").and_then(Value::as_u64).unwrap_or(0) as usize)
+    }
+
     /// `Browser.close`: the browser shuts down gracefully (profile saved).
     /// The reply may never come: the connection drops as it exits.
     pub fn close_remote(&self) -> Result<()> {

@@ -234,9 +234,9 @@ fn two_sessions_share_one_browser_and_nothing_else() {
     a.ok(&["tab-new"]);
     assert_eq!(b.ok(&["tab-list"])["tabs"].as_array().map(Vec::len), Some(1));
 
-    // `quit --close-browser` closes A's context, not the browser.
+    // `quit --close-browser` closes A's context, not the browser B uses.
     let bye = a.ok(&["quit", "--close-browser"]);
-    assert!(bye["browser"].as_str().unwrap_or("").starts_with("shared"), "{bye}");
+    assert!(bye["browser"].as_str().unwrap_or("").starts_with("left open: 1 other session"), "{bye}");
     assert_eq!(b.sessions_on_browser(), "shared (1 session)");
     assert_eq!(b.text(&["eval", "document.title"]), "download");
     assert_eq!(browser.browsers().len(), 1);
