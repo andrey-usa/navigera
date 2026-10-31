@@ -9,10 +9,14 @@
 //! do is the grounding and checking an agent otherwise pays a full LLM turn
 //! and a full page snapshot for. Configured by environment:
 //!
-//! - `TYPESAFE_API_KEY`: use TypeSafe's API (`https://api.typesafe.ai`).
+//! - `NAVIGERA_DECIDER_KEY`: the API key, one for every model the endpoint
+//!   serves (Jev, Kev, ...); `TYPESAFE_API_KEY` is read when it is unset.
+//!   With a key and no URL, decisions go to TypeSafe's API
+//!   (`https://api.typesafe.ai`).
 //! - `NAVIGERA_DECIDER_URL`: another endpoint with the same API, such as a
 //!   LiteLLM proxy (`http://<proxy>/typesafe/v1/systemone`) or a local mock.
-//! - `NAVIGERA_DECIDER_MODEL`: the model id (default `jev-latest`).
+//! - `NAVIGERA_DECIDER_MODEL`: the model id (default `jev-latest`); the key
+//!   stays the same when the model changes.
 //!
 //! Plain `http://` endpoints are spoken to directly; `https://` goes through
 //! `curl`, which every supported OS ships, so the binary carries no TLS stack
@@ -47,7 +51,7 @@ pub struct Decider {
 impl Decider {
     pub fn from_env() -> Option<Decider> {
         let var = |name: &str| std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-        let key = var("TYPESAFE_API_KEY");
+        let key = var("NAVIGERA_DECIDER_KEY").or_else(|| var("TYPESAFE_API_KEY"));
         let url = var("NAVIGERA_DECIDER_URL");
         if key.is_none() && url.is_none() {
             return None;
@@ -67,8 +71,9 @@ impl Decider {
     /// The error for `find`/`check` when no decider is configured.
     pub fn missing(op: &str) -> anyhow::Error {
         anyhow::anyhow!(
-            "{op} needs a decision model: set TYPESAFE_API_KEY (TypeSafe Jev), or NAVIGERA_DECIDER_URL \
-             for an endpoint with the same API; without one, read `ax` and pass a ref"
+            "{op} needs a decision model: set NAVIGERA_DECIDER_KEY (NAVIGERA_DECIDER_MODEL picks the model, \
+             default jev-latest), or NAVIGERA_DECIDER_URL for an endpoint with the same API; without one, \
+             read `ax` and pass a ref"
         )
     }
 

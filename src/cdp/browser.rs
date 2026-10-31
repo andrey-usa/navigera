@@ -158,6 +158,31 @@ impl Browser {
         Ok(Self::finish(handle, client, None, None, ws_url.to_string()))
     }
 
+    /// A browser a shared-browser host keeps (see `crate::shared`),
+    /// reached over `client`: navigera owns no process here either.
+    pub fn on_host(handle: &tokio::runtime::Handle, client: CdpClient, label: String) -> Self {
+        Self::finish(handle, client, None, None, label)
+    }
+
+    /// Divert this browser's CDP connection to raw messages (see
+    /// [`CdpClient::take_raw`]): the shared-browser host forwards them.
+    pub fn take_raw(
+        &self,
+    ) -> Result<(tokio::sync::mpsc::UnboundedSender<String>, tokio::sync::mpsc::UnboundedReceiver<String>)> {
+        self.client.take_raw()
+    }
+
+    /// Has the connection to the browser ended?
+    pub fn is_closed(&self) -> bool {
+        self.client.is_closed()
+    }
+
+    /// How many browser contexts other than the default one are open.
+    pub fn context_count(&self) -> Result<usize> {
+        let r = self.block_on(self.client.send("Target.getBrowserContexts", json!({}), None, CMD_TIMEOUT))?;
+        Ok(r.get("browserContextIds").and_then(Value::as_array).map_or(0, Vec::len))
+    }
+
     fn finish(
         handle: &tokio::runtime::Handle,
         client: CdpClient,
@@ -297,15 +322,14 @@ impl Browser {
         Ok(())
     }
 
-    /// Grant a permission (e.g. `geolocation`) to every origin.
-    pub fn grant_permission(&self, permission: &str) -> Result<()> {
-        self.block_on(self.client.send(
-            "Browser.setPermission",
-            json!({ "permission": { "name": permission }, "setting": "granted" }),
-            None,
-            CMD_TIMEOUT,
-        ))
-        .map(|_| ())
+    /// Grant a permission (e.g. `geolocation`) to every origin, in one
+    /// browser context (the default one without `context`).
+    pub fn grant_permission(&self, permission: &str, context: Option<&str>) -> Result<()> {
+        let mut params = json!({ "permission": { "name": permission }, "setting": "granted" });
+        if let Some(context) = context {
+            params["browserContextId"] = json!(context);
+        }
+        self.block_on(self.client.send("Browser.setPermission", params, None, CMD_TIMEOUT)).map(|_| ())
     }
 
     /// The watcher's shared state (dialog log, popups, navigation).

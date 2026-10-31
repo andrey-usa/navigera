@@ -44,7 +44,7 @@ What it can do is make the LLM's job smaller.
 - **MCP**: `browser_find`, `browser_check` and a `find` target appear only
   when a decider is configured, so the default tool list stays what agents
   know (it grows from ~2,600 to ~3,200 tokens).
-- **Privacy**: off unless `TYPESAFE_API_KEY` or `NAVIGERA_DECIDER_URL` is set;
+- **Privacy**: off unless `NAVIGERA_DECIDER_KEY` (or `TYPESAFE_API_KEY`) or `NAVIGERA_DECIDER_URL` is set;
   typed values are replaced by `(filled)` before anything is sent.
 
 ### Measured

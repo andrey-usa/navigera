@@ -29,10 +29,14 @@ getting wrong, one page each, built the way those sites behave:
                 without its unload path leaves the follower waiting)
 /poll           a page that polls one URL every 300 ms, forever
 /one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
+/click-fetch    a button that starts a 200 ms fetch, then brings a list
+/two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
+/stale-ref      a button and a bare draggable=true handle (no handlers)
 /drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
 /drag-pointer   the same list, each item made draggable on pointerdown (as
                 React Aria does)
+/drag-position  a drop box that reports where in it the drop (and the press) landed
 /drag-slider    a knob that follows a held mouse (no drag starts)
 /never-stops    a button that never stops drifting: the click still
                 happens once the settle budget runs out
@@ -117,6 +121,29 @@ fetch('/slow-echo?ms=400').then(() => {
 });
 </script>""")
 
+PAGES["/click-fetch"] = ("click fetch", "", """
+<button id=go>Go</button><ul id=list><li>Loading...</li></ul>
+<script>
+document.getElementById('go').onclick = () => {
+  fetch('/slow-echo?ms=200').then(() => {
+    document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
+  });
+};
+</script>""")
+
+PAGES["/two-fetch"] = ("two fetch", "", """
+<ul id=list><li>Loading...</li></ul>
+<script>
+// Half a list, then a 400 ms gap with no request, then the other half:
+// a quiet window shorter than the gap reads only the first half.
+fetch('/slow-echo?ms=100').then(() => {
+  document.getElementById('list').innerHTML = '<li>Alpha</li>';
+  return new Promise(r => setTimeout(r, 400));
+}).then(() => fetch('/slow-echo?ms=100')).then(() => {
+  document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
+});
+</script>""")
+
 PAGES["/big-table"] = ("big table", "", """
 <table><tbody id=rows></tbody></table><p id=out></p>
 <script>
@@ -124,6 +151,10 @@ rows.innerHTML = Array.from({length: 2000}, (_, i) =>
   `<tr><td>Item ${i}</td><td><button onclick="out.textContent='edit ${i}'">Edit ${i}</button> <a href="#r${i}">View ${i}</a></td></tr>`).join('');
 </script>""")
 
+PAGES["/stale-ref"] = ("stale ref", "", """
+<button id=b>Go</button>
+<div id=h draggable="true" style="width:80px;height:20px">Handle</div>
+""")
 PAGES["/drag-native"] = ("drag native", "", """
 <style>li{padding:8px;margin:2px;border:1px solid #888;width:200px;list-style:none;background:#eee}</style>
 <ul id=list><li id=a>Alpha</li><li id=b>Beta</li><li id=c>Gamma</li></ul>
@@ -170,6 +201,25 @@ for (const li of document.querySelectorAll('li')) {
   });
   li.addEventListener('dragend', () => { note('end'); li.draggable = false; });
 }
+</script>""")
+
+PAGES["/drag-position"] = ("drag position", "#src{width:80px;height:30px;background:#cde}#dst{width:200px;height:100px;background:#eee;margin-top:40px}", """
+<div id=src draggable=true>drag me</div>
+<div id=dst>drop here</div>
+<p id=log></p>
+<script>
+const dst = document.getElementById('dst');
+document.getElementById('src').addEventListener('dragstart', (e) => {
+  e.dataTransfer.setData('text/plain', 'x');
+  const r = e.target.getBoundingClientRect();
+  document.getElementById('log').dataset.press = Math.round(e.clientX - r.left) + ',' + Math.round(e.clientY - r.top);
+});
+dst.addEventListener('dragover', (e) => e.preventDefault());
+dst.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const r = dst.getBoundingClientRect();
+  document.getElementById('log').textContent = Math.round(e.clientX - r.left) + ',' + Math.round(e.clientY - r.top);
+});
 </script>""")
 
 PAGES["/drag-slider"] = ("drag slider", "", """

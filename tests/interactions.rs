@@ -1216,6 +1216,76 @@ fn drag_runs_a_real_html5_drag() {
     }
 }
 
+/// A target that has to scroll into view: the source is pressed where it is
+/// before that scroll, not where it was (the scroll moves it away, and the
+/// old point then lies over the target itself).
+#[test]
+fn drag_to_a_target_far_below_drags_the_source() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    for (tag, mobile) in [("desk", false), ("mob", true)] {
+        let s = Session::start(&format!("dragf-{tag}"), &[]);
+        if mobile {
+            s.ok(&["set", "device", "iPhone 15"]);
+        }
+        for page in ["drag-native", "drag-pointer"] {
+            s.ok(&["goto", &format!("{}/{page}", site.url)]);
+            s.ok(&["eval", "document.getElementById('b').style.marginBottom = '3000px'"]);
+            let r = s.ok(&["drag", "#a", "#c"]);
+            assert_eq!(r["drag"]["path"], "drag", "{tag} {page}: {r}");
+            assert_eq!(r["drag"]["dropped"], true, "{tag} {page}: {r}");
+            let log = s.text(&["get", "text", "--selector", "#log"]);
+            assert!(log.contains("drop:a"), "{tag} {page}: {log}");
+            assert_eq!(list_order(&s), "bca", "{tag} {page}");
+        }
+    }
+}
+
+/// A ref whose element left the page fails at once and says so; a bare
+/// `draggable=true` element gets a ref without any handler on it.
+#[test]
+fn a_stale_ref_fails_at_once_and_a_draggable_has_a_ref() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("stale-ref", &[]);
+    s.ok(&["goto", &format!("{}/stale-ref", site.url)]);
+    let ax = s.text(&["ax"]);
+    assert!(ax.lines().any(|l| l.contains("Handle") && l.contains("[ref=")), "{ax}");
+    let go = ax.lines().find(|l| l.contains("button \"Go\"")).unwrap();
+    let r = go.split("[ref=").nth(1).unwrap().split(']').next().unwrap().to_string();
+    s.ok(&["eval", "document.getElementById('b').remove()"]);
+    let t = std::time::Instant::now();
+    let e = s.fails(&["click", &r]);
+    assert!(e.contains("stale") && !e.contains("--force"), "{e}");
+    assert!(t.elapsed() < std::time::Duration::from_millis(2000), "took {:?}", t.elapsed());
+}
+
+/// `--from-at`/`--to-at` press and drop at a point of the element (from its
+/// top-left corner, as Playwright's sourcePosition/targetPosition); the
+/// default is its center.
+#[test]
+fn drag_presses_and_drops_where_asked() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("dragat", &[]);
+    for (args, drop) in [
+        (&[][..], "100,50"),
+        (&["--to-at", "20,5"][..], "20,5"),
+        (&["--to-at", "150,90", "--from-at", "10,10"][..], "150,90"),
+    ] {
+        s.ok(&["goto", &format!("{}/drag-position", site.url)]);
+        let mut cmd = vec!["drag", "#src", "#dst"];
+        cmd.extend_from_slice(args);
+        let r = s.ok(&cmd);
+        assert_eq!(r["drag"]["dropped"], true, "{args:?}: {r}");
+        let got = s.text(&["get", "text", "--selector", "#log"]);
+        let (gx, gy) =
+            got.split_once(',').map(|(x, y)| (x.parse::<f64>().unwrap(), y.parse::<f64>().unwrap())).unwrap();
+        let (wx, wy) =
+            drop.split_once(',').map(|(x, y)| (x.parse::<f64>().unwrap(), y.parse::<f64>().unwrap())).unwrap();
+        assert!((gx - wx).abs() <= 1.0 && (gy - wy).abs() <= 1.0, "{args:?}: dropped at {got}, wanted {drop}");
+    }
+    let press = s.text(&["eval", "document.getElementById('log').dataset.press"]);
+    assert_eq!(press, "10,10", "--from-at presses there");
+}
+
 /// With no drag to start, `drag` is a held mouse: the knob follows it.
 #[test]
 fn drag_without_a_drag_is_a_held_mouse() {
@@ -1276,6 +1346,64 @@ fn a_snapshot_does_not_wait_on_polls_and_no_wait_skips_the_wait() {
     s.ok(&["screenshot", "--no-wait", "--path", &std::env::temp_dir().join("nv-quiet.png").display().to_string()]);
 }
 
+/// A snapshot after a successful `wait` skips the quiet wait (and says
+/// nothing about it), while a snapshot after a click still waits and
+/// says how long it waited.
+#[test]
+fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("quiet-skip", &[]);
+    let has_quiet_note = |r: &Value| {
+        r["notes"]
+            .as_array()
+            .map(|n| n.iter().any(|x| x.as_str().unwrap_or("").contains("network quiet")))
+            .unwrap_or(false)
+    };
+
+    s.ok(&["goto", &format!("{}/one-fetch", site.url)]);
+    s.ok(&["wait", "--text", "Alpha"]);
+    // The FIRST snapshot after the wait must skip: a median over several
+    // would hide it, since later snapshots are quiet anyway.
+    let t = std::time::Instant::now();
+    let (ok, r) = s.run(&["ax"]);
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    assert!(ok, "ax failed: {r}");
+    assert!(ms < 300.0, "first ax after wait --text took {ms:.0} ms");
+    assert!(!has_quiet_note(&r), "a skipped wait should report nothing: {r}");
+    assert!(r["result"].as_str().unwrap_or("").contains("Alpha"));
+
+    // A click is not a wait: the snapshot after it waits, and says so.
+    s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
+    s.ok(&["click", "--role", "button", "--name", "Go"]);
+    let (_, r) = s.run(&["ax"]);
+    assert!(has_quiet_note(&r), "a snapshot that waited should say so: {r}");
+    assert!(r["result"].as_str().unwrap_or("").contains("Alpha"));
+}
+
+/// The default quiet window reads a list that arrives in two fetches with
+/// a 400 ms gap between them; a 250 ms window ends in the gap and reads
+/// only the first half. That is why the default stays 500 ms and 250 ms
+/// is opt-in per session.
+#[test]
+fn a_short_quiet_window_reads_a_chained_list_early() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("quiet-window", &[]);
+
+    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
+
+    s.ok(&["set", "network-quiet", "250"]);
+    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Alpha") && !tree.contains("Beta"), "{tree}");
+
+    s.ok(&["set", "network-quiet", "500"]);
+    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
+}
+
 /// `check` on a controlled checkbox (the click's default is cancelled and the
 /// app commits the state later, as a React onChange re-render does) succeeds
 /// once the state lands, not only when it is already there as the click
@@ -1297,6 +1425,23 @@ fn check_waits_for_a_late_commit() {
     s.ok(&["eval", &page("")]);
     let error = s.fails(&["check", "--selector", "#c", "--timeout-ms", "1000"]);
     assert!(error.contains("did not check it"), "{error}");
+}
+
+/// A page short enough for the whole tree to be read in one call (about as
+/// long as the limit) still stops at the limit, and its note gives no count.
+#[test]
+fn ax_with_a_limit_on_a_mid_size_page_says_more_lines_without_a_count() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("midtable", &[]);
+    s.ok(&["goto", &format!("{}/honesty", site.url)]);
+    s.ok(&["eval", "(() => { let h = '<ul>'; for (let i = 0; i < 200; i++) h += '<li>Item ' + i + ' <button onclick=\"out(' + i + ')\">Pick ' + i + '</button></li>'; document.body.insertAdjacentHTML('beforeend', h + '</ul>'); return 1; })()"]);
+    let tree = s.text(&["ax", "--limit", "300"]);
+    assert!(tree.contains("Pick 0") && !tree.contains("Pick 199"), "{tree}");
+    let last = tree.lines().last().unwrap();
+    assert!(last.starts_with("… more lines"), "{last}");
+    assert!(tree.lines().count() <= 302, "{} lines", tree.lines().count());
+    s.ok(&["click", "--role", "button", "--name", "Pick 7"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#out"]), "7");
 }
 
 /// A snapshot of a big table with a limit prints only the first rows, says it

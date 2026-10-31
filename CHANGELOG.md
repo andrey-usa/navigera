@@ -6,6 +6,78 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-10-31
+
+### Added
+
+- `drag --to-at <x>,<y>` drops at that point of the target (CSS pixels from
+  its top-left corner; default its center), `--from-at` presses at that
+  point of the source, as Playwright's `targetPosition`/`sourcePosition`:
+  a drop near a list row's top edge lands before it.
+- Named sessions share one browser, each in a browser context of its own
+  (tabs, cookies, storage, cache, downloads, permissions apart), so N
+  parallel agents cost one browser plus a renderer each instead of N
+  browsers. A small host process keeps the browser on the private pipe (no
+  DevTools port), gives each session a browser-level CDP session of its own,
+  disposes a session's contexts when it goes (killed or not) and closes the
+  browser 30 s after the last session (`NAVIGERA_SHARED_GRACE_S`). `navigera
+  mcp` shares the same way. `start --own-browser` (or
+  `NAVIGERA_SHARED_BROWSER=0`) keeps a browser per session; `--attach`,
+  `--profile` and Lightpanda keep theirs. `status` says `browser: shared (N
+  sessions)` or `own`; if the shared browser dies, each session's next
+  command says so and `start` relaunches it.
+- `navigera sessions` lists the named sessions (pid, age, idle time,
+  browser, URL, memory) and the shared browsers; `sessions --clean` quits the
+  ones idle 5 min or more (`--idle <s>`), removes dead socket files and closes
+  a shared browser left unused, and says how much memory that freed;
+  `--clean --all` quits every session.
+- `start --parent <pid>` (or `NAVIGERA_PARENT_PID`): the session quits when
+  that process exits, so a crashed agent leaves no browser behind.
+- A command that came in while another client's command was running on the
+  same session gets a note: a session name is shared by every process that
+  uses it.
+
+### Changed
+
+- An unused session ends after 10 min, not 30 (`start --idle <s>`, or
+  `--idle-timeout-s`). `status` and `sessions` don't count as use.
+- Chrome starts with `--disable-field-trial-config`, as Playwright's and
+  Puppeteer's do: Chromium and Chrome for Testing builds no longer turn on
+  the experiments of Chrome's field-trial testing config, which cost about
+  19 MiB per page (8 sessions: 894 to 716 MiB) and differed from build to
+  build.
+- A ref whose element has left the page fails at once ("that ref is stale ... run `ax` for fresh
+  refs", no `--force` hint) instead of after the 5 s wait for a box. An element with
+  `draggable="true"` gets a ref in `ax` even with no handler on it.
+- The decision model's key is `NAVIGERA_DECIDER_KEY`, one key for whichever
+  model `NAVIGERA_DECIDER_MODEL` names (Jev, Kev, ...). `TYPESAFE_API_KEY`
+  is still read when it is unset.
+- `ax` on a page whose tree is about as long as the output limit or shorter
+  reads it in one call instead of node by node (a 250-row table: 342 to
+  163 ms), and no longer copies the reply. A page with more than 4 DOM nodes
+  per line of limit still reads lazily, stopping at the limit.
+- A snapshot right after a `wait` that succeeded (text, selector, url,
+  gone, js, idle) skips the network-quiet wait when no request has started
+  since (`ax` after `wait --text`: 561 to 56 ms). A snapshot that did wait
+  says so (`waited 412 ms for network quiet`). `set network-quiet <ms>`
+  sets the quiet window per session (default 500 ms; 250 ms reads a list
+  that arrives in two fetches 400 ms apart too early), and `wait --idle`
+  uses it.
+
+### Fixed
+
+- `drag` to a target that has to scroll into view drags the source. The
+  target used to be scrolled into view before the press, which moved the
+  source away: the press landed on whatever had scrolled under it (often
+  the target itself), so the wrong element was dragged or no drag started.
+  As in Playwright, the source is now pressed and the drag started first,
+  and the target is scrolled into view while it is held.
+- A snapshot cut by `--limit` that was read in one call said "1 more lines"
+  whatever its length; it now says "more lines", as the lazy read does.
+- `start --profile` opens one window, not two: the profile browser starts
+  with `--no-startup-window`, as navigera's own launches do, so there is no
+  blank startup window and no "unsupported command-line flag" bar.
+
 ## [0.6.4] - 2026-10-31
 
 Fixes found by running a real app's end-to-end tests on navigera: snapshots
@@ -677,6 +749,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.6.5]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.5
 [0.6.4]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.4
 [0.6.3]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.3
 [0.6.2]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.2

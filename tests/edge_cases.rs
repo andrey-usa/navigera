@@ -69,10 +69,14 @@ struct Session {
 
 impl Session {
     fn start(test: &str) -> Session {
+        Self::start_with(test, &[])
+    }
+
+    fn start_with(test: &str, extra: &[&str]) -> Session {
         let name =
             std::env::temp_dir().join(format!("nv-edge-{test}-{}.sock", std::process::id())).display().to_string();
         let s = Session { name };
-        s.ok(&["start", "--idle-timeout-s", "120"]);
+        s.ok(&[&["start", "--idle-timeout-s", "120"], extra].concat());
         s
     }
 
@@ -175,7 +179,8 @@ fn browser_death_is_reported_at_once() {
     if !chrome_available() {
         return;
     }
-    let s = Session::start("death");
+    // The browser of its own this checks is a child of the session server.
+    let s = Session::start_with("death", &["--own-browser"]);
     s.ok(&["goto", "about:blank"]);
     let server_pid = session_server_pid(&s.name).expect("session server pid");
     let chrome = children_of(server_pid)
@@ -377,10 +382,16 @@ fn keys_shift_and_enter_outside_forms() {
     s.ok(&["press", "Shift+1", "--selector", "#i"]);
     assert_eq!(s.text("document.getElementById('i').value"), "A!");
     s.ok(&["eval", "document.activeElement.blur()"]);
-    let (r, _) = s.run(&["press", "Enter"]);
-    assert_eq!(r["ok"], true, "{r}");
-    let ms = r["elapsed_ms"].as_f64().unwrap_or(f64::MAX);
-    assert!(ms < 140.0, "Enter on <body> waited for a navigation: {ms} ms");
+    // The fastest of three: waiting out the 150 ms grace would make every
+    // try slower than that, while a loaded runner only adds noise.
+    let fastest = (0..3)
+        .map(|_| {
+            let (r, _) = s.run(&["press", "Enter"]);
+            assert_eq!(r["ok"], true, "{r}");
+            r["elapsed_ms"].as_f64().unwrap_or(f64::MAX)
+        })
+        .fold(f64::MAX, f64::min);
+    assert!(fastest < 140.0, "Enter on <body> waited for a navigation: {fastest} ms at best");
 }
 
 /// An accepted prompt() without --prompt-text answers with the page's
@@ -423,7 +434,8 @@ fn killed_session_server_takes_its_browser_down() {
     if !chrome_available() {
         return;
     }
-    let s = Session::start("orphan");
+    // The browser of its own this checks is a child of the session server.
+    let s = Session::start_with("orphan", &["--own-browser"]);
     s.ok(&["goto", "about:blank"]);
     let server = session_server_pid(&s.name).expect("session server pid");
     let browser = children_of(server)
@@ -512,7 +524,8 @@ fn killed_session_server_takes_its_browser_down() {
     let s = Session {
         name: std::env::temp_dir().join(format!("nv-edge-orphan-{}.sock", std::process::id())).display().to_string(),
     };
-    let started = s.ok(&["start", "--idle-timeout-s", "120"]);
+    // The browser of its own this checks is a child of the session server.
+    let started = s.ok(&["start", "--idle-timeout-s", "120", "--own-browser"]);
     let server = started["pid"].as_u64().expect("start reports the server pid");
     s.ok(&["goto", "about:blank"]);
     let query = format!(

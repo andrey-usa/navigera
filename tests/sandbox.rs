@@ -71,7 +71,8 @@ fn a_machine_without_a_sandbox_pays_the_failed_launch_once() {
 
     for round in 0..2 {
         let name = format!("nv-sandbox-{}-{round}", std::process::id());
-        let started = run(&["-s", &name, "--chromium", &fake, "start"], &runtime);
+        // A browser per session: each start is a launch of its own.
+        let started = run(&["-s", &name, "--chromium", &fake, "start", "--own-browser"], &runtime);
         assert_eq!(started["ok"], true, "{started}");
         let two = run(&["-s", &name, "--raw", "eval", "1+1"], &runtime);
         assert_eq!(two, 2, "round {round}");
@@ -96,7 +97,7 @@ fn a_machine_without_a_sandbox_pays_the_failed_launch_once() {
     std::fs::write(&fake, script).unwrap();
     std::fs::write(&calls, "").unwrap();
     let name = format!("nv-sandbox-{}-2", std::process::id());
-    assert_eq!(run(&["-s", &name, "--chromium", &fake, "start"], &runtime)["ok"], true);
+    assert_eq!(run(&["-s", &name, "--chromium", &fake, "start", "--own-browser"], &runtime)["ok"], true);
     assert_eq!(run(&["-s", &name, "--raw", "eval", "1+1"], &runtime), 2);
     run(&["-s", &name, "quit"], &runtime);
     let launches = std::fs::read_to_string(&calls).unwrap();

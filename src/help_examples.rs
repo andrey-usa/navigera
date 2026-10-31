@@ -11,8 +11,15 @@ pub type Help = (&'static str, &'static [(&'static str, &'static str)], &'static
 pub const EXAMPLES: &[Help] = &[
     (
         "start",
-        &[("navigera -s s start", ""), ("navigera -s s start --natural", "browser that looks less headless")],
         &[
+            ("navigera -s s start", ""),
+            ("navigera -s s start --natural", "browser that looks less headless"),
+            ("navigera -s s start --parent 4242", "the session ends when process 4242 (the agent) exits"),
+        ],
+        &[
+            ("--own-browser", "a browser for this session alone (default: one shared browser, a context each)"),
+            ("--idle <s>", "end the session after this long unused (default 600; 0 = never)"),
+            ("--parent <pid>", "end the session when that process exits ($NAVIGERA_PARENT_PID)"),
             ("--attach [<where>]", "use a running browser; it stays open after quit"),
             ("--profile <name>", "a persistent navigera browser, kept between sessions"),
             ("--from <browser>", "seed the profile with a copy of a browser's sign-ins"),
@@ -47,7 +54,7 @@ pub const EXAMPLES: &[Help] = &[
             ("--all", "every node of the accessibility tree, as a JSON list"),
             ("--refs all", "put [ref=N] on every node, not just actionable ones"),
             ("--format json", "print the tree as JSON instead of text"),
-            ("--no-wait", "skip the wait for the network to go quiet (up to 3 s after the last fetch/XHR, so a list still loading has landed); steady polls never hold it"),
+            ("--no-wait", "skip the wait for the network to go quiet (up to 3 s after the last fetch/XHR, so a list still loading has landed); steady polls never hold it; a successful `wait` also skips the next snapshot's wait while no request happens"),
         ],
     ),
     (
@@ -335,6 +342,7 @@ pub const EXAMPLES: &[Help] = &[
             ("locale <tag>", "the emulated locale, e.g. en-US"),
             ("timezone <zone>", "the emulated timezone, e.g. Europe/London"),
             ("credentials <user> <password>", "HTTP basic-auth credentials (`off` resets)"),
+            ("network-quiet <ms>", "this session's snapshot network-quiet window (default 500; 0 skips the window itself, pending requests still wait)"),
         ],
     ),
     (
@@ -414,12 +422,15 @@ pub const EXAMPLES: &[Help] = &[
         &[
             ("navigera -s s drag --from-text \"A\" --to-text \"B\"", ""),
             ("navigera -s s drag \"#column-a\" \"#column-b\"", ""),
+            ("navigera -s s drag 12 14 --to-at 20,5", "drop near the top edge (before it, in a list)"),
         ],
         &[
             ("<from>", "the source: a ref or CSS selector"),
             ("<to>", "the target: a ref or CSS selector"),
             ("--from-text <t>", "the source, by its visible text"),
             ("--to-text <t>", "the target, by its visible text"),
+            ("--from-at <x>,<y>", "press here, in CSS px from the source's top-left (default: center)"),
+            ("--to-at <x>,<y>", "drop here, in CSS px from the target's top-left (default: center)"),
         ],
     ),
     (
@@ -435,7 +446,7 @@ pub const EXAMPLES: &[Help] = &[
         ],
         &[
             ("<target>", "the checkbox/radio/switch, by ref, --selector, …"),
-            ("<yes/no question>", "ask the decision model; needs TYPESAFE_API_KEY"),
+            ("<yes/no question>", "ask the decision model; needs NAVIGERA_DECIDER_KEY"),
             ("--no-wait", "with a question: skip the wait for the network to go quiet (see `ax --no-wait`)"),
         ],
     ),
@@ -516,7 +527,7 @@ pub const EXAMPLES: &[Help] = &[
     (
         "quit",
         &[("navigera -s s quit", ""), ("navigera -s s quit --close-browser", "")],
-        &[("--close-browser", "also close an attached/--profile browser")],
+        &[("--close-browser", "also close an attached/--profile browser (a shared one stays for its other sessions)")],
     ),
     (
         "serve",
@@ -539,6 +550,19 @@ pub const EXAMPLES: &[Help] = &[
         ],
     ),
     ("profiles", &[("navigera profiles", "")], &[]),
+    (
+        "sessions",
+        &[
+            ("navigera sessions", "name, pid, idle time, browser, memory of each"),
+            ("navigera sessions --clean", "quit the ones idle 5 min or more"),
+            ("navigera sessions --clean --all", "quit every session; say how much memory that freed"),
+        ],
+        &[
+            ("--clean", "quit idle sessions, drop dead ones, close unused shared browsers"),
+            ("--idle <s>", "with --clean: idle for this long or more (default 300)"),
+            ("--all", "with --clean: every session"),
+        ],
+    ),
     ("skill", &[("navigera skill", "")], &[]),
     (
         "install-browser",

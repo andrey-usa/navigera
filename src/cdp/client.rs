@@ -33,6 +33,10 @@ pub const CLOSED: &str = "the connection to the browser closed";
 /// A command waiting for its answer, and the tab session it went to.
 type Pending = HashMap<u64, (Option<String>, Responder)>;
 
+/// Where every incoming message goes once [`CdpClient::take_raw`] diverted
+/// them (the shared-browser host forwards them as they are).
+type RawTap = Arc<Mutex<Option<mpsc::UnboundedSender<String>>>>;
+
 pub struct CdpClient {
     inner: Arc<Inner>,
 }
@@ -54,11 +58,14 @@ struct Inner {
     /// Set once the transport is gone (browser exited, pipe/socket closed):
     /// `send` then fails at once instead of waiting out its timeout.
     closed: Arc<AtomicBool>,
+    raw: RawTap,
 }
 
 /// Mark the connection closed and fail every request still waiting.
-fn close_all(closed: &AtomicBool, pending: &Mutex<Pending>) {
+fn close_all(closed: &AtomicBool, pending: &Mutex<Pending>, raw: &RawTap) {
     closed.store(true, Ordering::SeqCst);
+    // A raw reader sees its channel end: the browser is gone.
+    raw.lock().unwrap().take();
     let mut pending = pending.lock().unwrap();
     for (_, (_, responder)) in pending.drain() {
         let _ = responder.send(Err(CLOSED.to_string()));
@@ -96,6 +103,8 @@ impl CdpClient {
         let sent_pump = Arc::clone(&events_sent);
         let closed = Arc::new(AtomicBool::new(false));
         let closed_pump = Arc::clone(&closed);
+        let raw: RawTap = Arc::default();
+        let raw_pump = Arc::clone(&raw);
 
         tokio::spawn(async move {
             loop {
@@ -115,7 +124,7 @@ impl CdpClient {
                     incoming = stream.next() => {
                         match incoming {
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
-                                dispatch(&text, &pending_pump, &event_tx_pump, &sent_pump);
+                                dispatch(&text, &pending_pump, &event_tx_pump, &sent_pump, &raw_pump);
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
                             Some(Ok(_)) => {} // ping/pong/binary: ignore
@@ -125,7 +134,7 @@ impl CdpClient {
                 }
             }
             // Connection lost: fail everything still pending.
-            close_all(&closed_pump, &pending_pump);
+            close_all(&closed_pump, &pending_pump, &raw_pump);
         });
 
         Ok(Self {
@@ -136,6 +145,7 @@ impl CdpClient {
                 events: event_tx,
                 events_sent,
                 closed,
+                raw,
             }),
         })
     }
@@ -144,35 +154,49 @@ impl CdpClient {
     /// messages, one writer task and one reader task.
     #[cfg(unix)]
     pub async fn connect_pipe(from_browser: std::os::fd::OwnedFd, to_browser: std::os::fd::OwnedFd) -> Result<Self> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut reader =
+        let reader =
             tokio::net::unix::pipe::Receiver::from_owned_fd(from_browser).context("CDP pipe (browser -> us)")?;
-        let mut writer =
-            tokio::net::unix::pipe::Sender::from_owned_fd(to_browser).context("CDP pipe (us -> browser)")?;
+        let writer = tokio::net::unix::pipe::Sender::from_owned_fd(to_browser).context("CDP pipe (us -> browser)")?;
+        Ok(Self::connect_framed(reader, writer))
+    }
+
+    /// Connect over a byte stream carrying NUL-terminated JSON messages, as
+    /// Chrome's pipe does: the pipe itself, or a shared-browser host's
+    /// socket (see `crate::shared`).
+    pub fn connect_framed<R, W>(mut reader: R, mut writer: W) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, _) = broadcast::channel::<Value>(512);
         let pending: Arc<Mutex<Pending>> = Arc::new(Mutex::new(HashMap::new()));
         let closed = Arc::new(AtomicBool::new(false));
+        let raw: RawTap = Arc::default();
 
-        let (closed_w, pending_w) = (Arc::clone(&closed), Arc::clone(&pending));
+        let (closed_w, pending_w, raw_w) = (Arc::clone(&closed), Arc::clone(&pending), Arc::clone(&raw));
         tokio::spawn(async move {
             while let Some(text) = rx.recv().await {
                 let mut bytes = text.into_bytes();
                 bytes.push(0);
                 if writer.write_all(&bytes).await.is_err() {
-                    // Chrome is gone (EPIPE): the request just queued would
-                    // otherwise wait out its whole timeout.
-                    close_all(&closed_w, &pending_w);
+                    // The other end is gone (EPIPE): the request just queued
+                    // would otherwise wait out its whole timeout.
+                    close_all(&closed_w, &pending_w, &raw_w);
                     break;
                 }
             }
-            // Dropping the writer closes Chrome's command pipe: it exits.
+            // Dropping the writer closes the stream: Chrome exits on its
+            // pipe closing, a host lets this client's context go.
+            let _ = writer.shutdown().await;
         });
         let pending_pump = Arc::clone(&pending);
         let event_tx_pump = event_tx.clone();
         let events_sent = Arc::new(AtomicU64::new(0));
         let sent_pump = Arc::clone(&events_sent);
         let closed_pump = Arc::clone(&closed);
+        let raw_pump = Arc::clone(&raw);
         tokio::spawn(async move {
             let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
             let mut chunk = vec![0u8; 256 * 1024];
@@ -185,7 +209,7 @@ impl CdpClient {
                         while let Some(pos) = buf[scanned..].iter().position(|b| *b == 0) {
                             let end = scanned + pos;
                             if let Ok(text) = std::str::from_utf8(&buf[..end]) {
-                                dispatch(text, &pending_pump, &event_tx_pump, &sent_pump);
+                                dispatch(text, &pending_pump, &event_tx_pump, &sent_pump, &raw_pump);
                             }
                             buf.drain(..=end);
                             scanned = 0;
@@ -194,9 +218,9 @@ impl CdpClient {
                     }
                 }
             }
-            close_all(&closed_pump, &pending_pump);
+            close_all(&closed_pump, &pending_pump, &raw_pump);
         });
-        Ok(Self {
+        Self {
             inner: Arc::new(Inner {
                 next_id: AtomicU64::new(1),
                 pending,
@@ -204,8 +228,26 @@ impl CdpClient {
                 events: event_tx,
                 events_sent,
                 closed,
+                raw,
             }),
-        })
+        }
+    }
+
+    /// From now on every incoming message goes, as its JSON text, to the
+    /// returned receiver instead of to `send` callers and subscribers, and
+    /// the returned sender writes JSON texts to the browser as they are.
+    /// The receiver ends when the browser connection does. For the
+    /// shared-browser host, which forwards messages without reading them
+    /// twice.
+    pub fn take_raw(&self) -> Result<(mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>)> {
+        let writer = self.inner.writer.lock().unwrap().clone().ok_or_else(|| anyhow::anyhow!("{CLOSED}"))?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.inner.raw.lock().unwrap() = Some(tx);
+        if self.inner.closed.load(Ordering::SeqCst) {
+            // Closed before the tap was in place: end the reader at once.
+            self.inner.raw.lock().unwrap().take();
+        }
+        Ok((writer, rx))
     }
 
     /// Send one CDP command and await its `{result}` (or `{error}`).
@@ -253,6 +295,12 @@ impl CdpClient {
             .map_err(|_| anyhow::anyhow!("{NO_ANSWER} within {} ms ({method})", timeout.as_millis()))?
             .map_err(|_| anyhow::anyhow!("{CLOSED} ({method})"))?;
         response.map_err(|e| anyhow::anyhow!("the browser refused {method}: {e}"))
+    }
+
+    /// Has the connection ended (the browser, or a shared browser's host,
+    /// gone)?
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::SeqCst)
     }
 
     /// How many events have been broadcast to subscribers so far.
@@ -335,7 +383,11 @@ fn shape(value: &Value, depth: usize) -> Value {
     }
 }
 
-fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Value>, sent: &AtomicU64) {
+fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Value>, sent: &AtomicU64, raw: &RawTap) {
+    if let Some(tap) = raw.lock().unwrap().as_ref() {
+        let _ = tap.send(text.to_string());
+        return;
+    }
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return;
     };

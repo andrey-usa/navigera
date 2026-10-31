@@ -269,6 +269,9 @@ fn profile_browser_outlives_sessions_and_keeps_cookies() {
     start(&s);
     let _closer = CloseOnDrop(s.clone());
     let first = active_port(Path::new(&dir), Duration::from_secs(1)).expect("profile browser endpoint");
+    // Only the session's window: Chrome opens no blank startup window of its own.
+    let pages = page_urls(first.0).expect("profile browser targets");
+    assert_eq!(pages.len(), 1, "one page after start --profile, not Chrome's startup tab too");
     ok(&s, &["goto", &format!("{base}/title")]);
     ok(&s, &["eval", "(document.cookie = 'nv=kept; max-age=3600; path=/', 1)"]);
     assert_eq!(ok(&s, &["quit"])["browser"], "left open");

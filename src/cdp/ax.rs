@@ -832,15 +832,17 @@ fn render_inner(
     }
     let fetch_failed = tree.fetch_failed;
     let lazy = tree.fetch.is_some();
+    let tree_stopped = tree.stopped;
     let total = tree.lines.len();
     let mut lines = tree.lines;
     let mut truncated = 0;
     if opts.limit > 0 && total > opts.limit {
         truncated = total - opts.limit;
         lines.truncate(opts.limit);
-        // A lazy walk stopped a line past the limit, so how many lines the
-        // whole tree has is not known: no count, rather than a wrong one.
-        let more = if lazy { "more lines".to_string() } else { format!("{truncated} more lines") };
+        // The walk stops a line past the limit (lazy or not), so how many
+        // lines the whole tree has is not known: no count, rather than a
+        // wrong one ("1 more lines" on a 3,000-line page).
+        let more = if lazy || tree_stopped { "more lines".to_string() } else { format!("{truncated} more lines") };
         lines.push(format!("… {more} (scope with `ax --selector <css>`, or raise `--limit`)"));
     }
     (Rendered { lines: lines.len(), text: lines.join("\n"), truncated }, fetch_failed)
@@ -961,7 +963,13 @@ mod tests {
         let out = render("", &nodes, &[], &Options { limit: 1, ..Options::default() });
         assert_eq!(out.truncated, 1);
         assert!(out.text.starts_with("- paragraph: Returns"));
-        assert!(out.text.contains("1 more lines"));
+        // The walk stops a line past the limit, so the count would be wrong
+        // on a longer tree: none is given.
+        assert!(
+            out.text.ends_with("… more lines (scope with `ax --selector <css>`, or raise `--limit`)"),
+            "{}",
+            out.text
+        );
     }
 
     #[test]

@@ -28,7 +28,9 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | `--download-dir <dir>` | where downloaded files go (`$NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own in `navigera-<uid>` under the system temp directory, which only you can enter) |
 | `--chromium <path>` | browser binary (also `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`) |
 | `--engine chrome\|lightpanda` (`$NAVIGERA_ENGINE`), `--headed` | engine; visible window |
-| `--idle-timeout-s <s>` | a session server shuts down after this idle time (default 1800, 0 = never) |
+| `--idle-timeout-s <s>` | a session server shuts down after this idle time (default 600, 0 = never; also `start --idle <s>`). `status` and `sessions` don't count as use |
+| `--own-browser` | with `start` (or `mcp`): a browser of the session's own instead of a context on the shared browser (`$NAVIGERA_SHARED_BROWSER=0`) |
+| `--parent <pid>` | with `start`: the session quits when that process exits (checked twice a second; `$NAVIGERA_PARENT_PID`) |
 | `-V, --version`, `-h, --help`, `help <command>` | info |
 
 Every command prints one JSON object: `{"id":…, "ok":true, "result":…,
@@ -84,7 +86,8 @@ another process are reachable by ref only.
 
 | command | args | result |
 |---|---|---|
-| `start` | (with `-s`) | `{session, socket, log, pid}`; detached server + browser; `already_running` if it exists |
+| `start` | (with `-s`) | `{session, socket, log, pid}`; detached server, in a context of its own on the shared browser (started if none runs; see [Browsers and engines](#browsers-and-engines)); `already_running` if it exists |
+| `sessions` | `[--clean [--all] [--idle <s>]]` | no session needed: `{sessions: [{name, state, pid, age_s, idle_s, browser, url, memory_mib, parent}], shared_browsers: [{socket, pid, memory_mib}], memory_mib}`. `state` is `ready`, `busy` (a command is running) or `stale` (no server answers). Memory: the session server and its own browser (proportional set size on Linux, resident elsewhere); a shared browser counts once, under `shared_browsers`. `--clean` quits the sessions idle 300 s or more (`--idle <s>`), or all of them (`--all`), removes stale files and closes a shared browser no session uses any more; adds `quit`, `removed` and `freed_mib` |
 | `goto` | `<url>` or `--url`; `--wait load\|domcontentloaded\|commit`; `--timeout-ms` | state `{tab, tabs, url, title}`; a URL that downloads leaves the page where it was and adds `download` (the file) and a `note`. `example.com` → `https://`, `localhost:3000` → `http://` |
 | `ax` (`snapshot`) | `[<ref> \| --selector <css> \| --text t]` scope; `--limit <lines>` (2000); `--refs all`; `--format json` (old flat list: `{ref, role, name, value?, url?}`; with `--all` `{id, role, name, backendNodeId}`); `--all` | text tree (below) |
 | `click` | target; `--button right\|middle`; `--force` | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box); `no_effect` note if the page did nothing in response |
@@ -123,7 +126,7 @@ another process are reachable by ref only.
 | `route` | `<url glob>` (`*`, `?` over the whole URL), then `--abort` (default) or `--status <n> [--body <text> \| --body-file <f>] [--content-type <t>] [--header 'Name: value']…`; no argument lists the rules with their hit counts | `{route, action}`. Only matching URLs are intercepted |
 | `unroute` | `[<url glob>]` | `{removed}` (all rules without a glob) |
 | `init-script` | `<js>`, `--file <path.js>`, `--clear`; no argument lists them | runs before the page's own scripts in every document of every tab; adding returns `{init_scripts: n}`, `--clear` `{removed}` |
-| `status` | — | `{engine, executable, endpoint, attached, version}` + state (`closed: true` once the session's only tab was closed) |
+| `status` | — | `{engine, executable, endpoint, attached, browser, version}` + state (`closed: true` once the session's only tab was closed). `browser`: `shared (N sessions)`, `own` or `attached`. A session server adds `server: {pid, started_at, idle_s, parent}` |
 | `locate` | target (a ref, usually) | `{locators: [{kind, flags}]}`: the flags that find the element again, most stable first (`testid`, `role` + name, `label`, `placeholder`, `text`, `css`), each kept only when the op's own finder picks this element on the page as it is; inside a frame each has `--frame` (a cross-origin frame named from the page that holds it); `secret: true` for a password field (`type=password`, `autocomplete` current/new-password or one-time-code) |
 | `history` | `--clear` empties it | `{history: [{command, at, url, page, locators?}]}` (`page`: the title, the visible `h1` and the status/alert messages showing after the action): the actions the session ran (navigation, clicks, typing, selects, uploads, drags, scrolls, tabs, dialogs, and the waits between; not reads or `eval`), oldest first, the last 1000; one on a ref has the `locate` of its element from just before it ran (and `secret: true` for a password field), so `primavera from-session` can write it as a test |
 | `title` / `url` | — | string / state |
@@ -135,7 +138,7 @@ another process are reachable by ref only.
 | `tab-select` | `<index>` (or `--index <n>`) or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |
 | `tab-close` | `[<index>]` (default: active) | state |
 | `dialog` | `--accept [--prompt-text t]` or `--dismiss` | `{dialogs: "accept"\|"dismiss"}` |
-| `quit` (`close`) | — | `{bye: true}`; a session server and its browser exit |
+| `quit` (`close`) | — | `{bye: true}`; a session server exits with its browser context (a browser of its own: with its browser). `--close-browser` on a shared browser closes the session's context only and says so |
 | `skill` | — | prints the agent guide (SKILL.md) |
 | `install-browser` | `[chrome-headless-shell \| chrome] [--channel stable\|beta\|dev\|canary] [--where]` | downloads that Chrome from Google's Chrome for Testing into navigera's cache, used from then on (see Browsers and engines): `{installed, version}`; `--where` prints the directory |
 | `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
@@ -289,9 +292,9 @@ where the session (or `navigera mcp`) starts:
 
 | variable | Value |
 |---|---|
-| `TYPESAFE_API_KEY` | TypeSafe's API, `https://api.typesafe.ai/v1/systemone` |
+| `NAVIGERA_DECIDER_KEY` | the API key, the same for every model (`TYPESAFE_API_KEY` is read when it is unset); with no URL, TypeSafe's API, `https://api.typesafe.ai/v1/systemone` |
 | `NAVIGERA_DECIDER_URL` | an endpoint with the same API (a LiteLLM proxy's `/typesafe/v1/systemone`, a mock); `http://` directly, `https://` through `curl` |
-| `NAVIGERA_DECIDER_MODEL` | model id (default `jev-latest`) |
+| `NAVIGERA_DECIDER_MODEL` | model id (default `jev-latest`; any model the endpoint serves, such as a Kev model) |
 | `NAVIGERA_FIND_MIN` | probability `--find` needs before it acts (default 0.5) |
 
 `start` reports `"decider": "<model>"` when one is configured, so an agent can
@@ -489,8 +492,38 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   launch on a fresh Windows machine takes 4–6 s, later ones under 1 s.
 - **A session that stopped.** A client call to a session that isn't running
   quotes the end of its server's log (`<socket>.log`, kept after the server
-  exits), which says why it stopped: `idle for 1800s`, a browser crash, or
-  `quit`.
+  exits), which says why it stopped: `idle for 600s`, `process <pid>
+  (--parent) exited`, a browser crash, or `quit`.
+- **One session name, one browser.** A session name is shared by every
+  process that uses it: two agents on one name drive one browser (wrong
+  pages, missing refs, one's `quit` ends the other's session). A command
+  that came in while another client's command was running on the session
+  gets a `note` saying so. Give each agent its own `-s <name>`.
+- **Shared browser.** Named sessions (and `navigera mcp`) share one
+  browser, each in a browser context of its own: tabs, popups, cookies,
+  local storage, cache, downloads (each session's own directory),
+  permissions, routes, credentials, init scripts, emulation and dialog
+  answers are the session's. N parallel agents cost one browser plus a
+  renderer each instead of N browsers. A small host process (`navigera
+  … browser-host`, started by the first session) launches the browser as a
+  session would and keeps it; sessions reach it through a socket in the
+  session directory (`browser-<key>.sock`; on Windows the loopback port and
+  token file sessions use), never a DevTools port: on Linux/macOS the
+  browser still runs on the private pipe. Each session gets a browser-level
+  CDP session of its own; the host renumbers commands and routes answers
+  and events, and a session can address only what it opened and cannot
+  close the browser. A session's contexts close when its connection does,
+  a killed session server's included. The browser closes 30 s after its
+  last session leaves (`$NAVIGERA_SHARED_GRACE_S`), so the next agent's
+  `start` is warm. Sessions share a browser when everything that shapes it
+  matches (navigera's version, the executable, headless or not,
+  `--natural`, `NAVIGERA_EXTRA_FLAGS`/`NAVIGERA_DROP_FLAGS`/
+  `NAVIGERA_NO_SANDBOX`); `show`/`hide` move a session to the visible or
+  headless one. If the shared browser dies, each session's next command
+  says so and the session ends; `start` relaunches it. A browser of its
+  own instead: `start --own-browser` (or `NAVIGERA_SHARED_BROWSER=0`);
+  `--attach`, `--profile`, Lightpanda and `--transport ws` on Linux/macOS
+  always get one.
 - **`--engine lightpanda`** (experimental; tested on Lightpanda 1.0.1 and the
   nightly) starts `lightpanda serve` with iframes and stylesheets loaded and
   telemetry off (`LIGHTPANDA_DISABLE_TELEMETRY`). The binary comes from

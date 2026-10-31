@@ -78,18 +78,45 @@ pub struct NetState {
     /// URL without its query string -> when its last requests started (the
     /// last three), to tell a poll from data the page is waiting for.
     pub starts: HashMap<String, Vec<std::time::Instant>>,
+    /// When a `wait` last succeeded on this tab: the agent already synced
+    /// with the page then, so a snapshot needs no quiet wait unless a
+    /// new request has started since (see [`skip_quiet_wait`]).
+    pub synced: Option<std::time::Instant>,
+    /// How many non-poll requests had started when that `wait` succeeded.
+    pub synced_seq: Option<u64>,
+    /// Non-poll requests started on this tab (polls excluded, as in
+    /// [`Shared::net_state`]): a new one after the sync means the page
+    /// changed after the agent synced with it.
+    pub seq: u64,
+}
+
+/// A snapshot may skip the network-quiet wait when a `wait` already synced
+/// with the page and no new request has started since, and none is in
+/// flight. A request that started before the wait and lands after it is
+/// fine: its data is in the DOM by snapshot time. A request that started
+/// after the wait is not: the page changed after the sync, so the snapshot
+/// waits for quiet as usual. (Polls don't count: they neither start new
+/// data nor move the quiet clock.)
+pub(crate) fn skip_quiet_wait(synced_seq: Option<u64>, current_seq: u64, pending: usize) -> bool {
+    synced_seq.is_some_and(|s| s == current_seq) && pending == 0
 }
 
 /// A request to a URL that has already been requested twice or more, at a
-/// steady interval (this gap within half to double the one before, at most
-/// [`POLL_MAX_INTERVAL`]), is a poll: it neither counts as pending nor moves
-/// the quiet clock. `starts` are the earlier starts of that URL, oldest first.
+/// steady interval (this gap within half to double the one before, between
+/// [`POLL_MIN_INTERVAL`] and [`POLL_MAX_INTERVAL`]), is a poll: it neither
+/// counts as pending nor moves the quiet clock. `starts` are the earlier
+/// starts of that URL, oldest first.
 fn is_poll(starts: &[std::time::Instant], now: std::time::Instant) -> bool {
     let [.., a, b] = starts else { return false };
     let before = b.duration_since(*a);
     let gap = now.duration_since(*b);
-    before <= POLL_MAX_INTERVAL && gap >= before / 2 && gap <= before * 2
+    (POLL_MIN_INTERVAL..=POLL_MAX_INTERVAL).contains(&before) && gap >= before / 2 && gap <= before * 2
 }
+
+/// The shortest gap between requests that can make them a poll: a burst
+/// to one path (a `Promise.all`, a quick chain of pages) is loading, not
+/// polling, and must keep the wait.
+const POLL_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The longest gap between requests that still makes them a poll.
 const POLL_MAX_INTERVAL: Duration = Duration::from_secs(10);
@@ -322,6 +349,32 @@ impl Shared {
             .get(session_id)
             .map(|n| (n.pending.values().filter(|t| t.elapsed() < LONG_REQUEST).count(), n.last))
             .unwrap_or((0, None))
+    }
+
+    /// (Requests started, requests in flight) on this tab, for the
+    /// snapshot skip check: the first is the sequence a `wait` records.
+    pub fn net_seq_pending(&self, session_id: &str) -> (u64, usize) {
+        self.net
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .map(|n| (n.seq, n.pending.values().filter(|t| t.elapsed() < LONG_REQUEST).count()))
+            .unwrap_or((0, 0))
+    }
+
+    /// The request sequence a `wait` last recorded on this tab, if any.
+    pub fn synced_seq(&self, session_id: &str) -> Option<u64> {
+        self.net.lock().unwrap().get(session_id).and_then(|n| n.synced_seq)
+    }
+
+    /// A `wait` just succeeded on this tab: remember how many requests had
+    /// started, so the next snapshot can skip its quiet wait while no new
+    /// request starts.
+    pub fn mark_network_synced(&self, session_id: &str) {
+        if let Some(n) = self.net.lock().unwrap().get_mut(session_id) {
+            n.synced = Some(std::time::Instant::now());
+            n.synced_seq = Some(n.seq);
+        }
     }
 
     /// Seed a freshly attached tab's navigation state: its load may have
@@ -669,6 +722,7 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                     }
                 }
                 if !poll {
+                    state.seq += 1;
                     state.pending.entry(id.to_string()).or_insert(now);
                     state.last = Some(now);
                 }
@@ -737,8 +791,11 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                     // The old document's requests die with it.
                     if let Some(net) = shared.net.lock().unwrap().get_mut(session) {
                         net.pending.clear();
-                        // A new document's requests are not the old one's polls.
+                        // A new document's requests are not the old one's polls,
+                        // and a wait on the old document does not sync the new one.
                         net.starts.clear();
+                        net.synced = None;
+                        net.synced_seq = None;
                     }
                     state.loading = true;
                     state.dom_ready = false;
@@ -781,6 +838,21 @@ mod tests {
         assert!(!is_poll(&[t0, at(t0, 300)], at(t0, 3000)));
         // Too slow to be a poll worth ignoring.
         assert!(!is_poll(&[t0, at(t0, 20_000)], at(t0, 40_000)));
+        // A burst to one path is loading: too quick to be a poll.
+        assert!(!is_poll(&[t0, at(t0, 1)], at(t0, 2)));
+        assert!(!is_poll(&[t0, at(t0, 120)], at(t0, 240)));
+    }
+
+    #[test]
+    fn a_snapshot_skips_the_quiet_wait_only_after_a_wait_with_no_new_request() {
+        // No wait yet: never skip.
+        assert!(!skip_quiet_wait(None, 0, 0));
+        // Wait succeeded, no new request, none in flight: skip.
+        assert!(skip_quiet_wait(Some(3), 3, 0));
+        // A request started after the wait: do not skip, even once it lands.
+        assert!(!skip_quiet_wait(Some(3), 4, 0));
+        // A request still in flight: do not skip.
+        assert!(!skip_quiet_wait(Some(3), 3, 1));
     }
 
     #[test]

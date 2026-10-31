@@ -227,10 +227,14 @@ fn start_profile_browser(
     let mut cmd = Command::new(exe);
     // `navigator.webdriver` stays false, as in navigera's own launches: a
     // signed-in profile is the one place a site's bot check matters most.
+    // `--no-startup-window`: the session opens its own window, so Chrome's
+    // startup window would be a second, blank one, and the only one that
+    // shows Chrome's "unsupported command-line flag" bar for the flag above.
     cmd.arg(format!("--user-data-dir={}", dir.display()))
         .arg("--remote-debugging-port=0")
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
+        .arg("--no-startup-window")
         .arg("--disable-blink-features=AutomationControlled");
     if headless {
         cmd.arg("--headless=new").arg(super::transport::HEADLESS_MOUSE).arg("--window-size=1440,900");

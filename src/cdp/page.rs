@@ -487,7 +487,12 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             const framed = await new Promise((res) => { requestAnimationFrame(() => res(true)); setTimeout(() => res(false), 100); });
             idle = framed ? 0 : idle + 1;
             const r2 = box.getBoundingClientRect();
-            const same = r2.left === r.left && r2.top === r.top && r2.width === r.width && r2.height === r.height;
+            // The centre is where the press lands, so the centre is what
+            // must hold still: an element that spins or pulses in place
+            // (an infinite animation the settle step ignores) changes its
+            // box every frame but not its middle.
+            const same = Math.abs((r2.left + r2.width / 2) - (r.left + r.width / 2)) < 1
+                && Math.abs((r2.top + r2.height / 2) - (r.top + r.height / 2)) < 1;
             r = r2;
             if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= deadline) break;
         }
@@ -694,7 +699,7 @@ const HOVER_PREP: &str = r#"async function (el, settleMs) {
                 ox += fr.left + fe.clientLeft; oy += fr.top + fe.clientTop;
                 w = w.parent;
             }
-            if (!Number.isNaN(ox)) return { x: x + ox, y: y + oy };
+            if (!Number.isNaN(ox)) return { x: x + ox, y: y + oy, w: r.width, h: r.height };
             return { xframe: true };
         }
         if (Date.now() >= deadline) break;
@@ -941,6 +946,35 @@ const DRAG_DROP: &str = r#"function (el) {
 
 /// Mouse moves from the press to the target of a `drag`.
 const DRAG_STEPS: usize = 8;
+
+/// The first moves of a drag, off the press point past Chrome's drag
+/// threshold: where a native drag starts, before the target is scrolled
+/// into view. 4 px is enough on desktop; with touch emulation Chrome 158
+/// starts it only further out, so the moves go to 20 px (each move stops
+/// the walk once the drag has started).
+const DRAG_START_STEPS: [(f64, f64); 5] = [(3.0, 3.0), (6.0, 6.0), (10.0, 10.0), (15.0, 15.0), (20.0, 20.0)];
+
+/// A held drag's end: the result and the point it ended at, or the target
+/// had no on-screen point (its `on_element` result) and the drag was let go.
+enum Held {
+    Done(Value, (f64, f64)),
+    NoTarget(Result<Value>),
+}
+
+fn drag_point(p: &Value) -> Option<(f64, f64)> {
+    Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?))
+}
+
+/// An element's on-screen point (its center, from HOVER_PREP) moved to
+/// `at`, an offset from its top-left corner, as Playwright's
+/// `sourcePosition`/`targetPosition` are.
+fn at_offset(mut p: Value, at: Option<[f64; 2]>) -> Value {
+    let (Some([ox, oy]), Some((x, y))) = (at, drag_point(&p)) else { return p };
+    let (w, h) = (p["w"].as_f64().unwrap_or(0.0), p["h"].as_f64().unwrap_or(0.0));
+    p["x"] = json!(x - w / 2.0 + ox);
+    p["y"] = json!(y - h / 2.0 + oy);
+    p
+}
 
 const IDENTITY: &str = "function (el) { return el; }";
 
@@ -1842,18 +1876,58 @@ impl Page {
     /// its "Loading…" placeholder. Returns at once on a page that has been
     /// quiet (typically: the agent was thinking for seconds).
     pub fn network_quiet(&self, quiet: Duration, max: Duration) -> bool {
-        let deadline = std::time::Instant::now() + max;
+        self.network_quiet_waited(quiet, max).0
+    }
+
+    /// [`network_quiet`], also reporting how long it waited, so a snapshot
+    /// can say so (0 when it returned at once).
+    pub fn network_quiet_waited(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
+        let started = std::time::Instant::now();
+        let deadline = started + max;
         loop {
             let (pending, last) = self.shared.net_state(&self.session_id);
             let idle_for = last.map(|t| t.elapsed()).unwrap_or(Duration::MAX);
             if pending == 0 && idle_for >= quiet {
+                return (true, started.elapsed());
+            }
+            if std::time::Instant::now() >= deadline {
+                return (false, started.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether the next snapshot may skip the quiet wait: a `wait` already
+    /// synced with this tab and no new request has started since. A request
+    /// the wait itself was waiting for may still sit in the in-flight set
+    /// while its finish event is on its way (the DOM already shows its
+    /// data — that is what the wait matched), so this gives it a moment to
+    /// clear; a request genuinely still in flight outlasts the drain and
+    /// the snapshot waits as usual.
+    pub fn quiet_synced(&self) -> bool {
+        let Some(synced_seq) = self.shared.synced_seq(&self.session_id) else {
+            return false;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        loop {
+            let (seq, pending) = self.shared.net_seq_pending(&self.session_id);
+            if seq != synced_seq {
+                return false;
+            }
+            if crate::cdp::events::skip_quiet_wait(Some(synced_seq), seq, pending) {
                 return true;
             }
             if std::time::Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// A `wait` just succeeded on this tab: remember when, for the next
+    /// snapshot's skip check.
+    pub fn mark_quiet_synced(&self) {
+        self.shared.mark_network_synced(&self.session_id);
     }
 
     fn send(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
@@ -2408,8 +2482,10 @@ impl Page {
             Target::Ref(node) => {
                 let fn_on_this = format!(
                     "function (...args) {{ const el = this.nodeType === 1 ? this : this.parentElement; \
-                     if (!el) throw new Error({}); return ({function})(el, ...args); }}",
-                    json!(format!("{what}: ref is not inside an element"))
+                     if (!el) throw new Error({}); if (!el.isConnected) throw new Error({}); \
+                     return ({function})(el, ...args); }}",
+                    json!(format!("{what}: ref is not inside an element")),
+                    json!(format!("{what}: that ref is stale, its element left the page (the page changed since `ax`); run `ax` for fresh refs"))
                 );
                 return self.call_on_ref(*node, &fn_on_this, args, true, timeout).map(|(v, _)| v);
             }
@@ -3122,21 +3198,53 @@ impl Page {
     /// or one that never reports a drag) gets the events a browser fires, dragstart through dragend, from the
     /// page, for a `draggable` source (`{html5: true, dropped, path:
     /// "synthetic"}`), with one DataTransfer shared from start to drop.
-    pub fn drag(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
+    ///
+    /// The target is scrolled into view only once the source is held, as
+    /// Playwright does: scrolling it into view first could move the source
+    /// out from under the press point, and the press would then land on (and
+    /// drag) whatever had scrolled there.
+    pub fn drag(
+        &self,
+        from: &Target,
+        to: &Target,
+        from_at: Option<[f64; 2]>,
+        to_at: Option<[f64; 2]>,
+        wait: Duration,
+        timeout: Duration,
+    ) -> Result<Value> {
         let settle = json!(self.hit_settle_ms(wait));
         let a = self.on_element(from, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout)?;
-        let b = self.on_element(to, "drag", HOVER_PREP, &[settle], wait, timeout)?;
-        let point = |p: &Value| Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?));
-        let (Some((ax, ay)), Some((bx, by))) = (point(&a), point(&b)) else {
+        let resolve_to = || {
+            self.on_element(to, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout)
+                .map(|b| at_offset(b, to_at))
+        };
+        let a = at_offset(a, from_at);
+        let Some((ax, ay)) = drag_point(&a) else {
+            // No on-screen point for the source (a covered element, a frame
+            // out of reach): a draggable source still gets the page-side drag.
+            if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
+                return Ok(synthetic);
+            }
+            resolve_to()?;
             bail!("drag: no on-screen point for both elements (inside a cross-origin iframe?)");
         };
-        match self.send("Input.setInterceptDrags", json!({ "enabled": true }), timeout) {
+        let held = match self.send("Input.setInterceptDrags", json!({ "enabled": true }), timeout) {
             Ok(_) => {
-                let r = self.drag_with_intercept((ax, ay), (bx, by), timeout);
+                let r = self.drag_with_intercept((ax, ay), &resolve_to, timeout);
                 // Whatever happened, Chrome gets its own drags back.
                 let _ = self.send("Input.setInterceptDrags", json!({ "enabled": false }), timeout);
+                r?
+            }
+            Err(_) => {
+                if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
+                    return Ok(synthetic);
+                }
+                self.drag_mouse((ax, ay), &resolve_to, timeout)?
+            }
+        };
+        match held {
+            Held::Done(r, (bx, by)) => {
                 self.moved_to(bx, by);
-                let r = r?;
                 // An engine can take the command and still never report a
                 // drag (Lightpanda): a source that is draggable after the
                 // held mouse gets the page-side drag.
@@ -3147,13 +3255,16 @@ impl Page {
                 }
                 Ok(r)
             }
-            Err(_) => {
+            Held::NoTarget(b) => {
+                // No on-screen point for the target (a drop zone that appears
+                // only once the drag starts, a covered target, a frame out
+                // of reach): the held drag was let go; a draggable source
+                // still gets the page-side drag.
                 if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
                     return Ok(synthetic);
                 }
-                self.moved_to(bx, by);
-                self.drag_mouse((ax, ay), (bx, by), timeout)?;
-                Ok(json!({ "from": { "x": ax, "y": ay }, "to": { "x": bx, "y": by }, "path": "mouse" }))
+                b?;
+                bail!("drag: no on-screen point for both elements (inside a cross-origin iframe?)");
             }
         }
     }
@@ -3170,18 +3281,28 @@ impl Page {
         Ok(Some(json!({ "html5": true, "dropped": dropped, "path": "synthetic" })))
     }
 
-    /// Press at `a`, move in steps to `b`, release: the held mouse.
-    fn drag_mouse(&self, a: (f64, f64), b: (f64, f64), timeout: Duration) -> Result<()> {
-        let mut events = vec![("mouseMoved", a.0, a.1, "none", 0), ("mousePressed", a.0, a.1, "left", 1)];
+    /// Press at `a`, move off it past the drag threshold, find the target
+    /// (scrolling it into view), move in steps to it, release: the held mouse.
+    fn drag_mouse(&self, a: (f64, f64), resolve_to: &dyn Fn() -> Result<Value>, timeout: Duration) -> Result<Held> {
+        self.mouse_event("mouseMoved", a.0, a.1, "none", 0, timeout)?;
+        self.mouse_event("mousePressed", a.0, a.1, "left", 1, timeout)?;
+        let mut at = a;
+        for (dx, dy) in DRAG_START_STEPS {
+            at = (a.0 + dx, a.1 + dy);
+            self.mouse_event("mouseMoved", at.0, at.1, "left", 1, timeout)?;
+        }
+        let to = resolve_to();
+        let Some(b) = to.as_ref().ok().and_then(drag_point) else {
+            self.mouse_event("mouseReleased", at.0, at.1, "left", 0, timeout)?;
+            return Ok(Held::NoTarget(to));
+        };
         for i in 1..=DRAG_STEPS {
             let t = i as f64 / DRAG_STEPS as f64;
-            events.push(("mouseMoved", a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, "left", 1));
+            self.mouse_event("mouseMoved", at.0 + (b.0 - at.0) * t, at.1 + (b.1 - at.1) * t, "left", 1, timeout)?;
         }
-        events.push(("mouseReleased", b.0, b.1, "left", 0));
-        for (kind, x, y, button, buttons) in events {
-            self.mouse_event(kind, x, y, button, buttons, timeout)?;
-        }
-        Ok(())
+        self.mouse_event("mouseReleased", b.0, b.1, "left", 0, timeout)?;
+        let r = json!({ "from": { "x": a.0, "y": a.1 }, "to": { "x": b.0, "y": b.1 }, "path": "mouse" });
+        Ok(Held::Done(r, b))
     }
 
     fn mouse_event(&self, kind: &str, x: f64, y: f64, button: &str, buttons: u8, timeout: Duration) -> Result<Value> {
@@ -3193,7 +3314,12 @@ impl Page {
     }
 
     /// The drag with `Input.setInterceptDrags` on: see [`Page::drag`].
-    fn drag_with_intercept(&self, a: (f64, f64), b: (f64, f64), timeout: Duration) -> Result<Value> {
+    fn drag_with_intercept(
+        &self,
+        a: (f64, f64),
+        resolve_to: &dyn Fn() -> Result<Value>,
+        timeout: Duration,
+    ) -> Result<Held> {
         let mut events = self.client.subscribe();
         let session = self.session_id.clone();
         // The drag Chrome would have started, if it has, from what has come in.
@@ -3234,33 +3360,60 @@ impl Page {
             .and_then(|v| v["result"]["value"].as_bool())
             .unwrap_or(false);
         let patience = if expecting { Duration::from_millis(400) } else { Duration::from_millis(0) };
+        // One move: the drag Chrome started on it, if any, waited for when
+        // the source is draggable.
+        let step = |x: f64, y: f64, events: &mut tokio::sync::broadcast::Receiver<Value>| -> Result<Option<Value>> {
+            self.mouse_event("mouseMoved", x, y, "left", 1, timeout)?;
+            let mut data = intercepted(events);
+            if data.is_none() && !patience.is_zero() {
+                data = self.block_on(async {
+                    let wait = async {
+                        loop {
+                            match events.recv().await {
+                                Ok(e)
+                                    if e.get("method").and_then(Value::as_str) == Some("Input.dragIntercepted")
+                                        && e.get("sessionId").and_then(Value::as_str) == Some(session.as_str()) =>
+                                {
+                                    return Some(e["params"]["data"].clone());
+                                }
+                                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(_) => return None,
+                            }
+                        }
+                    };
+                    tokio::time::timeout(patience, wait).await.ok().flatten()
+                });
+            }
+            Ok(data)
+        };
+        // Off the source past the drag threshold, where Chrome starts a drag.
         let mut data = None;
+        let mut at = a;
+        for (dx, dy) in DRAG_START_STEPS {
+            if data.is_some() {
+                break;
+            }
+            at = (a.0 + dx, a.1 + dy);
+            data = step(at.0, at.1, &mut events)?;
+            if data.is_some() {
+                self.drag_event("dragEnter", at.0, at.1, data.as_ref(), timeout)?;
+            }
+        }
+        // The source is held: now the target may scroll into view.
+        let to = resolve_to();
+        let Some(b) = to.as_ref().ok().and_then(drag_point) else {
+            if let Some(data) = data.as_ref() {
+                let _ = self.drag_event("dragCancel", at.0, at.1, Some(data), timeout);
+            }
+            self.mouse_event("mouseReleased", at.0, at.1, "left", 0, timeout)?;
+            return Ok(Held::NoTarget(to));
+        };
         let mut path = Vec::new();
         for i in 1..=DRAG_STEPS {
             let t = i as f64 / DRAG_STEPS as f64;
-            let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+            let (x, y) = (at.0 + (b.0 - at.0) * t, at.1 + (b.1 - at.1) * t);
             if data.is_none() {
-                self.mouse_event("mouseMoved", x, y, "left", 1, timeout)?;
-                data = intercepted(&mut events);
-                if data.is_none() && !patience.is_zero() {
-                    data = self.block_on(async {
-                        let wait = async {
-                            loop {
-                                match events.recv().await {
-                                    Ok(e)
-                                        if e.get("method").and_then(Value::as_str) == Some("Input.dragIntercepted")
-                                            && e.get("sessionId").and_then(Value::as_str) == Some(session.as_str()) =>
-                                    {
-                                        return Some(e["params"]["data"].clone());
-                                    }
-                                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                    Err(_) => return None,
-                                }
-                            }
-                        };
-                        tokio::time::timeout(patience, wait).await.ok().flatten()
-                    });
-                }
+                data = step(x, y, &mut events)?;
                 if data.is_some() {
                     self.drag_event("dragEnter", x, y, data.as_ref(), timeout)?;
                 }
@@ -3272,12 +3425,13 @@ impl Page {
             // A drag may start with the last step: one more look, then it was a plain mouse drag.
             std::thread::sleep(Duration::from_millis(30));
             if let Some(data) = intercepted(&mut events) {
-                return self.finish_drag(&data, &[], b, timeout);
+                return Ok(Held::Done(self.finish_drag(&data, &[], b, timeout)?, b));
             }
             self.mouse_event("mouseReleased", b.0, b.1, "left", 0, timeout)?;
-            return Ok(json!({ "from": { "x": a.0, "y": a.1 }, "to": { "x": b.0, "y": b.1 }, "path": "mouse" }));
+            let r = json!({ "from": { "x": a.0, "y": a.1 }, "to": { "x": b.0, "y": b.1 }, "path": "mouse" });
+            return Ok(Held::Done(r, b));
         };
-        self.finish_drag(&data, &path, b, timeout)
+        Ok(Held::Done(self.finish_drag(&data, &path, b, timeout)?, b))
     }
 
     /// The rest of an intercepted drag: over at each point, then the drop.
@@ -4021,7 +4175,11 @@ impl Page {
                     continue;
                 }
                 let parent = parents.get(i).copied().unwrap_or(-1);
-                if listening.contains(&index) || (pointer(index) && !pointer(parent)) {
+                // `draggable=true` is a handle a user grabs, handler or not.
+                if listening.contains(&index)
+                    || (pointer(index) && !pointer(parent))
+                    || attr("draggable").as_deref() == Some("true")
+                {
                     match items(index) {
                         Some(items) => out.nodes.extend(
                             items
@@ -4194,17 +4352,46 @@ impl Page {
     /// tree with `[ref=N]` on actionable nodes, iframes included. `json`
     /// keeps the older flat `[{ref, role, name, value?}]` list.
     pub fn ax_tree(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        let started = std::time::Instant::now();
+        let result = self.ax_tree_inner(timeout, opts);
+        crate::timing::record("ax_total", started);
+        result
+    }
+
+    fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
         // The text tree stops at the output limit, so on a large page it
         // need not read the whole tree: fetch lazily from the root and
         // stop. Anything the lazy path cannot serve (JSON, a depth cap,
         // no limit, a browser without the lazy calls) reads the full tree
         // exactly as before, and a failed lazy fetch falls back to it.
-        if !opts.json && opts.max_depth.is_none() && opts.limit > 0 && !self.shared.is_single_target() {
+        if !opts.json
+            && opts.max_depth.is_none()
+            && opts.limit > 0
+            && !self.shared.is_single_target()
+            && (opts.scope.is_some() || !self.fits_in(opts.limit, timeout))
+        {
             if let Ok(text) = self.ax_tree_lazy(timeout, opts) {
                 return Ok(text);
             }
         }
         self.ax_tree_full(timeout, opts)
+    }
+
+    /// Will the page's tree be about as long as the output limit or
+    /// shorter? Then one `getFullAXTree` is the cheaper read: Chrome builds
+    /// a node about 3x cheaper in that call than through `getChildAXNodes`
+    /// (0.03 ms against 0.1 ms per node, a 250-row table 177 ms against 335),
+    /// and the lazy walk's advantage, not reading what the limit cuts, is
+    /// worth nothing when little is cut. A page has about 0.55 lines per DOM
+    /// node (measured on tables of 250 to 2,000 rows) and the full read still
+    /// won at 500 rows against a limit of 2,000 (359 ms against 509), lost at
+    /// 1,000 (742 against 643): 4 DOM nodes per line of limit is the middle. An unknown count
+    /// (the call is missing) means "no": the lazy walk is the old default.
+    fn fits_in(&self, limit: usize, timeout: Duration) -> bool {
+        self.send("Memory.getDOMCounters", json!({}), timeout)
+            .ok()
+            .and_then(|c| c.get("nodes").and_then(Value::as_u64))
+            .is_some_and(|nodes| nodes <= limit as u64 * 4)
     }
 
     /// Text tree from a lazy fetch: the root (or the partial tree around
@@ -4237,7 +4424,9 @@ impl Page {
             None => (vec![main_root.clone()], None),
         };
         let frames = self.frame_trees(timeout);
+        let started = std::time::Instant::now();
         let clicks = self.clickables(timeout);
+        crate::timing::record("ax_clickables", started);
         let title = ax_str(&main_root, "name").to_string();
         let url = main_root
             .get("properties")
@@ -4275,6 +4464,7 @@ impl Page {
             }
             (nodes, failed)
         });
+        let started = std::time::Instant::now();
         let (rendered, failed) = ax::render_lazy(
             &format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default()),
             &seed,
@@ -4288,6 +4478,7 @@ impl Page {
             },
             fetch,
         );
+        crate::timing::record("ax_lazy_walk", started);
         if failed {
             bail!("lazy AX fetch failed");
         }
@@ -4299,8 +4490,14 @@ impl Page {
         if let Some(d) = opts.max_depth {
             params["depth"] = json!(d);
         }
-        let res = self.send("Accessibility.getFullAXTree", params, timeout)?;
-        let mut nodes = res.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+        let started = std::time::Instant::now();
+        let mut res = self.send("Accessibility.getFullAXTree", params, timeout)?;
+        crate::timing::record("ax_full_call", started);
+        // Taken, not cloned: the reply is megabytes on a large page.
+        let mut nodes = match res.get_mut("nodes").map(Value::take) {
+            Some(Value::Array(nodes)) => nodes,
+            _ => Vec::new(),
+        };
         if self.shared.is_single_target() {
             self.unmask_passwords(&mut nodes, timeout);
             self.live_checked(&mut nodes, timeout);
@@ -4308,9 +4505,13 @@ impl Page {
         if opts.json {
             return Ok(flat_ax(&nodes, opts.all));
         }
+        let started = std::time::Instant::now();
         let frames = self.frame_trees(timeout);
+        crate::timing::record("ax_frames", started);
         // Lightpanda has no DOMSnapshot; its tree is printed as it comes.
+        let started = std::time::Instant::now();
         let clicks = if self.shared.is_single_target() { ax::Clickables::default() } else { self.clickables(timeout) };
+        crate::timing::record("ax_clickables", started);
         let root = nodes.iter().find(|n| n.get("parentId").is_none());
         let title = root.map(|n| ax_str(n, "name").to_string()).unwrap_or_default();
         let url = root
@@ -4327,12 +4528,14 @@ impl Page {
             Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
             None => None,
         };
+        let started = std::time::Instant::now();
         let rendered = ax::render(
             &format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default()),
             &nodes,
             &frames,
             &ax::Options { all_refs: opts.all_refs, limit: opts.limit, root_backend_id, origin, clicks },
         );
+        crate::timing::record("ax_render", started);
         let mut text = rendered.text;
         // Lightpanda's tree stops at a shadow root; what is inside is read
         // from the page instead, without refs (see SHADOW_AX).
