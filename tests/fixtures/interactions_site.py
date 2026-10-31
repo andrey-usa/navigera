@@ -30,6 +30,7 @@ getting wrong, one page each, built the way those sites behave:
 /poll           a page that polls one URL every 300 ms, forever
 /one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
 /big-table      a 2,000-row table, a button and a link in each row
+/stale-ref      a button and a bare draggable=true handle (no handlers)
 /drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
 /drag-pointer   the same list, each item made draggable on pointerdown (as
                 React Aria does)
@@ -124,6 +125,10 @@ rows.innerHTML = Array.from({length: 2000}, (_, i) =>
   `<tr><td>Item ${i}</td><td><button onclick="out.textContent='edit ${i}'">Edit ${i}</button> <a href="#r${i}">View ${i}</a></td></tr>`).join('');
 </script>""")
 
+PAGES["/stale-ref"] = ("stale ref", "", """
+<button id=b>Go</button>
+<div id=h draggable="true" style="width:80px;height:20px">Handle</div>
+""")
 PAGES["/drag-native"] = ("drag native", "", """
 <style>li{padding:8px;margin:2px;border:1px solid #888;width:200px;list-style:none;background:#eee}</style>
 <ul id=list><li id=a>Alpha</li><li id=b>Beta</li><li id=c>Gamma</li></ul>

@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- A ref whose element has left the page fails at once ("that ref is stale ... run `ax` for fresh
+  refs", no `--force` hint) instead of after the 5 s wait for a box. An element with
+  `draggable="true"` gets a ref in `ax` even with no handler on it.
 - The decision model's key is `NAVIGERA_DECIDER_KEY`, one key for whichever
   model `NAVIGERA_DECIDER_MODEL` names (Jev, Kev, ...). `TYPESAFE_API_KEY`
   is still read when it is unset.

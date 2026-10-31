@@ -1216,6 +1216,24 @@ fn drag_runs_a_real_html5_drag() {
     }
 }
 
+/// A ref whose element left the page fails at once and says so; a bare
+/// `draggable=true` element gets a ref without any handler on it.
+#[test]
+fn a_stale_ref_fails_at_once_and_a_draggable_has_a_ref() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("stale-ref", &[]);
+    s.ok(&["goto", &format!("{}/stale-ref", site.url)]);
+    let ax = s.text(&["ax"]);
+    assert!(ax.lines().any(|l| l.contains("Handle") && l.contains("[ref=")), "{ax}");
+    let go = ax.lines().find(|l| l.contains("button \"Go\"")).unwrap();
+    let r = go.split("[ref=").nth(1).unwrap().split(']').next().unwrap().to_string();
+    s.ok(&["eval", "document.getElementById('b').remove()"]);
+    let t = std::time::Instant::now();
+    let e = s.fails(&["click", &r]);
+    assert!(e.contains("stale") && !e.contains("--force"), "{e}");
+    assert!(t.elapsed() < std::time::Duration::from_millis(2000), "took {:?}", t.elapsed());
+}
+
 /// With no drag to start, `drag` is a held mouse: the knob follows it.
 #[test]
 fn drag_without_a_drag_is_a_held_mouse() {

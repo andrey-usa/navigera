@@ -2413,8 +2413,10 @@ impl Page {
             Target::Ref(node) => {
                 let fn_on_this = format!(
                     "function (...args) {{ const el = this.nodeType === 1 ? this : this.parentElement; \
-                     if (!el) throw new Error({}); return ({function})(el, ...args); }}",
-                    json!(format!("{what}: ref is not inside an element"))
+                     if (!el) throw new Error({}); if (!el.isConnected) throw new Error({}); \
+                     return ({function})(el, ...args); }}",
+                    json!(format!("{what}: ref is not inside an element")),
+                    json!(format!("{what}: that ref is stale, its element left the page (the page changed since `ax`); run `ax` for fresh refs"))
                 );
                 return self.call_on_ref(*node, &fn_on_this, args, true, timeout).map(|(v, _)| v);
             }
@@ -4034,7 +4036,11 @@ impl Page {
                     continue;
                 }
                 let parent = parents.get(i).copied().unwrap_or(-1);
-                if listening.contains(&index) || (pointer(index) && !pointer(parent)) {
+                // `draggable=true` is a handle a user grabs, handler or not.
+                if listening.contains(&index)
+                    || (pointer(index) && !pointer(parent))
+                    || attr("draggable").as_deref() == Some("true")
+                {
                     match items(index) {
                         Some(items) => out.nodes.extend(
                             items
