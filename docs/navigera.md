@@ -199,7 +199,10 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   than 5 s (long polls, streams) don't count. A page that has been quiet —
   usual when an agent has been thinking — is read at once. So
   `goto … && … ax` shows a single-page app's list, not its "Loading…"
-  placeholder.
+  placeholder. A request to a URL the page has already fetched twice at a
+  steady interval is a poll and doesn't count, so a dashboard that refreshes
+  every few hundred milliseconds is read at once. `--no-wait` (on `ax`,
+  `screenshot`, `find`, `check` and `--find`) skips the wait.
 - **Clicks** are trusted mouse events at the element's centre after
   scrolling it into view, once the element has stopped moving: CSS
   animations and transitions running on it or an ancestor (a dialog sliding

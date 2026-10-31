@@ -6,7 +6,57 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-31
+
+Fixes found by running a real app's end-to-end tests on navigera: snapshots
+no longer stall on pages that poll, drag and drop runs a real browser drag,
+clicks wait for a moving element to settle, and headless Chrome reports a
+mouse, as Playwright's does.
+
+### Added
+
+- `ax`, `screenshot`, `find`, `check <question>` and `--find` take
+  `--no-wait` to skip the wait for fetched data; their help now describes
+  the wait.
+- `fill --force` skips the new field checks (below).
+
 ### Changed
+
+- The wait for fetched data before a snapshot ignores polls: a fetch/XHR to
+  a URL (query string aside) already requested twice or more at a steady
+  interval no longer counts as pending. `ax` on a page polling every 300 ms:
+  3011 ms -> 2 ms; a list that arrives from one held fetch is still waited
+  for. Requests are forgotten when a new document starts.
+- `drag` runs a real browser drag when the page starts one
+  (`Input.setInterceptDrags`, then `dragEnter`/`dragOver` along the path and
+  a drop at the target), so HTML5 drag-and-drop lists and boards accept it.
+  Without a drag the held mouse is released at the target as before. The
+  result gains `"path": "drag"`, `"mouse"` or `"synthetic"`. An engine that
+  never reports a drag (Lightpanda) gives a `draggable` source the
+  page-side drag.
+- `click` and `dblclick` wait until the target's box is the same in two
+  reads with a frame drawn between them before pressing, so an element
+  that is still moving without a CSS animation (a deferred commit, a
+  script-driven slide) is clicked where it settles, not where it started.
+  `--force` skips the wait; a target that never stops is clicked when the
+  settle budget ends.
+- `fill` and `fill --keys` wait, within the command timeout, until the field
+  is visible, enabled and editable, and the timeout error names the check
+  that failed. Before, a hidden or disabled field was filled without a
+  word. `--force` keeps the old behaviour.
+- `check` re-reads the state every 50 ms until it matches or the element
+  budget runs out, so a controlled input that commits its state after the
+  click returns (React `onChange`) is no longer reported as a failed click.
+- Waits end at the page's change instead of a frame later: on a page that
+  keeps changing, frames lag; on a page writing to the DOM every 4 ms, a wait
+  for `enabled`, a URL or text returns 3-7 ms sooner (median). Wakes are at least 8 ms apart, so a page
+  that changes constantly is not re-checked on every write.
+- Headless launches report a mouse (`hover: hover`, `pointer: fine`), as
+  Playwright's do. Before, an app that turns its mouse handlers on only for
+  a hover-capable pointer treated headless Chrome as a touch screen. A touch
+  device from `set device` still reports touch.
+- `ax` asks Chrome for less layout data for its clickable-element marks:
+  2,000 rows with `--limit 50`: 618 -> 378 ms. The output is unchanged.
 
 - `wait --frame` is woken by the frame's changes too, as the other waits
   are, not only looked at every 100 ms. An element added to a same-origin
@@ -18,6 +68,12 @@ All notable changes to this project are documented here. The format follows
   `pagehide`) and a tab that hands work to another tab from it is heard at
   once. `Target.closeTarget` skipped `beforeunload`. It stays as the
   fallback when `Page.close` is refused or the tab is still there after 1.5 s.
+
+### Fixed
+
+- `set device Desktop` and `set device Laptop` failed after setting the
+  viewport on Chrome 155, which refuses to turn touch off with a touch-point
+  count of 0. A desktop device now turns touch off as `set device off` does.
 
 ## [0.6.3] - 2026-10-30
 
@@ -621,6 +677,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.6.4]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.4
 [0.6.3]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.3
 [0.6.2]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.2
 [0.6.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.1
