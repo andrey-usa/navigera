@@ -15,4 +15,5 @@ pub mod mcp;
 pub mod proc;
 pub mod protocol;
 pub mod session;
+pub mod shared;
 pub mod timing;

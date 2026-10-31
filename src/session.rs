@@ -38,8 +38,16 @@ use crate::protocol::{self, Command, Driver, SessionConfig};
 
 use endpoint::{connect, Listener, Stream};
 
+/// The sockets sessions (and the shared-browser host) listen on: a Unix
+/// socket, or on Windows a loopback port whose address and token sit in a
+/// file.
 #[cfg(unix)]
-mod endpoint {
+pub(crate) use self::endpoint_unix as endpoint;
+#[cfg(windows)]
+pub(crate) use self::endpoint_windows as endpoint;
+
+#[cfg(unix)]
+pub(crate) mod endpoint_unix {
     use std::io;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
@@ -64,7 +72,7 @@ mod endpoint {
 }
 
 #[cfg(windows)]
-mod endpoint {
+pub(crate) mod endpoint_windows {
     use std::io::{self, Read, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::path::Path;
@@ -238,7 +246,7 @@ pub fn session_dir() -> std::io::Result<PathBuf> {
 
 /// Create (truncate) a session log without following a symlink planted at
 /// its path.
-fn create_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn create_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -287,7 +295,7 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     // A socket file nobody answers on is left over from a crashed server.
     let _ = std::fs::remove_file(&path);
 
-    let mut driver = match Driver::launch(config) {
+    let mut driver = match Driver::launch_session(config) {
         Ok(driver) => driver,
         Err(e) => {
             eprintln!("navigera: {e:#}");
@@ -308,11 +316,44 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     if config.idle_timeout_s > 0 {
         spawn_idle_watchdog(path.clone(), Arc::clone(&last_activity), config.idle_timeout_s);
     }
+    let parent = config.parent_pid.and_then(crate::proc::ParentWatch::new);
+    match (config.parent_pid, &parent) {
+        (Some(pid), None) => {
+            eprintln!("navigera: process {pid} (--parent) is not running");
+            driver.session().close();
+            let _ = std::fs::remove_file(&path);
+            return ExitCode::from(1);
+        }
+        (Some(pid), Some(_)) => eprintln!("navigera: the session quits when process {pid} (--parent) exits"),
+        _ => {}
+    }
+    let server = ServerInfo { pid: std::process::id(), started_at: now_s(), parent: config.parent_pid };
+    if let Some(parent) = parent {
+        spawn_parent_watchdog(path.clone(), parent);
+    }
 
-    loop {
+    // Connections are taken as they come and served one at a time; one
+    // that came in while another was being served gets a note (two
+    // callers on one session name drive one browser).
+    let (connections, incoming) = std::sync::mpsc::channel::<(Stream, Instant)>();
+    std::thread::spawn(move || loop {
         let Ok(stream) = listener.accept() else { continue };
-        last_activity.store(now_s(), Ordering::Relaxed);
-        if serve_connection(&mut driver, stream, &last_activity) {
+        if connections.send((stream, Instant::now())).is_err() {
+            return;
+        }
+    });
+    let mut free_since = Instant::now();
+    for (stream, arrived) in incoming {
+        let waited = arrived < free_since;
+        let quit = serve_connection(&mut driver, stream, &last_activity, &server, waited);
+        free_since = Instant::now();
+        if quit {
+            break;
+        }
+        // The shared browser went away: this session's error said so, and
+        // `start` makes a new one (on a relaunched browser).
+        if driver.shared_browser_gone() {
+            eprintln!("navigera: the shared browser is gone; shutting the session down");
             break;
         }
     }
@@ -324,21 +365,59 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// What `status` adds about the session server itself.
+struct ServerInfo {
+    pid: u32,
+    started_at: u64,
+    parent: Option<u32>,
+}
+
+/// The note a command gets when it came in while another client's command
+/// was running on the session.
+pub const SHARED_NAME_NOTE: &str = "another command was running on this session when this one came in: a session \
+     name is shared by every process that uses it, so two agents on one name drive one browser (give each its own -s name)";
+
 /// Serve one client connection; returns true once a `quit` was answered.
-fn serve_connection(driver: &mut Driver, stream: Stream, last: &AtomicU64) -> bool {
+/// `waited`: it came in while another connection was being served.
+fn serve_connection(driver: &mut Driver, stream: Stream, last: &AtomicU64, server: &ServerInfo, waited: bool) -> bool {
     let reader = match stream.try_clone() {
         Ok(read_half) => BufReader::new(read_half),
         Err(_) => return false,
     };
     let mut writer = stream;
+    let mut waited = waited;
     for line in reader.lines() {
         let Ok(raw) = line else { return false };
-        last.store(now_s(), Ordering::Relaxed);
-        let Some((responses, is_quit)) = protocol::handle_line(driver, &raw) else {
+        // `sessions` asks for status without making the session busy.
+        let (is_status, probe) = match serde_json::from_str::<Value>(&raw) {
+            Ok(v) => (v["op"] == "status", v["op"] == "status" && v[PROBE] == true),
+            Err(_) => (false, false),
+        };
+        let idle_s = now_s().saturating_sub(last.load(Ordering::Relaxed));
+        if !probe {
+            last.store(now_s(), Ordering::Relaxed);
+        }
+        let Some((mut responses, is_quit)) = protocol::handle_line(driver, &raw) else {
             continue;
         };
+        if let Some(first) = responses.first_mut() {
+            if waited {
+                first.notes.get_or_insert_with(Vec::new).push(SHARED_NAME_NOTE.into());
+                waited = false;
+            }
+            if let (true, Some(result)) = (is_status, first.result.as_mut()) {
+                result["server"] = json!({
+                    "pid": server.pid,
+                    "started_at": server.started_at,
+                    "idle_s": idle_s,
+                    "parent": server.parent,
+                });
+            }
+        }
         let written = responses.iter().try_for_each(|response| protocol::write_response(&mut writer, response, false));
-        last.store(now_s(), Ordering::Relaxed);
+        if !probe {
+            last.store(now_s(), Ordering::Relaxed);
+        }
         if is_quit {
             return true;
         }
@@ -358,14 +437,32 @@ fn spawn_idle_watchdog(path: PathBuf, last: Arc<AtomicU64>, idle_s: u64) {
             continue;
         }
         eprintln!("navigera: idle for {idle_s}s, shutting the session down");
-        if let Ok(mut stream) = connect(&path) {
-            let _ = stream.write_all(b"{\"op\":\"quit\"}\n");
-            let _ = stream.flush();
-            let mut reply = String::new();
-            let _ = BufReader::new(stream).read_line(&mut reply);
-        }
+        quit_session(&path);
         break;
     });
+}
+
+/// `--parent`: once that process exits, the session quits (an agent that
+/// crashed leaves no session behind).
+fn spawn_parent_watchdog(path: PathBuf, parent: crate::proc::ParentWatch) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(500));
+        if parent.alive() {
+            continue;
+        }
+        eprintln!("navigera: process {} (--parent) exited, shutting the session down", parent.pid());
+        quit_session(&path);
+        break;
+    });
+}
+
+/// Send a session a `quit` and wait for its answer.
+fn quit_session(path: &std::path::Path) -> bool {
+    let Ok(mut stream) = connect(path) else { return false };
+    let _ = stream.write_all(b"{\"op\":\"quit\"}\n");
+    let _ = stream.flush();
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).is_ok_and(|n| n > 0)
 }
 
 /// Client: send one command to the session server and print its response.
@@ -489,7 +586,7 @@ fn localize_request(request: &mut Value, config: &SessionConfig) {
 }
 
 /// The last `n` lines of a session log ("" when there is none).
-fn log_tail(path: &std::path::Path, n: usize) -> String {
+pub(crate) fn log_tail(path: &std::path::Path, n: usize) -> String {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
@@ -601,6 +698,18 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     if let Some(dir) = &config.download_dir {
         cmd.arg("--download-dir").arg(dir);
     }
+    if config.own_browser {
+        cmd.arg("--own-browser");
+    }
+    let parent = config
+        .parent_pid
+        .or_else(|| std::env::var("NAVIGERA_PARENT_PID").ok().and_then(|v| v.trim().parse().ok()).filter(|p| *p > 0));
+    if let Some(pid) = parent {
+        if !crate::proc::pid_alive(pid) {
+            return fail(output, config, format!("--parent {pid}: no process {pid} is running"));
+        }
+        cmd.arg("--parent").arg(pid.to_string());
+    }
     cmd.arg("serve").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log));
     let mut child = match crate::proc::spawn_detached(&mut cmd) {
         Ok(child) => child,
@@ -693,4 +802,177 @@ mod tests {
         create_log(&plain).unwrap();
         assert_eq!(std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777, 0o600);
     }
+}
+
+/// Marks a `status` from `sessions`: it does not count as using the
+/// session (an idle one stays idle).
+const PROBE: &str = "probe";
+
+/// What a session server answers `status` with, or why it doesn't.
+enum Probe {
+    Ready(Value),
+    /// Connected, no answer in time: a command is running.
+    Busy,
+    /// Nobody listens: a file left by a server that died.
+    Stale,
+}
+
+fn probe(path: &std::path::Path) -> Probe {
+    let Ok(stream) = connect(path) else { return Probe::Stale };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut writer = &stream;
+    let request = format!("{{\"id\":1,\"op\":\"status\",\"{PROBE}\":true}}\n");
+    if writer.write_all(request.as_bytes()).and_then(|_| writer.flush()).is_err() {
+        return Probe::Busy;
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut line = String::new();
+    match BufReader::new(&stream).read_line(&mut line) {
+        Ok(n) if n > 0 => match serde_json::from_str::<Value>(line.trim()) {
+            Ok(v) => Probe::Ready(v["result"].clone()),
+            Err(_) => Probe::Busy,
+        },
+        _ => Probe::Busy,
+    }
+}
+
+fn mib(kb: u64) -> f64 {
+    (kb as f64 / 1024.0 * 10.0).round() / 10.0
+}
+
+/// The shared browsers' hosts: (socket, host pid).
+fn shared_hosts(dir: &std::path::Path) -> Vec<(PathBuf, u32)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "sock")
+                && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("browser-"))
+        })
+        .filter_map(|p| {
+            let pid = std::fs::read_to_string(p.with_extension("pid")).ok()?.trim().parse().ok()?;
+            crate::proc::pid_alive(pid).then_some((p, pid))
+        })
+        .collect()
+}
+
+/// `sessions`: every named session in the session directory (name, server
+/// pid, age, idle time, browser, memory) and the shared browsers. With
+/// `clean`: quit the sessions idle for `idle_s` (default 300) or more, or
+/// every one with `all`; drop files no server answers on; close shared
+/// browsers left without a session; say how much memory that freed.
+pub fn sessions(
+    config: &SessionConfig,
+    clean: bool,
+    all: bool,
+    idle_s: Option<u64>,
+    output: &mut dyn Write,
+) -> ExitCode {
+    let dir = match session_dir() {
+        Ok(dir) => dir,
+        Err(e) => return fail(output, config, e.to_string()),
+    };
+    let threshold = idle_s.unwrap_or(300);
+    let table = crate::proc::process_table();
+    let hosts = shared_hosts(&dir);
+    let host_pids: Vec<u32> = hosts.iter().map(|(_, pid)| *pid).collect();
+    let mut listed = Vec::new();
+    let (mut quit, mut removed) = (Vec::new(), Vec::new());
+    let mut before_kb = 0;
+    let mut paths: Vec<PathBuf> =
+        std::fs::read_dir(&dir).map(|entries| entries.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    paths.sort();
+    for path in paths {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = name.strip_suffix(".sock") else { continue };
+        if name.starts_with("browser-") {
+            continue;
+        }
+        match probe(&path) {
+            Probe::Stale => {
+                if clean {
+                    let _ = std::fs::remove_file(&path);
+                    removed.push(name.to_string());
+                } else {
+                    listed.push(
+                        json!({ "name": name, "state": "stale: no server answers (`sessions --clean` removes it)" }),
+                    );
+                }
+            }
+            Probe::Busy => listed.push(json!({ "name": name, "state": "busy: a command is running" })),
+            Probe::Ready(status) => {
+                let server = &status["server"];
+                let pid = server["pid"].as_u64().unwrap_or(0) as u32;
+                let kb = if pid > 0 { crate::proc::tree_kb(&table, pid, &host_pids) } else { 0 };
+                before_kb += kb;
+                let idle = server["idle_s"].as_u64().unwrap_or(0);
+                let mut entry = json!({
+                    "name": name,
+                    "state": "ready",
+                    "pid": pid,
+                    "age_s": now_s().saturating_sub(server["started_at"].as_u64().unwrap_or(now_s())),
+                    "idle_s": idle,
+                    "browser": status["browser"],
+                    "url": status["url"],
+                    "memory_mib": mib(kb),
+                });
+                if let Some(parent) = server["parent"].as_u64() {
+                    entry["parent"] = json!(parent);
+                }
+                if clean && (all || idle >= threshold) && quit_session(&path) {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while path.exists() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    quit.push(name.to_string());
+                } else {
+                    listed.push(entry);
+                }
+            }
+        }
+    }
+    let mut browsers = Vec::new();
+    for (socket, pid) in &hosts {
+        let kb = crate::proc::tree_kb(&table, *pid, &[]);
+        before_kb += kb;
+        browsers.push(json!({ "socket": socket.display().to_string(), "pid": pid, "memory_mib": mib(kb) }));
+    }
+    let mut result = json!({ "sessions": listed, "shared_browsers": browsers, "memory_mib": mib(before_kb) });
+    if clean {
+        // A shared browser no listed session uses any more closes now,
+        // not after its grace period.
+        let left_shared = listed.iter().any(|s| s["browser"].as_str().is_some_and(|b| b.starts_with("shared")));
+        if !left_shared {
+            for (socket, pid) in &hosts {
+                crate::shared::close_if_unused(socket);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while crate::proc::pid_alive(*pid) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        // What is left, measured again.
+        std::thread::sleep(Duration::from_millis(300));
+        let table = crate::proc::process_table();
+        let mut after_kb: u64 = listed
+            .iter()
+            .filter_map(|s| s["pid"].as_u64())
+            .map(|p| crate::proc::tree_kb(&table, p as u32, &host_pids))
+            .sum();
+        let mut browsers = Vec::new();
+        for (socket, pid) in shared_hosts(&dir) {
+            let kb = crate::proc::tree_kb(&table, pid, &[]);
+            after_kb += kb;
+            browsers.push(json!({ "socket": socket.display().to_string(), "pid": pid, "memory_mib": mib(kb) }));
+        }
+        result["sessions"] = json!(listed);
+        result["shared_browsers"] = json!(browsers);
+        result["quit"] = json!(quit);
+        result["removed"] = json!(removed);
+        result["memory_mib"] = json!(mib(after_kb));
+        result["freed_mib"] = json!(mib(before_kb.saturating_sub(after_kb)));
+    }
+    print_json(output, &json!({ "id": null, "ok": true, "result": result }), config);
+    ExitCode::SUCCESS
 }

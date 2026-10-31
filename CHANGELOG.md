@@ -6,8 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Named sessions share one browser, each in a browser context of its own
+  (tabs, cookies, storage, cache, downloads, permissions apart), so N
+  parallel agents cost one browser plus a renderer each instead of N
+  browsers. A small host process keeps the browser on the private pipe (no
+  DevTools port), gives each session a browser-level CDP session of its own,
+  disposes a session's contexts when it goes (killed or not) and closes the
+  browser 30 s after the last session (`NAVIGERA_SHARED_GRACE_S`). `navigera
+  mcp` shares the same way. `start --own-browser` (or
+  `NAVIGERA_SHARED_BROWSER=0`) keeps a browser per session; `--attach`,
+  `--profile` and Lightpanda keep theirs. `status` says `browser: shared (N
+  sessions)` or `own`; if the shared browser dies, each session's next
+  command says so and `start` relaunches it.
+- `navigera sessions` lists the named sessions (pid, age, idle time,
+  browser, URL, memory) and the shared browsers; `sessions --clean` quits the
+  ones idle 5 min or more (`--idle <s>`), removes dead socket files and closes
+  a shared browser left unused, and says how much memory that freed;
+  `--clean --all` quits every session.
+- `start --parent <pid>` (or `NAVIGERA_PARENT_PID`): the session quits when
+  that process exits, so a crashed agent leaves no browser behind.
+- A command that came in while another client's command was running on the
+  same session gets a note: a session name is shared by every process that
+  uses it.
+
 ### Changed
 
+- An unused session ends after 10 min, not 30 (`start --idle <s>`, or
+  `--idle-timeout-s`). `status` and `sessions` don't count as use.
 - A ref whose element has left the page fails at once ("that ref is stale ... run `ax` for fresh
   refs", no `--force` hint) instead of after the 5 s wait for a box. An element with
   `draggable="true"` gets a ref in `ax` even with no handler on it.

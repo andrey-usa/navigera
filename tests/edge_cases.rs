@@ -69,10 +69,14 @@ struct Session {
 
 impl Session {
     fn start(test: &str) -> Session {
+        Self::start_with(test, &[])
+    }
+
+    fn start_with(test: &str, extra: &[&str]) -> Session {
         let name =
             std::env::temp_dir().join(format!("nv-edge-{test}-{}.sock", std::process::id())).display().to_string();
         let s = Session { name };
-        s.ok(&["start", "--idle-timeout-s", "120"]);
+        s.ok(&[&["start", "--idle-timeout-s", "120"], extra].concat());
         s
     }
 
@@ -175,7 +179,8 @@ fn browser_death_is_reported_at_once() {
     if !chrome_available() {
         return;
     }
-    let s = Session::start("death");
+    // The browser of its own this checks is a child of the session server.
+    let s = Session::start_with("death", &["--own-browser"]);
     s.ok(&["goto", "about:blank"]);
     let server_pid = session_server_pid(&s.name).expect("session server pid");
     let chrome = children_of(server_pid)
@@ -423,7 +428,8 @@ fn killed_session_server_takes_its_browser_down() {
     if !chrome_available() {
         return;
     }
-    let s = Session::start("orphan");
+    // The browser of its own this checks is a child of the session server.
+    let s = Session::start_with("orphan", &["--own-browser"]);
     s.ok(&["goto", "about:blank"]);
     let server = session_server_pid(&s.name).expect("session server pid");
     let browser = children_of(server)

@@ -562,7 +562,8 @@ impl<'a> Server<'a> {
 
     fn driver(&mut self) -> Result<&mut Driver, String> {
         if self.driver.is_none() {
-            self.driver = Some(Driver::launch(self.config).map_err(|e| format!("could not start the browser: {e:#}"))?);
+            self.driver =
+                Some(Driver::launch_session(self.config).map_err(|e| format!("could not start the browser: {e:#}"))?);
         }
         Ok(self.driver.as_mut().expect("just launched"))
     }

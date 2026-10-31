@@ -11,8 +11,15 @@ pub type Help = (&'static str, &'static [(&'static str, &'static str)], &'static
 pub const EXAMPLES: &[Help] = &[
     (
         "start",
-        &[("navigera -s s start", ""), ("navigera -s s start --natural", "browser that looks less headless")],
         &[
+            ("navigera -s s start", ""),
+            ("navigera -s s start --natural", "browser that looks less headless"),
+            ("navigera -s s start --parent 4242", "the session ends when process 4242 (the agent) exits"),
+        ],
+        &[
+            ("--own-browser", "a browser for this session alone (default: one shared browser, a context each)"),
+            ("--idle <s>", "end the session after this long unused (default 600; 0 = never)"),
+            ("--parent <pid>", "end the session when that process exits ($NAVIGERA_PARENT_PID)"),
             ("--attach [<where>]", "use a running browser; it stays open after quit"),
             ("--profile <name>", "a persistent navigera browser, kept between sessions"),
             ("--from <browser>", "seed the profile with a copy of a browser's sign-ins"),
@@ -517,7 +524,7 @@ pub const EXAMPLES: &[Help] = &[
     (
         "quit",
         &[("navigera -s s quit", ""), ("navigera -s s quit --close-browser", "")],
-        &[("--close-browser", "also close an attached/--profile browser")],
+        &[("--close-browser", "also close an attached/--profile browser (a shared one stays for its other sessions)")],
     ),
     (
         "serve",
@@ -540,6 +547,19 @@ pub const EXAMPLES: &[Help] = &[
         ],
     ),
     ("profiles", &[("navigera profiles", "")], &[]),
+    (
+        "sessions",
+        &[
+            ("navigera sessions", "name, pid, idle time, browser, memory of each"),
+            ("navigera sessions --clean", "quit the ones idle 5 min or more"),
+            ("navigera sessions --clean --all", "quit every session; say how much memory that freed"),
+        ],
+        &[
+            ("--clean", "quit idle sessions, drop dead ones, close unused shared browsers"),
+            ("--idle <s>", "with --clean: idle for this long or more (default 300)"),
+            ("--all", "with --clean: every session"),
+        ],
+    ),
     ("skill", &[("navigera skill", "")], &[]),
     (
         "install-browser",

@@ -47,7 +47,12 @@ navigera -s work quit                     # done
 - Actions return `{tab, tabs, url, title}`: where you ended up.
 - The browser, its tabs and cookies persist between commands of a session.
   `-s` is short for `--session`; `$NAVIGERA_SESSION` sets a default. An idle
-  session shuts down after 30 min.
+  session shuts down after 10 min (`start --idle <s>`); `start --parent <pid>`
+  ends it when that process (your agent) exits.
+- Several agents at once: give each its own `-s` name. Sessions share one
+  browser, each in its own context (cookies, storage, tabs apart); two
+  agents on one name would drive one browser. `navigera sessions` lists them
+  with their memory; `sessions --clean` quits the idle ones.
 
 ### If `start` prints `"decider"`
 

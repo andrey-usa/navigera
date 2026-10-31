@@ -864,6 +864,12 @@ pub struct SessionConfig {
     /// `--download-dir`: where downloads are saved (see
     /// `browser::download_dir`).
     pub download_dir: Option<String>,
+    /// `--own-browser`: a session server launches a browser of its own
+    /// instead of working in a context of the shared one (`crate::shared`).
+    pub own_browser: bool,
+    /// `--parent <pid>` (`$NAVIGERA_PARENT_PID`): the session server quits
+    /// when that process exits.
+    pub parent_pid: Option<u32>,
 }
 
 /// A snapshot's network-quiet wait runs at most this long (long polls,
@@ -871,8 +877,9 @@ pub struct SessionConfig {
 /// (`set network-quiet <ms>`, default 500 ms).
 const NETWORK_QUIET_MAX: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Default idle shutdown for session servers.
-pub const DEFAULT_IDLE_TIMEOUT_S: u64 = 1800;
+/// Default idle shutdown for session servers: an agent that forgot its
+/// session (or crashed) leaves it for this long at most.
+pub const DEFAULT_IDLE_TIMEOUT_S: u64 = 600;
 
 impl Default for SessionConfig {
     fn default() -> Self {
@@ -894,6 +901,8 @@ impl Default for SessionConfig {
             natural: false,
             wait_ms: None,
             download_dir: None,
+            own_browser: false,
+            parent_pid: None,
         }
     }
 }
@@ -931,7 +940,7 @@ const DEFAULT_ATTACH: &str = "chrome";
 
 /// True when `word` is a command name (so it can't be `--attach`'s value).
 fn is_command_word(word: &str) -> bool {
-    matches!(word, "serve" | "mcp" | "skill" | "install-skill" | "install-browser" | "profiles" | "help")
+    matches!(word, "serve" | "mcp" | "skill" | "install-skill" | "install-browser" | "profiles" | "sessions" | "help")
         || OPS.iter().any(|(name, _, _)| *name == word)
 }
 
@@ -972,6 +981,15 @@ pub enum Local {
     Version,
     /// List the browsers and profiles a session can be handed.
     Profiles,
+    /// The shared browser's host (spawned by sessions; see `crate::shared`).
+    BrowserHost,
+    /// List the named sessions (and shared browsers), or quit the idle
+    /// ones (`--clean`) or all of them (`--clean --all`).
+    Sessions {
+        clean: bool,
+        all: bool,
+        idle_s: Option<u64>,
+    },
     /// Download a browser from Chrome for Testing into navigera's cache.
     InstallBrowser {
         product: String,
@@ -998,7 +1016,7 @@ pub struct ParsedArgs {
 
 /// One op's CLI documentation: (name, synopsis, what it does).
 const OPS: &[(&str, &str, &str)] = &[
-    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless]] [--natural] [--download-dir <dir>]", "spawn a detached session server + headless browser (needs --session); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins"),
+    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless]] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
     ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
@@ -1056,6 +1074,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("quit", "[--close-browser]", "close the browser and the session server; attached (--attach/--profile): only disconnect, unless --close-browser"),
     ("serve", "", "for programs: read one JSON command per line on stdin (`{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}`) and answer each on stdout; the protocol is in docs/navigera.md"),
     ("mcp", "[--headed] [--profile <name> | --attach [<where>]]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
+    ("sessions", "[--clean [--all] [--idle <s>]]", "list the named sessions (pid, idle time, browser, memory) and the shared browsers; --clean quits the ones idle 5 min or more and drops dead ones, --all quits every one"),
     ("profiles", "", "list what a session can be handed: your browsers' profiles (name, email, whether --attach can reach them now) and navigera's own --profile browsers"),
     ("skill", "", "print the agent skill (usage guide) for this version"),
     ("install-browser", "[chrome-headless-shell | chrome] [--channel stable|beta|dev|canary] [--where]", "download Chrome from Google's Chrome for Testing into navigera's cache (default chrome-headless-shell: the same Chrome without its UI layer, ~3x faster to start), used from then on; --where prints the directory"),
@@ -1117,7 +1136,8 @@ pub fn usage(program: &str) -> String {
         ),
         ("--chromium <path>", "the browser binary ($CHROME_BIN); --engine lightpanda ($NAVIGERA_ENGINE); --headed".into()),
         ("--transport ws", "talk to the browser over a DevTools port instead of a private pipe (to open DevTools on it; the Windows default)".into()),
-        ("--idle-timeout-s <s>", format!("the session server shuts down after this long idle (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never)")),
+        ("--idle-timeout-s <s>", format!("the session server shuts down after this long idle (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never; `start --idle <s>` too)")),
+        ("--parent <pid>", "with `start`: the session ends when that process exits ($NAVIGERA_PARENT_PID)".into()),
         (
             "--attach [chrome|edge|<dir>|<port>]",
             "with `start`: use your running browser and never close it. Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there".into(),
@@ -1128,6 +1148,10 @@ pub fn usage(program: &str) -> String {
             "with --profile: first copy your own browser's sign-ins into it (cookies, site storage, saved logins); --from-profile <dir|name|email> picks the profile".into(),
         ),
         ("--natural", "look like the browser it is: no HeadlessChrome user agent, a real screen size ($NAVIGERA_NATURAL=1)".into()),
+        (
+            "--own-browser",
+            "with `start`: launch a browser for this session alone. By default sessions share one browser, each in a context of its own (cookies, storage, tabs apart) ($NAVIGERA_SHARED_BROWSER=0)".into(),
+        ),
         ("--pretty", "pretty-print JSON".into()),
         ("-V, --version", "print the version".into()),
     ];
@@ -1322,6 +1346,10 @@ fn extract_present(args: &mut std::collections::VecDeque<String>, flag: &str) ->
     args.len() != before
 }
 
+fn parse_pid(raw: &str) -> Result<u32, String> {
+    raw.trim().parse::<u32>().ok().filter(|p| *p > 0).ok_or_else(|| format!("--parent takes a process id, got {raw:?}"))
+}
+
 /// Global flags may appear before *or* after the command (`eval … --pretty`).
 fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut SessionConfig) -> Result<(), String> {
     if let Some(raw) = extract_value(args, "--engine")? {
@@ -1360,6 +1388,12 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
     }
     if let Some(from) = extract_value(args, "--from")? {
         config.from = Some(from);
+    }
+    if extract_present(args, "--own-browser") {
+        config.own_browser = true;
+    }
+    if let Some(raw) = extract_value(args, "--parent")? {
+        config.parent_pid = Some(parse_pid(&raw)?);
     }
     if let Some(from_profile) = extract_value(args, "--from-profile")? {
         config.from_profile = Some(from_profile);
@@ -1521,6 +1555,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             "--from" => config.from = Some(value("--from")?),
             "--from-profile" => config.from_profile = Some(value("--from-profile")?),
             "--natural" => config.natural = true,
+            "--own-browser" => config.own_browser = true,
+            "--parent" => config.parent_pid = Some(parse_pid(&value("--parent")?).map_err(ArgsError::Invalid)?),
             "--download-dir" => config.download_dir = Some(caller_path(value("--download-dir")?)),
             "--wait-ms" => {
                 let raw = value("--wait-ms")?;
@@ -1567,6 +1603,11 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             if let Some(raw) = str_flag(&mut args, "--timeout-ms")? {
                 config.timeout_ms = parse_f64(&raw, "--timeout-ms").map_err(ArgsError::Invalid)?;
             }
+            if let Some(raw) = str_flag(&mut args, "--idle")? {
+                config.idle_timeout_s = raw
+                    .parse::<u64>()
+                    .map_err(|_| ArgsError::Invalid(format!("--idle takes whole seconds (0 = never), got {raw:?}")))?;
+            }
             if let Some(extra) = args.front() {
                 return invalid(format!("unexpected argument {extra:?} after {op}"));
             }
@@ -1582,6 +1623,26 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             return Ok(ParsedArgs { config, command: None, start: false, local: None, mcp: true });
         }
         "skill" => return parsed(config, None, false, Some(Local::Skill)),
+        // Not in the help: sessions start it.
+        "browser-host" => return parsed(config, None, false, Some(Local::BrowserHost)),
+        "sessions" => {
+            let clean = extract_present(&mut args, "--clean");
+            let all = extract_present(&mut args, "--all");
+            let idle_s = match str_flag(&mut args, "--idle")? {
+                Some(raw) => Some(
+                    raw.parse::<u64>()
+                        .map_err(|_| ArgsError::Invalid(format!("--idle takes whole seconds, got {raw:?}")))?,
+                ),
+                None => None,
+            };
+            if let Some(extra) = args.pop_front() {
+                return invalid(format!("unexpected argument {extra:?} after sessions"));
+            }
+            if all && !clean {
+                return invalid("--all goes with --clean: `sessions --clean --all` quits every session".to_string());
+            }
+            return parsed(config, None, false, Some(Local::Sessions { clean, all, idle_s }));
+        }
         "profiles" => {
             if let Some(extra) = args.front() {
                 return invalid(format!("unexpected argument {extra:?} after profiles"));
@@ -2279,9 +2340,7 @@ pub struct Outcome {
 impl Driver {
     /// Launch the engine described by `config` (Chrome by default).
     pub fn launch(config: &SessionConfig) -> anyhow::Result<Self> {
-        crate::browser::set_natural(config.natural);
-        crate::browser::set_element_wait(config.wait_ms);
-        crate::browser::set_download_dir(config.download_dir.as_deref());
+        Self::apply_settings(config);
         if let Some(target) = config.attach_target() {
             let session = BrowserSession::attach(&target, config.timeout_ms)
                 .map_err(|e| anyhow::anyhow!("could not connect to the browser: {e:#}"))?;
@@ -2298,6 +2357,33 @@ impl Driver {
             anyhow::anyhow!("browser launch failed (engine={}, headed={}): {e:#}", config.engine, config.headed)
         })?;
         Ok(Self { session, history: Vec::new() })
+    }
+
+    /// A named session's or an MCP server's browser: a context of its own
+    /// on the shared browser (see `crate::shared`) when `config` allows
+    /// it, else as [`Driver::launch`].
+    pub fn launch_session(config: &SessionConfig) -> anyhow::Result<Self> {
+        if !crate::shared::wanted(config) {
+            return Self::launch(config);
+        }
+        Self::apply_settings(config);
+        let session = BrowserSession::launch_shared(!config.headed, config.chromium.as_deref(), config.timeout_ms)
+            .map_err(|e| anyhow::anyhow!("browser launch failed (shared browser, headed={}): {e:#}", config.headed))?;
+        Ok(Self { session, history: Vec::new() })
+    }
+
+    /// The process-wide settings `config` names: natural mode, the element
+    /// wait, the download directory.
+    fn apply_settings(config: &SessionConfig) {
+        crate::browser::set_natural(config.natural);
+        crate::browser::set_element_wait(config.wait_ms);
+        crate::browser::set_download_dir(config.download_dir.as_deref());
+    }
+
+    /// Has the connection to a shared browser ended (it crashed or was
+    /// killed)? The session can do nothing more then.
+    pub fn shared_browser_gone(&self) -> bool {
+        self.session.is_shared() && self.session.browser_gone()
     }
 
     /// The active page (tab) this driver's ops target.
@@ -2470,6 +2556,14 @@ impl Driver {
                     from_profile: None,
                 };
                 BrowserSession::attach(&target, timeout_ms)
+            }
+            None if self.session.is_shared() => {
+                let state = self.session.storage_state()?;
+                let mut new = BrowserSession::launch_shared(!visible, Some(&exe), timeout_ms);
+                if let Ok(new) = &mut new {
+                    new.load_storage_state(&state)?;
+                }
+                new
             }
             None => {
                 let state = self.session.storage_state()?;
@@ -2670,7 +2764,11 @@ impl Driver {
         }
         let result = self.dispatch(command).map_err(|e| {
             let msg = format!("{e:#}");
-            if msg.contains(crate::cdp::CONNECTION_CLOSED) {
+            if msg.contains(crate::cdp::CONNECTION_CLOSED) && self.session.is_shared() {
+                anyhow::anyhow!(
+                    "{msg} — the shared browser is gone (it crashed or was killed); this session has ended: run `start` again to relaunch it"
+                )
+            } else if msg.contains(crate::cdp::CONNECTION_CLOSED) {
                 let how = self.session.browser_exit().unwrap_or_else(|| "connection lost".into());
                 anyhow::anyhow!("{msg} — the browser is gone ({how}); run `quit`, then `start` again")
             } else {
@@ -3505,6 +3603,13 @@ impl Driver {
                 state["executable"] = json!(self.session.executable());
                 state["endpoint"] = json!(self.session.endpoint());
                 state["attached"] = json!(self.session.is_attached());
+                state["browser"] = json!(match self.session.shared_sessions() {
+                    Some(1) => "shared (1 session)".to_string(),
+                    Some(n) => format!("shared ({n} sessions)"),
+                    None if self.session.is_shared() => "shared".to_string(),
+                    None if self.session.is_attached() => "attached".to_string(),
+                    None => "own".to_string(),
+                });
                 state["version"] = json!(env!("CARGO_PKG_VERSION"));
                 Ok(state)
             }
@@ -3573,6 +3678,11 @@ impl Driver {
                 Ok(json!({ "bye": true, "browser": "closed" }))
             }
             Command::Quit { .. } if s.is_attached() => Ok(json!({ "bye": true, "browser": "left open" })),
+            // Its context closes; the browser is the other sessions' too.
+            Command::Quit { close_browser: true } if s.is_shared() => Ok(json!({
+                "bye": true,
+                "browser": "shared: this session's context closed; the browser closes on its own once no session uses it",
+            })),
             Command::Quit { .. } => Ok(json!({ "bye": true })),
         }
     }
@@ -4096,6 +4206,8 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
             let _ = write!(output, "{SKILL_MD}");
             ExitCode::SUCCESS
         }
+        Local::BrowserHost => crate::shared::serve_host(config),
+        Local::Sessions { clean, all, idle_s } => crate::session::sessions(config, *clean, *all, *idle_s, output),
         Local::Profiles => {
             let response = json!({ "id": null, "ok": true, "result": crate::cdp::import::list_profiles() });
             if print_cli_response(output, &response, config) {

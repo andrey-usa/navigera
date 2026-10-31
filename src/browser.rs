@@ -79,7 +79,7 @@ const CHROME_FLAGS: &[&str] = &[
 /// browser-version-specific failure in CI without a rebuild:
 /// `NAVIGERA_DROP_FLAGS` (comma-separated prefixes to remove) and
 /// `NAVIGERA_EXTRA_FLAGS` (space-separated flags to add).
-fn chrome_flags() -> Vec<String> {
+pub(crate) fn chrome_flags() -> Vec<String> {
     let drop: Vec<String> = std::env::var("NAVIGERA_DROP_FLAGS")
         .map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
         .unwrap_or_default();
@@ -451,6 +451,86 @@ pub enum AttachTarget {
     },
 }
 
+/// Launch Chrome (no page yet): the executable resolved, the launch flags
+/// (natural mode's too), and a fallback to `--no-sandbox` where the sandbox
+/// cannot start. Shared by a session's own browser and the shared-browser
+/// host.
+fn launch_chrome(
+    handle: &tokio::runtime::Handle,
+    headless: bool,
+    executable: Option<&str>,
+    transport: &str,
+) -> Result<(Browser, String)> {
+    // Natural mode wants the full Chrome even headless:
+    // chrome-headless-shell is a different program with tells of its
+    // own.
+    let Some(exe) = resolve_executable_for(executable, headless && !natural()) else {
+        bail!(
+            "no Chrome/Chromium/Edge found — run `navigera install-browser` (Google's chrome-headless-shell, into navigera's cache), install Chrome, or pass a browser with --chromium or $CHROME_BIN"
+        );
+    };
+    crate::timing::log(&format!("[browser] executable {exe}"));
+    let launch = |flags: Vec<String>| -> Result<Browser> {
+        let browser = Browser::launch(
+            handle,
+            &LaunchOptions {
+                exe: exe.clone(),
+                headless,
+                chrome_flags: flags,
+                debugging_port: None,
+                pipe: transport == "pipe",
+            },
+        )?;
+        // A browser that cannot start its sandbox dies before the
+        // first target: probe it here so the fallback below sees it.
+        if let Err(e) = browser.tab_targets() {
+            let report = browser.death_report();
+            // Reaped and its profile deleted before any retry, so a
+            // fallback launch leaves no zombie or directory behind.
+            browser.close();
+            anyhow::bail!("{e:#} ({report})");
+        }
+        Ok(browser)
+    };
+    let mut flags = chrome_flags();
+    if natural() {
+        flags.extend(natural_flags(&exe, headless)?);
+    }
+    let note = no_sandbox_note(&exe);
+    if !flags.iter().any(|f| f == NO_SANDBOX) && note.as_ref().is_some_and(|n| n.exists()) {
+        eprintln!("{NO_SANDBOX_WARNING}");
+        flags.push(NO_SANDBOX.into());
+    }
+    let browser = match launch(flags.clone()) {
+        Ok(browser) => browser,
+        Err(e) if !flags.iter().any(|f| f == NO_SANDBOX) && sandbox_unavailable(&format!("{e:#}")) => {
+            eprintln!("{NO_SANDBOX_WARNING}");
+            if let Some(note) = &note {
+                // The session directory is ours alone (0700, checked),
+                // so nothing else can have planted a link here.
+                let _ = std::fs::write(note, format!("{exe}\n"));
+            }
+            flags.push(NO_SANDBOX.into());
+            launch(flags)?
+        }
+        Err(e) => return Err(e),
+    };
+    crate::timing::log(&format!(
+        "[browser] engine=chrome launched {} via {exe} (headless={headless})",
+        browser.ws_url(),
+    ));
+    Ok((browser, exe))
+}
+
+/// The browser a shared-browser host keeps (see `crate::shared`): Chrome
+/// launched as a session's own would be, with no page, on the default
+/// transport (the private pipe on Linux/macOS).
+pub fn launch_host(headless: bool, executable: Option<&str>) -> Result<(tokio::runtime::Runtime, Browser)> {
+    let runtime = engine_runtime()?;
+    let (browser, _) = launch_chrome(runtime.handle(), headless, executable, DEFAULT_TRANSPORT)?;
+    Ok((runtime, browser))
+}
+
 /// CDP transport when none is asked for. The pipe (fds 3/4) is Unix-only
 /// here; Windows uses a DevTools WebSocket on a random localhost port, and
 /// a kill-on-close job object stands in for the pipe's "Chrome exits with
@@ -515,6 +595,9 @@ pub struct BrowserSession {
     /// False for a session `fork` made: closing it closes its context, not
     /// the browser.
     owner: bool,
+    /// In its own context on the browser a shared-browser host keeps (see
+    /// `crate::shared`): closing it closes its context.
+    shared: bool,
     /// Owns the tokio runtime; declared LAST so it drops last, after the
     /// browser/client/pages that use it.
     _runtime: std::sync::Arc<tokio::runtime::Runtime>,
@@ -571,65 +654,7 @@ impl BrowserSession {
             crate::timing::log(&format!("[browser] engine=lightpanda launched {} via {bin}", browser.ws_url()));
             (browser, bin)
         } else {
-            // Natural mode wants the full Chrome even headless:
-            // chrome-headless-shell is a different program with tells of its
-            // own.
-            let Some(exe) = resolve_executable_for(executable, headless && !natural()) else {
-                bail!(
-                    "no Chrome/Chromium/Edge found — run `navigera install-browser` (Google's chrome-headless-shell, into navigera's cache), install Chrome, or pass a browser with --chromium or $CHROME_BIN"
-                );
-            };
-            crate::timing::log(&format!("[browser] executable {exe}"));
-            let launch = |flags: Vec<String>| -> Result<Browser> {
-                let browser = Browser::launch(
-                    &handle,
-                    &LaunchOptions {
-                        exe: exe.clone(),
-                        headless,
-                        chrome_flags: flags,
-                        debugging_port: None,
-                        pipe: transport == "pipe",
-                    },
-                )?;
-                // A browser that cannot start its sandbox dies before the
-                // first target: probe it here so the fallback below sees it.
-                if let Err(e) = browser.tab_targets() {
-                    let report = browser.death_report();
-                    // Reaped and its profile deleted before any retry, so a
-                    // fallback launch leaves no zombie or directory behind.
-                    browser.close();
-                    anyhow::bail!("{e:#} ({report})");
-                }
-                Ok(browser)
-            };
-            let mut flags = chrome_flags();
-            if natural() {
-                flags.extend(natural_flags(&exe, headless)?);
-            }
-            let note = no_sandbox_note(&exe);
-            if !flags.iter().any(|f| f == NO_SANDBOX) && note.as_ref().is_some_and(|n| n.exists()) {
-                eprintln!("{NO_SANDBOX_WARNING}");
-                flags.push(NO_SANDBOX.into());
-            }
-            let browser = match launch(flags.clone()) {
-                Ok(browser) => browser,
-                Err(e) if !flags.iter().any(|f| f == NO_SANDBOX) && sandbox_unavailable(&format!("{e:#}")) => {
-                    eprintln!("{NO_SANDBOX_WARNING}");
-                    if let Some(note) = &note {
-                        // The session directory is ours alone (0700, checked),
-                        // so nothing else can have planted a link here.
-                        let _ = std::fs::write(note, format!("{exe}\n"));
-                    }
-                    flags.push(NO_SANDBOX.into());
-                    launch(flags)?
-                }
-                Err(e) => return Err(e),
-            };
-            crate::timing::log(&format!(
-                "[browser] engine=chrome launched {} via {exe} (headless={headless})",
-                browser.ws_url(),
-            ));
-            (browser, exe)
+            launch_chrome(&handle, headless, executable, &transport)?
         };
         crate::timing::record("browser_up", launch_started);
         let page_started = std::time::Instant::now();
@@ -660,6 +685,7 @@ impl BrowserSession {
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
             context: None,
             owner: true,
+            shared: false,
             attached: false,
             closed: None,
             profile_dir: None,
@@ -672,6 +698,77 @@ impl BrowserSession {
             held: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
+    }
+
+    /// A session in a browser context of its own on the shared browser for
+    /// this executable and mode (see `crate::shared`), started if none
+    /// runs: tabs, cookies, storage, cache, downloads, permissions are the
+    /// session's own. Closing it closes its context; the browser stays for
+    /// the other sessions.
+    pub fn launch_shared(headless: bool, executable: Option<&str>, nav_timeout_ms: f64) -> Result<Self> {
+        let started = std::time::Instant::now();
+        let Some(exe) = resolve_executable_for(executable, headless && !natural()) else {
+            bail!(
+                "no Chrome/Chromium/Edge found — run `navigera install-browser` (Google's chrome-headless-shell, into navigera's cache), install Chrome, or pass a browser with --chromium or $CHROME_BIN"
+            );
+        };
+        let spec = crate::shared::Spec { exe: exe.clone(), headless, natural: natural() };
+        let runtime = engine_runtime()?;
+        let handle = runtime.handle().clone();
+        let (stream, lease, socket) = crate::shared::connect(&spec)?;
+        crate::timing::record("shared_connect", started);
+        let client = crate::shared::client(stream, &handle)?;
+        let browser = Browser::on_host(&handle, client, format!("shared browser {}", socket.display()));
+        // Other sessions' tabs are in this browser too: popups and closed
+        // tabs count only when they are this session's (as for a fork).
+        browser.shared().forked.store(true, std::sync::atomic::Ordering::Relaxed);
+        let context = browser.create_context().context("a browser context on the shared browser")?;
+        if let Ok(dir) = download_dir() {
+            let _ = browser.enable_downloads_in(Some(&dir), Some(&context));
+        }
+        let page = browser.new_page_with(Some("about:blank"), false, Some(&context))?;
+        // The context exists: the host may count this session now.
+        drop(lease);
+        crate::timing::record("launch_total", started);
+        Ok(Self {
+            browser: std::sync::Arc::new(browser),
+            pages: vec![page],
+            active: 0,
+            exe,
+            lightpanda: false,
+            timeout_ms: nav_timeout_ms,
+            abandoned: std::sync::Mutex::new(None),
+            network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
+            context: Some(context),
+            owner: false,
+            shared: true,
+            attached: false,
+            closed: None,
+            profile_dir: None,
+            profile_exe: None,
+            downloads_dir: None,
+            overrides: Default::default(),
+            no_rule_call: Default::default(),
+            init_scripts: Vec::new(),
+            init_ids: Default::default(),
+            held: Default::default(),
+            _runtime: std::sync::Arc::new(runtime),
+        })
+    }
+
+    /// On the shared browser (see [`BrowserSession::launch_shared`])?
+    pub fn is_shared(&self) -> bool {
+        self.shared
+    }
+
+    /// How many sessions the shared browser has (its browser contexts).
+    pub fn shared_sessions(&self) -> Option<usize> {
+        self.shared.then(|| self.browser.context_count().ok()).flatten()
+    }
+
+    /// Has the connection to the browser ended?
+    pub fn browser_gone(&self) -> bool {
+        self.browser.is_closed()
     }
 
     /// Work in a browser that is already running (`--attach`) or in the
@@ -740,6 +837,7 @@ impl BrowserSession {
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
             context: None,
             owner: true,
+            shared: false,
             attached: true,
             closed: None,
             profile_dir,
@@ -974,6 +1072,7 @@ impl BrowserSession {
             held: std::sync::Mutex::new(Vec::new()),
             context: Some(context),
             owner: false,
+            shared: self.shared,
             _runtime: std::sync::Arc::clone(&self._runtime),
         })
     }
@@ -1592,9 +1691,10 @@ impl BrowserSession {
         )
     }
 
-    /// Browser-wide permission for the pages' origins (geolocation).
+    /// Permission for the pages' origins (geolocation), in this session's
+    /// browser context.
     pub fn grant(&self, permission: &str) {
-        let _ = self.browser.grant_permission(permission);
+        let _ = self.browser.grant_permission(permission, self.context.as_deref());
     }
 
     fn apply_overrides(&self, page: &Page) {

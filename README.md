@@ -137,6 +137,17 @@ mode, and navigera never passes `--enable-automation`. It is not a CAPTCHA
 solver and fakes no fingerprint: it is a regular Chrome, run for you.
 Details: [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md#browsers-and-engines).
 
+**Parallel agents.** Give each agent its own `-s <name>`. Sessions share
+one browser, each in a browser context of its own (cookies, storage, cache,
+tabs and downloads apart), so N agents cost one browser plus a page each,
+as Playwright's one driver with a context per test does, not N browsers.
+The browser stays on the private pipe (no DevTools port) and closes 30 s
+after its last session. `start --own-browser` gives a session a browser of
+its own. `navigera sessions` lists the sessions with their memory and idle
+time; `sessions --clean` quits the idle ones (`--all`: every one), and
+`start --parent <pid>` ends a session when its agent's process does. An
+unused session ends after 10 min.
+
 Programs can keep one browser on a pipe instead: `navigera serve` reads
 one JSON command per stdin line, for example
 `{"id":1,"op":"goto","url":"https://example.com"}`. The session socket speaks
