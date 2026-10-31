@@ -35,6 +35,11 @@ All notable changes to this project are documented here. The format follows
 
 - An unused session ends after 10 min, not 30 (`start --idle <s>`, or
   `--idle-timeout-s`). `status` and `sessions` don't count as use.
+- Chrome starts with `--disable-field-trial-config`, as Playwright's and
+  Puppeteer's do: Chromium and Chrome for Testing builds no longer turn on
+  the experiments of Chrome's field-trial testing config, which cost about
+  19 MiB per page (8 sessions: 894 to 716 MiB) and differed from build to
+  build.
 - A ref whose element has left the page fails at once ("that ref is stale ... run `ax` for fresh
   refs", no `--force` hint) instead of after the 5 s wait for a box. An element with
   `draggable="true"` gets a ref in `ax` even with no handler on it.

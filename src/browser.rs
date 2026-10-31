@@ -36,11 +36,18 @@ fn engine_runtime() -> Result<tokio::runtime::Runtime> {
 /// one's cookies. Chrome honours only the last `--disable-features` /
 /// `--enable-features` flag, so each list is a single flag.
 ///
+/// `--disable-field-trial-config`: Chromium and Chrome for Testing builds
+/// otherwise turn on the experiments of Chrome's field trial testing
+/// config, which cost about 19 MiB per page here (8 pages: 894 -> 716 MiB
+/// in all) and make the browser differ from build to build. Playwright and
+/// Puppeteer pass it too; official Chrome builds ignore that config.
+///
 /// The renderer sandbox stays on: an agent opens pages nobody vetted, and the
 /// sandbox is what contains a renderer exploit. `--no-sandbox` is added only
 /// where Chrome cannot have one (see [`chrome_flags`]).
 const CHROME_FLAGS: &[&str] = &[
     "--disable-dev-shm-usage",
+    "--disable-field-trial-config",
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
     "--no-default-browser-check",
@@ -712,6 +719,8 @@ impl BrowserSession {
                 "no Chrome/Chromium/Edge found — run `navigera install-browser` (Google's chrome-headless-shell, into navigera's cache), install Chrome, or pass a browser with --chromium or $CHROME_BIN"
             );
         };
+        // The session's log names its browser, as a launch's does.
+        crate::timing::log(&format!("[browser] executable {exe} (shared browser)"));
         let spec = crate::shared::Spec { exe: exe.clone(), headless, natural: natural() };
         let runtime = engine_runtime()?;
         let handle = runtime.handle().clone();

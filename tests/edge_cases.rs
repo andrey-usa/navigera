@@ -518,7 +518,8 @@ fn killed_session_server_takes_its_browser_down() {
     let s = Session {
         name: std::env::temp_dir().join(format!("nv-edge-orphan-{}.sock", std::process::id())).display().to_string(),
     };
-    let started = s.ok(&["start", "--idle-timeout-s", "120"]);
+    // The browser of its own this checks is a child of the session server.
+    let started = s.ok(&["start", "--idle-timeout-s", "120", "--own-browser"]);
     let server = started["pid"].as_u64().expect("start reports the server pid");
     s.ok(&["goto", "about:blank"]);
     let query = format!(
