@@ -14,6 +14,15 @@ All notable changes to this project are documented here. The format follows
 - The decision model's key is `NAVIGERA_DECIDER_KEY`, one key for whichever
   model `NAVIGERA_DECIDER_MODEL` names (Jev, Kev, ...). `TYPESAFE_API_KEY`
   is still read when it is unset.
+- `ax` on a page whose tree is about as long as the output limit or shorter
+  reads it in one call instead of node by node (a 250-row table: 342 to
+  163 ms), and no longer copies the reply. A page with more than 4 DOM nodes
+  per line of limit still reads lazily, stopping at the limit.
+
+### Fixed
+
+- A snapshot cut by `--limit` that was read in one call said "1 more lines"
+  whatever its length; it now says "more lines", as the lazy read does.
 
 ### Fixed
 

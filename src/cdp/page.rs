@@ -4218,12 +4218,34 @@ impl Page {
         // stop. Anything the lazy path cannot serve (JSON, a depth cap,
         // no limit, a browser without the lazy calls) reads the full tree
         // exactly as before, and a failed lazy fetch falls back to it.
-        if !opts.json && opts.max_depth.is_none() && opts.limit > 0 && !self.shared.is_single_target() {
+        if !opts.json
+            && opts.max_depth.is_none()
+            && opts.limit > 0
+            && !self.shared.is_single_target()
+            && (opts.scope.is_some() || !self.fits_in(opts.limit, timeout))
+        {
             if let Ok(text) = self.ax_tree_lazy(timeout, opts) {
                 return Ok(text);
             }
         }
         self.ax_tree_full(timeout, opts)
+    }
+
+    /// Will the page's tree be about as long as the output limit or
+    /// shorter? Then one `getFullAXTree` is the cheaper read: Chrome builds
+    /// a node about 3x cheaper in that call than through `getChildAXNodes`
+    /// (0.03 ms against 0.1 ms per node, a 250-row table 177 ms against 335),
+    /// and the lazy walk's advantage, not reading what the limit cuts, is
+    /// worth nothing when little is cut. A page has about 0.55 lines per DOM
+    /// node (measured on tables of 250 to 2,000 rows) and the full read still
+    /// won at 500 rows against a limit of 2,000 (359 ms against 509), lost at
+    /// 1,000 (742 against 643): 4 DOM nodes per line of limit is the middle. An unknown count
+    /// (the call is missing) means "no": the lazy walk is the old default.
+    fn fits_in(&self, limit: usize, timeout: Duration) -> bool {
+        self.send("Memory.getDOMCounters", json!({}), timeout)
+            .ok()
+            .and_then(|c| c.get("nodes").and_then(Value::as_u64))
+            .is_some_and(|nodes| nodes <= limit as u64 * 4)
     }
 
     /// Text tree from a lazy fetch: the root (or the partial tree around
@@ -4318,8 +4340,12 @@ impl Page {
         if let Some(d) = opts.max_depth {
             params["depth"] = json!(d);
         }
-        let res = self.send("Accessibility.getFullAXTree", params, timeout)?;
-        let mut nodes = res.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut res = self.send("Accessibility.getFullAXTree", params, timeout)?;
+        // Taken, not cloned: the reply is megabytes on a large page.
+        let mut nodes = match res.get_mut("nodes").map(Value::take) {
+            Some(Value::Array(nodes)) => nodes,
+            _ => Vec::new(),
+        };
         if self.shared.is_single_target() {
             self.unmask_passwords(&mut nodes, timeout);
             self.live_checked(&mut nodes, timeout);

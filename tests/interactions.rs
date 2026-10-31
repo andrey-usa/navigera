@@ -1317,6 +1317,23 @@ fn check_waits_for_a_late_commit() {
     assert!(error.contains("did not check it"), "{error}");
 }
 
+/// A page short enough for the whole tree to be read in one call (about as
+/// long as the limit) still stops at the limit, and its note gives no count.
+#[test]
+fn ax_with_a_limit_on_a_mid_size_page_says_more_lines_without_a_count() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("midtable", &[]);
+    s.ok(&["goto", &format!("{}/honesty", site.url)]);
+    s.ok(&["eval", "(() => { let h = '<ul>'; for (let i = 0; i < 200; i++) h += '<li>Item ' + i + ' <button onclick=\"out(' + i + ')\">Pick ' + i + '</button></li>'; document.body.insertAdjacentHTML('beforeend', h + '</ul>'); return 1; })()"]);
+    let tree = s.text(&["ax", "--limit", "300"]);
+    assert!(tree.contains("Pick 0") && !tree.contains("Pick 199"), "{tree}");
+    let last = tree.lines().last().unwrap();
+    assert!(last.starts_with("… more lines"), "{last}");
+    assert!(tree.lines().count() <= 302, "{} lines", tree.lines().count());
+    s.ok(&["click", "--role", "button", "--name", "Pick 7"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#out"]), "7");
+}
+
 /// A snapshot of a big table with a limit prints only the first rows, says it
 /// cut the rest, and its refs work.
 #[test]
