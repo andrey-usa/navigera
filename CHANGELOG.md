@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `start --profile` opens one window, not two: the profile browser starts
+  with `--no-startup-window`, as navigera's own launches do, so there is no
+  blank startup window and no "unsupported command-line flag" bar.
+
 ## [0.6.4] - 2026-10-31
 
 Fixes found by running a real app's end-to-end tests on navigera: snapshots
