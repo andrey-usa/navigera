@@ -164,12 +164,16 @@ impl Browser {
         Self::finish(handle, client, None, None, label)
     }
 
-    /// Divert this browser's CDP connection to raw messages (see
-    /// [`CdpClient::take_raw`]): the shared-browser host forwards them.
-    pub fn take_raw(
-        &self,
-    ) -> Result<(tokio::sync::mpsc::UnboundedSender<String>, tokio::sync::mpsc::UnboundedReceiver<String>)> {
-        self.client.take_raw()
+    /// A sender of raw JSON texts to the browser (see
+    /// [`CdpClient::raw_writer`]).
+    pub fn raw_writer(&self) -> Result<tokio::sync::mpsc::UnboundedSender<String>> {
+        self.client.raw_writer()
+    }
+
+    /// Hand every message from the browser to `handler` (see
+    /// [`CdpClient::take_raw`]): the shared-browser host routes them.
+    pub fn take_raw(&self, handler: super::client::RawHandler) {
+        self.client.take_raw(handler)
     }
 
     /// Has the connection to the browser ended?

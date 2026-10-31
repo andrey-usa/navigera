@@ -4364,41 +4364,49 @@ impl Page {
         // stop. Anything the lazy path cannot serve (JSON, a depth cap,
         // no limit, a browser without the lazy calls) reads the full tree
         // exactly as before, and a failed lazy fetch falls back to it.
-        if !opts.json
-            && opts.max_depth.is_none()
-            && opts.limit > 0
-            && !self.shared.is_single_target()
-            && (opts.scope.is_some() || !self.fits_in(opts.limit, timeout))
-        {
-            if let Ok(text) = self.ax_tree_lazy(timeout, opts) {
-                return Ok(text);
+        if !opts.json && opts.max_depth.is_none() && opts.limit > 0 && !self.shared.is_single_target() {
+            // A scoped snapshot reads its subtree lazily, whatever the page;
+            // a whole page is read lazily when it is well past the limit,
+            // and only while the walk costs less than one full read would
+            // (see LAZY_CALLS_PER_NODE).
+            let (lazy, budget) = match &opts.scope {
+                Some(_) => (true, None),
+                None => match self.dom_nodes(timeout) {
+                    Some(nodes) => (nodes > opts.limit as u64 * 4, Some((nodes as f64 * LAZY_CALLS_PER_NODE) as usize)),
+                    // An unknown count: the lazy walk, as before.
+                    None => (true, None),
+                },
+            };
+            if lazy {
+                // What the walk reads first (frames, clickable elements) is
+                // the full read's too: read once, kept if the walk gives up.
+                let mut parts = None;
+                if let Ok(text) = self.ax_tree_lazy(timeout, opts, budget, &mut parts) {
+                    return Ok(text);
+                }
+                return self.ax_tree_full(timeout, opts, parts);
             }
         }
-        self.ax_tree_full(timeout, opts)
+        self.ax_tree_full(timeout, opts, None)
     }
 
-    /// Will the page's tree be about as long as the output limit or
-    /// shorter? Then one `getFullAXTree` is the cheaper read: Chrome builds
-    /// a node about 3x cheaper in that call than through `getChildAXNodes`
-    /// (0.03 ms against 0.1 ms per node, a 250-row table 177 ms against 335),
-    /// and the lazy walk's advantage, not reading what the limit cuts, is
-    /// worth nothing when little is cut. A page has about 0.55 lines per DOM
-    /// node (measured on tables of 250 to 2,000 rows) and the full read still
-    /// won at 500 rows against a limit of 2,000 (359 ms against 509), lost at
-    /// 1,000 (742 against 643): 4 DOM nodes per line of limit is the middle. An unknown count
-    /// (the call is missing) means "no": the lazy walk is the old default.
-    fn fits_in(&self, limit: usize, timeout: Duration) -> bool {
-        self.send("Memory.getDOMCounters", json!({}), timeout)
-            .ok()
-            .and_then(|c| c.get("nodes").and_then(Value::as_u64))
-            .is_some_and(|nodes| nodes <= limit as u64 * 4)
+    /// The page's DOM node count (`Memory.getDOMCounters`), what one full
+    /// read of the tree costs in proportion to.
+    fn dom_nodes(&self, timeout: Duration) -> Option<u64> {
+        self.send("Memory.getDOMCounters", json!({}), timeout).ok().and_then(|c| c.get("nodes").and_then(Value::as_u64))
     }
 
     /// Text tree from a lazy fetch: the root (or the partial tree around
     /// a scope) plus children on demand, in sibling windows, until the
     /// output limit is reached. Errors, and any failed child fetch, bail
     /// so [`Self::ax_tree`] falls back to the full tree.
-    fn ax_tree_lazy(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+    fn ax_tree_lazy(
+        &self,
+        timeout: Duration,
+        opts: &AxOptions,
+        budget: Option<usize>,
+        parts: &mut Option<(Vec<ax::Frame>, ax::Clickables)>,
+    ) -> Result<Value> {
         // getRootAXNode and getChildAXNodes answer -32000 until the domain
         // is enabled; getFullAXTree does not need it, so without this the
         // lazy path bailed on its first call and silently read the whole
@@ -4427,6 +4435,7 @@ impl Page {
         let started = std::time::Instant::now();
         let clicks = self.clickables(timeout);
         crate::timing::record("ax_clickables", started);
+        *parts = Some((frames.clone(), clicks.clone()));
         let title = ax_str(&main_root, "name").to_string();
         let url = main_root
             .get("properties")
@@ -4475,6 +4484,7 @@ impl Page {
                 root_backend_id: scoped_backend,
                 origin,
                 clicks,
+                lazy_budget: budget,
             },
             fetch,
         );
@@ -4485,7 +4495,12 @@ impl Page {
         Ok(Value::String(rendered.text))
     }
 
-    fn ax_tree_full(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+    fn ax_tree_full(
+        &self,
+        timeout: Duration,
+        opts: &AxOptions,
+        parts: Option<(Vec<ax::Frame>, ax::Clickables)>,
+    ) -> Result<Value> {
         let mut params = json!({});
         if let Some(d) = opts.max_depth {
             params["depth"] = json!(d);
@@ -4505,13 +4520,20 @@ impl Page {
         if opts.json {
             return Ok(flat_ax(&nodes, opts.all));
         }
-        let started = std::time::Instant::now();
-        let frames = self.frame_trees(timeout);
-        crate::timing::record("ax_frames", started);
-        // Lightpanda has no DOMSnapshot; its tree is printed as it comes.
-        let started = std::time::Instant::now();
-        let clicks = if self.shared.is_single_target() { ax::Clickables::default() } else { self.clickables(timeout) };
-        crate::timing::record("ax_clickables", started);
+        let (frames, clicks) = match parts {
+            Some(parts) => parts,
+            None => {
+                let started = std::time::Instant::now();
+                let frames = self.frame_trees(timeout);
+                crate::timing::record("ax_frames", started);
+                // Lightpanda has no DOMSnapshot; its tree is printed as it comes.
+                let started = std::time::Instant::now();
+                let clicks =
+                    if self.shared.is_single_target() { ax::Clickables::default() } else { self.clickables(timeout) };
+                crate::timing::record("ax_clickables", started);
+                (frames, clicks)
+            }
+        };
         let root = nodes.iter().find(|n| n.get("parentId").is_none());
         let title = root.map(|n| ax_str(n, "name").to_string()).unwrap_or_default();
         let url = root
@@ -4533,7 +4555,14 @@ impl Page {
             &format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default()),
             &nodes,
             &frames,
-            &ax::Options { all_refs: opts.all_refs, limit: opts.limit, root_backend_id, origin, clicks },
+            &ax::Options {
+                all_refs: opts.all_refs,
+                limit: opts.limit,
+                root_backend_id,
+                origin,
+                clicks,
+                lazy_budget: None,
+            },
         );
         crate::timing::record("ax_render", started);
         let mut text = rendered.text;
@@ -4604,6 +4633,16 @@ impl Page {
         }
     }
 }
+
+/// What one child fetch of the lazy `ax` walk costs, in DOM nodes of a
+/// full read: about a quarter. Measured (Chrome 153, text tables): a fetch
+/// about 0.33 ms, a full read 0.09-0.15 ms per node and more per node on
+/// bigger pages. A walk that needs more fetches than a quarter of the page's
+/// nodes to reach the limit gives up for the full read: a 1,000-row table
+/// (9,008 nodes, 3,014 fetches; full 790 ms, lazy 969 ms) reads in full, a
+/// 2,000-row one (18,008 nodes; full 1,849, lazy 1,318) lazily, and so does
+/// one of 4,000 rows (full 5,233, lazy 1,969).
+const LAZY_CALLS_PER_NODE: f64 = 0.25;
 
 /// How long `close_target` waits for the page to go after `Page.close`.
 const CLOSE_WAIT: Duration = Duration::from_millis(1500);

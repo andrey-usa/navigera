@@ -33,9 +33,11 @@ pub const CLOSED: &str = "the connection to the browser closed";
 /// A command waiting for its answer, and the tab session it went to.
 type Pending = HashMap<u64, (Option<String>, Responder)>;
 
-/// Where every incoming message goes once [`CdpClient::take_raw`] diverted
-/// them (the shared-browser host forwards them as they are).
-type RawTap = Arc<Mutex<Option<mpsc::UnboundedSender<String>>>>;
+/// What every incoming message is handed to, as its JSON text, once
+/// [`CdpClient::take_raw`] diverted them (the shared-browser host routes
+/// them right there, on the task that read them).
+pub type RawHandler = Box<dyn FnMut(&str) + Send>;
+type RawTap = Arc<Mutex<Option<RawHandler>>>;
 
 pub struct CdpClient {
     inner: Arc<Inner>,
@@ -65,6 +67,7 @@ struct Inner {
 fn close_all(closed: &AtomicBool, pending: &Mutex<Pending>, raw: &RawTap) {
     closed.store(true, Ordering::SeqCst);
     // A raw reader sees its channel end: the browser is gone.
+    // The raw handler goes with the connection.
     raw.lock().unwrap().take();
     let mut pending = pending.lock().unwrap();
     for (_, (_, responder)) in pending.drain() {
@@ -233,21 +236,18 @@ impl CdpClient {
         }
     }
 
-    /// From now on every incoming message goes, as its JSON text, to the
-    /// returned receiver instead of to `send` callers and subscribers, and
-    /// the returned sender writes JSON texts to the browser as they are.
-    /// The receiver ends when the browser connection does. For the
-    /// shared-browser host, which forwards messages without reading them
-    /// twice.
-    pub fn take_raw(&self) -> Result<(mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>)> {
-        let writer = self.inner.writer.lock().unwrap().clone().ok_or_else(|| anyhow::anyhow!("{CLOSED}"))?;
-        let (tx, rx) = mpsc::unbounded_channel();
-        *self.inner.raw.lock().unwrap() = Some(tx);
-        if self.inner.closed.load(Ordering::SeqCst) {
-            // Closed before the tap was in place: end the reader at once.
-            self.inner.raw.lock().unwrap().take();
-        }
-        Ok((writer, rx))
+    /// A sender that writes JSON texts to the browser as they are.
+    pub fn raw_writer(&self) -> Result<mpsc::UnboundedSender<String>> {
+        self.inner.writer.lock().unwrap().clone().ok_or_else(|| anyhow::anyhow!("{CLOSED}"))
+    }
+
+    /// From now on every incoming message is handed, as its JSON text, to
+    /// `handler`, on the task that read it, instead of to `send` callers and
+    /// subscribers. For the shared-browser host, which routes messages
+    /// without reading them twice or passing them between threads.
+    /// [`CdpClient::is_closed`] says when the connection has ended.
+    pub fn take_raw(&self, handler: RawHandler) {
+        *self.inner.raw.lock().unwrap() = Some(handler);
     }
 
     /// Send one CDP command and await its `{result}` (or `{error}`).
@@ -384,8 +384,8 @@ fn shape(value: &Value, depth: usize) -> Value {
 }
 
 fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Value>, sent: &AtomicU64, raw: &RawTap) {
-    if let Some(tap) = raw.lock().unwrap().as_ref() {
-        let _ = tap.send(text.to_string());
+    if let Some(handler) = raw.lock().unwrap().as_mut() {
+        handler(text);
         return;
     }
     let Ok(value) = serde_json::from_str::<Value>(text) else {

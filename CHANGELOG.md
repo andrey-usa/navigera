@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `ax` on a large page through the shared browser lost up to a quarter of
+  its speed in 0.6.5: each of the snapshot's thousands of tree reads crossed
+  four threads of the browser's host. The host now routes a message on the
+  thread that reads it, and renumbers and routes answers and events by
+  their envelope alone, without parsing them. A 2,000-row table: 1,563 to
+  about 1,400 ms (0.6.4 with a browser of its own: about 1,265).
+- `ax` with the default limit reads a page the cheaper way for that page.
+  The read that stops at the limit, node by node, now gives up for one full
+  read when it projects more node reads than a quarter of the page's DOM
+  nodes, as on markup where every printed line sits under many wrappers. A
+  2,000-row list nested in divs: 5.1 s in 0.6.4, 3.1 s now; a 1,000-row
+  table is read in one call (about 900 ms); 2,000- and 4,000-row tables keep
+  stopping at the limit. A snapshot that gave up reads the page's frames and
+  clickable elements once, not twice.
+
 ## [0.6.5] - 2026-10-31
 
 ### Added

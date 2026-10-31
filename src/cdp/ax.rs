@@ -109,7 +109,15 @@ pub struct Options {
     pub origin: String,
     /// What the page makes clickable beyond the tree's actionable roles.
     pub clicks: Clickables,
+    /// The lazy walk gives up (and the caller reads the whole tree in one
+    /// call instead) once it projects more child fetches than this to reach
+    /// the limit. `None`: no budget.
+    pub lazy_budget: Option<usize>,
 }
+
+/// Fetched nodes the lazy walk reaches before it projects its total from
+/// the lines they gave.
+pub const LAZY_PROBE: usize = 24;
 
 /// Elements a user could click though the tree gives them no actionable
 /// role (a `<div>` row with a click handler, an icon `<span>`), by backend
@@ -126,6 +134,7 @@ pub struct Clickables {
 
 /// One frame's AX nodes, spliced under the AX node of its owner element
 /// (`<iframe>` backend node id).
+#[derive(Clone)]
 pub struct Frame {
     pub owner_backend_id: u64,
     pub nodes: Vec<Value>,
@@ -230,6 +239,12 @@ struct Tree<'a> {
     /// browser answered without is not asked again).
     fetched: std::collections::HashSet<usize>,
     fetch_failed: bool,
+    /// Child fetches so far, and the fetched nodes the walk has reached
+    /// (see [`Options::lazy_budget`]): fetches run ahead of the walk by up
+    /// to a window of siblings, so the lines per fetch are read off the
+    /// fetches it has used.
+    calls: usize,
+    used: std::collections::HashSet<usize>,
     /// The output limit was reached mid-walk: no more lines are printed.
     stopped: bool,
     /// Line indices whose node's children were cut off by the limit (the
@@ -275,6 +290,14 @@ impl<'a> Tree<'a> {
                     }
                 }
             }
+            // Never more fetches than the budget allows, whatever the
+            // projection: past it, one full read is the cheaper way.
+            if let Some(budget) = self.opts.lazy_budget {
+                if self.calls + todo.len() > budget {
+                    self.give_up("its fetch budget is spent");
+                    todo.clear();
+                }
+            }
             if !todo.is_empty() {
                 let done: Vec<usize> = todo.iter().filter_map(|id| self.by_id.get(id).copied()).collect();
                 if let Some(mut fetch) = self.fetch.take() {
@@ -283,6 +306,7 @@ impl<'a> Tree<'a> {
                     if failed {
                         self.fetch_failed = true;
                     }
+                    self.calls += todo.len();
                     for i in done {
                         self.fetched.insert(i);
                     }
@@ -292,6 +316,9 @@ impl<'a> Tree<'a> {
                 }
             }
         }
+        if self.fetched.contains(&idx) && self.used.insert(idx) {
+            self.check_budget();
+        }
         let mut out: Vec<usize> = ids.iter().filter_map(|id| self.by_id.get(id).copied()).collect();
         // An <iframe>'s document lives in another frame's tree.
         if let Some(backend) = backend_id(&self.nodes[idx]) {
@@ -300,6 +327,26 @@ impl<'a> Tree<'a> {
             }
         }
         out
+    }
+
+    /// On a page where each line costs many fetches (deep wrappers, wide
+    /// rows), reading the whole tree at once is cheaper: once the fetches
+    /// used project past the budget, give up, and the caller does that.
+    fn check_budget(&mut self) {
+        let Some(budget) = self.opts.lazy_budget else { return };
+        let used = self.used.len();
+        let projected = used * self.opts.limit / self.lines.len().max(1);
+        if used >= LAZY_PROBE && projected > budget {
+            let why = format!("{used} fetches for {} lines project {projected}, past {budget}", self.lines.len());
+            self.give_up(&why);
+        }
+    }
+
+    fn give_up(&mut self, why: &str) {
+        crate::timing::log(&format!("[ax] lazy walk gives up for one full read: {why}"));
+        self.fetch = None;
+        self.fetch_failed = true;
+        self.stopped = true;
     }
 
     fn role(node: &Value) -> &str {
@@ -788,6 +835,8 @@ fn render_inner(
         fetch,
         fetched: std::collections::HashSet::new(),
         fetch_failed: false,
+        calls: 0,
+        used: std::collections::HashSet::new(),
         stopped: false,
         boundary: Vec::new(),
     };
