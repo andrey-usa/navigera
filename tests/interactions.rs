@@ -1486,3 +1486,39 @@ fn ax_with_a_limit_on_a_big_table_stops_at_the_limit() {
     let r = s.ok(&["click", "--selector", "tr:nth-child(3) button"]);
     assert!(r.is_object(), "{r}");
 }
+
+/// Text in a page of `<div>`s shares lines (a line per `<div>` made such a
+/// page over twice the size), and a cut says how much it left out and the
+/// ref that reads all of it.
+#[test]
+fn text_shares_lines_and_a_cut_says_how_to_read_the_rest() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("text", &[]);
+    let rows: String = (0..300)
+        .map(|i| format!("<div>{}</div>", (0..10).map(|j| format!("<div>r{i}c{j}</div>")).collect::<String>()))
+        .collect();
+    s.ok(&["goto", &format!("data:text/html,<title>cells</title>{rows}<button>Next</button>")]);
+    let tree = s.text(&["ax", "--limit", "0"]);
+    let text_lines = tree.lines().filter(|l| l.starts_with("- text: ")).count();
+    assert!(text_lines < 80, "3,000 cells took {text_lines} lines:\n{tree}");
+    assert!(tree.contains("r0c0 r0c1") && tree.contains("r299c9") && tree.contains("- button \"Next\""), "{tree}");
+    for i in [0, 150, 299] {
+        for j in 0..10 {
+            assert!(tree.contains(&format!("r{i}c{j}")), "r{i}c{j} is missing:\n{tree}");
+        }
+    }
+
+    let long = "Lorem ipsum dolor sit amet. ".repeat(40);
+    s.ok(&["goto", &format!("data:text/html,<title>long</title><div>{long}</div><p>{long}</p>")]);
+    let tree = s.text(&["ax"]);
+    let refs: Vec<&str> = tree.match_indices("chars: get text ").map(|(at, m)| &tree[at + m.len()..]).collect();
+    assert_eq!(refs.len(), 2, "both cuts say how to read the rest:\n{tree}");
+    let omitted = format!("(+{} chars", long.trim().chars().count() - 300);
+    assert_eq!(tree.matches(&omitted).count(), 2, "{tree}");
+    for r in refs {
+        let id: String = r.chars().take_while(char::is_ascii_digit).collect();
+        assert_eq!(s.text(&["get", "text", &id]), long.trim(), "get text {id}");
+    }
+}

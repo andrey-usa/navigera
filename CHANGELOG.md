@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Adjacent text in a snapshot shares lines of up to 300 characters instead
+  of taking a line per element: a page of 3,000 `<div>` cells went from
+  3,001 lines (39 KB) to 51 lines (15 KB). A control or any other element
+  between texts still starts a new line, and no text is cut to pack a line.
+- A text, name or value cut in a snapshot now says how much it left out,
+  and a cut text says which ref reads all of it:
+  `… (+1979 chars: get text 8)`. A name's cut is noted outside its quotes.
+
 ### Fixed
 
 - A long poll (a chat or notification request held open, reconnected when
