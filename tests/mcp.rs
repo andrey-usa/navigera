@@ -38,6 +38,7 @@ impl Client {
     fn start_with(env: &[(&str, &str)]) -> Client {
         let mut child = Command::new(tool_exe())
             .arg("mcp")
+            .env_remove("NAVIGERA_DECIDER_KEY")
             .env_remove("TYPESAFE_API_KEY")
             .env_remove("NAVIGERA_DECIDER_URL")
             .envs(env.iter().copied())

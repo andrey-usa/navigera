@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The decision model's key is `NAVIGERA_DECIDER_KEY`, one key for whichever
+  model `NAVIGERA_DECIDER_MODEL` names (Jev, Kev, ...). `TYPESAFE_API_KEY`
+  is still read when it is unset.
+
 ### Fixed
 
 - `start --profile` opens one window, not two: the profile browser starts

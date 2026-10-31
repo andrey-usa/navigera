@@ -289,9 +289,9 @@ where the session (or `navigera mcp`) starts:
 
 | variable | Value |
 |---|---|
-| `TYPESAFE_API_KEY` | TypeSafe's API, `https://api.typesafe.ai/v1/systemone` |
+| `NAVIGERA_DECIDER_KEY` | the API key, the same for every model (`TYPESAFE_API_KEY` is read when it is unset); with no URL, TypeSafe's API, `https://api.typesafe.ai/v1/systemone` |
 | `NAVIGERA_DECIDER_URL` | an endpoint with the same API (a LiteLLM proxy's `/typesafe/v1/systemone`, a mock); `http://` directly, `https://` through `curl` |
-| `NAVIGERA_DECIDER_MODEL` | model id (default `jev-latest`) |
+| `NAVIGERA_DECIDER_MODEL` | model id (default `jev-latest`; any model the endpoint serves, such as a Kev model) |
 | `NAVIGERA_FIND_MIN` | probability `--find` needs before it acts (default 0.5) |
 
 `start` reports `"decider": "<model>"` when one is configured, so an agent can

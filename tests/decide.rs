@@ -101,7 +101,11 @@ fn find_check_and_find_targets_ask_the_decision_model() {
     // the session takes a smaller one from its environment.
     let started = s.run(
         &["start"],
-        &[("NAVIGERA_DECIDER_URL", &jev.url), ("TYPESAFE_API_KEY", "test-key"), ("NAVIGERA_AX_PREVIEW_BYTES", "1000")],
+        &[
+            ("NAVIGERA_DECIDER_URL", &jev.url),
+            ("NAVIGERA_DECIDER_KEY", "test-key"),
+            ("NAVIGERA_AX_PREVIEW_BYTES", "1000"),
+        ],
     );
     assert_eq!(started["ok"], true, "{started}");
     assert_eq!(started["result"]["decider"], "jev-latest", "{started}");
@@ -168,7 +172,8 @@ fn without_a_decision_model_find_says_how_to_get_one() {
     }
     let site = serve("bench/site/server.py", &[]);
     let s = Session { name: format!("nv-nodecide-{}", std::process::id()) };
-    let started = s.run(&["start"], &[("NAVIGERA_DECIDER_URL", ""), ("TYPESAFE_API_KEY", "")]);
+    let started =
+        s.run(&["start"], &[("NAVIGERA_DECIDER_URL", ""), ("NAVIGERA_DECIDER_KEY", ""), ("TYPESAFE_API_KEY", "")]);
     assert_eq!(started["ok"], true, "{started}");
     assert!(started["result"].get("decider").is_none(), "{started}");
     assert!(started.get("notes").is_none(), "{started}");
@@ -176,5 +181,5 @@ fn without_a_decision_model_find_says_how_to_get_one() {
     assert!(s.run(&["ax"], &[]).get("notes").is_none(), "no decision model, no note");
     let r = s.run(&["click", "--find", "the cart link"], &[]);
     assert_eq!(r["ok"], false);
-    assert!(r["error"].as_str().unwrap().contains("TYPESAFE_API_KEY"), "{r}");
+    assert!(r["error"].as_str().unwrap().contains("NAVIGERA_DECIDER_KEY"), "{r}");
 }

@@ -435,7 +435,7 @@ pub const EXAMPLES: &[Help] = &[
         ],
         &[
             ("<target>", "the checkbox/radio/switch, by ref, --selector, …"),
-            ("<yes/no question>", "ask the decision model; needs TYPESAFE_API_KEY"),
+            ("<yes/no question>", "ask the decision model; needs NAVIGERA_DECIDER_KEY"),
             ("--no-wait", "with a question: skip the wait for the network to go quiet (see `ax --no-wait`)"),
         ],
     ),

@@ -159,8 +159,10 @@ they look for it.
 
 Two small decisions an agent otherwise spends a page tree and an LLM turn on,
 *which element* and *did it work*, can go to a System One model:
-TypeSafe's [Jev](https://docs.typesafe.ai) when `TYPESAFE_API_KEY` is set, or
-any endpoint with the same API through `NAVIGERA_DECIDER_URL`.
+TypeSafe's models ([Jev](https://docs.typesafe.ai), Kev, ...) when
+`NAVIGERA_DECIDER_KEY` is set (`NAVIGERA_DECIDER_MODEL` picks the model, the
+key stays the same; `TYPESAFE_API_KEY` still works), or any endpoint with the
+same API through `NAVIGERA_DECIDER_URL`.
 
 ```bash
 navigera -s work click --find "accept the cookies"   # acts on the element the model picks

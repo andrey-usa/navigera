@@ -15,7 +15,7 @@ navigera runs a real browser for an agent that opens pages nobody vetted.
 | a web page vs. the CDP connection | the default transport is a private pipe (Linux/macOS): no port at all. Chrome rejects DevTools WebSocket connections from web origins |
 | the downloaded binary | `install.sh` / `install.ps1` verify the SHA-256 published with each release; release builds carry GitHub build-provenance attestations (`gh attestation verify <file> -R andrey-usa/navigera`) |
 | the MCP server's file access | every file a tool or `browser_run` step reads or writes (upload, route `body_file`, `state`, `network --har`/`--body-file`, `pdf`, `screenshot --path`, `downloads --dir`) must be inside the working directory, and `file:` and `chrome://`/`devtools://` pages are refused, unless `NAVIGERA_MCP_ALLOW_FILES=1` |
-| page content vs. third parties | nothing leaves the machine but the browser's own traffic, unless you configure a decision model (`TYPESAFE_API_KEY` / `NAVIGERA_DECIDER_URL`). Then `find` and `check` send the page's accessibility tree to it, with text typed into fields replaced by `(filled)`; the key goes to `curl` on stdin, not in its arguments |
+| page content vs. third parties | nothing leaves the machine but the browser's own traffic, unless you configure a decision model (`NAVIGERA_DECIDER_KEY` / `NAVIGERA_DECIDER_URL`). Then `find` and `check` send the page's accessibility tree to it, with text typed into fields replaced by `(filled)`; the key goes to `curl` on stdin, not in its arguments |
 
 ## Known exposures
 
