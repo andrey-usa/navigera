@@ -1,0 +1,84 @@
+name: pr-text
+
+# A pull request's title, description and commits, and what lands on master,
+# carry the author's words only: no footer or trailer a tool appends, no
+# identity other than the maintainer's (and GitHub's own merge commits and
+# dependency bumps). A squash merge turns the description into master's
+# commit message, so the description is checked like a commit, on every edit.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-text:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the text and the identities
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, re, subprocess, sys
+
+          event = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
+          # Footer and trailer shapes tools append: a "generated with/by
+          # [tool](link)" line, co-author and session trailers, the robot
+          # emoji some footers start with.
+          text_rules = [
+              (re.compile(r"generated\s+(with|by)\s*\[", re.I), "a 'generated with/by [tool](link)' footer"),
+              (re.compile(r"^\s*co-authored-by:", re.I | re.M), "a Co-authored-by trailer"),
+              (re.compile(r"^[\w-]+-session:\s*https?://", re.I | re.M), "a session-link trailer"),
+              (re.compile("\U0001F916"), "the robot emoji of a tool footer"),
+          ]
+          allowed = {
+              "62624421+andrey-usa@users.noreply.github.com",
+              "noreply@github.com",
+              "49699333+dependabot[bot]@users.noreply.github.com",
+          }
+          problems = []
+
+          def check_text(where, text):
+              for rule, what in text_rules:
+                  if rule.search(text or ""):
+                      problems.append(f"{where}: {what}")
+
+          def git(*args):
+              return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
+
+          if os.environ["EVENT_NAME"] == "pull_request":
+              pr = event["pull_request"]
+              check_text("PR title", pr.get("title"))
+              check_text("PR description", pr.get("body"))
+              span = f"{pr['base']['sha']}..{pr['head']['sha']}"
+          else:
+              before = event.get("before") or ""
+              span = f"{before}..{event['after']}" if before.strip("0") else f"{event['after']}~1..{event['after']}"
+
+          for record in git("log", "--format=%H%x1f%ae%x1f%ce%x1f%B%x1e", span).split("\x1e"):
+              if not record.strip():
+                  continue
+              sha, author, committer, message = record.strip("\n").split("\x1f", 3)
+              short = sha[:9]
+              for role, email in (("author", author), ("committer", committer)):
+                  if email not in allowed:
+                      problems.append(f"commit {short}: {role} {email} is not the maintainer's identity")
+              check_text(f"commit {short} message", message)
+
+          if problems:
+              for p in problems:
+                  print(f"::error title=pr-text::{p}")
+              print("Edit the PR description or the commit messages; the check runs again on every edit.")
+              sys.exit(1)
+          print(f"pr-text: clean ({span})")
+          EOF
