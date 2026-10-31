@@ -81,15 +81,21 @@ pub struct NetState {
 }
 
 /// A request to a URL that has already been requested twice or more, at a
-/// steady interval (this gap within half to double the one before, at most
-/// [`POLL_MAX_INTERVAL`]), is a poll: it neither counts as pending nor moves
-/// the quiet clock. `starts` are the earlier starts of that URL, oldest first.
+/// steady interval (this gap within half to double the one before, between
+/// [`POLL_MIN_INTERVAL`] and [`POLL_MAX_INTERVAL`]), is a poll: it neither
+/// counts as pending nor moves the quiet clock. `starts` are the earlier
+/// starts of that URL, oldest first.
 fn is_poll(starts: &[std::time::Instant], now: std::time::Instant) -> bool {
     let [.., a, b] = starts else { return false };
     let before = b.duration_since(*a);
     let gap = now.duration_since(*b);
-    before <= POLL_MAX_INTERVAL && gap >= before / 2 && gap <= before * 2
+    (POLL_MIN_INTERVAL..=POLL_MAX_INTERVAL).contains(&before) && gap >= before / 2 && gap <= before * 2
 }
+
+/// The shortest gap between requests that can make them a poll: a burst
+/// to one path (a `Promise.all`, a quick chain of pages) is loading, not
+/// polling, and must keep the wait.
+const POLL_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The longest gap between requests that still makes them a poll.
 const POLL_MAX_INTERVAL: Duration = Duration::from_secs(10);
@@ -781,6 +787,9 @@ mod tests {
         assert!(!is_poll(&[t0, at(t0, 300)], at(t0, 3000)));
         // Too slow to be a poll worth ignoring.
         assert!(!is_poll(&[t0, at(t0, 20_000)], at(t0, 40_000)));
+        // A burst to one path is loading: too quick to be a poll.
+        assert!(!is_poll(&[t0, at(t0, 1)], at(t0, 2)));
+        assert!(!is_poll(&[t0, at(t0, 120)], at(t0, 240)));
     }
 
     #[test]
