@@ -1216,6 +1216,30 @@ fn drag_runs_a_real_html5_drag() {
     }
 }
 
+/// A target that has to scroll into view: the source is pressed where it is
+/// before that scroll, not where it was (the scroll moves it away, and the
+/// old point then lies over the target itself).
+#[test]
+fn drag_to_a_target_far_below_drags_the_source() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    for (tag, mobile) in [("desk", false), ("mob", true)] {
+        let s = Session::start(&format!("dragf-{tag}"), &[]);
+        if mobile {
+            s.ok(&["set", "device", "iPhone 15"]);
+        }
+        for page in ["drag-native", "drag-pointer"] {
+            s.ok(&["goto", &format!("{}/{page}", site.url)]);
+            s.ok(&["eval", "document.getElementById('b').style.marginBottom = '3000px'"]);
+            let r = s.ok(&["drag", "#a", "#c"]);
+            assert_eq!(r["drag"]["path"], "drag", "{tag} {page}: {r}");
+            assert_eq!(r["drag"]["dropped"], true, "{tag} {page}: {r}");
+            let log = s.text(&["get", "text", "--selector", "#log"]);
+            assert!(log.contains("drop:a"), "{tag} {page}: {log}");
+            assert_eq!(list_order(&s), "bca", "{tag} {page}");
+        }
+    }
+}
+
 /// A ref whose element left the page fails at once and says so; a bare
 /// `draggable=true` element gets a ref without any handler on it.
 #[test]

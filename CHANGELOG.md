@@ -28,6 +28,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `drag` to a target that has to scroll into view drags the source. The
+  target used to be scrolled into view before the press, which moved the
+  source away: the press landed on whatever had scrolled under it (often
+  the target itself), so the wrong element was dragged or no drag started.
+  As in Playwright, the source is now pressed and the drag started first,
+  and the target is scrolled into view while it is held.
 - A snapshot cut by `--limit` that was read in one call said "1 more lines"
   whatever its length; it now says "more lines", as the lazy read does.
 - `start --profile` opens one window, not two: the profile browser starts

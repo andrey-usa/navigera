@@ -947,6 +947,22 @@ const DRAG_DROP: &str = r#"function (el) {
 /// Mouse moves from the press to the target of a `drag`.
 const DRAG_STEPS: usize = 8;
 
+/// The first moves of a drag, off the press point past Chrome's drag
+/// threshold (4 px): where a native drag starts, before the target is
+/// scrolled into view.
+const DRAG_START_STEPS: [(f64, f64); 2] = [(3.0, 3.0), (6.0, 6.0)];
+
+/// A held drag's end: the result and the point it ended at, or the target
+/// had no on-screen point (its `on_element` result) and the drag was let go.
+enum Held {
+    Done(Value, (f64, f64)),
+    NoTarget(Result<Value>),
+}
+
+fn drag_point(p: &Value) -> Option<(f64, f64)> {
+    Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?))
+}
+
 const IDENTITY: &str = "function (el) { return el; }";
 
 /// Auto-wait: resolve the first match for `sel`, polling every 50 ms for up
@@ -3169,29 +3185,41 @@ impl Page {
     /// or one that never reports a drag) gets the events a browser fires, dragstart through dragend, from the
     /// page, for a `draggable` source (`{html5: true, dropped, path:
     /// "synthetic"}`), with one DataTransfer shared from start to drop.
+    ///
+    /// The target is scrolled into view only once the source is held, as
+    /// Playwright does: scrolling it into view first could move the source
+    /// out from under the press point, and the press would then land on (and
+    /// drag) whatever had scrolled there.
     pub fn drag(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
         let settle = json!(self.hit_settle_ms(wait));
         let a = self.on_element(from, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout)?;
-        let b = self.on_element(to, "drag", HOVER_PREP, &[settle], wait, timeout);
-        let point = |p: &Value| Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?));
-        let to_point = b.as_ref().ok().and_then(point);
-        let (Some((ax, ay)), Some((bx, by))) = (point(&a), to_point) else {
-            // No on-screen point for one of them (a drop zone that appears
-            // only once the drag starts, a covered target, a frame out of
-            // reach): a draggable source still gets the page-side drag.
+        let resolve_to = || self.on_element(to, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout);
+        let Some((ax, ay)) = drag_point(&a) else {
+            // No on-screen point for the source (a covered element, a frame
+            // out of reach): a draggable source still gets the page-side drag.
             if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
                 return Ok(synthetic);
             }
-            b?;
+            resolve_to()?;
             bail!("drag: no on-screen point for both elements (inside a cross-origin iframe?)");
         };
-        match self.send("Input.setInterceptDrags", json!({ "enabled": true }), timeout) {
+        let held = match self.send("Input.setInterceptDrags", json!({ "enabled": true }), timeout) {
             Ok(_) => {
-                let r = self.drag_with_intercept((ax, ay), (bx, by), timeout);
+                let r = self.drag_with_intercept((ax, ay), &resolve_to, timeout);
                 // Whatever happened, Chrome gets its own drags back.
                 let _ = self.send("Input.setInterceptDrags", json!({ "enabled": false }), timeout);
+                r?
+            }
+            Err(_) => {
+                if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
+                    return Ok(synthetic);
+                }
+                self.drag_mouse((ax, ay), &resolve_to, timeout)?
+            }
+        };
+        match held {
+            Held::Done(r, (bx, by)) => {
                 self.moved_to(bx, by);
-                let r = r?;
                 // An engine can take the command and still never report a
                 // drag (Lightpanda): a source that is draggable after the
                 // held mouse gets the page-side drag.
@@ -3202,13 +3230,16 @@ impl Page {
                 }
                 Ok(r)
             }
-            Err(_) => {
+            Held::NoTarget(b) => {
+                // No on-screen point for the target (a drop zone that appears
+                // only once the drag starts, a covered target, a frame out
+                // of reach): the held drag was let go; a draggable source
+                // still gets the page-side drag.
                 if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
                     return Ok(synthetic);
                 }
-                self.moved_to(bx, by);
-                self.drag_mouse((ax, ay), (bx, by), timeout)?;
-                Ok(json!({ "from": { "x": ax, "y": ay }, "to": { "x": bx, "y": by }, "path": "mouse" }))
+                b?;
+                bail!("drag: no on-screen point for both elements (inside a cross-origin iframe?)");
             }
         }
     }
@@ -3225,18 +3256,28 @@ impl Page {
         Ok(Some(json!({ "html5": true, "dropped": dropped, "path": "synthetic" })))
     }
 
-    /// Press at `a`, move in steps to `b`, release: the held mouse.
-    fn drag_mouse(&self, a: (f64, f64), b: (f64, f64), timeout: Duration) -> Result<()> {
-        let mut events = vec![("mouseMoved", a.0, a.1, "none", 0), ("mousePressed", a.0, a.1, "left", 1)];
+    /// Press at `a`, move off it past the drag threshold, find the target
+    /// (scrolling it into view), move in steps to it, release: the held mouse.
+    fn drag_mouse(&self, a: (f64, f64), resolve_to: &dyn Fn() -> Result<Value>, timeout: Duration) -> Result<Held> {
+        self.mouse_event("mouseMoved", a.0, a.1, "none", 0, timeout)?;
+        self.mouse_event("mousePressed", a.0, a.1, "left", 1, timeout)?;
+        let mut at = a;
+        for (dx, dy) in DRAG_START_STEPS {
+            at = (a.0 + dx, a.1 + dy);
+            self.mouse_event("mouseMoved", at.0, at.1, "left", 1, timeout)?;
+        }
+        let to = resolve_to();
+        let Some(b) = to.as_ref().ok().and_then(drag_point) else {
+            self.mouse_event("mouseReleased", at.0, at.1, "left", 0, timeout)?;
+            return Ok(Held::NoTarget(to));
+        };
         for i in 1..=DRAG_STEPS {
             let t = i as f64 / DRAG_STEPS as f64;
-            events.push(("mouseMoved", a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, "left", 1));
+            self.mouse_event("mouseMoved", at.0 + (b.0 - at.0) * t, at.1 + (b.1 - at.1) * t, "left", 1, timeout)?;
         }
-        events.push(("mouseReleased", b.0, b.1, "left", 0));
-        for (kind, x, y, button, buttons) in events {
-            self.mouse_event(kind, x, y, button, buttons, timeout)?;
-        }
-        Ok(())
+        self.mouse_event("mouseReleased", b.0, b.1, "left", 0, timeout)?;
+        let r = json!({ "from": { "x": a.0, "y": a.1 }, "to": { "x": b.0, "y": b.1 }, "path": "mouse" });
+        Ok(Held::Done(r, b))
     }
 
     fn mouse_event(&self, kind: &str, x: f64, y: f64, button: &str, buttons: u8, timeout: Duration) -> Result<Value> {
@@ -3248,7 +3289,12 @@ impl Page {
     }
 
     /// The drag with `Input.setInterceptDrags` on: see [`Page::drag`].
-    fn drag_with_intercept(&self, a: (f64, f64), b: (f64, f64), timeout: Duration) -> Result<Value> {
+    fn drag_with_intercept(
+        &self,
+        a: (f64, f64),
+        resolve_to: &dyn Fn() -> Result<Value>,
+        timeout: Duration,
+    ) -> Result<Held> {
         let mut events = self.client.subscribe();
         let session = self.session_id.clone();
         // The drag Chrome would have started, if it has, from what has come in.
@@ -3289,33 +3335,60 @@ impl Page {
             .and_then(|v| v["result"]["value"].as_bool())
             .unwrap_or(false);
         let patience = if expecting { Duration::from_millis(400) } else { Duration::from_millis(0) };
+        // One move: the drag Chrome started on it, if any, waited for when
+        // the source is draggable.
+        let step = |x: f64, y: f64, events: &mut tokio::sync::broadcast::Receiver<Value>| -> Result<Option<Value>> {
+            self.mouse_event("mouseMoved", x, y, "left", 1, timeout)?;
+            let mut data = intercepted(events);
+            if data.is_none() && !patience.is_zero() {
+                data = self.block_on(async {
+                    let wait = async {
+                        loop {
+                            match events.recv().await {
+                                Ok(e)
+                                    if e.get("method").and_then(Value::as_str) == Some("Input.dragIntercepted")
+                                        && e.get("sessionId").and_then(Value::as_str) == Some(session.as_str()) =>
+                                {
+                                    return Some(e["params"]["data"].clone());
+                                }
+                                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(_) => return None,
+                            }
+                        }
+                    };
+                    tokio::time::timeout(patience, wait).await.ok().flatten()
+                });
+            }
+            Ok(data)
+        };
+        // Off the source past the drag threshold, where Chrome starts a drag.
         let mut data = None;
+        let mut at = a;
+        for (dx, dy) in DRAG_START_STEPS {
+            if data.is_some() {
+                break;
+            }
+            at = (a.0 + dx, a.1 + dy);
+            data = step(at.0, at.1, &mut events)?;
+            if data.is_some() {
+                self.drag_event("dragEnter", at.0, at.1, data.as_ref(), timeout)?;
+            }
+        }
+        // The source is held: now the target may scroll into view.
+        let to = resolve_to();
+        let Some(b) = to.as_ref().ok().and_then(drag_point) else {
+            if let Some(data) = data.as_ref() {
+                let _ = self.drag_event("dragCancel", at.0, at.1, Some(data), timeout);
+            }
+            self.mouse_event("mouseReleased", at.0, at.1, "left", 0, timeout)?;
+            return Ok(Held::NoTarget(to));
+        };
         let mut path = Vec::new();
         for i in 1..=DRAG_STEPS {
             let t = i as f64 / DRAG_STEPS as f64;
-            let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+            let (x, y) = (at.0 + (b.0 - at.0) * t, at.1 + (b.1 - at.1) * t);
             if data.is_none() {
-                self.mouse_event("mouseMoved", x, y, "left", 1, timeout)?;
-                data = intercepted(&mut events);
-                if data.is_none() && !patience.is_zero() {
-                    data = self.block_on(async {
-                        let wait = async {
-                            loop {
-                                match events.recv().await {
-                                    Ok(e)
-                                        if e.get("method").and_then(Value::as_str) == Some("Input.dragIntercepted")
-                                            && e.get("sessionId").and_then(Value::as_str) == Some(session.as_str()) =>
-                                    {
-                                        return Some(e["params"]["data"].clone());
-                                    }
-                                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                    Err(_) => return None,
-                                }
-                            }
-                        };
-                        tokio::time::timeout(patience, wait).await.ok().flatten()
-                    });
-                }
+                data = step(x, y, &mut events)?;
                 if data.is_some() {
                     self.drag_event("dragEnter", x, y, data.as_ref(), timeout)?;
                 }
@@ -3327,12 +3400,13 @@ impl Page {
             // A drag may start with the last step: one more look, then it was a plain mouse drag.
             std::thread::sleep(Duration::from_millis(30));
             if let Some(data) = intercepted(&mut events) {
-                return self.finish_drag(&data, &[], b, timeout);
+                return Ok(Held::Done(self.finish_drag(&data, &[], b, timeout)?, b));
             }
             self.mouse_event("mouseReleased", b.0, b.1, "left", 0, timeout)?;
-            return Ok(json!({ "from": { "x": a.0, "y": a.1 }, "to": { "x": b.0, "y": b.1 }, "path": "mouse" }));
+            let r = json!({ "from": { "x": a.0, "y": a.1 }, "to": { "x": b.0, "y": b.1 }, "path": "mouse" });
+            return Ok(Held::Done(r, b));
         };
-        self.finish_drag(&data, &path, b, timeout)
+        Ok(Held::Done(self.finish_drag(&data, &path, b, timeout)?, b))
     }
 
     /// The rest of an intercepted drag: over at each point, then the drop.
