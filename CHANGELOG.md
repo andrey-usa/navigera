@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-10-31
+
 ### Added
 
 - `drag --to-at <x>,<y>` drops at that point of the target (CSS pixels from
@@ -747,6 +749,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.6.5]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.5
 [0.6.4]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.4
 [0.6.3]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.3
 [0.6.2]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.2
