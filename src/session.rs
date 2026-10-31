@@ -342,11 +342,15 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
             return;
         }
     });
+    // When the last connection that ran a command was done: one that only
+    // connected (`start` checking the socket is up) kept no one waiting.
     let mut free_since = Instant::now();
     for (stream, arrived) in incoming {
         let waited = arrived < free_since;
-        let quit = serve_connection(&mut driver, stream, &last_activity, &server, waited);
-        free_since = Instant::now();
+        let (quit, ran) = serve_connection(&mut driver, stream, &last_activity, &server, waited);
+        if ran {
+            free_since = Instant::now();
+        }
         if quit {
             break;
         }
@@ -377,17 +381,25 @@ struct ServerInfo {
 pub const SHARED_NAME_NOTE: &str = "another command was running on this session when this one came in: a session \
      name is shared by every process that uses it, so two agents on one name drive one browser (give each its own -s name)";
 
-/// Serve one client connection; returns true once a `quit` was answered.
-/// `waited`: it came in while another connection was being served.
-fn serve_connection(driver: &mut Driver, stream: Stream, last: &AtomicU64, server: &ServerInfo, waited: bool) -> bool {
+/// Serve one client connection; returns whether a `quit` was answered and
+/// whether it ran any command. `waited`: it came in while another
+/// connection's command was running.
+fn serve_connection(
+    driver: &mut Driver,
+    stream: Stream,
+    last: &AtomicU64,
+    server: &ServerInfo,
+    waited: bool,
+) -> (bool, bool) {
     let reader = match stream.try_clone() {
         Ok(read_half) => BufReader::new(read_half),
-        Err(_) => return false,
+        Err(_) => return (false, false),
     };
+    let mut ran = false;
     let mut writer = stream;
     let mut waited = waited;
     for line in reader.lines() {
-        let Ok(raw) = line else { return false };
+        let Ok(raw) = line else { return (false, ran) };
         // `sessions` asks for status without making the session busy.
         let (is_status, probe) = match serde_json::from_str::<Value>(&raw) {
             Ok(v) => (v["op"] == "status", v["op"] == "status" && v[PROBE] == true),
@@ -400,6 +412,8 @@ fn serve_connection(driver: &mut Driver, stream: Stream, last: &AtomicU64, serve
         let Some((mut responses, is_quit)) = protocol::handle_line(driver, &raw) else {
             continue;
         };
+        // A `sessions` probe is no one's command either.
+        ran |= !probe;
         if let Some(first) = responses.first_mut() {
             if waited {
                 first.notes.get_or_insert_with(Vec::new).push(SHARED_NAME_NOTE.into());
@@ -419,13 +433,13 @@ fn serve_connection(driver: &mut Driver, stream: Stream, last: &AtomicU64, serve
             last.store(now_s(), Ordering::Relaxed);
         }
         if is_quit {
-            return true;
+            return (true, ran);
         }
         if written.is_err() {
-            return false;
+            return (false, ran);
         }
     }
-    false
+    (false, ran)
 }
 
 /// After `idle_s` without traffic, send ourselves a `quit` over the socket so

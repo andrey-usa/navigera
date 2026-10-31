@@ -382,10 +382,16 @@ fn keys_shift_and_enter_outside_forms() {
     s.ok(&["press", "Shift+1", "--selector", "#i"]);
     assert_eq!(s.text("document.getElementById('i').value"), "A!");
     s.ok(&["eval", "document.activeElement.blur()"]);
-    let (r, _) = s.run(&["press", "Enter"]);
-    assert_eq!(r["ok"], true, "{r}");
-    let ms = r["elapsed_ms"].as_f64().unwrap_or(f64::MAX);
-    assert!(ms < 140.0, "Enter on <body> waited for a navigation: {ms} ms");
+    // The fastest of three: waiting out the 150 ms grace would make every
+    // try slower than that, while a loaded runner only adds noise.
+    let fastest = (0..3)
+        .map(|_| {
+            let (r, _) = s.run(&["press", "Enter"]);
+            assert_eq!(r["ok"], true, "{r}");
+            r["elapsed_ms"].as_f64().unwrap_or(f64::MAX)
+        })
+        .fold(f64::MAX, f64::min);
+    assert!(fastest < 140.0, "Enter on <body> waited for a navigation: {fastest} ms at best");
 }
 
 /// An accepted prompt() without --prompt-text answers with the page's
