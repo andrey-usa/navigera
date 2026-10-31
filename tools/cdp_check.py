@@ -58,6 +58,11 @@ def enum_of(param: dict, domain: str, types: dict):
     return None
 
 
+# The domain of navigera's own shared-browser host (src/shared.rs): its
+# methods are answered by the host and never reach the browser.
+HOST_DOMAIN = "Navigera."
+
+
 def check_trace(lines, commands, types):
     errors, notes, seen = [], set(), {}
     for raw in lines:
@@ -69,6 +74,8 @@ def check_trace(lines, commands, types):
             method, params = rec["method"], rec.get("params") or {}
         except (json.JSONDecodeError, KeyError, TypeError):
             notes.add("skipped an unreadable trace line")
+            continue
+        if method.startswith(HOST_DOMAIN):
             continue
         seen.setdefault(method, 0)
         seen[method] += 1

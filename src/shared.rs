@@ -524,10 +524,12 @@ impl Router {
             }
         };
         if method == CLOSE_IF_UNUSED {
-            self.close_now = true;
-            // How many other clients use the browser: it closes once they
-            // and this one are gone.
+            // Closed as soon as this client is gone, if no other uses the
+            // browser; with others, it keeps its grace period after them.
             let others = self.clients.len().saturating_sub(1);
+            if others == 0 {
+                self.close_now = true;
+            }
             let result = RawValue::from_string(format!("{{\"others\":{others}}}")).ok();
             if let Some(client) = self.clients.get(&cid) {
                 client.send(answer(id, result.as_deref(), None, None));

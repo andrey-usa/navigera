@@ -1494,14 +1494,9 @@ fn ax_with_a_limit_on_a_big_table_stops_at_the_limit() {
 /// ref that reads all of it.
 #[test]
 fn text_shares_lines_and_a_cut_says_how_to_read_the_rest() {
-    if !chrome() {
-        return;
-    }
+    let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("text", &[]);
-    let rows: String = (0..300)
-        .map(|i| format!("<div>{}</div>", (0..10).map(|j| format!("<div>r{i}c{j}</div>")).collect::<String>()))
-        .collect();
-    s.ok(&["goto", &format!("data:text/html,<title>cells</title>{rows}<button>Next</button>")]);
+    s.ok(&["goto", &format!("{}/div-cells", site.url)]);
     let tree = s.text(&["ax", "--limit", "0"]);
     let text_lines = tree.lines().filter(|l| l.starts_with("- text: ")).count();
     assert!(text_lines < 80, "3,000 cells took {text_lines} lines:\n{tree}");
@@ -1513,7 +1508,7 @@ fn text_shares_lines_and_a_cut_says_how_to_read_the_rest() {
     }
 
     let long = "Lorem ipsum dolor sit amet. ".repeat(40);
-    s.ok(&["goto", &format!("data:text/html,<title>long</title><div>{long}</div><p>{long}</p>")]);
+    s.ok(&["goto", &format!("{}/long-text", site.url)]);
     let tree = s.text(&["ax"]);
     let refs: Vec<&str> = tree.match_indices("chars: get text ").map(|(at, m)| &tree[at + m.len()..]).collect();
     assert_eq!(refs.len(), 2, "both cuts say how to read the rest:\n{tree}");

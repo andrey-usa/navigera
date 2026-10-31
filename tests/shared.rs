@@ -242,7 +242,10 @@ fn two_sessions_share_one_browser_and_nothing_else() {
     assert_eq!(browser.browsers().len(), 1);
 
     b.ok(&["quit"]);
-    // Kept warm for the grace, then gone.
+    // Kept warm for the grace, then gone: still there a few of the host's
+    // 250 ms checks later (A's --close-browser, with B still on it, must
+    // not close it the moment B leaves).
+    std::thread::sleep(Duration::from_millis(800));
     assert_eq!(browser.browsers().len(), 1, "kept for the grace period");
     assert!(browser.wait_browsers(0, Duration::from_secs(15)).is_empty(), "the browser exits after the grace");
 }

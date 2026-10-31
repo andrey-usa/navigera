@@ -44,6 +44,8 @@ getting wrong, one page each, built the way those sites behave:
                 happens once the settle budget runs out
 /moving-target  a button that glides to a stop over its first frames
                 (no CSS animation), reporting where it was clicked
+/div-cells      3,000 cells, each a <div> of its own text, in 300 <div> rows
+/long-text      a <div> and a <p> of 1,120 characters each
 /cookie-banner  a button under a banner with Accept and Reject that stays
 /loading-cover  a button under an overlay with a Cancel button, removed when
                 a 2.5 s fetch returns
@@ -78,6 +80,13 @@ const drift = () => {
 };
 requestAnimationFrame(drift);
 </script>""")
+
+PAGES["/div-cells"] = ("cells", "", "".join(
+    "<div>" + "".join(f"<div>r{i}c{j}</div>" for j in range(10)) + "</div>" for i in range(300)
+) + "<button>Next</button>")
+
+LONG = "Lorem ipsum dolor sit amet. " * 40
+PAGES["/long-text"] = ("long", "", f"<div>{LONG}</div><p>{LONG}</p>")
 
 PAGES["/cookie-banner"] = ("cookie banner", "", """
 <p id=status>waiting</p>
