@@ -64,15 +64,26 @@ pub struct NavState {
     pub committed_at: Option<std::time::Instant>,
 }
 
-/// A fetch/XHR open this long is a long poll or a stream.
-const LONG_REQUEST: Duration = Duration::from_secs(5);
+/// A fetch/XHR open this long is a long poll or a stream, not data the
+/// page is about to render: it stops holding a snapshot, and the URL's
+/// later requests (a long poll's reconnects) never hold one. A data request
+/// slower than this is what `wait` is for.
+const LONG_REQUEST: Duration = Duration::from_secs(1);
 
 /// A tab's in-flight `fetch`/XHR requests (`Network` events), so a read
 /// right after an action can wait for the data it triggered to arrive.
 #[derive(Clone, Debug, Default)]
 pub struct NetState {
-    /// request id -> when it started.
-    pub pending: HashMap<String, std::time::Instant>,
+    /// request id -> when it started, its method and URL without the query
+    /// (`POST /collect`), and the quiet clock before it started (put back if
+    /// it turns out to be background traffic and nothing else moved it).
+    pub pending: HashMap<String, (std::time::Instant, String, Option<std::time::Instant>)>,
+    /// Methods and URLs (without the query) whose requests are background
+    /// traffic: one
+    /// stayed open past [`LONG_REQUEST`] (a long poll, a stream), or the
+    /// server answered 202/204, no content (an analytics beacon). Their
+    /// requests neither hold a snapshot nor move the quiet clock.
+    pub background: std::collections::HashSet<String>,
     /// When the last fetch/XHR started or ended.
     pub last: Option<std::time::Instant>,
     /// URL without its query string -> when its last requests started (the
@@ -88,6 +99,23 @@ pub struct NetState {
     /// [`Shared::net_state`]): a new one after the sync means the page
     /// changed after the agent synced with it.
     pub seq: u64,
+}
+
+impl NetState {
+    /// Requests in flight that may still bring data the page renders: one
+    /// open past [`LONG_REQUEST`] is a long poll or a stream, and from now
+    /// on its URL is background traffic.
+    fn live_pending(&mut self) -> usize {
+        let mut live = 0;
+        for (started, key, _) in self.pending.values() {
+            if started.elapsed() < LONG_REQUEST {
+                live += 1;
+            } else if !key.is_empty() {
+                self.background.insert(key.clone());
+            }
+        }
+        live
+    }
 }
 
 /// A snapshot may skip the network-quiet wait when a `wait` already synced
@@ -343,23 +371,13 @@ impl Shared {
     /// Requests open longer than [`LONG_REQUEST`] are long polls or streams,
     /// not data the page is about to render: they don't count.
     pub fn net_state(&self, session_id: &str) -> (usize, Option<std::time::Instant>) {
-        self.net
-            .lock()
-            .unwrap()
-            .get(session_id)
-            .map(|n| (n.pending.values().filter(|t| t.elapsed() < LONG_REQUEST).count(), n.last))
-            .unwrap_or((0, None))
+        self.net.lock().unwrap().get_mut(session_id).map(|n| (n.live_pending(), n.last)).unwrap_or((0, None))
     }
 
     /// (Requests started, requests in flight) on this tab, for the
     /// snapshot skip check: the first is the sequence a `wait` records.
     pub fn net_seq_pending(&self, session_id: &str) -> (u64, usize) {
-        self.net
-            .lock()
-            .unwrap()
-            .get(session_id)
-            .map(|n| (n.seq, n.pending.values().filter(|t| t.elapsed() < LONG_REQUEST).count()))
-            .unwrap_or((0, 0))
+        self.net.lock().unwrap().get_mut(session_id).map(|n| (n.seq, n.live_pending())).unwrap_or((0, 0))
     }
 
     /// The request sequence a `wait` last recorded on this tab, if any.
@@ -712,10 +730,12 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                 let now = std::time::Instant::now();
                 let url = params.pointer("/request/url").and_then(Value::as_str).unwrap_or("");
                 let key = url.split(['?', '#']).next().unwrap_or("").to_string();
-                let mut poll = false;
+                let method = params.pointer("/request/method").and_then(Value::as_str).unwrap_or("GET");
+                let target = if key.is_empty() { String::new() } else { format!("{method} {key}") };
+                let mut poll = state.background.contains(&target);
                 if !key.is_empty() {
-                    let starts = state.starts.entry(key).or_default();
-                    poll = is_poll(starts, now);
+                    let starts = state.starts.entry(key.clone()).or_default();
+                    poll |= is_poll(starts, now);
                     starts.push(now);
                     if starts.len() > 3 {
                         starts.remove(0);
@@ -723,8 +743,29 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                 }
                 if !poll {
                     state.seq += 1;
-                    state.pending.entry(id.to_string()).or_insert(now);
+                    let before = state.last;
+                    state.pending.entry(id.to_string()).or_insert((now, target, before));
                     state.last = Some(now);
+                }
+            }
+        }
+        // No content back (202, 204): a beacon the page doesn't read, so
+        // that URL's requests are background traffic.
+        "Network.responseReceived" => {
+            let status = params.pointer("/response/status").and_then(Value::as_u64);
+            if let (Some(202 | 204), Some(id)) = (status, params.get("requestId").and_then(Value::as_str)) {
+                let mut net = shared.net.lock().unwrap();
+                if let Some(state) = net.get_mut(session) {
+                    if let Some((started, key, before)) = state.pending.remove(id) {
+                        if !key.is_empty() {
+                            state.background.insert(key);
+                        }
+                        // It never was data: the quiet clock goes back to
+                        // where it stood, unless something else moved it since.
+                        if state.last == Some(started) {
+                            state.last = before;
+                        }
+                    }
                 }
             }
         }
@@ -732,7 +773,10 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
             if let Some(id) = params.get("requestId").and_then(Value::as_str) {
                 let mut net = shared.net.lock().unwrap();
                 if let Some(state) = net.get_mut(session) {
-                    if state.pending.remove(id).is_some() {
+                    if let Some((started, key, _)) = state.pending.remove(id) {
+                        if started.elapsed() >= LONG_REQUEST && !key.is_empty() {
+                            state.background.insert(key);
+                        }
                         state.last = Some(std::time::Instant::now());
                     }
                 }

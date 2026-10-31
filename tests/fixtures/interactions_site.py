@@ -28,6 +28,8 @@ getting wrong, one page each, built the way those sites behave:
                 other on beforeunload, which takes over (a tab closed
                 without its unload path leaves the follower waiting)
 /poll           a page that polls one URL every 300 ms, forever
+/long-poll      a chat-style long poll: one request held open (?hold=ms), reconnected
+/beacons        analytics POSTs at irregular 100-900 ms intervals, answered 204
 /one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
 /click-fetch    a button that starts a 200 ms fetch, then brings a list
 /two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
@@ -111,6 +113,27 @@ PAGES["/poll"] = ("poll", "", """
 <script>
 let n = 0;
 setInterval(() => fetch('/slow-echo?ms=5').then(() => { document.getElementById('status').textContent = 'polled ' + (++n); }), 300);
+</script>""")
+
+PAGES["/long-poll"] = ("long poll", "", """
+<p id=status>connecting</p>
+<script>
+// A chat-style long poll: one request held open, reconnected when it ends.
+let n = 0;
+const poll = () => fetch('/hold?ms=' + (new URLSearchParams(location.search).get('hold') || '2000'))
+  .then(() => { document.getElementById('status').textContent = 'reconnected ' + (++n); poll(); });
+poll();
+</script>""")
+
+PAGES["/beacons"] = ("beacons", "", """
+<p id=status>tracking</p>
+<script>
+// Analytics beacons at irregular intervals; the server answers 204.
+const beacon = () => {
+  fetch('/collect', { method: 'POST', body: 'e=' + Date.now() });
+  setTimeout(beacon, 100 + Math.random() * 800);
+};
+beacon();
 </script>""")
 
 PAGES["/one-fetch"] = ("one fetch", "", """
@@ -676,6 +699,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        if urlparse(self.path).path == "/collect":
+            self.send_response(204)
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query, keep_blank_values=True)
@@ -688,6 +721,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(f"<!doctype html><html><body><div id=content>{t}</div></body></html>")
         if u.path.startswith("/event/"):
             return self.send("ok", "text/plain")
+        if u.path == "/hold":
+            import time
+            time.sleep(int(q.get("ms", ["2000"])[0]) / 1000)
+            return self.send("{}", "application/json")
         if u.path == "/slow-echo":
             import time
             time.sleep(int(q.get("ms", ["100"])[0]) / 1000)

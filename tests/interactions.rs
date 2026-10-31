@@ -1317,6 +1317,32 @@ fn median(mut v: Vec<f64>) -> f64 {
     v[v.len() / 2]
 }
 
+/// A long poll (a request held open, reconnected) and irregular analytics
+/// beacons are background traffic: the first snapshot waits at most about
+/// a second for the held request, and later ones don't wait on either.
+#[test]
+fn long_polls_and_beacons_dont_hold_snapshots() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("bg", &[]);
+    s.ok(&["goto", &format!("{}/long-poll?hold=2500", site.url)]);
+    let (first, _) = timed(&s, &["ax"]);
+    assert!(first < 2000.0, "first ax on a long-poll page took {first} ms (the cap is 3 s)");
+    let (second, _) = timed(&s, &["ax"]);
+    assert!(second < 700.0, "second ax took {second} ms");
+    // After the reconnect: the same URL is a long poll, not data.
+    s.ok(&["wait", "--text", "reconnected 1"]);
+    let after: Vec<f64> = (0..3).map(|_| timed(&s, &["ax"]).0).collect();
+    assert!(median(after.clone()) < 700.0, "ax after a reconnect took {after:?} ms");
+
+    s.ok(&["goto", &format!("{}/beacons", site.url)]);
+    // Right after load: the first beacon answered 204, so it held nothing.
+    let (first, _) = timed(&s, &["ax"]);
+    assert!(first < 450.0, "first ax on a page sending beacons took {first} ms (the quiet window is 500)");
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let beacons: Vec<f64> = (0..5).map(|_| timed(&s, &["ax"]).0).collect();
+    assert!(median(beacons.clone()) < 700.0, "ax on a page sending beacons took {beacons:?} ms");
+}
+
 /// A snapshot waits for the network to go quiet so an SPA's "Loading..." list
 /// has landed, but a request repeated at a steady interval is a poll and
 /// doesn't hold it; `--no-wait` skips the wait.
