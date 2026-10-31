@@ -2624,12 +2624,11 @@ impl Driver {
                 Command::Ax { .. } | Command::Screenshot { .. } | Command::Find { .. } | Command::Check { .. }
             ) || command.find_target().is_some())
                 && !command.no_wait()
+                && !self.session.quiet_synced()
             {
-                if !self.session.quiet_synced() {
-                    let window = self.session.network_quiet_window();
-                    let (_, waited) = self.session.network_quiet_waited(window, budget.min(NETWORK_QUIET_MAX));
-                    quiet_waited_ms = waited.as_millis() as u64;
-                }
+                let window = self.session.network_quiet_window();
+                let (_, waited) = self.session.network_quiet_waited(window, budget.min(NETWORK_QUIET_MAX));
+                quiet_waited_ms = waited.as_millis() as u64;
             }
         }
         // `--find <description>`: the decision model picks the element and the
