@@ -948,9 +948,11 @@ const DRAG_DROP: &str = r#"function (el) {
 const DRAG_STEPS: usize = 8;
 
 /// The first moves of a drag, off the press point past Chrome's drag
-/// threshold (4 px): where a native drag starts, before the target is
-/// scrolled into view.
-const DRAG_START_STEPS: [(f64, f64); 2] = [(3.0, 3.0), (6.0, 6.0)];
+/// threshold: where a native drag starts, before the target is scrolled
+/// into view. 4 px is enough on desktop; with touch emulation Chrome 158
+/// starts it only further out, so the moves go to 20 px (each move stops
+/// the walk once the drag has started).
+const DRAG_START_STEPS: [(f64, f64); 5] = [(3.0, 3.0), (6.0, 6.0), (10.0, 10.0), (15.0, 15.0), (20.0, 20.0)];
 
 /// A held drag's end: the result and the point it ended at, or the target
 /// had no on-screen point (its `on_element` result) and the drag was let go.
