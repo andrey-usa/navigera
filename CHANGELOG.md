@@ -18,14 +18,18 @@ All notable changes to this project are documented here. The format follows
   reads it in one call instead of node by node (a 250-row table: 342 to
   163 ms), and no longer copies the reply. A page with more than 4 DOM nodes
   per line of limit still reads lazily, stopping at the limit.
+- A snapshot right after a `wait` that succeeded (text, selector, url,
+  gone, js, idle) skips the network-quiet wait when no request has started
+  since (`ax` after `wait --text`: 561 to 56 ms). A snapshot that did wait
+  says so (`waited 412 ms for network quiet`). `set network-quiet <ms>`
+  sets the quiet window per session (default 500 ms; 250 ms reads a list
+  that arrives in two fetches 400 ms apart too early), and `wait --idle`
+  uses it.
 
 ### Fixed
 
 - A snapshot cut by `--limit` that was read in one call said "1 more lines"
   whatever its length; it now says "more lines", as the lazy read does.
-
-### Fixed
-
 - `start --profile` opens one window, not two: the profile browser starts
   with `--no-startup-window`, as navigera's own launches do, so there is no
   blank startup window and no "unsupported command-line flag" bar.
