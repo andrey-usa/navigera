@@ -487,7 +487,12 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             const framed = await new Promise((res) => { requestAnimationFrame(() => res(true)); setTimeout(() => res(false), 100); });
             idle = framed ? 0 : idle + 1;
             const r2 = box.getBoundingClientRect();
-            const same = r2.left === r.left && r2.top === r.top && r2.width === r.width && r2.height === r.height;
+            // The centre is where the press lands, so the centre is what
+            // must hold still: an element that spins or pulses in place
+            // (an infinite animation the settle step ignores) changes its
+            // box every frame but not its middle.
+            const same = Math.abs((r2.left + r2.width / 2) - (r.left + r.width / 2)) < 1
+                && Math.abs((r2.top + r2.height / 2) - (r.top + r.height / 2)) < 1;
             r = r2;
             if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= deadline) break;
         }
