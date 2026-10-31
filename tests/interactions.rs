@@ -1294,6 +1294,64 @@ fn a_snapshot_does_not_wait_on_polls_and_no_wait_skips_the_wait() {
     s.ok(&["screenshot", "--no-wait", "--path", &std::env::temp_dir().join("nv-quiet.png").display().to_string()]);
 }
 
+/// A snapshot after a successful `wait` skips the quiet wait (and says
+/// nothing about it), while a snapshot after a click still waits and
+/// says how long it waited.
+#[test]
+fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("quiet-skip", &[]);
+    let has_quiet_note = |r: &Value| {
+        r["notes"]
+            .as_array()
+            .map(|n| n.iter().any(|x| x.as_str().unwrap_or("").contains("network quiet")))
+            .unwrap_or(false)
+    };
+
+    s.ok(&["goto", &format!("{}/one-fetch", site.url)]);
+    s.ok(&["wait", "--text", "Alpha"]);
+    // The FIRST snapshot after the wait must skip: a median over several
+    // would hide it, since later snapshots are quiet anyway.
+    let t = std::time::Instant::now();
+    let (ok, r) = s.run(&["ax"]);
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    assert!(ok, "ax failed: {r}");
+    assert!(ms < 300.0, "first ax after wait --text took {ms:.0} ms");
+    assert!(!has_quiet_note(&r), "a skipped wait should report nothing: {r}");
+    assert!(r["result"].as_str().unwrap_or("").contains("Alpha"));
+
+    // A click is not a wait: the snapshot after it waits, and says so.
+    s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
+    s.ok(&["click", "--role", "button", "--name", "Go"]);
+    let (_, r) = s.run(&["ax"]);
+    assert!(has_quiet_note(&r), "a snapshot that waited should say so: {r}");
+    assert!(r["result"].as_str().unwrap_or("").contains("Alpha"));
+}
+
+/// The default quiet window reads a list that arrives in two fetches with
+/// a 400 ms gap between them; a 250 ms window ends in the gap and reads
+/// only the first half. That is why the default stays 500 ms and 250 ms
+/// is opt-in per session.
+#[test]
+fn a_short_quiet_window_reads_a_chained_list_early() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("quiet-window", &[]);
+
+    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
+
+    s.ok(&["set", "network-quiet", "250"]);
+    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Alpha") && !tree.contains("Beta"), "{tree}");
+
+    s.ok(&["set", "network-quiet", "500"]);
+    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
+}
+
 /// `check` on a controlled checkbox (the click's default is cancelled and the
 /// app commits the state later, as a React onChange re-render does) succeeds
 /// once the state lands, not only when it is already there as the click

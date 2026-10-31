@@ -478,6 +478,9 @@ pub struct BrowserSession {
     /// for after a full navigation timeout (a page that streams forever,
     /// a hung server). Later ops don't wait on it again.
     abandoned: std::sync::Mutex<Option<(String, u64)>>,
+    /// This session's network-quiet window for snapshots (`set
+    /// network-quiet <ms>`); the default is [`DEFAULT_NETWORK_QUIET_MS`].
+    network_quiet_ms: std::sync::Mutex<u64>,
     /// Connected to a browser navigera doesn't own (`--attach`,
     /// `--profile`): closing only disconnects.
     attached: bool,
@@ -516,6 +519,15 @@ pub struct BrowserSession {
     /// browser/client/pages that use it.
     _runtime: std::sync::Arc<tokio::runtime::Runtime>,
 }
+
+/// The snapshot network-quiet window (ms) before `set network-quiet`
+/// changes it: long enough for a list that arrives in chained fetches
+/// (a second fetch starting up to ~400 ms after the first lands) to
+/// finish, short enough to cost nothing on a page that is already quiet.
+/// A 250 ms window reads such a list early (measured: a 300–400 ms gap
+/// returns only the first half), so it is opt-in per session, not the
+/// default.
+const DEFAULT_NETWORK_QUIET_MS: u64 = 500;
 
 impl BrowserSession {
     /// Launch a headless CDP browser ready for navigation.
@@ -645,6 +657,7 @@ impl BrowserSession {
             lightpanda,
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
+            network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
             context: None,
             owner: true,
             attached: false,
@@ -724,6 +737,7 @@ impl BrowserSession {
             lightpanda: false,
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
+            network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
             context: None,
             owner: true,
             attached: true,
@@ -947,6 +961,7 @@ impl BrowserSession {
             lightpanda: false,
             timeout_ms: self.timeout_ms,
             abandoned: std::sync::Mutex::new(None),
+            network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
             attached: self.attached,
             closed: None,
             profile_dir: None,
@@ -1705,6 +1720,33 @@ impl BrowserSession {
     /// (see [`Page::network_quiet`]).
     pub fn network_quiet(&self, quiet: Duration, max: Duration) -> bool {
         self.active_tab().network_quiet(quiet, max)
+    }
+
+    /// [`Page::network_quiet_waited`]: also how long the wait took.
+    pub fn network_quiet_waited(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
+        self.active_tab().network_quiet_waited(quiet, max)
+    }
+
+    /// Whether the next snapshot may skip the quiet wait (a `wait`
+    /// already synced with the active tab, no request since).
+    pub fn quiet_synced(&self) -> bool {
+        self.active_tab().quiet_synced()
+    }
+
+    /// A `wait` just succeeded on the active tab.
+    pub fn mark_quiet_synced(&self) {
+        self.active_tab().mark_quiet_synced();
+    }
+
+    /// This session's snapshot network-quiet window.
+    pub fn network_quiet_window(&self) -> Duration {
+        Duration::from_millis(*self.network_quiet_ms.lock().unwrap())
+    }
+
+    /// `set network-quiet <ms>`: the snapshot quiet window for this
+    /// session (0 skips the window itself, pending requests still wait).
+    pub fn set_network_quiet_window(&self, ms: u64) {
+        *self.network_quiet_ms.lock().unwrap() = ms;
     }
 
     /// The default navigation timeout (`--timeout-ms`).

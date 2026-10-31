@@ -178,7 +178,15 @@ fn without_a_decision_model_find_says_how_to_get_one() {
     assert!(started["result"].get("decider").is_none(), "{started}");
     assert!(started.get("notes").is_none(), "{started}");
     s.ok(&["goto", &format!("{}/shop", site.url)]);
-    assert!(s.run(&["ax"], &[]).get("notes").is_none(), "no decision model, no note");
+    // No decision model, no decider note. A snapshot may still note what
+    // it waited for (the network-quiet wait), which is not a decider note.
+    let ax = s.run(&["ax"], &[]);
+    if let Some(notes) = ax.get("notes") {
+        for n in notes.as_array().unwrap() {
+            let t = n.as_str().unwrap_or_default();
+            assert!(!t.contains("decision model") && !t.contains("--find"), "no decision model, no decider note: {t}");
+        }
+    }
     let r = s.run(&["click", "--find", "the cart link"], &[]);
     assert_eq!(r["ok"], false);
     assert!(r["error"].as_str().unwrap().contains("NAVIGERA_DECIDER_KEY"), "{r}");

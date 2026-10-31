@@ -866,10 +866,9 @@ pub struct SessionConfig {
     pub download_dir: Option<String>,
 }
 
-/// Before `ax`/`screenshot`: no fetch/XHR for this long (the usual 500 ms
-/// network-idle window) …
-const NETWORK_QUIET: std::time::Duration = std::time::Duration::from_millis(500);
-/// … waiting at most this long (long polls, chatty analytics).
+/// A snapshot's network-quiet wait runs at most this long (long polls,
+/// chatty analytics). The window itself is the session's
+/// (`set network-quiet <ms>`, default 500 ms).
 const NETWORK_QUIET_MAX: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Default idle shutdown for session servers.
@@ -2052,7 +2051,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             if !SETTINGS.contains(&what.as_str()) {
                 return invalid(format!(
                     "{op}: unknown setting {what:?}; settings: viewport, device, media, geo, offline, headers, ua, \
-                     locale, timezone, credentials"
+                     locale, timezone, credentials, network-quiet"
                 ));
             }
             let scale = num_flag(&mut args, "--scale")?;
@@ -2567,6 +2566,9 @@ impl Driver {
         // own timeout, and never fatal: a page that never finishes loading
         // must not wedge the session. Ops that navigate or don't read the
         // page skip it.
+        // How long this op's snapshot quiet wait took (ms), for its note;
+        // 0 when it skipped the wait or returned at once.
+        let mut quiet_waited_ms = 0u64;
         let reads_page = !matches!(
             command,
             Command::Quit { .. }
@@ -2613,14 +2615,21 @@ impl Driver {
             self.session.settle_within(budget);
             // Snapshots read what the page shows: give data it is still
             // fetching (an SPA's "Loading…" list) a moment to land, so the
-            // agent doesn't spend a turn on a placeholder.
+            // agent doesn't spend a turn on a placeholder. Skipped when a
+            // `wait` just synced with the page and no request has happened
+            // since: the agent already waited for what it needed, and
+            // re-waiting costs the whole quiet window again.
             if (matches!(
                 command,
                 Command::Ax { .. } | Command::Screenshot { .. } | Command::Find { .. } | Command::Check { .. }
             ) || command.find_target().is_some())
                 && !command.no_wait()
             {
-                self.session.network_quiet(NETWORK_QUIET, budget.min(NETWORK_QUIET_MAX));
+                if !self.session.quiet_synced() {
+                    let window = self.session.network_quiet_window();
+                    let (_, waited) = self.session.network_quiet_waited(window, budget.min(NETWORK_QUIET_MAX));
+                    quiet_waited_ms = waited.as_millis() as u64;
+                }
             }
         }
         // `--find <description>`: the decision model picks the element and the
@@ -2704,6 +2713,17 @@ impl Driver {
             self.history.push(e);
         }
         let mut notes = if result.is_ok() { self.session.follow_popups(op_timeout_ms(command)) } else { Vec::new() };
+        if result.is_ok() {
+            // A `wait` that succeeded synced the agent with the page: the
+            // next snapshot skips its quiet wait while no request happens.
+            // A bare `wait --ms` (a sleep) and a `wait --download` alone
+            // say nothing about the page, so they do not mark it.
+            if let Command::Wait { selector, text, url, gone, js, idle, .. } = command {
+                if selector.is_some() || text.is_some() || url.is_some() || gone.is_some() || js.is_some() || *idle {
+                    self.session.mark_quiet_synced();
+                }
+            }
+        }
         // Uncaught exceptions while this op ran (a handler that crashed is
         // why a click "did nothing"): one line, `errors` has the rest.
         if !matches!(command, Command::Console { .. } | Command::Errors { .. }) {
@@ -2765,6 +2785,11 @@ impl Driver {
                     ));
                 }
             }
+        }
+        // Last: what this snapshot itself waited for, if anything. It goes
+        // after the tree notes so their order does not change.
+        if quiet_waited_ms > 0 {
+            notes.push(format!("waited {quiet_waited_ms} ms for network quiet"));
         }
         Ok(Outcome { result, dialogs, new_tabs, notes })
     }
@@ -2991,7 +3016,7 @@ impl Driver {
                         .map(|ms| std::time::Duration::from_secs_f64(ms / 1000.0))
                         .unwrap_or(std::time::Duration::from_secs(10));
                     let started = std::time::Instant::now();
-                    if !s.network_quiet(NETWORK_QUIET, max) {
+                    if !s.network_quiet(self.session.network_quiet_window(), max) {
                         anyhow::bail!("wait: the network was not idle within {} ms", max.as_millis());
                     }
                     if [selector, text, url, gone, js].iter().all(|c| c.is_none()) {
@@ -3386,6 +3411,17 @@ impl Driver {
                 self.session.set_credentials(creds).map_err(|e| anyhow::anyhow!("set credentials: {e:#}"))?;
                 Ok(json!({ "credentials": if on { "set" } else { "off" } }))
             }
+            Command::Set { what, values, .. } if what == "network-quiet" => {
+                let ms: u64 = match values.as_slice() {
+                    [v] => v.parse().map_err(|_| anyhow::anyhow!("set network-quiet <ms>: got {v:?}"))?,
+                    _ => anyhow::bail!("set network-quiet <ms>"),
+                };
+                if ms > 5000 {
+                    anyhow::bail!("set network-quiet <ms>: at most 5000, got {ms}");
+                }
+                self.session.set_network_quiet_window(ms);
+                Ok(json!({ "network-quiet-ms": ms }))
+            }
             Command::Set { what, values, scale, mobile, accuracy } => {
                 let plan = crate::emulate::plan(what, values, *scale, *mobile, *accuracy, s.is_lightpanda())?;
                 if let Some(permission) = plan.grant {
@@ -3667,6 +3703,7 @@ const SETTINGS: &[&str] = &[
     "tz",
     "credentials",
     "auth",
+    "network-quiet",
 ];
 
 /// What every op says once the session's only tab has closed.

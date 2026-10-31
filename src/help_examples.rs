@@ -47,7 +47,7 @@ pub const EXAMPLES: &[Help] = &[
             ("--all", "every node of the accessibility tree, as a JSON list"),
             ("--refs all", "put [ref=N] on every node, not just actionable ones"),
             ("--format json", "print the tree as JSON instead of text"),
-            ("--no-wait", "skip the wait for the network to go quiet (up to 3 s after the last fetch/XHR, so a list still loading has landed); steady polls never hold it"),
+            ("--no-wait", "skip the wait for the network to go quiet (up to 3 s after the last fetch/XHR, so a list still loading has landed); steady polls never hold it; a successful `wait` also skips the next snapshot's wait while no request happens"),
         ],
     ),
     (
@@ -335,6 +335,7 @@ pub const EXAMPLES: &[Help] = &[
             ("locale <tag>", "the emulated locale, e.g. en-US"),
             ("timezone <zone>", "the emulated timezone, e.g. Europe/London"),
             ("credentials <user> <password>", "HTTP basic-auth credentials (`off` resets)"),
+            ("network-quiet <ms>", "this session's snapshot network-quiet window (default 500; 0 skips the window itself, pending requests still wait)"),
         ],
     ),
     (

@@ -29,6 +29,8 @@ getting wrong, one page each, built the way those sites behave:
                 without its unload path leaves the follower waiting)
 /poll           a page that polls one URL every 300 ms, forever
 /one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
+/click-fetch    a button that starts a 200 ms fetch, then brings a list
+/two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
 /stale-ref      a button and a bare draggable=true handle (no handlers)
 /drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
@@ -114,6 +116,29 @@ PAGES["/one-fetch"] = ("one fetch", "", """
 <ul id=list><li>Loading...</li></ul>
 <script>
 fetch('/slow-echo?ms=400').then(() => {
+  document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
+});
+</script>""")
+
+PAGES["/click-fetch"] = ("click fetch", "", """
+<button id=go>Go</button><ul id=list><li>Loading...</li></ul>
+<script>
+document.getElementById('go').onclick = () => {
+  fetch('/slow-echo?ms=200').then(() => {
+    document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
+  });
+};
+</script>""")
+
+PAGES["/two-fetch"] = ("two fetch", "", """
+<ul id=list><li>Loading...</li></ul>
+<script>
+// Half a list, then a 400 ms gap with no request, then the other half:
+// a quiet window shorter than the gap reads only the first half.
+fetch('/slow-echo?ms=100').then(() => {
+  document.getElementById('list').innerHTML = '<li>Alpha</li>';
+  return new Promise(r => setTimeout(r, 400));
+}).then(() => fetch('/slow-echo?ms=100')).then(() => {
   document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
 });
 </script>""")

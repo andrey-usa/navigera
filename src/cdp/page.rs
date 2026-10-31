@@ -1847,18 +1847,58 @@ impl Page {
     /// its "Loading…" placeholder. Returns at once on a page that has been
     /// quiet (typically: the agent was thinking for seconds).
     pub fn network_quiet(&self, quiet: Duration, max: Duration) -> bool {
-        let deadline = std::time::Instant::now() + max;
+        self.network_quiet_waited(quiet, max).0
+    }
+
+    /// [`network_quiet`], also reporting how long it waited, so a snapshot
+    /// can say so (0 when it returned at once).
+    pub fn network_quiet_waited(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
+        let started = std::time::Instant::now();
+        let deadline = started + max;
         loop {
             let (pending, last) = self.shared.net_state(&self.session_id);
             let idle_for = last.map(|t| t.elapsed()).unwrap_or(Duration::MAX);
             if pending == 0 && idle_for >= quiet {
+                return (true, started.elapsed());
+            }
+            if std::time::Instant::now() >= deadline {
+                return (false, started.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether the next snapshot may skip the quiet wait: a `wait` already
+    /// synced with this tab and no new request has started since. A request
+    /// the wait itself was waiting for may still sit in the in-flight set
+    /// while its finish event is on its way (the DOM already shows its
+    /// data — that is what the wait matched), so this gives it a moment to
+    /// clear; a request genuinely still in flight outlasts the drain and
+    /// the snapshot waits as usual.
+    pub fn quiet_synced(&self) -> bool {
+        let Some(synced_seq) = self.shared.synced_seq(&self.session_id) else {
+            return false;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        loop {
+            let (seq, pending) = self.shared.net_seq_pending(&self.session_id);
+            if seq != synced_seq {
+                return false;
+            }
+            if crate::cdp::events::skip_quiet_wait(Some(synced_seq), seq, pending) {
                 return true;
             }
             if std::time::Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// A `wait` just succeeded on this tab: remember when, for the next
+    /// snapshot's skip check.
+    pub fn mark_quiet_synced(&self) {
+        self.shared.mark_network_synced(&self.session_id);
     }
 
     fn send(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
