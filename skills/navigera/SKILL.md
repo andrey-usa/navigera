@@ -39,7 +39,8 @@ navigera -s work quit                     # done
   `navigera -s work fill 21 "Ada" && navigera -s work click 30 && navigera -s work --raw ax`.
   A failing step stops the chain. Fewer calls = fewer tokens.
 - `ax` waits (up to 3 s) for data the page is still fetching, so a
-  `goto … && … ax` chain shows the loaded page, not "Loading…".
+  `goto … && … ax` chain shows the loaded page, not "Loading…". A page that
+  polls doesn't hold it; `--no-wait` skips it.
 - Each command prints one JSON line, `{"ok":true,"result":…}` or
   `{"ok":false,"error":"…"}` (exit code 1). `--raw` prints only the result,
   strings as plain text (best for `ax` and `eval`); its errors go to stderr.

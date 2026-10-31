@@ -171,6 +171,105 @@ fn a_wait_sees_a_change_within_a_frame() {
     assert!(after[3] < 35.0, "seen this many ms after the change: {after:?}");
 }
 
+/// A wait inside a frame sees a change there within a frame of it, not at
+/// its next poll: an element added to the frame 120-400 ms after the wait
+/// starts. The time from its adding to the next command's clock reading
+/// (`Date.now`, one clock for both documents) holds the wait's return and
+/// that command's start-up too, which is most of it on a slow or busy
+/// machine (Windows CI, 16 ms a command). So each sample is paired with a
+/// control on the same frame: the stamp is made by an `eval`, then the same
+/// wait, already satisfied, returns at once through the same return path,
+/// then the same reading. The control holds the commands' time and slightly
+/// more (one more start-up), so the wake is at most what the difference
+/// shows: the median of the per-sample differences. Looking every 100 ms put
+/// it near 50 ms.
+#[test]
+fn a_wait_in_a_frame_sees_a_change_within_a_frame() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("framewake", &[]);
+    s.ok(&["goto", &format!("{}/iframe-form", site.url)]);
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    for (what, flag) in [("selector", "--selector"), ("text", "--text")] {
+        let (mut seen, mut diff) = (Vec::new(), Vec::new());
+        for i in 0..15 {
+            let delay = 120 + 20 * i;
+            let (selector, text) = (".late", format!("late {what} {i}"));
+            s.ok(&[
+                "eval",
+                &format!(
+                    "const d = document.getElementById('email-subscribe').contentDocument; \
+                     d.querySelectorAll('.late').forEach((e) => e.remove()); \
+                     setTimeout(() => {{ const p = d.createElement('p'); p.className = 'late'; \
+                     p.textContent = '{text}'; d.body.append(p); window.__added = Date.now(); }}, {delay}); 1"
+                ),
+            ]);
+            let target = if flag == "--selector" { selector.to_string() } else { text };
+            let wait = ["wait", flag, &target, "--frame", "#email-subscribe"];
+            s.ok(&wait);
+            let after = s.ok(&["eval", "Date.now() - window.__added"]).as_f64().unwrap();
+            // The control: the element is there now, so the same wait returns at once.
+            s.ok(&["eval", "window.__added = Date.now(); 1"]);
+            s.ok(&wait);
+            let own = s.ok(&["eval", "Date.now() - window.__added"]).as_f64().unwrap();
+            seen.push(after);
+            diff.push(after - own);
+        }
+        let (seen, diff) = (median(&mut seen), median(&mut diff));
+        eprintln!("wait {flag} --frame: seen {seen} ms after adding, {diff} ms over the same commands with no wait");
+        assert!(
+            diff < 25.0,
+            "wait {flag} --frame saw it {seen} ms after it was added, {diff} ms over its own commands (median of 15)"
+        );
+    }
+}
+
+/// A headless Chrome has no pointing device and says so (`hover: none`,
+/// `pointer: none`), which leaves an app that gates its mouse handlers on
+/// hover inert. navigera's launch says there is a mouse, as a headed Chrome
+/// on a desktop does; a touch device still reports a coarse pointer and no
+/// hover, and the next page after
+/// `set device off` is back to the mouse.
+#[test]
+fn headless_reports_a_mouse_and_a_touch_device_reports_touch() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("pointer", &[]);
+    s.ok(&["goto", "about:blank"]);
+    let q = |query: &str| s.ok(&["eval", &format!("matchMedia('{query}').matches")]).as_bool().unwrap();
+    let mouse = || q("(hover: hover)") && q("(any-hover: hover)") && q("(pointer: fine)") && q("(any-pointer: fine)");
+    assert!(mouse(), "headless: no mouse");
+    s.ok(&["set", "device", "iPhone 15"]);
+    assert!(q("(pointer: coarse)") && q("(hover: none)") && !q("(hover: hover)"), "iPhone: not touch");
+    s.ok(&["set", "device", "off"]);
+    s.ok(&["goto", "about:blank"]);
+    assert!(mouse(), "after set device off: no mouse");
+    // Turning touch emulation off in headless leaves the current page with no
+    // pointer until the next one, as after `set device off`.
+    s.ok(&["set", "device", "Desktop"]);
+    s.ok(&["goto", "about:blank"]);
+    assert!(mouse(), "Desktop: no mouse");
+}
+
+/// A frame of another origin is out of the observer's reach: a wait there
+/// still sees what appears in it (looking again every 100 ms), on the same
+/// site (another port) and across sites (its own process).
+#[test]
+fn a_wait_in_a_cross_origin_frame_still_sees_a_change() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("framewake-xo", &[]);
+    for page in ["/xo-parent", "/xo-parent?same-site"] {
+        s.ok(&["goto", &format!("{}{page}", site.url)]);
+        // The frame loads a page of its own origin whose button appears 300 ms later.
+        s.ok(&["eval", "const f = document.getElementById('card'); f.src = new URL(f.src).origin + '/slow?ms=300'; 1"]);
+        let waited = s.ok(&["wait", "--text", "Late button", "--frame", "#card", "--timeout-ms", "5000"]);
+        assert!(waited["waited_ms"].as_f64().unwrap() < 1500.0, "{page}: {waited}");
+    }
+}
+
 /// `eval` takes what people type: an expression, an arrow function,
 /// statements with the last value the answer, top-level `await`, or a body
 /// that `return`s.
@@ -329,6 +428,38 @@ fn a_click_waits_for_a_sliding_modal_to_settle() {
 }
 
 #[test]
+fn a_click_waits_for_a_moving_target_to_stop() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("moving-target", &[]);
+    s.ok(&["goto", &format!("{}/moving-target", site.url)]);
+    s.ok(&["click", "--selector", "#mover"]);
+    let status = s.text(&["get", "text", "--selector", "#status"]);
+    // The button glides 40px a frame for 12 frames from x=60, then stops:
+    // settled box centre x is 60 + 12*40 + 34/2 = 557. A click read before
+    // it stopped lands on empty page and the status stays "waiting".
+    assert!(status.starts_with("ok "), "click did not land on the button: {status}");
+    let x: i32 = status
+        .strip_prefix("ok ")
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .expect("status carries the click x");
+    assert!((540..=574).contains(&x), "click x {x} is not the settled centre 557");
+}
+
+#[test]
+fn a_click_on_a_target_that_never_stops_still_lands() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("never-stops", &[]);
+    s.ok(&["goto", &format!("{}/never-stops", site.url)]);
+    s.ok(&["click", "--selector", "#drifter"]);
+    let status = s.text(&["get", "text", "--selector", "#status"]);
+    // The drift is +/-12px around x=200, the button 60px wide: a click at
+    // the last-read centre always lands on it once the settle budget ends
+    // the stability wait. Reaching here at all proves there is no hang.
+    assert!(status.starts_with("ok "), "click did not land on the button: {status}");
+}
+
+#[test]
 fn a_field_under_a_panel_is_uncovered_before_typing() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("overlap", &[]);
@@ -375,6 +506,23 @@ fn tabs_by_target_id_and_requests_since() {
     s.ok(&["goto", &format!("{}/multi-select", site.url)]);
     let since = s.text(&["network", "--since", &last.to_string()]);
     assert!(since.contains("/multi-select") && !since.contains("/right-click"), "{since}");
+}
+
+/// A tab closed with `tab-close` goes the way a user closes it: its page
+/// gets to run its unload path (`beforeunload` included), so a tab that
+/// hands work on from it (a leader telling the follower over a
+/// BroadcastChannel) is heard at once. `Target.closeTarget` skipped that
+/// path, and the follower never knew.
+#[test]
+fn closing_a_tab_lets_its_page_hand_over_to_another_tab() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("tabclose", &[]);
+    s.ok(&["goto", &format!("{}/leader?leader", site.url)]);
+    s.ok(&["tab-new", &format!("{}/leader", site.url)]);
+    s.ok(&["tab-select", "0"]);
+    s.ok(&["tab-close", "0"]);
+    let waited = s.ok(&["wait", "--text", "took over", "--timeout-ms", "2000"]);
+    assert!(waited["waited_ms"].as_f64().unwrap() < 2000.0, "the follower did not hear the leader go: {waited}");
 }
 
 #[test]
@@ -506,6 +654,36 @@ fn clicks_only_claim_what_a_user_could_do() {
     assert!(err.contains("read-only"), "{err}");
     let err = s.fails(&["fill", "--selector", "#off", "x", "--timeout-ms", "300"]);
     assert!(err.contains("disabled"), "{err}");
+}
+
+#[test]
+fn fill_waits_for_a_field_a_user_could_type_into() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("fillwait", &[]);
+    s.ok(&["goto", &format!("{}/fillwait", site.url)]);
+    let value = |sel: &str| s.text(&["eval", &format!("document.querySelector('{sel}').value")]);
+    // Shown / enabled 400 ms after load (checked first, before any other wait): filled once ready.
+    s.ok(&["fill", "--selector", "#later", "shown", "--timeout-ms", "3000"]);
+    assert_eq!(value("#later"), "shown");
+    s.ok(&["fill", "--selector", "#off", "enabled", "--timeout-ms", "3000"]);
+    assert_eq!(value("#off"), "enabled");
+    // Hidden: waits the whole timeout, then names the failed check.
+    for sel in ["#hidden", "#vis"] {
+        let t0 = std::time::Instant::now();
+        let err = s.fails(&["fill", "--selector", sel, "x", "--timeout-ms", "700"]);
+        assert!(err.contains("not visible"), "{err}");
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(650), "{:?}", t0.elapsed());
+        assert_eq!(value(sel), "");
+    }
+    // Read-only never changes: fails as not editable.
+    let err = s.fails(&["fill", "--selector", "#ro", "x", "--timeout-ms", "300"]);
+    assert!(err.contains("not editable"), "{err}");
+    // A transparent field is still one a user can click into.
+    s.ok(&["fill", "--selector", "#zero", "ok", "--timeout-ms", "1000"]);
+    assert_eq!(value("#zero"), "ok");
+    // --force skips the checks.
+    s.ok(&["fill", "--selector", "#hidden", "forced", "--force", "--timeout-ms", "300"]);
+    assert_eq!(value("#hidden"), "forced");
 }
 
 #[test]
@@ -995,4 +1173,145 @@ fn clickable_refs_skip_what_a_user_cant_tell_apart_or_reach() {
     let menu = menu.split("ref=").nth(1).and_then(|r| r.split(']').next()).unwrap();
     s.ok(&["click", menu]);
     assert_eq!(s.ok(&["title"]), "menu true");
+}
+
+/// Order of the list items on a drag page, e.g. "bca".
+fn list_order(s: &Session) -> String {
+    s.text(&["eval", "[...document.querySelectorAll('li')].map(l => l.id).join('')"])
+}
+
+/// `drag` drives a real drag: the browser starts it from the mouse press, and
+/// the drag events follow the pointer to the drop. Desktop and touch emulation.
+#[test]
+fn drag_runs_a_real_html5_drag() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    for (tag, mobile) in [("desk", false), ("mob", true)] {
+        let s = Session::start(&format!("dragn-{tag}"), &[]);
+        if mobile {
+            s.ok(&["set", "device", "iPhone 15"]);
+        }
+        for page in ["drag-native", "drag-pointer"] {
+            s.ok(&["goto", &format!("{}/{page}", site.url)]);
+            let r = s.ok(&["drag", "#a", "#c"]);
+            assert_eq!(r["drag"]["path"], "drag", "{tag} {page}: {r}");
+            assert_eq!(r["drag"]["html5"], true, "{tag} {page}: {r}");
+            assert_eq!(r["drag"]["dropped"], true, "{tag} {page}: {r}");
+            assert_eq!(list_order(&s), "bca", "{tag} {page}");
+            // The browser ran the whole drag: dragend fired, and dragenter
+            // followed the pointer over more than the target.
+            let log = s.text(&["get", "text", "--selector", "#log"]);
+            assert!(log.starts_with("start enter"), "{tag} {page}: {log}");
+            assert!(log.matches("enter").count() >= 2, "{tag} {page}: {log}");
+            assert!(log.ends_with("drop:a end"), "{tag} {page}: {log}");
+            // The mouse is released: a click right after is a plain click.
+            s.ok(&["click", "#b"]);
+        }
+        // Dropped on something that takes no drop: the drag ran, nothing landed.
+        s.ok(&["goto", &format!("{}/drag-native", site.url)]);
+        s.ok(&["eval", "document.getElementById('log').textContent = 'no drop here'"]);
+        let r = s.ok(&["drag", "#a", "#log"]);
+        assert_eq!(r["drag"]["path"], "drag", "{tag}: {r}");
+        assert_eq!(r["drag"]["dropped"], false, "{tag}: {r}");
+        assert_eq!(list_order(&s), "abc", "{tag}");
+    }
+}
+
+/// With no drag to start, `drag` is a held mouse: the knob follows it.
+#[test]
+fn drag_without_a_drag_is_a_held_mouse() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    for (tag, mobile) in [("desk", false), ("mob", true)] {
+        let s = Session::start(&format!("drags-{tag}"), &[]);
+        if mobile {
+            s.ok(&["set", "device", "iPhone 15"]);
+        }
+        s.ok(&["goto", &format!("{}/drag-slider", site.url)]);
+        let r = s.ok(&["drag", "#knob", "#track"]);
+        assert_eq!(r["drag"]["path"], "mouse", "{tag}: {r}");
+        assert!(r["drag"]["from"]["x"].is_number() && r["drag"]["to"]["x"].is_number(), "{tag}: {r}");
+        let out: f64 = s.text(&["get", "text", "--selector", "#out"]).parse().unwrap();
+        assert!(out > 100.0, "{tag}: knob at {out}");
+    }
+}
+
+/// How long `args` takes to run on the session, in ms (the CLI start-up is in
+/// it for every sample alike).
+fn timed(s: &Session, args: &[&str]) -> (f64, Value) {
+    let t = std::time::Instant::now();
+    let r = s.ok(args);
+    (t.elapsed().as_secs_f64() * 1000.0, r)
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+/// A snapshot waits for the network to go quiet so an SPA's "Loading..." list
+/// has landed, but a request repeated at a steady interval is a poll and
+/// doesn't hold it; `--no-wait` skips the wait.
+#[test]
+fn a_snapshot_does_not_wait_on_polls_and_no_wait_skips_the_wait() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("quiet", &[]);
+
+    // One fetch the server holds for 400 ms: the list is there, not "Loading...".
+    s.ok(&["goto", &format!("{}/one-fetch", site.url)]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Alpha") && !tree.contains("Loading"), "{tree}");
+    // --no-wait reads at once: the placeholder (the fetch is still out).
+    s.ok(&["goto", &format!("{}/one-fetch", site.url)]);
+    let early = s.text(&["ax", "--no-wait"]);
+    assert!(early.contains("Loading"), "{early}");
+
+    // A page polling every 300 ms: the wait never holds a snapshot for the
+    // 3 s cap. Let the polling settle first (two requests are not yet a poll).
+    s.ok(&["goto", &format!("{}/poll", site.url)]);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let waited: Vec<f64> = (0..5).map(|_| timed(&s, &["ax"]).0).collect();
+    let skipped: Vec<f64> = (0..5).map(|_| timed(&s, &["ax", "--no-wait"]).0).collect();
+    assert!(median(waited.clone()) < 1000.0, "ax on a polling page took {waited:?} ms");
+    assert!(median(skipped.clone()) < 1000.0, "ax --no-wait took {skipped:?} ms");
+    assert!(s.text(&["ax", "--no-wait"]).contains("polled"));
+    s.ok(&["screenshot", "--no-wait", "--path", &std::env::temp_dir().join("nv-quiet.png").display().to_string()]);
+}
+
+/// `check` on a controlled checkbox (the click's default is cancelled and the
+/// app commits the state later, as a React onChange re-render does) succeeds
+/// once the state lands, not only when it is already there as the click
+/// returns; one that never commits still fails, inside the element's budget.
+#[test]
+fn check_waits_for_a_late_commit() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("latecheck", &[]);
+    s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+    let page = |delay: &str| {
+        format!(
+            "document.body.innerHTML = '<label><input type=checkbox id=c> Forecast</label>'; \
+             document.getElementById('c').addEventListener('click', (e) => {{ e.preventDefault(); {delay} }}); 1"
+        )
+    };
+    s.ok(&["eval", &page("setTimeout(() => { document.getElementById('c').checked = true; }, 300);")]);
+    assert_eq!(s.ok(&["check", "--selector", "#c"])["changed"], true);
+    assert_eq!(s.ok(&["eval", "document.getElementById('c').checked"]), true);
+    s.ok(&["eval", &page("")]);
+    let error = s.fails(&["check", "--selector", "#c", "--timeout-ms", "1000"]);
+    assert!(error.contains("did not check it"), "{error}");
+}
+
+/// A snapshot of a big table with a limit prints only the first rows, says it
+/// cut the rest, and its refs work.
+#[test]
+fn ax_with_a_limit_on_a_big_table_stops_at_the_limit() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("bigtable", &[]);
+    s.ok(&["goto", &format!("{}/big-table", site.url)]);
+    let tree = s.text(&["ax", "--limit", "30"]);
+    assert!(tree.contains("Edit 0") && tree.contains("more lines"), "{tree}");
+    assert!(!tree.contains("Edit 1999"), "the limit cut nothing");
+    assert!(tree.lines().count() <= 32, "{} lines", tree.lines().count());
+    s.ok(&["click", "--role", "button", "--name", "Edit 7"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#out"]), "edit 7");
+    let r = s.ok(&["click", "--selector", "tr:nth-child(3) button"]);
+    assert!(r.is_object(), "{r}");
 }

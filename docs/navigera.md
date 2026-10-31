@@ -88,7 +88,7 @@ another process are reachable by ref only.
 | `goto` | `<url>` or `--url`; `--wait load\|domcontentloaded\|commit`; `--timeout-ms` | state `{tab, tabs, url, title}`; a URL that downloads leaves the page where it was and adds `download` (the file) and a `note`. `example.com` → `https://`, `localhost:3000` → `http://` |
 | `ax` (`snapshot`) | `[<ref> \| --selector <css> \| --text t]` scope; `--limit <lines>` (2000); `--refs all`; `--format json` (old flat list: `{ref, role, name, value?, url?}`; with `--all` `{id, role, name, backendNodeId}`); `--all` | text tree (below) |
 | `click` | target; `--button right\|middle`; `--force` | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box); `no_effect` note if the page did nothing in response |
-| `fill` | target, `<value>` or `--value`; `--keys` selects what the field holds and types the value key by key (apps that keep only typed input, observable-model forms) | state |
+| `fill` | target, `<value>` or `--value`; `--keys` selects what the field holds and types the value key by key (apps that keep only typed input, observable-model forms); waits (up to the command timeout) for the field to be visible, enabled and editable, and the timeout error names the check that failed; `--force` skips the checks | state |
 | `type` | `<text>` or `--value`; optional `--selector/--ref/--text` to focus first | state |
 | `press` | `<key>` or `--key`; optional target to focus first | state |
 | `select` | target, option label(s)/value(s) (positional or repeated `--value`; labels match with whitespace collapsed); `--add` keeps what a multiple select already has. On a custom dropdown (an ARIA combobox: react-select and the like) it does what a user does: focuses it, opens it (ArrowDown, else a click), finds the option by its text in the listbox that opened (a portal at the end of `<body>` included), types to filter when it isn't listed, and clicks it | state + `selected` |
@@ -199,7 +199,10 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   than 5 s (long polls, streams) don't count. A page that has been quiet —
   usual when an agent has been thinking — is read at once. So
   `goto … && … ax` shows a single-page app's list, not its "Loading…"
-  placeholder.
+  placeholder. A request to a URL the page has already fetched twice at a
+  steady interval is a poll and doesn't count, so a dashboard that refreshes
+  every few hundred milliseconds is read at once. `--no-wait` (on `ax`,
+  `screenshot`, `find`, `check` and `--find`) skips the wait.
 - **Clicks** are trusted mouse events at the element's centre after
   scrolling it into view, once the element has stopped moving: CSS
   animations and transitions running on it or an ancestor (a dialog sliding

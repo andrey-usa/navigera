@@ -24,6 +24,20 @@ getting wrong, one page each, built the way those sites behave:
 /typed-only     an input whose app keeps only what was typed
 /lazy-box       a scrollable box that loads more when scrolled to its end
 /honesty        a decoy copy of an id, disabled and read-only controls
+/leader         two tabs of one site: the one opened with ?leader tells the
+                other on beforeunload, which takes over (a tab closed
+                without its unload path leaves the follower waiting)
+/poll           a page that polls one URL every 300 ms, forever
+/one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
+/big-table      a 2,000-row table, a button and a link in each row
+/drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
+/drag-pointer   the same list, each item made draggable on pointerdown (as
+                React Aria does)
+/drag-slider    a knob that follows a held mouse (no drag starts)
+/never-stops    a button that never stops drifting: the click still
+                happens once the settle budget runs out
+/moving-target  a button that glides to a stop over its first frames
+                (no CSS animation), reporting where it was clicked
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
 
@@ -35,6 +49,146 @@ from urllib.parse import parse_qs, urlparse
 HEAD = "<!doctype html><html><head><meta charset=utf-8><title>{title}</title><style>{style}</style></head><body>"
 
 PAGES = {}
+
+
+
+PAGES["/never-stops"] = ("never stops", "", """
+<p id=status>waiting</p>
+<button id=drifter style="position:absolute;left:200px;top:60px;width:60px;height:30px"
+  onclick="document.getElementById('status').textContent='ok '+event.clientX+' '+event.clientY">D</button>
+<script>
+// A perpetual small drift, no CSS animation: the box never reads the same
+// twice, so only the settle budget can end the wait - then the click must
+// still land on the button (the drift is smaller than the button).
+let dx = 0, dir = 1;
+const drift = () => {
+  dx += dir * 3;
+  if (Math.abs(dx) >= 12) dir = -dir;
+  document.getElementById('drifter').style.left = (200 + dx) + 'px';
+  requestAnimationFrame(drift);
+};
+requestAnimationFrame(drift);
+</script>""")
+
+PAGES["/moving-target"] = ("moving target", "", """
+<p id=status>waiting</p>
+<button id=mover style="position:absolute;left:60px;top:60px;width:34px;height:22px"
+  onclick="document.getElementById('status').textContent='ok '+event.clientX+' '+event.clientY">M</button>
+<script>
+// No CSS animation: a plain rAF glide, the shape a deferred page commit
+// takes. 40px a frame for 12 frames, then still - a one-read click lands
+// on empty page where the button used to be.
+let x = 60, frames = 0;
+const glide = () => {
+  if (frames++ >= 12) return;
+  x += 40;
+  document.getElementById('mover').style.left = x + 'px';
+  requestAnimationFrame(glide);
+};
+requestAnimationFrame(glide);
+</script>""")
+
+PAGES["/leader"] = ("leader", "", """
+<p id=role>waiting</p>
+<script>
+const bc = new BroadcastChannel('nv-leader');
+const role = document.getElementById('role');
+if (location.search.includes('leader')) {
+  role.textContent = 'leader';
+  addEventListener('beforeunload', () => bc.postMessage('bye'));
+} else {
+  role.textContent = 'follower';
+  bc.onmessage = (e) => { if (e.data === 'bye') role.textContent = 'took over'; };
+}
+</script>""")
+
+PAGES["/poll"] = ("poll", "", """
+<p id=status>idle</p><button id=go>Go</button>
+<script>
+let n = 0;
+setInterval(() => fetch('/slow-echo?ms=5').then(() => { document.getElementById('status').textContent = 'polled ' + (++n); }), 300);
+</script>""")
+
+PAGES["/one-fetch"] = ("one fetch", "", """
+<ul id=list><li>Loading...</li></ul>
+<script>
+fetch('/slow-echo?ms=400').then(() => {
+  document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
+});
+</script>""")
+
+PAGES["/big-table"] = ("big table", "", """
+<table><tbody id=rows></tbody></table><p id=out></p>
+<script>
+rows.innerHTML = Array.from({length: 2000}, (_, i) =>
+  `<tr><td>Item ${i}</td><td><button onclick="out.textContent='edit ${i}'">Edit ${i}</button> <a href="#r${i}">View ${i}</a></td></tr>`).join('');
+</script>""")
+
+PAGES["/drag-native"] = ("drag native", "", """
+<style>li{padding:8px;margin:2px;border:1px solid #888;width:200px;list-style:none;background:#eee}</style>
+<ul id=list><li id=a>Alpha</li><li id=b>Beta</li><li id=c>Gamma</li></ul>
+<p id=log></p>
+<script>
+const log = [];
+const note = (t) => { log.push(t); document.getElementById('log').textContent = log.join(' '); };
+let moving = null;
+for (const li of document.querySelectorAll('li')) {
+  li.draggable = true;
+  li.addEventListener('dragstart', (e) => { moving = li; e.dataTransfer.setData('text/plain', li.id); e.dataTransfer.effectAllowed = 'move'; note('start'); });
+  li.addEventListener('dragenter', () => note('enter'));
+  li.addEventListener('dragover', (e) => e.preventDefault());
+  li.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData('text/plain');
+    const src = document.getElementById(id);
+    note('drop:' + id);
+    if (src && src !== li) li.after(src);
+  });
+  li.addEventListener('dragend', () => { note('end');  });
+}
+</script>""")
+
+PAGES["/drag-pointer"] = ("drag pointer", "", """
+<style>li{padding:8px;margin:2px;border:1px solid #888;width:200px;list-style:none;background:#eee}</style>
+<ul id=list><li id=a>Alpha</li><li id=b>Beta</li><li id=c>Gamma</li></ul>
+<p id=log></p>
+<script>
+const log = [];
+const note = (t) => { log.push(t); document.getElementById('log').textContent = log.join(' '); };
+let moving = null;
+for (const li of document.querySelectorAll('li')) {
+  li.addEventListener('pointerdown', () => { li.draggable = true; });
+  li.addEventListener('dragstart', (e) => { moving = li; e.dataTransfer.setData('text/plain', li.id); e.dataTransfer.effectAllowed = 'move'; note('start'); });
+  li.addEventListener('dragenter', () => note('enter'));
+  li.addEventListener('dragover', (e) => e.preventDefault());
+  li.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData('text/plain');
+    const src = document.getElementById(id);
+    note('drop:' + id);
+    if (src && src !== li) li.after(src);
+  });
+  li.addEventListener('dragend', () => { note('end'); li.draggable = false; });
+}
+</script>""")
+
+PAGES["/drag-slider"] = ("drag slider", "", """
+<div id=track style="position:relative;width:300px;height:20px;background:#ccc;margin:20px">
+  <div id=knob style="position:absolute;left:0;top:0;width:20px;height:20px;background:#33a"></div>
+</div>
+<p id=out>0</p>
+<script>
+const knob = document.getElementById('knob'), track = document.getElementById('track');
+let held = false;
+knob.addEventListener('mousedown', (e) => { held = true; e.preventDefault(); });
+addEventListener('mouseup', () => { held = false; });
+addEventListener('mousemove', (e) => {
+  if (!held) return;
+  const x = Math.max(0, Math.min(280, e.clientX - track.getBoundingClientRect().left - 10));
+  knob.style.left = x + 'px';
+  document.getElementById('out').textContent = Math.round(x);
+});
+</script>""")
 
 PAGES["/hidden-layers"] = ("hidden layers", "", """
 <div id=spot style="position:relative;height:60px">
@@ -339,6 +493,16 @@ PAGES["/honesty"] = ("honesty", "", """
 <script>
 function out(t) { document.getElementById('out').textContent = t; }
 setTimeout(() => { document.getElementById('unlock-later').disabled = false; }, 600);
+</script>""")
+
+
+PAGES["/fillwait"] = ("fillwait", "", """
+<input id=hidden style="display:none"> <input id=vis style="visibility:hidden">
+<input id=later style="display:none"> <input id=off disabled> <input id=ro readonly value=fixed>
+<input id=zero style="opacity:0">
+<script>
+setTimeout(() => { document.getElementById('later').style.display = ''; }, 400);
+setTimeout(() => { document.getElementById('off').disabled = false; }, 400);
 </script>""")
 
 

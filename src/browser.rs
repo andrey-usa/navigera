@@ -1324,10 +1324,21 @@ impl BrowserSession {
             return Ok(false);
         }
         self.click_target(target, &cdp::ClickOptions::default(), timeout_ms)?;
-        if checked(self)? != want {
-            bail!("clicking it did not {} it", if want { "check" } else { "uncheck" });
+        // A controlled input commits its state after the click returns
+        // (a React onChange re-render), so one immediate re-read can call
+        // a working click a failure: re-read until it lands or the
+        // element's own budget runs out.
+        let (wait, _) = self.element_budget(timeout_ms);
+        let deadline = std::time::Instant::now() + wait.min(Duration::from_secs(5));
+        loop {
+            if checked(self)? == want {
+                return Ok(true);
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!("clicking it did not {} it", if want { "check" } else { "uncheck" });
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        Ok(true)
     }
 
     pub fn key_event(&self, key: &str, down: bool) -> Result<()> {
@@ -1929,16 +1940,17 @@ impl BrowserSession {
         self.active_tab().hover(target, wait, timeout)
     }
 
-    pub fn fill_target(&self, target: &Target, value: &str, timeout_ms: Option<f64>) -> Result<()> {
+    pub fn fill_target(&self, target: &Target, value: &str, force: bool, timeout_ms: Option<f64>) -> Result<()> {
         let (wait, timeout) = self.element_budget(timeout_ms);
-        self.active_tab().fill(target, value, wait, timeout)
+        self.active_tab().fill(target, value, force, wait, timeout)
     }
 
     /// `fill --keys`: select what the field holds and type over it, key by
     /// key; Backspace clears it for an empty value.
-    pub fn fill_keys(&self, target: &Target, value: &str, timeout_ms: Option<f64>) -> Result<()> {
+    pub fn fill_keys(&self, target: &Target, value: &str, force: bool, timeout_ms: Option<f64>) -> Result<()> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let page = self.active_tab();
+        page.field_ready(target, force, wait, timeout)?;
         if page.on_element(target, "fill", cdp::page_js::FOCUS_SELECT_ALL, &[], wait, timeout)?
             != serde_json::Value::Bool(true)
         {
@@ -2184,10 +2196,16 @@ impl BrowserSession {
         let started = std::time::Instant::now();
         loop {
             self.settle_within(wait.saturating_sub(started.elapsed()));
-            match self.active_tab().check_in_frame(chain, js_predicate, timeout) {
+            // Up to WATCH in the frame at a time, woken by its changes (as
+            // `wait_until_or_in_frames` is in the page), then looked at again
+            // from here: a navigation, a frame that went or came, the budget.
+            let chunk = wait.saturating_sub(started.elapsed()).min(WATCH);
+            match self.active_tab().watch_in_frame(chain, js_predicate, chunk, timeout) {
                 Ok(true) => return Ok((started.elapsed().as_secs_f64() * 1000.0).round()),
                 Err(e) if format!("{e:#}").contains("not a frame") => return Err(e),
-                _ => {}
+                // The document went mid-watch: not a tight loop of retries.
+                Err(_) => std::thread::sleep(Duration::from_millis(25)),
+                Ok(false) => {}
             }
             if started.elapsed() >= wait {
                 bail!(
@@ -2195,7 +2213,6 @@ impl BrowserSession {
                     wait.as_millis()
                 );
             }
-            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
@@ -2207,7 +2224,7 @@ impl BrowserSession {
 
     /// Fill the first matching field with `value`.
     pub fn fill(&self, selector: &str, value: &str, timeout_ms: Option<f64>) -> Result<()> {
-        self.fill_target(&Target::Selector(selector.to_string()), value, timeout_ms)
+        self.fill_target(&Target::Selector(selector.to_string()), value, false, timeout_ms)
     }
 
     /// Click the node with this `backendNodeId` (an `ax` ref).
@@ -2217,7 +2234,7 @@ impl BrowserSession {
 
     /// Fill the node with this `backendNodeId` (an `ax` ref) with `value`.
     pub fn fill_ref(&self, backend_node_id: u64, value: &str, timeout_ms: Option<f64>) -> Result<()> {
-        self.fill_target(&Target::Ref(backend_node_id), value, timeout_ms)
+        self.fill_target(&Target::Ref(backend_node_id), value, false, timeout_ms)
     }
 
     /// First element's text content for `selector`, if present.

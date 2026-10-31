@@ -47,6 +47,7 @@ pub const EXAMPLES: &[Help] = &[
             ("--all", "every node of the accessibility tree, as a JSON list"),
             ("--refs all", "put [ref=N] on every node, not just actionable ones"),
             ("--format json", "print the tree as JSON instead of text"),
+            ("--no-wait", "skip the wait for the network to go quiet (up to 3 s after the last fetch/XHR, so a list still loading has landed); steady polls never hold it"),
         ],
     ),
     (
@@ -213,7 +214,10 @@ pub const EXAMPLES: &[Help] = &[
     (
         "find",
         &[("navigera -s s find \"the number input\"", "needs a decision model")],
-        &[("<description>", "the element, described in words; needs a decision model")],
+        &[
+            ("<description>", "the element, described in words; needs a decision model"),
+            ("--no-wait", "skip the wait for the network to go quiet (up to 3 s after the last fetch/XHR, so a list still loading has landed); steady polls never hold it"),
+        ],
     ),
     ("title", &[("navigera -s s title", "")], &[]),
     (
@@ -432,6 +436,7 @@ pub const EXAMPLES: &[Help] = &[
         &[
             ("<target>", "the checkbox/radio/switch, by ref, --selector, …"),
             ("<yes/no question>", "ask the decision model; needs TYPESAFE_API_KEY"),
+            ("--no-wait", "with a question: skip the wait for the network to go quiet (see `ax --no-wait`)"),
         ],
     ),
     (
@@ -473,6 +478,7 @@ pub const EXAMPLES: &[Help] = &[
         &[
             ("--path <f.png>", "where to write the PNG"),
             ("--full-page", "capture the whole page, not just the viewport"),
+            ("--no-wait", "skip the wait for the network to go quiet (up to 3 s after the last fetch/XHR, so a list still loading has landed); steady polls never hold it"),
         ],
     ),
     (

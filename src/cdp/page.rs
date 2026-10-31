@@ -158,26 +158,35 @@ pub const DEEP: &str = r#"(() => {
         return out;
     };
     const roots = () => { const out = []; for (const d of topDocs()) { out.push(d); shadows(d, out); } return out; };
-    // A wait's pause: until the frame after any of these roots changes, or
+    // A wait's pause: until any of these roots changes, or
     // `ms` at most. A poll alone sees a change half an interval late on
     // average (25 ms of a 50 ms poll, 50 of 100); woken by the change it is
     // under a millisecond. What no observer sees (a stylesheet rule starting
     // to match, a hover, a frame out of reach, a background tab with no
     // frames) still ends the pause at `ms`, so no wait is slower than the
     // poll it replaces. The observer goes at the first change or the time.
+    const MIN_GAP = 8;
+    let lastEnd = -1e9;
     const wake = (ms) => new Promise((resolve) => {
         let mo = null, timer = 0, done = false;
         const finish = () => {
             if (done) return;
             done = true;
+            lastEnd = performance.now();
             clearTimeout(timer);
             if (mo) mo.disconnect();
             resolve();
         };
         timer = setTimeout(finish, ms);
         try {
-            const frame = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(f, 0);
-            mo = new MutationObserver(() => { mo.disconnect(); frame(finish); });
+            // No frame hop: a busy page's frames can lag the change by a
+            // frame or more. Wakes are at least `MIN_GAP` ms apart, so a
+            // page that mutates constantly is not re-checked on every write.
+            mo = new MutationObserver(() => {
+                mo.disconnect();
+                const gap = MIN_GAP - (performance.now() - lastEnd);
+                if (gap > 0) setTimeout(finish, gap); else finish();
+            });
             const what = { subtree: true, childList: true, attributes: true, characterData: true };
             for (const r of roots()) mo.observe(r, what);
         } catch (_) {}
@@ -465,6 +474,23 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             const l = labels.find((l) => { const b = l.getBoundingClientRect(); return b.width > 0 && b.height > 0; });
             if (l) { box = l; l.scrollIntoView(Object.assign({ behavior: 'instant' }, align)); r = l.getBoundingClientRect(); }
         }
+        // Stable box: re-read across frames until two consecutive reads
+        // match - the press must land where the element IS, and a deferred
+        // (zero-delay) page commit can move it between one read and the
+        // press. Bounded by the settle budget: past it, click the last read.
+        // A match counts only with a frame between the reads: on a busy
+        // machine the 100 ms timer can win twice before the page's first
+        // frame, and two reads with no frame between them see nothing move.
+        // A hidden page draws no frames, and one that drew none for 500 ms
+        // isn't moving anything by frames either: the timer counts there.
+        for (let idle = 0; ; ) {
+            const framed = await new Promise((res) => { requestAnimationFrame(() => res(true)); setTimeout(() => res(false), 100); });
+            idle = framed ? 0 : idle + 1;
+            const r2 = box.getBoundingClientRect();
+            const same = r2.left === r.left && r2.top === r.top && r2.width === r.width && r2.height === r.height;
+            r = r2;
+            if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= deadline) break;
+        }
         let x = r.left + r.width / 2, y = r.top + r.height / 2;
         const root = box.getRootNode(), doc = box.ownerDocument;
         const at = (x, y) => root.elementFromPoint ? root.elementFromPoint(x, y) : doc.elementFromPoint(x, y);
@@ -680,17 +706,35 @@ const HOVER_PREP: &str = r#"async function (el, settleMs) {
     return { synthetic: true };
 }"#;
 
+/// What a user needs to type into a field: visible (a box, and not
+/// `visibility: hidden`; `opacity: 0` or a one-pixel box still count, as in
+/// Playwright), enabled and editable. Waits up to `settleMs` for all three,
+/// then throws naming the first that fails. `checkBox` is false where the
+/// engine has no layout (Lightpanda), so visibility can't be judged there.
+pub const FIELD_READY: &str = r#"async function (el, settleMs, checkBox) {
+    const why = () => {
+        if (checkBox) {
+            const r = el.getBoundingClientRect();
+            const v = (el.ownerDocument.defaultView || window).getComputedStyle(el).visibility;
+            if (!(r.width > 0 && r.height > 0) || v === 'hidden' || v === 'collapse') return 'not visible';
+        }
+        if (el.disabled || el.closest('fieldset[disabled]')) return 'disabled';
+        if (el.readOnly) return 'read-only (not editable)';
+        return '';
+    };
+    const end = Date.now() + (settleMs || 0);
+    while (why() && Date.now() < end) await new Promise((res) => setTimeout(res, 50));
+    const bad = why();
+    if (bad) throw new Error('fill: the field is ' + bad + "; a user can't type into it (waited " + (settleMs || 0) + ' ms; --force fills it anyway)');
+    return true;
+}"#;
+
 /// Fill `el` with `value`: native value setter (so React & co. see it) plus
 /// `input`/`change` events. Contenteditable hosts get their text replaced.
 /// A field whose centre is under something else (a sticky bar, an
 /// overlapping panel) is scrolled until it isn't, as a user would before
 /// typing; some pages check.
-const FILL_EL: &str = r#"async function (el, value, settleMs) {
-    // A disabled or read-only field takes no typing; wait for it to unlock.
-    const locked = () => !!(el.disabled || el.readOnly || el.closest('fieldset[disabled]'));
-    const end = Date.now() + (settleMs || 0);
-    while (locked() && Date.now() < end) await new Promise((res) => setTimeout(res, 50));
-    if (locked()) throw new Error('fill: the field is ' + (el.readOnly ? 'read-only' : 'disabled') + '; a user can\'t type into it');
+const FILL_EL: &str = r#"async function (el, value) {
     const covered = () => {
         const r = el.getBoundingClientRect();
         if (!(r.width > 0 && r.height > 0)) return false;
@@ -894,6 +938,9 @@ const DRAG_DROP: &str = r#"function (el) {
   fire(d.src, 'dragend', d.dt);
   return allowed;
 }"#;
+
+/// Mouse moves from the press to the target of a `drag`.
+const DRAG_STEPS: usize = 8;
 
 const IDENTITY: &str = "function (el) { return el; }";
 
@@ -3056,20 +3103,26 @@ impl Page {
 
     /// Drag `from` onto `to`.
     ///
-    /// A `draggable` element is HTML5 drag and drop, which headless Chrome
-    /// does not start from synthetic mouse input: it gets the events a
-    /// browser fires, dragstart through dragend, with one DataTransfer shared
-    /// from start to drop (a stand-in where the engine has no DataTransfer).
-    /// Anything else gets a trusted press over `from`, a move in steps and a
-    /// release over `to`, which sliders and pointer-driven sortable lists
-    /// follow. Returns `{html5, dropped?}` or the two points.
+    /// The drag is a real one, as Playwright's: a trusted press over `from`
+    /// and moves in steps, with Chrome told to hand a drag it starts to us
+    /// (`Input.setInterceptDrags`). Chrome starts no native drag from
+    /// synthetic mouse input on its own; when the page makes the source
+    /// draggable (a `draggable` attribute, or one set on pointer down, as
+    /// React Aria does) it reports the drag it would have started
+    /// (`Input.dragIntercepted`), and the rest of the path is driven with
+    /// `Input.dispatchDragEvent`: enter and over at each point, drop at the
+    /// target. Returns `{html5: true, dropped, path: "drag"}`, `dropped`
+    /// being whether the page took the drop.
+    ///
+    /// No drag started (a slider, a pointer-driven sortable list): the held
+    /// mouse was a plain mouse drag and is released over `to`: `{from, to,
+    /// path: "mouse"}`.
+    ///
+    /// An engine that cannot intercept drags (no `Input.setInterceptDrags`,
+    /// or one that never reports a drag) gets the events a browser fires, dragstart through dragend, from the
+    /// page, for a `draggable` source (`{html5: true, dropped, path:
+    /// "synthetic"}`), with one DataTransfer shared from start to drop.
     pub fn drag(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Value> {
-        let html5 = self.on_element(from, "drag", DRAG_IS_HTML5, &[], wait, timeout)?;
-        if html5 == Value::Bool(true) {
-            self.on_element(from, "drag", DRAG_START, &[], wait, timeout)?;
-            let dropped = self.on_element(to, "drag", DRAG_DROP, &[], wait, timeout)?;
-            return Ok(json!({ "html5": true, "dropped": dropped }));
-        }
         let settle = json!(self.hit_settle_ms(wait));
         let a = self.on_element(from, "drag", HOVER_PREP, std::slice::from_ref(&settle), wait, timeout)?;
         let b = self.on_element(to, "drag", HOVER_PREP, &[settle], wait, timeout)?;
@@ -3077,21 +3130,180 @@ impl Page {
         let (Some((ax, ay)), Some((bx, by))) = (point(&a), point(&b)) else {
             bail!("drag: no on-screen point for both elements (inside a cross-origin iframe?)");
         };
-        let mut events = vec![("mouseMoved", ax, ay, "none", 0), ("mousePressed", ax, ay, "left", 1)];
-        for i in 1..=8 {
-            let t = i as f64 / 8.0;
-            events.push(("mouseMoved", ax + (bx - ax) * t, ay + (by - ay) * t, "left", 1));
+        match self.send("Input.setInterceptDrags", json!({ "enabled": true }), timeout) {
+            Ok(_) => {
+                let r = self.drag_with_intercept((ax, ay), (bx, by), timeout);
+                // Whatever happened, Chrome gets its own drags back.
+                let _ = self.send("Input.setInterceptDrags", json!({ "enabled": false }), timeout);
+                self.moved_to(bx, by);
+                let r = r?;
+                // An engine can take the command and still never report a
+                // drag (Lightpanda): a source that is draggable after the
+                // held mouse gets the page-side drag.
+                if r["path"] == "mouse" {
+                    if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
+                        return Ok(synthetic);
+                    }
+                }
+                Ok(r)
+            }
+            Err(_) => {
+                if let Some(synthetic) = self.drag_synthetic(from, to, wait, timeout)? {
+                    return Ok(synthetic);
+                }
+                self.moved_to(bx, by);
+                self.drag_mouse((ax, ay), (bx, by), timeout)?;
+                Ok(json!({ "from": { "x": ax, "y": ay }, "to": { "x": bx, "y": by }, "path": "mouse" }))
+            }
         }
-        events.push(("mouseReleased", bx, by, "left", 0));
-        self.moved_to(bx, by);
+    }
+
+    /// The page-side drag for a `draggable` source: the events a browser
+    /// fires, dragstart through dragend, with one DataTransfer shared from
+    /// start to drop. `None` when the source is not draggable.
+    fn drag_synthetic(&self, from: &Target, to: &Target, wait: Duration, timeout: Duration) -> Result<Option<Value>> {
+        if self.on_element(from, "drag", DRAG_IS_HTML5, &[], wait, timeout)? != Value::Bool(true) {
+            return Ok(None);
+        }
+        self.on_element(from, "drag", DRAG_START, &[], wait, timeout)?;
+        let dropped = self.on_element(to, "drag", DRAG_DROP, &[], wait, timeout)?;
+        Ok(Some(json!({ "html5": true, "dropped": dropped, "path": "synthetic" })))
+    }
+
+    /// Press at `a`, move in steps to `b`, release: the held mouse.
+    fn drag_mouse(&self, a: (f64, f64), b: (f64, f64), timeout: Duration) -> Result<()> {
+        let mut events = vec![("mouseMoved", a.0, a.1, "none", 0), ("mousePressed", a.0, a.1, "left", 1)];
+        for i in 1..=DRAG_STEPS {
+            let t = i as f64 / DRAG_STEPS as f64;
+            events.push(("mouseMoved", a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, "left", 1));
+        }
+        events.push(("mouseReleased", b.0, b.1, "left", 0));
         for (kind, x, y, button, buttons) in events {
-            self.send(
-                "Input.dispatchMouseEvent",
-                json!({ "type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1 }),
-                timeout,
-            )?;
+            self.mouse_event(kind, x, y, button, buttons, timeout)?;
         }
-        Ok(json!({ "from": { "x": ax, "y": ay }, "to": { "x": bx, "y": by } }))
+        Ok(())
+    }
+
+    fn mouse_event(&self, kind: &str, x: f64, y: f64, button: &str, buttons: u8, timeout: Duration) -> Result<Value> {
+        self.send(
+            "Input.dispatchMouseEvent",
+            json!({ "type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": 1 }),
+            timeout,
+        )
+    }
+
+    /// The drag with `Input.setInterceptDrags` on: see [`Page::drag`].
+    fn drag_with_intercept(&self, a: (f64, f64), b: (f64, f64), timeout: Duration) -> Result<Value> {
+        let mut events = self.client.subscribe();
+        let session = self.session_id.clone();
+        // The drag Chrome would have started, if it has, from what has come in.
+        let intercepted = |events: &mut tokio::sync::broadcast::Receiver<Value>| -> Option<Value> {
+            loop {
+                match events.try_recv() {
+                    Ok(e)
+                        if e.get("method").and_then(Value::as_str) == Some("Input.dragIntercepted")
+                            && e.get("sessionId").and_then(Value::as_str) == Some(session.as_str()) =>
+                    {
+                        return Some(e["params"]["data"].clone());
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    Err(_) => return None,
+                }
+            }
+        };
+        self.mouse_event("mouseMoved", a.0, a.1, "none", 0, timeout)?;
+        self.mouse_event("mousePressed", a.0, a.1, "left", 1, timeout)?;
+        // A source the page made draggable (before this press or on it) gets
+        // time to start the drag; any other, no more than the event takes.
+        let expecting = self
+            .send(
+                "Runtime.evaluate",
+                json!({
+                    "expression": format!(
+                        "(() => {{ let e = document.elementFromPoint({}, {}); \
+                         while (e && e.shadowRoot && e.shadowRoot.elementFromPoint) {{ \
+                           const i = e.shadowRoot.elementFromPoint({}, {}); if (!i || i === e) break; e = i; }} \
+                         return !!(e && e.closest('[draggable=true]')); }})()",
+                        a.0, a.1, a.0, a.1
+                    ),
+                    "returnByValue": true,
+                }),
+                timeout,
+            )
+            .ok()
+            .and_then(|v| v["result"]["value"].as_bool())
+            .unwrap_or(false);
+        let patience = if expecting { Duration::from_millis(400) } else { Duration::from_millis(0) };
+        let mut data = None;
+        let mut path = Vec::new();
+        for i in 1..=DRAG_STEPS {
+            let t = i as f64 / DRAG_STEPS as f64;
+            let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+            if data.is_none() {
+                self.mouse_event("mouseMoved", x, y, "left", 1, timeout)?;
+                data = intercepted(&mut events);
+                if data.is_none() && !patience.is_zero() {
+                    data = self.block_on(async {
+                        let wait = async {
+                            loop {
+                                match events.recv().await {
+                                    Ok(e)
+                                        if e.get("method").and_then(Value::as_str) == Some("Input.dragIntercepted")
+                                            && e.get("sessionId").and_then(Value::as_str) == Some(session.as_str()) =>
+                                    {
+                                        return Some(e["params"]["data"].clone());
+                                    }
+                                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                    Err(_) => return None,
+                                }
+                            }
+                        };
+                        tokio::time::timeout(patience, wait).await.ok().flatten()
+                    });
+                }
+                if data.is_some() {
+                    self.drag_event("dragEnter", x, y, data.as_ref(), timeout)?;
+                }
+            } else {
+                path.push((x, y));
+            }
+        }
+        let Some(data) = data else {
+            // A drag may start with the last step: one more look, then it was a plain mouse drag.
+            std::thread::sleep(Duration::from_millis(30));
+            if let Some(data) = intercepted(&mut events) {
+                return self.finish_drag(&data, &[], b, timeout);
+            }
+            self.mouse_event("mouseReleased", b.0, b.1, "left", 0, timeout)?;
+            return Ok(json!({ "from": { "x": a.0, "y": a.1 }, "to": { "x": b.0, "y": b.1 }, "path": "mouse" }));
+        };
+        self.finish_drag(&data, &path, b, timeout)
+    }
+
+    /// The rest of an intercepted drag: over at each point, then the drop.
+    fn finish_drag(&self, data: &Value, path: &[(f64, f64)], b: (f64, f64), timeout: Duration) -> Result<Value> {
+        // Whether the page took the drop: Chrome sends `drop` only to a target
+        // that accepted the last `dragover`.
+        let _ = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": "window.__nvDropped = false; addEventListener('drop', () => { window.__nvDropped = true; }, { capture: true, once: true }); 1" }),
+            timeout,
+        );
+        for (x, y) in path {
+            self.drag_event("dragOver", *x, *y, Some(data), timeout)?;
+        }
+        self.drag_event("dragOver", b.0, b.1, Some(data), timeout)?;
+        self.drag_event("drop", b.0, b.1, Some(data), timeout)?;
+        let dropped = self
+            .send("Runtime.evaluate", json!({ "expression": "!!window.__nvDropped", "returnByValue": true }), timeout)
+            .ok()
+            .and_then(|v| v["result"]["value"].as_bool())
+            .unwrap_or(false);
+        Ok(json!({ "html5": true, "dropped": dropped, "path": "drag" }))
+    }
+
+    fn drag_event(&self, kind: &str, x: f64, y: f64, data: Option<&Value>, timeout: Duration) -> Result<Value> {
+        self.send("Input.dispatchDragEvent", json!({ "type": kind, "x": x, "y": y, "data": data }), timeout)
     }
 
     fn moved_to(&self, x: f64, y: f64) {
@@ -3247,9 +3459,21 @@ impl Page {
     }
 
     /// Set an input/textarea/contenteditable's value (native setter + events).
-    pub fn fill(&self, target: &Target, value: &str, wait: Duration, timeout: Duration) -> Result<()> {
-        let settle = json!(self.hit_settle_ms(wait));
-        self.on_element(target, "fill", FILL_EL, &[json!(value), settle], wait, timeout)?;
+    pub fn fill(&self, target: &Target, value: &str, force: bool, wait: Duration, timeout: Duration) -> Result<()> {
+        self.field_ready(target, force, wait, timeout)?;
+        self.on_element(target, "fill", FILL_EL, &[json!(value)], wait, timeout)?;
+        Ok(())
+    }
+
+    /// Wait for a field a user could type into (see [`FIELD_READY`]), unless
+    /// `force`. Waits as long as the element wait.
+    pub fn field_ready(&self, target: &Target, force: bool, wait: Duration, timeout: Duration) -> Result<()> {
+        if force {
+            return Ok(());
+        }
+        let settle = json!(wait.as_millis() as u64);
+        let check_box = json!(!self.shared.is_single_target());
+        self.on_element(target, "fill", FIELD_READY, &[settle, check_box], wait, timeout)?;
         Ok(())
     }
 
@@ -3459,6 +3683,33 @@ impl Page {
         }
     }
 
+    /// [`Page::check_in_frame`], watching in the frame for up to `chunk` at a
+    /// time: the predicate is checked again on the frame after each change
+    /// there (`DEEP`'s wake, scoped to the same frame) and at least every
+    /// 100 ms. False when the chunk ends unmet, or while the frame isn't
+    /// there. A frame of another origin is out of the observer's reach: it
+    /// is checked from here once and, unmet, waited on for the old 100 ms.
+    pub fn watch_in_frame(&self, chain: &str, js_predicate: &str, chunk: Duration, timeout: Duration) -> Result<bool> {
+        let watched = format!(
+            "(() => {{ const __nvStart = () => ({FRAME_DOC})({}); const __nvDeep = {DEEP}, __nvEnd = Date.now() + {}; \
+             return (async () => {{ for (;;) {{ if (await ({js_predicate}\n)) return true; const __nvLeft = __nvEnd - Date.now(); \
+             if (__nvLeft <= 0) return false; await __nvDeep.wake(Math.min(100, __nvLeft)); }} }})(); }})()",
+            json!(chain),
+            chunk.as_millis()
+        );
+        match self.check(&watched, timeout + chunk) {
+            Err(e) if format!("{e:#}").contains("(navigera:xo ") => {
+                let context = self.foreign_frame_context(chain, timeout)?;
+                let met = self.evaluate_in(context, &format!("!!({js_predicate})"), timeout)?.as_bool() == Some(true);
+                if !met {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(met)
+            }
+            other => other,
+        }
+    }
+
     /// PNG screenshot bytes; `full_page` captures beyond the viewport.
     pub fn screenshot_png(&self, timeout: Duration, full_page: bool) -> Result<Vec<u8>> {
         let mut params = json!({ "format": "png" });
@@ -3518,8 +3769,10 @@ impl Page {
     /// have no name or text.
     fn clickables(&self, timeout: Duration) -> ax::Clickables {
         let mut out = ax::Clickables::default();
-        let params =
-            json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility"], "includeDOMRects": true });
+        // No `includeDOMRects`: `layout.bounds` (all this reads) is always
+        // there, and the extra offset/client/scroll rects were about two
+        // thirds of the call's time on a 2,000-row table.
+        let params = json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility"] });
         let Ok(snap) = self.send("DOMSnapshot.captureSnapshot", params, timeout) else {
             return out;
         };
@@ -4102,15 +4355,55 @@ impl Page {
         Ok(Value::String(text))
     }
 
-    /// Close this tab's target.
+    /// Close this tab the way a user (and Playwright) does: `Page.close` on
+    /// the page's own session, which runs the page's unload path, so a tab
+    /// that hands work to another tab from `beforeunload` gets to do it.
+    /// `Target.closeTarget` skips `beforeunload`. It stays as the fallback
+    /// when `Page.close` is refused or the tab is still there after a short
+    /// wait (a `beforeunload` dialog can hold the page open). The target list
+    /// decides whether the tab is gone, not the replies: the reply to
+    /// `Page.close` can be lost with the session it was sent on, and a
+    /// `closeTarget` that comes too late finds no target.
     pub fn close_target(&self, timeout: Duration) -> Result<()> {
         self.shared.unregister(&self.session_id);
         self.block_on(async {
-            self.client.send("Target.closeTarget", json!({ "targetId": self.target_id }), None, timeout).await?;
+            let polite =
+                self.client.send("Page.close", json!({}), Some(&self.session_id), timeout.min(CLOSE_WAIT)).await;
+            let started = std::time::Instant::now();
+            loop {
+                if !self.target_alive(timeout).await {
+                    return Ok(());
+                }
+                if polite.is_err() || started.elapsed() >= CLOSE_WAIT {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let forced =
+                self.client.send("Target.closeTarget", json!({ "targetId": self.target_id }), None, timeout).await;
+            if forced.is_err() && !self.target_alive(timeout).await {
+                return Ok(());
+            }
+            forced?;
             Ok(())
         })
     }
+
+    /// Is this tab's target still listed by the browser? Unknown counts as yes.
+    async fn target_alive(&self, timeout: Duration) -> bool {
+        match self.client.send("Target.getTargets", json!({}), None, timeout.min(CLOSE_WAIT)).await {
+            Ok(v) => v
+                .get("targetInfos")
+                .and_then(Value::as_array)
+                .map(|l| l.iter().any(|t| t.get("targetId").and_then(Value::as_str) == Some(self.target_id.as_str())))
+                .unwrap_or(true),
+            Err(_) => true,
+        }
+    }
 }
+
+/// How long `close_target` waits for the page to go after `Page.close`.
+const CLOSE_WAIT: Duration = Duration::from_millis(1500);
 
 /// AX roles an agent can act on; always kept by the flat JSON view.
 const AX_INTERACTIVE: &[&str] = ax::INTERACTIVE;
