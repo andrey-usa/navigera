@@ -158,26 +158,35 @@ pub const DEEP: &str = r#"(() => {
         return out;
     };
     const roots = () => { const out = []; for (const d of topDocs()) { out.push(d); shadows(d, out); } return out; };
-    // A wait's pause: until the frame after any of these roots changes, or
+    // A wait's pause: until any of these roots changes, or
     // `ms` at most. A poll alone sees a change half an interval late on
     // average (25 ms of a 50 ms poll, 50 of 100); woken by the change it is
     // under a millisecond. What no observer sees (a stylesheet rule starting
     // to match, a hover, a frame out of reach, a background tab with no
     // frames) still ends the pause at `ms`, so no wait is slower than the
     // poll it replaces. The observer goes at the first change or the time.
+    const MIN_GAP = 8;
+    let lastEnd = -1e9;
     const wake = (ms) => new Promise((resolve) => {
         let mo = null, timer = 0, done = false;
         const finish = () => {
             if (done) return;
             done = true;
+            lastEnd = performance.now();
             clearTimeout(timer);
             if (mo) mo.disconnect();
             resolve();
         };
         timer = setTimeout(finish, ms);
         try {
-            const frame = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(f, 0);
-            mo = new MutationObserver(() => { mo.disconnect(); frame(finish); });
+            // No frame hop: a busy page's frames can lag the change by a
+            // frame or more. Wakes are at least `MIN_GAP` ms apart, so a
+            // page that mutates constantly is not re-checked on every write.
+            mo = new MutationObserver(() => {
+                mo.disconnect();
+                const gap = MIN_GAP - (performance.now() - lastEnd);
+                if (gap > 0) setTimeout(finish, gap); else finish();
+            });
             const what = { subtree: true, childList: true, attributes: true, characterData: true };
             for (const r of roots()) mo.observe(r, what);
         } catch (_) {}
