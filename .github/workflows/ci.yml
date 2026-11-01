@@ -176,6 +176,40 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
       - run: cargo check --locked --all-targets
 
+  # The static Linux binaries a release ships (musl, with mimalloc's C
+  # code), built on every change rather than first at release time. On
+  # x86_64 the binary also reads a page with the runner's Chrome.
+  musl:
+    name: musl (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - run: cargo build --release --locked --bin navigera --target ${{ matrix.target }}
+      - name: Smoke test
+        run: |
+          bin=target/${{ matrix.target }}/release/navigera
+          file "$bin" | tee /dev/stderr | grep -q 'static'
+          "$bin" --version
+          if [ "${{ matrix.target }}" = x86_64-unknown-linux-musl ]; then
+            printf '%s\n' '{"id":1,"op":"goto","url":"data:text/html,<h1>Static</h1><button>Go</button>"}' \
+              '{"id":2,"op":"ax","format":"text"}' '{"id":3,"op":"quit"}' | "$bin" serve | tee out.jsonl
+            grep -q 'heading \\"Static\\"' out.jsonl && grep -q 'button \\"Go\\"' out.jsonl
+          fi
+
   # Windows: the same unit + e2e tests on the runner's Chrome, through the
   # Windows code paths (WebSocket CDP, loopback-TCP sessions with a token,
   # kill-on-close job object).
