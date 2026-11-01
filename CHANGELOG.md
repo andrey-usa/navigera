@@ -61,8 +61,10 @@ All notable changes to this project are documented here. The format follows
   for three snapshots in 0.6.4, 1,002 / 7 / 7 now.
 - Analytics beacons at irregular intervals no longer hold the first
   snapshot: a request the server answers 202 or 204 (no content) is
-  background traffic, and that method and URL's later requests don't count
-  (first snapshot on such a page: 505 to 8 ms).
+  background traffic, and that method and URL's requests, the ones still
+  out included, don't count, in whatever order their events arrive (first
+  snapshot on such a page: 505 to 8 ms). The end of a long poll no longer
+  restarts the quiet window either.
 
 - `ax` on a large page through the shared browser lost up to a quarter of
   its speed in 0.6.5: each of the snapshot's thousands of tree reads crossed

@@ -84,8 +84,14 @@ pub struct NetState {
     /// server answered 202/204, no content (an analytics beacon). Their
     /// requests neither hold a snapshot nor move the quiet clock.
     pub background: std::collections::HashSet<String>,
-    /// When the last fetch/XHR started or ended.
+    /// When the last fetch/XHR started or ended, background traffic left
+    /// out (see [`NetState::clock_moves`]).
     pub last: Option<std::time::Instant>,
+    /// The recent moves of that clock: when, and which method and URL
+    /// moved it. A URL found to be background traffic later (a beacon's
+    /// 204 arriving after the next beacon started) is taken out again,
+    /// whatever order the events came in.
+    pub clock_moves: Vec<(std::time::Instant, String)>,
     /// URL without its query string -> when its last requests started (the
     /// last three), to tell a poll from data the page is waiting for.
     pub starts: HashMap<String, Vec<std::time::Instant>>,
@@ -102,6 +108,24 @@ pub struct NetState {
 }
 
 impl NetState {
+    /// The quiet clock moves: `target` started or ended now.
+    fn touch(&mut self, target: &str) {
+        let now = std::time::Instant::now();
+        self.clock_moves.retain(|(t, _)| now.duration_since(*t) < Duration::from_secs(10));
+        if self.clock_moves.len() >= 64 {
+            self.clock_moves.remove(0);
+        }
+        self.clock_moves.push((now, target.to_string()));
+        self.recompute_last();
+    }
+
+    /// The clock without the moves of what is now known to be background.
+    fn recompute_last(&mut self) {
+        let background = &self.background;
+        self.last =
+            self.clock_moves.iter().filter(|(_, t)| t.is_empty() || !background.contains(t)).map(|(at, _)| *at).max();
+    }
+
     /// Requests in flight that may still bring data the page renders: one
     /// open past [`LONG_REQUEST`] is a long poll or a stream, and from now
     /// on its URL is background traffic.
@@ -599,6 +623,81 @@ pub fn spawn(handle: &tokio::runtime::Handle, client: &CdpClient, shared: Arc<Sh
     });
 }
 
+/// A tab's fetch/XHR traffic, for the quiet wait (see [`NetState`]).
+fn note_network(shared: &Shared, method: &str, params: &Value, session: &str) {
+    match method {
+        "Network.requestWillBeSent" => {
+            let kind = params.get("type").and_then(Value::as_str).unwrap_or("");
+            if session.is_empty() || !matches!(kind, "XHR" | "Fetch") {
+                return;
+            }
+            if let Some(id) = params.get("requestId").and_then(Value::as_str) {
+                let mut net = shared.net.lock().unwrap();
+                let state = net.entry(session.to_string()).or_default();
+                let now = std::time::Instant::now();
+                let url = params.pointer("/request/url").and_then(Value::as_str).unwrap_or("");
+                let key = url.split(['?', '#']).next().unwrap_or("").to_string();
+                let method = params.pointer("/request/method").and_then(Value::as_str).unwrap_or("GET");
+                let target = if key.is_empty() { String::new() } else { format!("{method} {key}") };
+                let mut poll = state.background.contains(&target);
+                if !key.is_empty() {
+                    let starts = state.starts.entry(key.clone()).or_default();
+                    poll |= is_poll(starts, now);
+                    starts.push(now);
+                    if starts.len() > 3 {
+                        starts.remove(0);
+                    }
+                }
+                if !poll {
+                    state.seq += 1;
+                    let before = state.last;
+                    state.pending.entry(id.to_string()).or_insert((now, target.clone(), before));
+                    state.touch(&target);
+                }
+            }
+        }
+        // No content back (202, 204): a beacon the page doesn't read, so
+        // that URL's requests are background traffic.
+        "Network.responseReceived" => {
+            let status = params.pointer("/response/status").and_then(Value::as_u64);
+            if let (Some(202 | 204), Some(id)) = (status, params.get("requestId").and_then(Value::as_str)) {
+                let mut net = shared.net.lock().unwrap();
+                if let Some(state) = net.get_mut(session) {
+                    if let Some((_, key, _)) = state.pending.remove(id) {
+                        if !key.is_empty() {
+                            // It never was data, nor are the same URL's
+                            // requests still out: none of them moves the
+                            // quiet clock, however the events interleaved.
+                            state.pending.retain(|_, (_, k, _)| *k != key);
+                            state.background.insert(key);
+                        }
+                        state.recompute_last();
+                    }
+                }
+            }
+        }
+        "Network.loadingFinished" | "Network.loadingFailed" => {
+            if let Some(id) = params.get("requestId").and_then(Value::as_str) {
+                let mut net = shared.net.lock().unwrap();
+                if let Some(state) = net.get_mut(session) {
+                    if let Some((started, key, _)) = state.pending.remove(id) {
+                        if started.elapsed() >= LONG_REQUEST && !key.is_empty() {
+                            state.background.insert(key.clone());
+                        }
+                        // A long poll's end is background too.
+                        if state.background.contains(&key) {
+                            state.recompute_last();
+                        } else {
+                            state.touch(&key);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
     let Some(method) = event.get("method").and_then(Value::as_str) else {
         return;
@@ -732,68 +831,11 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                     .await;
             });
         }
-        "Network.requestWillBeSent" => {
-            let kind = params.get("type").and_then(Value::as_str).unwrap_or("");
-            if session.is_empty() || !matches!(kind, "XHR" | "Fetch") {
-                return;
-            }
-            if let Some(id) = params.get("requestId").and_then(Value::as_str) {
-                let mut net = shared.net.lock().unwrap();
-                let state = net.entry(session.to_string()).or_default();
-                let now = std::time::Instant::now();
-                let url = params.pointer("/request/url").and_then(Value::as_str).unwrap_or("");
-                let key = url.split(['?', '#']).next().unwrap_or("").to_string();
-                let method = params.pointer("/request/method").and_then(Value::as_str).unwrap_or("GET");
-                let target = if key.is_empty() { String::new() } else { format!("{method} {key}") };
-                let mut poll = state.background.contains(&target);
-                if !key.is_empty() {
-                    let starts = state.starts.entry(key.clone()).or_default();
-                    poll |= is_poll(starts, now);
-                    starts.push(now);
-                    if starts.len() > 3 {
-                        starts.remove(0);
-                    }
-                }
-                if !poll {
-                    state.seq += 1;
-                    let before = state.last;
-                    state.pending.entry(id.to_string()).or_insert((now, target, before));
-                    state.last = Some(now);
-                }
-            }
-        }
-        // No content back (202, 204): a beacon the page doesn't read, so
-        // that URL's requests are background traffic.
-        "Network.responseReceived" => {
-            let status = params.pointer("/response/status").and_then(Value::as_u64);
-            if let (Some(202 | 204), Some(id)) = (status, params.get("requestId").and_then(Value::as_str)) {
-                let mut net = shared.net.lock().unwrap();
-                if let Some(state) = net.get_mut(session) {
-                    if let Some((started, key, before)) = state.pending.remove(id) {
-                        if !key.is_empty() {
-                            state.background.insert(key);
-                        }
-                        // It never was data: the quiet clock goes back to
-                        // where it stood, unless something else moved it since.
-                        if state.last == Some(started) {
-                            state.last = before;
-                        }
-                    }
-                }
-            }
-        }
-        "Network.loadingFinished" | "Network.loadingFailed" => {
-            if let Some(id) = params.get("requestId").and_then(Value::as_str) {
-                let mut net = shared.net.lock().unwrap();
-                if let Some(state) = net.get_mut(session) {
-                    if let Some((started, key, _)) = state.pending.remove(id) {
-                        if started.elapsed() >= LONG_REQUEST && !key.is_empty() {
-                            state.background.insert(key);
-                        }
-                        state.last = Some(std::time::Instant::now());
-                    }
-                }
-            }
+        "Network.requestWillBeSent"
+        | "Network.responseReceived"
+        | "Network.loadingFinished"
+        | "Network.loadingFailed" => {
+            note_network(shared, method, &params, session);
         }
         "Target.targetCreated" => {
             let info = params.get("targetInfo").cloned().unwrap_or(Value::Null);
@@ -910,6 +952,35 @@ mod tests {
         assert!(!skip_quiet_wait(Some(3), 4, 0));
         // A request still in flight: do not skip.
         assert!(!skip_quiet_wait(Some(3), 3, 1));
+    }
+
+    /// Beacons whose 204s come back after the next beacon started leave
+    /// the quiet clock where data left it, in any order of events.
+    #[test]
+    fn interleaved_beacons_leave_the_quiet_clock_alone() {
+        let shared = Shared::default();
+        let ev = |method: &str, params: Value| note_network(&shared, method, &params, "s");
+        let sent = |id: &str, method: &str, url: &str| json!({ "requestId": id, "type": "Fetch", "request": { "url": url, "method": method } });
+        // Data first: it sets the clock.
+        ev("Network.requestWillBeSent", sent("d", "GET", "http://x.test/api"));
+        ev("Network.loadingFinished", json!({ "requestId": "d" }));
+        let (_, after_data) = shared.net_state("s");
+        assert!(after_data.is_some());
+        // Two beacons out before either answers.
+        ev("Network.requestWillBeSent", sent("b1", "POST", "http://x.test/collect"));
+        ev("Network.requestWillBeSent", sent("b2", "POST", "http://x.test/collect?e=2"));
+        assert_eq!(shared.net_state("s").0, 2);
+        ev("Network.responseReceived", json!({ "requestId": "b1", "response": { "status": 204 } }));
+        // The second, same URL, no longer counts either.
+        let (pending, last) = shared.net_state("s");
+        assert_eq!((pending, last), (0, after_data), "the clock is back where the data left it");
+        ev("Network.loadingFinished", json!({ "requestId": "b1" }));
+        ev("Network.responseReceived", json!({ "requestId": "b2", "response": { "status": 204 } }));
+        ev("Network.loadingFinished", json!({ "requestId": "b2" }));
+        assert_eq!(shared.net_state("s"), (0, after_data));
+        // A later beacon to that URL is background from the start.
+        ev("Network.requestWillBeSent", sent("b3", "POST", "http://x.test/collect"));
+        assert_eq!(shared.net_state("s"), (0, after_data));
     }
 
     #[test]
