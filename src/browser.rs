@@ -775,6 +775,12 @@ impl BrowserSession {
         self.shared.then(|| self.browser.context_count().ok()).flatten()
     }
 
+    /// `quit --close-browser` on a shared browser: it closes once this
+    /// session is gone, unless other sessions use it. Returns how many do.
+    pub fn close_shared_if_unused(&self) -> Result<usize> {
+        self.browser.close_host_if_unused()
+    }
+
     /// Has the connection to the browser ended?
     pub fn browser_gone(&self) -> bool {
         self.browser.is_closed()

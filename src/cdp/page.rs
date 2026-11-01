@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 
 use super::ax;
 use super::client::CdpClient;
+use super::domax;
 use super::events::Shared;
 use super::logs::Report;
 
@@ -462,6 +463,33 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         }
         return null;
     };
+    // An element whose position never holds still (a perpetual drift)
+    // gets this long in all to stop, then is clicked where it was last
+    // read, not after the whole element wait.
+    let steadyBy = null;
+    // A cover that stays put and has controls of its own (a cookie banner,
+    // a dialog) waits for the user, not for time: it is reported after
+    // COVER_MS, not the whole element wait. One with nothing to click (a
+    // loading overlay) or still animating is waited for.
+    const COVER_MS = 1000;
+    const CONTROLS = 'button, a[href], input:not([type=hidden]), select, textarea, summary, [role=button], [role=link], [role=checkbox], [role=switch], [role=tab], [role=menuitem]';
+    const coverOf = (n) => {
+        let c = n;
+        while (c.parentElement && c.parentElement !== c.ownerDocument.body && !c.parentElement.contains(el)) c = c.parentElement;
+        return c;
+    };
+    const controlsOf = (c) => [c, ...c.querySelectorAll(CONTROLS)].filter((b) => {
+        if (!b.matches(CONTROLS)) return false;
+        const r = b.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    });
+    const animating = (c) => !!c.getAnimations && c.getAnimations({ subtree: true }).some((a) => {
+        const t = a.effect && a.effect.getComputedTiming ? a.effect.getComputedTiming() : {};
+        return a.playState === 'running' && Number.isFinite(t.endTime);
+    });
+    const label = (b) => (b.innerText || b.getAttribute('aria-label') || b.value || b.title || '').replace(/\s+/g, ' ').trim().slice(0, 30);
+    const started = Date.now();
+    let cover = null, coverSince = 0, persistent = false;
     let hit = null, tries = 0;
     while (!force) {
         // Checked on every pass: an element that just appeared may only now
@@ -483,6 +511,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // frame, and two reads with no frame between them see nothing move.
         // A hidden page draws no frames, and one that drew none for 500 ms
         // isn't moving anything by frames either: the timer counts there.
+        if (steadyBy === null) steadyBy = Date.now() + Math.min(1000, settleMs);
         for (let idle = 0; ; ) {
             const framed = await new Promise((res) => { requestAnimationFrame(() => res(true)); setTimeout(() => res(false), 100); });
             idle = framed ? 0 : idle + 1;
@@ -494,7 +523,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             const same = Math.abs((r2.left + r2.width / 2) - (r.left + r.width / 2)) < 1
                 && Math.abs((r2.top + r2.height / 2) - (r.top + r.height / 2)) < 1;
             r = r2;
-            if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= deadline) break;
+            if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= Math.min(deadline, steadyBy)) break;
         }
         let x = r.left + r.width / 2, y = r.top + r.height / 2;
         const root = box.getRootNode(), doc = box.ownerDocument;
@@ -536,6 +565,16 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // Hidden by `visibility` or `pointer-events`, it is waiting to be
         // shown or enabled: waited for.
         if (hit && tries < ALIGN.length) continue;
+        if (hit && strict && !hit.contains(el)) {
+            const c = coverOf(hit);
+            if (c !== cover) {
+                cover = c;
+                coverSince = Date.now();
+            } else if (Date.now() - coverSince >= COVER_MS && !animating(c) && controlsOf(c).length) {
+                persistent = true;
+                break;
+            }
+        } else cover = null;
         const st = (el.ownerDocument.defaultView || window).getComputedStyle(el);
         const pending = st.visibility === 'hidden' || st.pointerEvents === 'none';
         const onPurpose = hit ? hit.contains(el) && !pending : !!visibleFor();
@@ -551,7 +590,9 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // Under something else the whole time: a user would hit that
         // instead. Nothing was clicked.
         el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-        return { covered: true, covered_by: describe(hit) };
+        const c = coverOf(hit);
+        const controls = controlsOf(c).map(label).filter((t) => t).slice(0, 4);
+        return { covered: true, covered_by: describe(c), controls, persistent, waited: Date.now() - started };
     }
     const view = el.ownerDocument.defaultView;
     const b = button === 'right' ? 2 : button === 'middle' ? 1 : 0;
@@ -639,6 +680,88 @@ pub const MOUSE_AT: &str = r#"function (el, dx, dy) {
     }
     return p.inside ? { x: p.x, y: p.y } : { outside: true, x: p.x, y: p.y, width: (window.top || window).innerWidth, height: (window.top || window).innerHeight };
 }"#;
+
+/// Attributes pages put an icon button's tooltip in, most specific first
+/// (`title` names the element in Chrome's tree already, unless a label or
+/// text does: then it is the tooltip shown here).
+const TOOLTIP_ATTRS: &[&str] = &[
+    "data-tooltip",
+    "data-tip",
+    "data-title",
+    "data-bs-title",
+    "data-bs-original-title",
+    "data-original-title",
+    "mattooltip",
+    "data-hint",
+    "aria-description",
+    "title",
+];
+
+/// An icon font's class for one glyph (`fa-trash`, `bi-x-lg`,
+/// `icon-close`, `mdi-delete`), not a family or a size (`fa`, `fa-solid`,
+/// `fa-lg`, `material-icons`).
+fn icon_class(class: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "fa-",
+        "bi-",
+        "icon-",
+        "glyphicon-",
+        "mdi-",
+        "ti-",
+        "la-",
+        "ri-",
+        "codicon-",
+        "octicon-",
+        "lucide-",
+        "feather-",
+        "ion-",
+        "bx-",
+        "bxs-",
+        "ph-",
+        "tabler-",
+        "heroicon-",
+        "gg-",
+        "iconoir-",
+    ];
+    const NOT_A_GLYPH: &[&str] = &[
+        "fa-solid",
+        "fa-regular",
+        "fa-light",
+        "fa-thin",
+        "fa-duotone",
+        "fa-brands",
+        "fa-sharp",
+        "fa-fw",
+        "fa-lg",
+        "fa-sm",
+        "fa-xs",
+        "fa-xl",
+        "fa-spin",
+        "fa-pulse",
+        "fa-inverse",
+        "fa-border",
+        "fa-pull-left",
+        "fa-pull-right",
+        "fa-stack",
+        "fa-stack-1x",
+        "fa-stack-2x",
+        "fa-li",
+        "fa-ul",
+        "fa-flip",
+        "fa-beat",
+        "icon-button",
+        "icon-btn",
+        "icon-only",
+        "icon-small",
+        "icon-large",
+        "icon-sm",
+        "icon-lg",
+    ];
+    let lower = class.to_ascii_lowercase();
+    PREFIXES.iter().any(|p| lower.len() > p.len() && lower.starts_with(p))
+        && !NOT_A_GLYPH.contains(&lower.as_str())
+        && !(lower.starts_with("fa-") && lower[3..].trim_end_matches('x').chars().all(|c| c.is_ascii_digit()))
+}
 
 pub const GET_EL: &str = r#"function (el, what, name) {
     switch (what) {
@@ -2812,14 +2935,32 @@ impl Page {
         // Watch what the click changes (not on Lightpanda: no layout, so its
         // clicks are DOM events anyway).
         let effects = !self.shared.is_single_target() && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none();
-        let mut point = self.on_element(
-            target,
-            "click",
-            CLICK_PREP,
-            &[json!(false), settle.clone(), strict.clone(), button.clone(), json!(effects)],
-            wait,
-            timeout,
-        )?;
+        let started = std::time::Instant::now();
+        let prep = |settle: &Value| {
+            self.on_element(
+                target,
+                "click",
+                CLICK_PREP,
+                &[json!(false), settle.clone(), strict.clone(), button.clone(), json!(effects)],
+                wait,
+                timeout,
+            )
+        };
+        let mut point = prep(&settle)?;
+        // A cover with controls that stayed put is reported early, unless
+        // the page is still fetching: then it may be a loading overlay
+        // about to go, and the rest of the element wait is spent on it.
+        while point.get("persistent").and_then(Value::as_bool) == Some(true)
+            && self.shared.fetching(&self.session_id) > 0
+        {
+            let Some(left) = wait.checked_sub(started.elapsed()).filter(|l| *l > Duration::from_millis(200)) else {
+                break;
+            };
+            point = prep(&json!(left.as_millis() as u64))?;
+        }
+        if point.get("covered").and_then(Value::as_bool) == Some(true) {
+            point["waited"] = json!(started.elapsed().as_millis() as u64);
+        }
         if point.get("disabled").and_then(Value::as_bool) == Some(true) {
             bail!("the element is disabled (waited {settle} ms for it to be enabled); a user can't click it");
         }
@@ -2841,12 +2982,26 @@ impl Page {
         if point.get("covered").and_then(Value::as_bool) == Some(true)
             && point.get("synthetic").and_then(Value::as_bool) != Some(true)
         {
+            let controls: Vec<String> = point
+                .get("controls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|c| serde_json::to_string(c).unwrap_or_default())
+                .collect();
+            let persistent = point.get("persistent").and_then(Value::as_bool) == Some(true);
             bail!(
-                "the element is covered by {} at its centre (waited {} ms; a user's click would land there). \
-                 Close it or wait for it to go; to click anyway, --force sends the click to the element \
-                 without the mouse",
+                "the element is covered by {} at its centre ({} {} ms; a user's click would land there). \
+                 {}; to click anyway, --force sends the click to the element without the mouse",
                 point.get("covered_by").and_then(Value::as_str).unwrap_or("another element"),
-                settle
+                if persistent { "it stayed put with controls of its own for" } else { "waited" },
+                point.get("waited").and_then(Value::as_u64).unwrap_or(settle.as_u64().unwrap_or(0)),
+                if controls.is_empty() {
+                    "Close it or wait for it to go".to_string()
+                } else {
+                    format!("Close it with one of its controls ({}) or wait for it to go", controls.join(", "))
+                }
             );
         }
         if point.get("xframe").and_then(Value::as_bool) == Some(true) {
@@ -3922,14 +4077,28 @@ impl Page {
     /// `.class` for each element, to tell apart actionable elements that
     /// have no name or text.
     fn clickables(&self, timeout: Duration) -> ax::Clickables {
+        match self.dom_snapshot(timeout) {
+            Some(snap) => clickables_from(&snap),
+            None => ax::Clickables::default(),
+        }
+    }
+
+    /// `DOMSnapshot.captureSnapshot` with the styles [`clickables_from`]
+    /// and the tree built from the snapshot read (cursor, pointer-events,
+    /// opacity, visibility, display, content). No `includeDOMRects`: `layout.bounds`
+    /// is always there, and the extra offset/client/scroll rects were about
+    /// two thirds of the call's time on a 2,000-row table.
+    fn dom_snapshot(&self, timeout: Duration) -> Option<Value> {
+        let params =
+            json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility", "display", "content"] });
+        self.send("DOMSnapshot.captureSnapshot", params, timeout).ok()
+    }
+}
+
+/// What a snapshot shows a user could click (see [`Page::clickables`]).
+fn clickables_from(snap: &Value) -> ax::Clickables {
+    {
         let mut out = ax::Clickables::default();
-        // No `includeDOMRects`: `layout.bounds` (all this reads) is always
-        // there, and the extra offset/client/scroll rects were about two
-        // thirds of the call's time on a 2,000-row table.
-        let params = json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility"] });
-        let Ok(snap) = self.send("DOMSnapshot.captureSnapshot", params, timeout) else {
-            return out;
-        };
         let strings: Vec<&str> = snap
             .get("strings")
             .and_then(Value::as_array)
@@ -4154,6 +4323,64 @@ impl Page {
                 }
                 words.split_whitespace().collect::<Vec<_>>().join(" ")
             };
+            // What an element with no text is, by the page's own markup: a
+            // tooltip attribute, else its icon (an icon font's class, an SVG
+            // sprite's symbol, an image's file name), its own or inside it.
+            let icon_hint = |i: i64| -> Option<String> {
+                let short = |v: &str| {
+                    let v = v.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let cut: String = v.chars().take(60).collect();
+                    serde_json::to_string(&cut).unwrap_or_default()
+                };
+                for name in TOOLTIP_ATTRS {
+                    let v = attr_of(i, name).trim();
+                    if !v.is_empty() {
+                        return Some(format!("{name}={}", short(v)));
+                    }
+                }
+                let mut queue = std::collections::VecDeque::from([(i, 0)]);
+                let mut img = None;
+                let mut seen = 0;
+                while let Some((at, depth)) = queue.pop_front() {
+                    seen += 1;
+                    if seen > 24 {
+                        break;
+                    }
+                    let icon = attr_of(at, "data-icon").trim();
+                    if !icon.is_empty() {
+                        return Some(format!("icon={}", short(icon)));
+                    }
+                    if let Some(class) = attr_of(at, "class").split_whitespace().find(|c| icon_class(c)) {
+                        return Some(format!("icon={}", short(class)));
+                    }
+                    match tag_of(at) {
+                        "use" | "USE" => {
+                            let href = Some(attr_of(at, "href"))
+                                .filter(|h| !h.is_empty())
+                                .unwrap_or(attr_of(at, "xlink:href"));
+                            let symbol = href.rsplit(['#', '/']).next().unwrap_or("").trim();
+                            if !symbol.is_empty() {
+                                return Some(format!("icon={}", short(symbol)));
+                            }
+                        }
+                        "IMG" if img.is_none() => {
+                            let src = attr_of(at, "src");
+                            let file =
+                                src.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("").trim();
+                            if !file.is_empty() && !src.starts_with("data:") {
+                                img = Some(format!("img={}", short(file)));
+                            }
+                        }
+                        _ => {}
+                    }
+                    if depth < 4 {
+                        for &k in children.get(&at).into_iter().flatten() {
+                            queue.push_back((k, depth + 1));
+                        }
+                    }
+                }
+                img
+            };
             for (i, &backend) in backends.iter().enumerate() {
                 if types.get(i) != Some(&1) {
                     continue;
@@ -4165,12 +4392,18 @@ impl Page {
                     let pairs = attrs.map(|a| a.as_slice()).unwrap_or(&[]);
                     pairs.chunks(2).find(|p| text(p.first()) == name).map(|p| text(p.get(1)).trim().to_string())
                 };
-                if let Some(id) = attr("id").filter(|id| !id.is_empty()) {
-                    out.hints.insert(backend, format!("#{id}"));
-                } else if let Some(class) = attr("class").and_then(|c| c.split_whitespace().next().map(str::to_string))
-                {
-                    out.hints.insert(backend, format!(".{class}"));
-                }
+                let selector = if let Some(id) = attr("id").filter(|id| !id.is_empty()) {
+                    Some(format!("#{id}"))
+                } else {
+                    attr("class").and_then(|c| c.split_whitespace().next().map(|c| format!(".{c}")))
+                };
+                // With no text inside (an icon button): what the page says it is.
+                let what = if texted.contains(&index) { None } else { icon_hint(index) };
+                match (selector, what) {
+                    (Some(s), Some(w)) => out.hints.insert(backend, format!("{s} {w}")),
+                    (Some(h), None) | (None, Some(h)) => out.hints.insert(backend, h),
+                    (None, None) => None,
+                };
                 if !landable(index) {
                     continue;
                 }
@@ -4201,7 +4434,9 @@ impl Page {
         }
         out
     }
+}
 
+impl Page {
     /// Backend node id of the element `target` names (for `ax --selector`).
     fn backend_id(&self, target: &Target, wait: Duration, timeout: Duration) -> Result<u64> {
         if let Target::Ref(node) = target {
@@ -4359,46 +4594,131 @@ impl Page {
     }
 
     fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        let tree_opts = !opts.json && opts.max_depth.is_none() && !self.shared.is_single_target();
+        // A large page's tree is built from the DOM snapshot; anything that
+        // path can't serve falls back to Chrome's tree below.
+        // `NAVIGERA_AX_SOURCE=chrome|dom` picks one (for comparing them).
+        let forced = std::env::var("NAVIGERA_AX_SOURCE").ok();
+        let nodes = if tree_opts && forced.is_none() { self.dom_nodes(timeout) } else { None };
+        // `both`: Chrome's tree, a separator line, then the snapshot's, of
+        // the same page load (for checking one against the other).
+        if tree_opts && forced.as_deref().map(str::trim) == Some("both") {
+            let chrome = self.ax_tree_full(timeout, opts, None)?;
+            let dom = self.ax_tree_dom(timeout, opts)?;
+            return Ok(Value::String(format!(
+                "{}\n=== DOM snapshot tree ===\n{}",
+                chrome.as_str().unwrap_or(""),
+                dom.as_str().unwrap_or("")
+            )));
+        }
+        let from_dom = tree_opts
+            && match forced.as_deref().map(str::trim) {
+                Some("dom") => true,
+                Some(_) => false,
+                None => nodes.is_some_and(|n| n > DOM_TREE_NODES),
+            };
+        if from_dom {
+            match self.ax_tree_dom(timeout, opts) {
+                Ok(text) => return Ok(text),
+                Err(e) => crate::timing::log(&format!("[ax] DOM snapshot tree failed, reading Chrome's: {e:#}")),
+            }
+        }
         // The text tree stops at the output limit, so on a large page it
         // need not read the whole tree: fetch lazily from the root and
         // stop. Anything the lazy path cannot serve (JSON, a depth cap,
         // no limit, a browser without the lazy calls) reads the full tree
         // exactly as before, and a failed lazy fetch falls back to it.
-        if !opts.json
-            && opts.max_depth.is_none()
-            && opts.limit > 0
-            && !self.shared.is_single_target()
-            && (opts.scope.is_some() || !self.fits_in(opts.limit, timeout))
-        {
-            if let Ok(text) = self.ax_tree_lazy(timeout, opts) {
-                return Ok(text);
+        if tree_opts && opts.limit > 0 {
+            // A scoped snapshot reads its subtree lazily, whatever the page;
+            // a whole page is read lazily when it is well past the limit,
+            // and only while the walk costs less than one full read would
+            // (see LAZY_CALLS_PER_NODE).
+            let nodes = if forced.is_some() { self.dom_nodes(timeout) } else { nodes };
+            let (lazy, budget) = match &opts.scope {
+                Some(_) => (true, None),
+                None => match nodes {
+                    Some(nodes) => (nodes > opts.limit as u64 * 4, Some((nodes as f64 * LAZY_CALLS_PER_NODE) as usize)),
+                    // An unknown count: the lazy walk, as before.
+                    None => (true, None),
+                },
+            };
+            if lazy {
+                // What the walk reads first (frames, clickable elements) is
+                // the full read's too: read once, kept if the walk gives up.
+                let mut parts = None;
+                if let Ok(text) = self.ax_tree_lazy(timeout, opts, budget, &mut parts) {
+                    return Ok(text);
+                }
+                return self.ax_tree_full(timeout, opts, parts);
             }
         }
-        self.ax_tree_full(timeout, opts)
+        self.ax_tree_full(timeout, opts, None)
     }
 
-    /// Will the page's tree be about as long as the output limit or
-    /// shorter? Then one `getFullAXTree` is the cheaper read: Chrome builds
-    /// a node about 3x cheaper in that call than through `getChildAXNodes`
-    /// (0.03 ms against 0.1 ms per node, a 250-row table 177 ms against 335),
-    /// and the lazy walk's advantage, not reading what the limit cuts, is
-    /// worth nothing when little is cut. A page has about 0.55 lines per DOM
-    /// node (measured on tables of 250 to 2,000 rows) and the full read still
-    /// won at 500 rows against a limit of 2,000 (359 ms against 509), lost at
-    /// 1,000 (742 against 643): 4 DOM nodes per line of limit is the middle. An unknown count
-    /// (the call is missing) means "no": the lazy walk is the old default.
-    fn fits_in(&self, limit: usize, timeout: Duration) -> bool {
-        self.send("Memory.getDOMCounters", json!({}), timeout)
-            .ok()
-            .and_then(|c| c.get("nodes").and_then(Value::as_u64))
-            .is_some_and(|nodes| nodes <= limit as u64 * 4)
+    /// The text tree built from the DOM snapshot (see `domax`): one
+    /// snapshot serves the tree and the clickable elements.
+    fn ax_tree_dom(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        let started = std::time::Instant::now();
+        let snap = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
+        crate::timing::record("ax_dom_snapshot", started);
+        let started = std::time::Instant::now();
+        let clicks = clickables_from(&snap);
+        let built = domax::build(&snap).ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
+        drop(snap);
+        crate::timing::record("ax_dom_build", started);
+        let root_backend_id = match &opts.scope {
+            Some(target) => {
+                let backend = self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?;
+                let has = |nodes: &[Value]| {
+                    nodes.iter().any(|n| n.get("backendDOMNodeId").and_then(Value::as_u64) == Some(backend))
+                };
+                if !has(&built.nodes) && !built.frames.iter().any(|f| has(&f.nodes)) {
+                    bail!("the scope is not in the snapshot's tree");
+                }
+                Some(backend)
+            }
+            None => None,
+        };
+        let url = built.url.clone();
+        let origin = url
+            .find("://")
+            .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
+            .unwrap_or_default();
+        let started = std::time::Instant::now();
+        let rendered = ax::render(
+            &format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default()),
+            &built.nodes,
+            &built.frames,
+            &ax::Options {
+                all_refs: opts.all_refs,
+                limit: opts.limit,
+                root_backend_id,
+                origin,
+                clicks,
+                lazy_budget: None,
+            },
+        );
+        crate::timing::record("ax_render", started);
+        Ok(Value::String(rendered.text))
+    }
+
+    /// The page's DOM node count (`Memory.getDOMCounters`), what one full
+    /// read of the tree costs in proportion to.
+    fn dom_nodes(&self, timeout: Duration) -> Option<u64> {
+        self.send("Memory.getDOMCounters", json!({}), timeout).ok().and_then(|c| c.get("nodes").and_then(Value::as_u64))
     }
 
     /// Text tree from a lazy fetch: the root (or the partial tree around
     /// a scope) plus children on demand, in sibling windows, until the
     /// output limit is reached. Errors, and any failed child fetch, bail
     /// so [`Self::ax_tree`] falls back to the full tree.
-    fn ax_tree_lazy(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+    fn ax_tree_lazy(
+        &self,
+        timeout: Duration,
+        opts: &AxOptions,
+        budget: Option<usize>,
+        parts: &mut Option<(Vec<ax::Frame>, ax::Clickables)>,
+    ) -> Result<Value> {
         // getRootAXNode and getChildAXNodes answer -32000 until the domain
         // is enabled; getFullAXTree does not need it, so without this the
         // lazy path bailed on its first call and silently read the whole
@@ -4427,6 +4747,7 @@ impl Page {
         let started = std::time::Instant::now();
         let clicks = self.clickables(timeout);
         crate::timing::record("ax_clickables", started);
+        *parts = Some((frames.clone(), clicks.clone()));
         let title = ax_str(&main_root, "name").to_string();
         let url = main_root
             .get("properties")
@@ -4475,6 +4796,7 @@ impl Page {
                 root_backend_id: scoped_backend,
                 origin,
                 clicks,
+                lazy_budget: budget,
             },
             fetch,
         );
@@ -4485,7 +4807,12 @@ impl Page {
         Ok(Value::String(rendered.text))
     }
 
-    fn ax_tree_full(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+    fn ax_tree_full(
+        &self,
+        timeout: Duration,
+        opts: &AxOptions,
+        parts: Option<(Vec<ax::Frame>, ax::Clickables)>,
+    ) -> Result<Value> {
         let mut params = json!({});
         if let Some(d) = opts.max_depth {
             params["depth"] = json!(d);
@@ -4505,13 +4832,20 @@ impl Page {
         if opts.json {
             return Ok(flat_ax(&nodes, opts.all));
         }
-        let started = std::time::Instant::now();
-        let frames = self.frame_trees(timeout);
-        crate::timing::record("ax_frames", started);
-        // Lightpanda has no DOMSnapshot; its tree is printed as it comes.
-        let started = std::time::Instant::now();
-        let clicks = if self.shared.is_single_target() { ax::Clickables::default() } else { self.clickables(timeout) };
-        crate::timing::record("ax_clickables", started);
+        let (frames, clicks) = match parts {
+            Some(parts) => parts,
+            None => {
+                let started = std::time::Instant::now();
+                let frames = self.frame_trees(timeout);
+                crate::timing::record("ax_frames", started);
+                // Lightpanda has no DOMSnapshot; its tree is printed as it comes.
+                let started = std::time::Instant::now();
+                let clicks =
+                    if self.shared.is_single_target() { ax::Clickables::default() } else { self.clickables(timeout) };
+                crate::timing::record("ax_clickables", started);
+                (frames, clicks)
+            }
+        };
         let root = nodes.iter().find(|n| n.get("parentId").is_none());
         let title = root.map(|n| ax_str(n, "name").to_string()).unwrap_or_default();
         let url = root
@@ -4533,7 +4867,14 @@ impl Page {
             &format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default()),
             &nodes,
             &frames,
-            &ax::Options { all_refs: opts.all_refs, limit: opts.limit, root_backend_id, origin, clicks },
+            &ax::Options {
+                all_refs: opts.all_refs,
+                limit: opts.limit,
+                root_backend_id,
+                origin,
+                clicks,
+                lazy_budget: None,
+            },
         );
         crate::timing::record("ax_render", started);
         let mut text = rendered.text;
@@ -4604,6 +4945,23 @@ impl Page {
         }
     }
 }
+
+/// What one child fetch of the lazy `ax` walk costs, in DOM nodes of a
+/// full read: about a quarter. Measured (Chrome 153, text tables): a fetch
+/// about 0.33 ms, a full read 0.09-0.15 ms per node and more per node on
+/// bigger pages. A walk that needs more fetches than a quarter of the page's
+/// nodes to reach the limit gives up for the full read: a 1,000-row table
+/// (9,008 nodes, 3,014 fetches; full 790 ms, lazy 969 ms) reads in full, a
+/// 2,000-row one (18,008 nodes; full 1,849, lazy 1,318) lazily, and so does
+/// one of 4,000 rows (full 5,233, lazy 1,969).
+const LAZY_CALLS_PER_NODE: f64 = 0.25;
+
+/// A page of more DOM nodes than this is read from the DOM snapshot
+/// (see `domax`), not Chrome's accessibility tree, which costs about a
+/// tenth of a millisecond per node read in full and three times that read
+/// lazily: a 2,000-row table (18,000 nodes) took 2.1 s for the tree and
+/// 0.19 s for the snapshot. Smaller pages keep Chrome's tree.
+const DOM_TREE_NODES: u64 = 3000;
 
 /// How long `close_target` waits for the page to go after `Page.close`.
 const CLOSE_WAIT: Duration = Duration::from_millis(1500);

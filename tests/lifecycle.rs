@@ -202,3 +202,64 @@ fn a_second_caller_on_one_name_is_told() {
     let third = dir.ok(&["-s", "one", "eval", "3"]);
     assert!(third.get("notes").is_none(), "{third}");
 }
+
+/// `quit --close-browser` on a shared session: the browser stays while
+/// another session uses it, and closes at once, not after its grace
+/// period, with the last one.
+#[test]
+fn quit_close_browser_closes_a_shared_browser_nobody_else_uses() {
+    if !chrome() {
+        return;
+    }
+    let dir = Dir::new();
+    for name in ["a", "b"] {
+        // A grace period longer than the test: only the quit can close it.
+        let out = dir.command().env("NAVIGERA_SHARED_GRACE_S", "60").args(["-s", name, "start"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    }
+    let shared = || dir.sessions()["shared_browsers"].as_array().unwrap().len();
+    assert_eq!(shared(), 1);
+    let r = dir.ok(&["-s", "a", "quit", "--close-browser"]);
+    assert_eq!(
+        r["result"]["browser"], "left open: 1 other session uses it; it closes on its own once none does",
+        "{r}"
+    );
+    assert_eq!(dir.names(), ["b"]);
+    assert_eq!(shared(), 1, "b still uses the browser");
+    let r = dir.ok(&["-s", "b", "quit", "--close-browser"]);
+    assert_eq!(r["result"]["browser"], "closed: no other session used it", "{r}");
+    eventually("the shared browser closes at once", Duration::from_secs(5), || shared() == 0);
+}
+
+/// Under a session directory whose path is too long for the shared
+/// browser's socket address, a session starts with a browser of its own
+/// instead of failing.
+#[cfg(unix)]
+#[test]
+fn a_long_session_directory_still_starts() {
+    if !chrome() {
+        return;
+    }
+    let dir = Dir::new();
+    // A directory whose `navigera/s.sock` fits a socket address (107 bytes
+    // on Linux, 103 elsewhere) and whose `navigera/browser-<key>.sock`,
+    // 23 bytes longer, does not.
+    let base = if cfg!(target_os = "linux") { 80 } else { 76 };
+    let root_len = dir.root.path().as_os_str().len();
+    if root_len + 2 > base {
+        return;
+    }
+    let deep = dir.root.path().join("d".repeat(base - root_len - 1));
+    std::fs::create_dir_all(&deep).unwrap();
+    let run = |args: &[&str]| {
+        let out = dir.command().env("XDG_RUNTIME_DIR", &deep).args(args).output().unwrap();
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let r = run(&["-s", "s", "start"]);
+    assert_eq!(r["ok"], true, "{r}");
+    let list = run(&["sessions"]);
+    assert_eq!(list["result"]["sessions"][0]["browser"], "own", "{list}");
+    let log = std::fs::read_to_string(deep.join("navigera").join("s.log")).unwrap();
+    assert!(log.contains("too long for a socket address"), "{log}");
+    assert_eq!(run(&["-s", "s", "quit"])["ok"], true);
+}

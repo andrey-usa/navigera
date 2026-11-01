@@ -118,7 +118,10 @@ page "Checkout — Acme" http://shop.test/checkout
   page navigates or re-renders: take a fresh `ax` before using an old one.
 - `clickable [ref=N]: <text>` is something the page made clickable without
   saying so (a row, a card, an icon): click it by ref like a button, before
-  reaching for `eval`. One with no text shows its `#id` or `.class`.
+  reaching for `eval`. One with no text shows its `#id` or `.class` and
+  what the page marks it with (`icon="fa-trash"`, `data-tooltip="Archive"`,
+  `img="home.png"`).
+- A cut text ends `… (+N chars: get text <ref>)`: that command reads it all.
 - Nesting shows what belongs together (which "Add to cart" sits in which
   product). Iframes and open shadow DOM are included; links show their `url=`.
 - Collapsed or hidden content (closed `<details>`, hover menus, inactive

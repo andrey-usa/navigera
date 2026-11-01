@@ -3699,11 +3699,17 @@ impl Driver {
                 Ok(json!({ "bye": true, "browser": "closed" }))
             }
             Command::Quit { .. } if s.is_attached() => Ok(json!({ "bye": true, "browser": "left open" })),
-            // Its context closes; the browser is the other sessions' too.
-            Command::Quit { close_browser: true } if s.is_shared() => Ok(json!({
-                "bye": true,
-                "browser": "shared: this session's context closed; the browser closes on its own once no session uses it",
-            })),
+            // Its context closes; the browser closes with it unless other
+            // sessions use it.
+            Command::Quit { close_browser: true } if s.is_shared() => {
+                let others = s.close_shared_if_unused().map_err(|e| anyhow::anyhow!("quit --close-browser: {e:#}"))?;
+                let browser = match others {
+                    0 => "closed: no other session used it".to_string(),
+                    1 => "left open: 1 other session uses it; it closes on its own once none does".to_string(),
+                    n => format!("left open: {n} other sessions use it; it closes on its own once none does"),
+                };
+                Ok(json!({ "bye": true, "browser": browser }))
+            }
             Command::Quit { .. } => Ok(json!({ "bye": true })),
         }
     }

@@ -6,6 +6,80 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-01
+
+### Changed
+
+- `ax` on a large page (over 3,000 DOM nodes) builds the tree from the DOM
+  snapshot it already takes for clickable elements, instead of reading
+  Chrome's accessibility tree, which costs about a millisecond per table
+  row. The output is the same (roles, names, states, values, refs): on 22
+  fixture pages and on Wikipedia, Python's and MDN's docs, GitHub, BBC,
+  httpbin and four QA practice sites the two trees print the same but for a
+  handful of lines (a time input's inner fields, very long cell names that
+  Chrome cuts). Table of 1,000 / 2,000 / 4,000 rows, whole tree: 730 /
+  1,789 / 4,671 ms before, 155 / 325 / 681 ms now (Playwright's
+  `ariaSnapshot`: 238 / 476 / 975 ms); with the default limit 149 / 317 /
+  604 ms. `NAVIGERA_AX_SOURCE=chrome|dom` picks the source.
+- Adjacent text in a snapshot shares lines of up to 300 characters instead
+  of taking a line per element: a page of 3,000 `<div>` cells went from
+  3,001 lines (39 KB) to 51 lines (15 KB). A control or any other element
+  between texts still starts a new line, and no text is cut to pack a line.
+- A text, name or value cut in a snapshot now says how much it left out,
+  and a cut text says which ref reads all of it:
+  `… (+1979 chars: get text 8)`. A name's cut is noted outside its quotes.
+- A control with no name or text (an icon button) shows what the page
+  marks it with next to its `#id` or `.class`: a tooltip attribute
+  (`data-tooltip`, `title`, …), its icon (an icon font's class, an SVG
+  sprite's symbol, `data-icon`), its image's file name, or the
+  `aria-describedby` text: `button .icon-btn icon="fa-trash" [ref=7]`.
+  Two icon buttons of one class no longer read the same.
+- `quit --close-browser` on a session in the shared browser closes the
+  browser with it when no other session uses it, and otherwise says how
+  many do. It used to leave the browser to close after its grace period.
+
+### Fixed
+
+- A click on an element that never stops moving (a perpetual drift) took
+  the whole element wait, 5 s, before clicking where it last was; it now
+  waits a second for it to hold still (about 1 s on such a button).
+- A click on an element under a cover that stays put with controls of its
+  own (a cookie banner, a dialog) fails after about a second instead of
+  5 s, naming the cover and its controls:
+  `covered by div#consent "We use cookies. Accept Reject" … Close it with
+  one of its controls ("Accept", "Reject")`. While the page still fetches,
+  a cover is waited for as before: a loading overlay with a Cancel button
+  goes when its data arrives, and the click then lands.
+- A session under a session directory with a long path (a deep
+  `$XDG_RUNTIME_DIR` or `$TMPDIR`) failed to start: the shared browser's
+  socket path did not fit a socket address. Such a session now takes a
+  browser of its own, and its log says why.
+- A long poll (a chat or notification request held open, reconnected when
+  it ends) no longer holds snapshots for up to 3 s each cycle: a fetch/XHR
+  open past 1 s stops holding a snapshot, and its URL's later requests
+  never hold one. On a page holding a 20 s long poll: 3,022 / 1,976 / 7 ms
+  for three snapshots in 0.6.4, 1,002 / 7 / 7 now.
+- Analytics beacons at irregular intervals no longer hold the first
+  snapshot: a request the server answers 202 or 204 (no content) is
+  background traffic, and that method and URL's requests, the ones still
+  out included, don't count, in whatever order their events arrive (first
+  snapshot on such a page: 505 to 8 ms). The end of a long poll no longer
+  restarts the quiet window either.
+- `ax` on a large page through the shared browser lost up to a quarter of
+  its speed in 0.6.5: each of the snapshot's thousands of tree reads crossed
+  four threads of the browser's host. The host now routes a message on the
+  thread that reads it, and renumbers and routes answers and events by
+  their envelope alone, without parsing them. A 2,000-row table: 1,563 to
+  about 1,400 ms (0.6.4 with a browser of its own: about 1,265).
+- `ax` with the default limit reads a page the cheaper way for that page.
+  The read that stops at the limit, node by node, now gives up for one full
+  read when it projects more node reads than a quarter of the page's DOM
+  nodes, as on markup where every printed line sits under many wrappers. A
+  2,000-row list nested in divs: 5.1 s in 0.6.4, 3.1 s now; a 1,000-row
+  table is read in one call (about 900 ms); 2,000- and 4,000-row tables keep
+  stopping at the limit. A snapshot that gave up reads the page's frames and
+  clickable elements once, not twice.
+
 ## [0.6.5] - 2026-10-31
 
 ### Added
@@ -749,6 +823,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.7.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.0
 [0.6.5]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.5
 [0.6.4]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.4
 [0.6.3]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.3

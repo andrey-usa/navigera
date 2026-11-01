@@ -234,15 +234,18 @@ fn two_sessions_share_one_browser_and_nothing_else() {
     a.ok(&["tab-new"]);
     assert_eq!(b.ok(&["tab-list"])["tabs"].as_array().map(Vec::len), Some(1));
 
-    // `quit --close-browser` closes A's context, not the browser.
+    // `quit --close-browser` closes A's context, not the browser B uses.
     let bye = a.ok(&["quit", "--close-browser"]);
-    assert!(bye["browser"].as_str().unwrap_or("").starts_with("shared"), "{bye}");
+    assert!(bye["browser"].as_str().unwrap_or("").starts_with("left open: 1 other session"), "{bye}");
     assert_eq!(b.sessions_on_browser(), "shared (1 session)");
     assert_eq!(b.text(&["eval", "document.title"]), "download");
     assert_eq!(browser.browsers().len(), 1);
 
     b.ok(&["quit"]);
-    // Kept warm for the grace, then gone.
+    // Kept warm for the grace, then gone: still there a few of the host's
+    // 250 ms checks later (A's --close-browser, with B still on it, must
+    // not close it the moment B leaves).
+    std::thread::sleep(Duration::from_millis(800));
     assert_eq!(browser.browsers().len(), 1, "kept for the grace period");
     assert!(browser.wait_browsers(0, Duration::from_secs(15)).is_empty(), "the browser exits after the grace");
 }

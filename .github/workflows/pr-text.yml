@@ -73,6 +73,12 @@ jobs:
               for role, email in (("author", author), ("committer", committer)):
                   if email not in allowed:
                       problems.append(f"commit {short}: {role} {email} is not the maintainer's identity")
+              # GitHub's own trailer on a squash-merged dependency bump.
+              message = re.sub(
+                  r"(?im)^co-authored-by:\s*dependabot\[bot\]\s*<49699333\+dependabot\[bot\]@users\.noreply\.github\.com>\s*$",
+                  "",
+                  message,
+              )
               check_text(f"commit {short} message", message)
 
           if problems:

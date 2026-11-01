@@ -109,7 +109,15 @@ pub struct Options {
     pub origin: String,
     /// What the page makes clickable beyond the tree's actionable roles.
     pub clicks: Clickables,
+    /// The lazy walk gives up (and the caller reads the whole tree in one
+    /// call instead) once it projects more child fetches than this to reach
+    /// the limit. `None`: no budget.
+    pub lazy_budget: Option<usize>,
 }
+
+/// Fetched nodes the lazy walk reaches before it projects its total from
+/// the lines they gave.
+pub const LAZY_PROBE: usize = 24;
 
 /// Elements a user could click though the tree gives them no actionable
 /// role (a `<div>` row with a click handler, an icon `<span>`), by backend
@@ -126,6 +134,7 @@ pub struct Clickables {
 
 /// One frame's AX nodes, spliced under the AX node of its owner element
 /// (`<iframe>` backend node id).
+#[derive(Clone)]
 pub struct Frame {
     pub owner_backend_id: u64,
     pub nodes: Vec<Value>,
@@ -156,18 +165,43 @@ fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn clip(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
+/// Characters of text a line shows before it cuts.
+const TEXT_MAX: usize = 300;
+/// Characters of a name or value shown before it cuts.
+const NAME_MAX: usize = 150;
+
+/// `s` cut to `max` characters, saying how much was left out and, given the
+/// node it came from, how to read all of it.
+fn clip(s: &str, max: usize, read_by: Option<u64>) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push_str(&cut_note(n - max, read_by));
+    out
+}
+
+fn cut_note(omitted: usize, read_by: Option<u64>) -> String {
+    match read_by {
+        Some(id) => format!("… (+{omitted} chars: get text {id})"),
+        None => format!("… (+{omitted} chars)"),
     }
 }
 
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| format!("\"{s}\""))
+}
+
+/// `s` quoted, cut to `max` characters with the cut said outside the quotes
+/// (inside, it would read as part of the name).
+fn quote_clip(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return quote(s);
+    }
+    let cut: String = s.chars().take(max).collect();
+    format!("{}{}", quote(&cut), cut_note(n - max, None))
 }
 
 pub(crate) fn prop<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
@@ -230,6 +264,12 @@ struct Tree<'a> {
     /// browser answered without is not asked again).
     fetched: std::collections::HashSet<usize>,
     fetch_failed: bool,
+    /// Child fetches so far, and the fetched nodes the walk has reached
+    /// (see [`Options::lazy_budget`]): fetches run ahead of the walk by up
+    /// to a window of siblings, so the lines per fetch are read off the
+    /// fetches it has used.
+    calls: usize,
+    used: std::collections::HashSet<usize>,
     /// The output limit was reached mid-walk: no more lines are printed.
     stopped: bool,
     /// Line indices whose node's children were cut off by the limit (the
@@ -275,6 +315,14 @@ impl<'a> Tree<'a> {
                     }
                 }
             }
+            // Never more fetches than the budget allows, whatever the
+            // projection: past it, one full read is the cheaper way.
+            if let Some(budget) = self.opts.lazy_budget {
+                if self.calls + todo.len() > budget {
+                    self.give_up("its fetch budget is spent");
+                    todo.clear();
+                }
+            }
             if !todo.is_empty() {
                 let done: Vec<usize> = todo.iter().filter_map(|id| self.by_id.get(id).copied()).collect();
                 if let Some(mut fetch) = self.fetch.take() {
@@ -283,6 +331,7 @@ impl<'a> Tree<'a> {
                     if failed {
                         self.fetch_failed = true;
                     }
+                    self.calls += todo.len();
                     for i in done {
                         self.fetched.insert(i);
                     }
@@ -292,6 +341,9 @@ impl<'a> Tree<'a> {
                 }
             }
         }
+        if self.fetched.contains(&idx) && self.used.insert(idx) {
+            self.check_budget();
+        }
         let mut out: Vec<usize> = ids.iter().filter_map(|id| self.by_id.get(id).copied()).collect();
         // An <iframe>'s document lives in another frame's tree.
         if let Some(backend) = backend_id(&self.nodes[idx]) {
@@ -300,6 +352,26 @@ impl<'a> Tree<'a> {
             }
         }
         out
+    }
+
+    /// On a page where each line costs many fetches (deep wrappers, wide
+    /// rows), reading the whole tree at once is cheaper: once the fetches
+    /// used project past the budget, give up, and the caller does that.
+    fn check_budget(&mut self) {
+        let Some(budget) = self.opts.lazy_budget else { return };
+        let used = self.used.len();
+        let projected = used * self.opts.limit / self.lines.len().max(1);
+        if used >= LAZY_PROBE && projected > budget {
+            let why = format!("{used} fetches for {} lines project {projected}, past {budget}", self.lines.len());
+            self.give_up(&why);
+        }
+    }
+
+    fn give_up(&mut self, why: &str) {
+        crate::timing::log(&format!("[ax] lazy walk gives up for one full read: {why}"));
+        self.fetch = None;
+        self.fetch_failed = true;
+        self.stopped = true;
     }
 
     fn role(node: &Value) -> &str {
@@ -496,7 +568,8 @@ impl<'a> Tree<'a> {
             if name.is_empty() || (!covered.is_empty() && covered.contains(&name)) {
                 return;
             }
-            self.push_line(format!("{indent}- text: {}", clip(&name, 300)));
+            let read_by = backend_id(&self.nodes[idx]);
+            self.push_line(format!("{indent}- text: {}", clip(&name, TEXT_MAX, read_by)));
             return;
         }
 
@@ -522,7 +595,7 @@ impl<'a> Tree<'a> {
         let mut line = format!("{indent}- {shown_role}");
         if !name.is_empty() {
             line.push(' ');
-            line.push_str(&quote(&clip(&name, 150)));
+            line.push_str(&quote_clip(&name, NAME_MAX));
         } else if let Some(text) = backend_id(&self.nodes[idx])
             .filter(|_| clickable)
             .and_then(|id| self.opts.clicks.texts.get(&id))
@@ -533,7 +606,7 @@ impl<'a> Tree<'a> {
             })
         {
             line.push(' ');
-            line.push_str(&quote(&clip(text, 150)));
+            line.push_str(&quote_clip(text, NAME_MAX));
         }
         let mut tags = Self::states(&self.nodes[idx], &role);
         if let Some(id) = backend_id(&self.nodes[idx]) {
@@ -543,11 +616,16 @@ impl<'a> Tree<'a> {
                 if name.is_empty() && text_of(&self.nodes[idx], "value").is_empty() {
                     let mut text = Vec::new();
                     self.descendant_text(idx, &mut text, 0);
-                    if let (true, Some(hint)) =
-                        (text.iter().all(|t| t.trim().is_empty()), self.opts.clicks.hints.get(&id))
-                    {
-                        line.push(' ');
-                        line.push_str(hint);
+                    if text.iter().all(|t| t.trim().is_empty()) {
+                        if let Some(hint) = self.opts.clicks.hints.get(&id) {
+                            line.push(' ');
+                            line.push_str(hint);
+                        }
+                        // `aria-describedby`: a tooltip kept elsewhere.
+                        let described = text_of(&self.nodes[idx], "description");
+                        if !described.is_empty() && !line.contains(&quote(&described)) {
+                            line.push_str(&format!(" description={}", quote_clip(&described, 60)));
+                        }
                     }
                 }
                 tags.push(format!("ref={id}"));
@@ -560,7 +638,7 @@ impl<'a> Tree<'a> {
         // ("on" unless set, which Lightpanda reports) reads like a state.
         let value = if CHECKABLE.contains(&role.as_str()) { String::new() } else { text_of(&self.nodes[idx], "value") };
         if !value.is_empty() && value != name {
-            line.push_str(&format!(" value={}", quote(&clip(&value, 150))));
+            line.push_str(&format!(" value={}", quote_clip(&value, NAME_MAX)));
         }
         if role == "link" {
             if let Some(Value::String(url)) = prop(&self.nodes[idx], "url") {
@@ -575,7 +653,7 @@ impl<'a> Tree<'a> {
 
         // <select>: list the options on the combobox line, not as a subtree.
         if (role == "combobox" || role == "listbox") && !options.is_empty() {
-            let shown: Vec<String> = options.iter().take(25).map(|o| quote(&clip(o, 60))).collect();
+            let shown: Vec<String> = options.iter().take(25).map(|o| quote_clip(o, 60)).collect();
             line.push_str(&format!(" options: {}", shown.join(", ")));
             if options.len() > 25 {
                 line.push_str(&format!(", …(+{})", options.len() - 25));
@@ -593,7 +671,7 @@ impl<'a> Tree<'a> {
                 .filter(|t| !t.is_empty() && !child_cover.contains(t.as_str()) && *t != value)
                 .collect();
             if !text.is_empty() {
-                line.push_str(&format!(": {}", clip(&text.join(" "), 300)));
+                line.push_str(&format!(": {}", clip(&text.join(" "), TEXT_MAX, backend_id(&self.nodes[idx]))));
             }
             self.push_line(line);
             return;
@@ -637,7 +715,7 @@ impl<'a> Tree<'a> {
                 let only_name = self.name(only);
                 let mut inner = self.describe(only, &only_role);
                 if !only_name.is_empty() {
-                    inner.insert_str(only_role.len(), &format!(" {}", quote(&clip(&only_name, 150))));
+                    inner.insert_str(only_role.len(), &format!(" {}", quote_clip(&only_name, NAME_MAX)));
                 }
                 line.push_str(&format!(": {inner}"));
                 self.push_line(line);
@@ -687,6 +765,7 @@ impl<'a> Tree<'a> {
             })
             .filter(|n| !n.is_empty())
             .collect();
+        let mut run = Vec::new();
         for child in kids {
             if self.stopped {
                 break;
@@ -696,8 +775,52 @@ impl<'a> Tree<'a> {
                 if !t.is_empty() && sibling_names.contains(&t) {
                     continue;
                 }
+                let name = self.name(child);
+                if !name.trim().is_empty() && (cover.is_empty() || !cover.contains(&name)) {
+                    run.push((name, backend_id(&self.nodes[child])));
+                }
+                continue;
             }
+            self.text_lines(&mut run, depth);
             self.walk(child, depth, cover);
+        }
+        self.text_lines(&mut run, depth);
+    }
+
+    /// Adjacent text, packed into `- text:` lines of up to [`TEXT_MAX`]
+    /// characters: a page of `<div>`s holding a word or two each took a
+    /// line per `<div>`. A text longer than that has a line of its own,
+    /// cut, with the ref to read all of it by.
+    fn text_lines(&mut self, run: &mut Vec<(String, Option<u64>)>, depth: usize) {
+        let indent = "  ".repeat(depth);
+        let mut line = String::new();
+        let mut len = 0;
+        for (text, read_by) in std::mem::take(run) {
+            if self.stopped {
+                return;
+            }
+            let text = text.trim();
+            let n = text.chars().count();
+            if !line.is_empty() && (n > TEXT_MAX || len + 1 + n > TEXT_MAX) {
+                self.push_line(format!("{indent}- text: {}", std::mem::take(&mut line)));
+                len = 0;
+                if self.stopped {
+                    return;
+                }
+            }
+            if n > TEXT_MAX {
+                self.push_line(format!("{indent}- text: {}", clip(text, TEXT_MAX, read_by)));
+                continue;
+            }
+            if !line.is_empty() {
+                line.push(' ');
+                len += 1;
+            }
+            line.push_str(text);
+            len += n;
+        }
+        if !line.is_empty() && !self.stopped {
+            self.push_line(format!("{indent}- text: {line}"));
         }
     }
 
@@ -788,6 +911,8 @@ fn render_inner(
         fetch,
         fetched: std::collections::HashSet::new(),
         fetch_failed: false,
+        calls: 0,
+        used: std::collections::HashSet::new(),
         stopped: false,
         boundary: Vec::new(),
     };
@@ -946,7 +1071,72 @@ mod tests {
         );
         // Without them, the row is bare text and the icon is not there.
         let out = render("", &nodes, &[], &Options::default());
-        assert_eq!(out.text, "- text: Gilli\n- text: Quam.\n- button [ref=7]");
+        assert_eq!(out.text, "- text: Gilli Quam.\n- button [ref=7]");
+    }
+
+    /// Text in sibling `<div>`s shares lines of up to 300 characters; a
+    /// control between runs ends one.
+    #[test]
+    fn adjacent_text_shares_lines() {
+        let mut nodes = vec![node("1", None, "RootWebArea", "", &[], 1)];
+        let mut kids = Vec::new();
+        for i in 0..100 {
+            let (div, text) = (format!("d{i}"), format!("t{i}"));
+            nodes.push(node(&div, Some("1"), "generic", "", &[&text], 10 + 2 * i));
+            nodes.push(node(&text, Some(&div), "StaticText", "cell", &[], 11 + 2 * i));
+            kids.push(div);
+            if i == 49 {
+                nodes.push(node("b", Some("1"), "button", "Next", &[], 500));
+                kids.push("b".into());
+            }
+        }
+        let ids: Vec<&str> = kids.iter().map(String::as_str).collect();
+        nodes[0] = node("1", None, "RootWebArea", "", &ids, 1);
+        let out = render("", &nodes, &[], &Options::default());
+        let lines: Vec<&str> = out.text.lines().collect();
+        // 50 "cell"s are 249 characters: one line each side of the button.
+        assert_eq!(lines.len(), 3, "{}", out.text);
+        assert_eq!(lines[0], format!("- text: {}", vec!["cell"; 50].join(" ")));
+        assert_eq!(lines[1], "- button \"Next\" [ref=500]");
+        // Past 300 characters a run takes another line, never cutting a text.
+        let long: Vec<Value> = (0..80)
+            .flat_map(|i| {
+                let (div, text) = (format!("d{i}"), format!("t{i}"));
+                [
+                    node(&div, Some("1"), "generic", "", &[&text], 10 + 2 * i),
+                    node(&text, Some(&div), "StaticText", "words", &[], 11 + 2 * i),
+                ]
+            })
+            .collect();
+        let ids: Vec<String> = (0..80).map(|i| format!("d{i}")).collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut all = vec![node("1", None, "RootWebArea", "", &ids, 1)];
+        all.extend(long);
+        let out = render("", &all, &[], &Options::default());
+        let lines: Vec<&str> = out.text.lines().collect();
+        assert_eq!(lines.len(), 2, "{}", out.text);
+        assert!(lines.iter().all(|l| l.len() <= "- text: ".len() + TEXT_MAX && !l.contains('…')), "{}", out.text);
+        assert_eq!(out.text.matches("words").count(), 80);
+    }
+
+    /// A cut says how much it left out and how to read the rest; a name's
+    /// cut is said outside its quotes.
+    #[test]
+    fn a_cut_says_what_it_left_out() {
+        let long = "x".repeat(1000);
+        let name = "n".repeat(200);
+        let nodes = vec![
+            node("1", None, "RootWebArea", "", &["2", "3", "5"], 1),
+            node("2", Some("1"), "StaticText", &long, &[], 2),
+            node("3", Some("1"), "paragraph", "", &["4"], 3),
+            node("4", Some("3"), "StaticText", &long, &[], 4),
+            node("5", Some("1"), "link", &name, &[], 5),
+        ];
+        let out = render("", &nodes, &[], &Options::default());
+        let lines: Vec<&str> = out.text.lines().collect();
+        assert_eq!(lines[0], format!("- text: {}… (+700 chars: get text 2)", "x".repeat(300)));
+        assert_eq!(lines[1], format!("- paragraph: {}… (+700 chars: get text 3)", "x".repeat(300)));
+        assert_eq!(lines[2], format!("- link \"{}\"… (+50 chars) [ref=5]", "n".repeat(150)));
     }
 
     #[test]

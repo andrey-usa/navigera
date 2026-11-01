@@ -41,7 +41,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
+#[cfg(test)]
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -75,7 +77,32 @@ pub fn wanted(config: &SessionConfig) -> bool {
         return false;
     }
     let transport = config.transport.clone().or_else(|| std::env::var("NAVIGERA_CDP_TRANSPORT").ok());
-    !(cfg!(unix) && transport.is_some_and(|t| t.trim() == "ws"))
+    if cfg!(unix) && transport.is_some_and(|t| t.trim() == "ws") {
+        return false;
+    }
+    socket_fits()
+}
+
+/// Does the host's socket path fit a Unix socket address? Under a session
+/// directory with a long path (a deep `$XDG_RUNTIME_DIR` or `$TMPDIR`) it
+/// would not bind, and the session takes a browser of its own instead.
+fn socket_fits() -> bool {
+    if !cfg!(unix) {
+        return true;
+    }
+    // The address holds the path and its NUL: 108 bytes on Linux, 104 on
+    // macOS and the BSDs.
+    let max = if cfg!(target_os = "linux") { 107 } else { 103 };
+    match paths(&"0".repeat(16)) {
+        Ok((socket, _, _)) if socket.as_os_str().len() > max => {
+            eprintln!(
+                "navigera: {} is too long for a socket address: this session has a browser of its own",
+                socket.display()
+            );
+            false
+        }
+        _ => true,
+    }
 }
 
 /// What a shared browser is launched as; sessions asking for the same
@@ -198,16 +225,17 @@ pub fn client(stream: Stream, handle: &tokio::runtime::Handle) -> Result<CdpClie
     Ok(CdpClient::connect_framed(reader, writer))
 }
 
-/// What reaches the host's router.
-enum Msg {
-    /// A client connected; its messages go to this sender (NUL-terminated).
-    New(u64, mpsc::Sender<Vec<u8>>),
-    Client(u64, String),
-    Gone(u64),
-    Chrome(String),
-    ChromeGone,
-    Tick,
+/// Where a client's messages go: its socket, written by whichever thread
+/// routes the message (a client that stops reading for the write timeout
+/// loses its connection, not everyone their answers).
+enum Out {
+    Socket(Stream),
+    #[cfg(test)]
+    Channel(mpsc::Sender<Vec<u8>>),
 }
+
+/// How long a write to a client may block.
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A command the browser has yet to answer.
 enum Pending {
@@ -229,7 +257,7 @@ enum Kind {
 }
 
 struct Client {
-    out: mpsc::Sender<Vec<u8>>,
+    out: Out,
     /// Its browser-level CDP session, once the browser made it.
     root: Option<String>,
     /// What it sent before that.
@@ -242,7 +270,31 @@ impl Client {
     fn send(&self, text: String) {
         let mut bytes = text.into_bytes();
         bytes.push(0);
-        let _ = self.out.send(bytes);
+        match &self.out {
+            // A failed write ends the connection; its reader sees that and
+            // the client goes.
+            Out::Socket(stream) => {
+                let mut writer = stream;
+                if writer.write_all(&bytes).is_err() {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+            }
+            #[cfg(test)]
+            Out::Channel(tx) => {
+                let _ = tx.send(bytes);
+            }
+        }
+    }
+
+    /// End the connection.
+    fn close(&self) {
+        match &self.out {
+            Out::Socket(stream) => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            #[cfg(test)]
+            Out::Channel(_) => {}
+        }
     }
 }
 
@@ -272,6 +324,58 @@ struct Fields<'a> {
 
 fn fields(raw: Option<&RawValue>) -> Option<Fields<'_>> {
     serde_json::from_str(raw?.get()).ok()
+}
+
+/// A CDP message's envelope read without parsing the message: the id at
+/// the front (`{"id":N,`), the method after it or at the front
+/// (`"method":"M"`), and a top-level `sessionId` at the end
+/// (`,"sessionId":"S"}`). Chrome and navigera's client both write the id
+/// first and the session last, so the router can renumber and route the
+/// answers and events it only passes on (nearly all of them: a large
+/// snapshot is thousands) with string edits instead of a parse of the whole
+/// message. A raw `,"sessionId":"` cannot occur inside a JSON string (its
+/// quotes are escaped), and an object nested at the end would leave `}}`,
+/// so a text that ends that way names the top-level session.
+#[derive(Debug, PartialEq)]
+struct Shape<'a> {
+    /// The id and where its digits end.
+    id: Option<(u64, usize)>,
+    method: Option<&'a str>,
+    /// The session and where `,"sessionId"` starts.
+    session: Option<(&'a str, usize)>,
+}
+
+fn shape(text: &str) -> Shape<'_> {
+    let plain = |v: &str| !v.is_empty() && !v.contains(['"', '\\']);
+    let id = text.strip_prefix("{\"id\":").and_then(|rest| {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let end = 6 + digits;
+        (digits > 0 && text.as_bytes().get(end) == Some(&b','))
+            .then(|| rest[..digits].parse().ok().map(|n| (n, end)))?
+    });
+    let method_at = match id {
+        Some((_, end)) => text[end..].strip_prefix(",\"method\":\"").map(|_| end + 11),
+        None => text.strip_prefix("{\"method\":\"").map(|_| 11),
+    };
+    let method = method_at.and_then(|at| text[at..].split_once('"').map(|(m, _)| m)).filter(|m| plain(m));
+    let session = text
+        .strip_suffix("\"}")
+        .and_then(|body| body.rfind(",\"sessionId\":\"").map(|at| (&body[at + 14..], at)))
+        .filter(|(v, _)| plain(v));
+    Shape { id, method, session }
+}
+
+/// `text` with its id (digits ending at `end`) replaced.
+fn with_id(text: &str, end: usize, id: u64) -> String {
+    format!("{{\"id\":{id}{}", &text[end..])
+}
+
+/// `text` without its trailing `,"sessionId":"…"` (starting at `at`).
+fn without_session(text: &str, at: usize) -> String {
+    let mut out = String::with_capacity(at + 1);
+    out.push_str(&text[..at]);
+    out.push('}');
+    out
 }
 
 fn quoted(s: &str) -> String {
@@ -318,7 +422,7 @@ fn event(method: &str, params: Option<&RawValue>, session: Option<&str>) -> Stri
 
 /// The host's own method: close the browser as soon as no session uses it
 /// (`sessions --clean`), not after the grace period.
-const CLOSE_IF_UNUSED: &str = "Navigera.closeIfUnused";
+pub(crate) const CLOSE_IF_UNUSED: &str = "Navigera.closeIfUnused";
 
 /// Ask the host on `socket` to close its browser once it has no session.
 pub fn close_if_unused(socket: &Path) {
@@ -358,7 +462,7 @@ impl Router {
         let _ = self.to_chrome.send(command(id, method, params, session));
     }
 
-    fn new_client(&mut self, id: u64, out: mpsc::Sender<Vec<u8>>) {
+    fn new_client(&mut self, id: u64, out: Out) {
         self.clients.insert(id, Client { out, root: None, queued: Vec::new(), contexts: HashSet::new() });
         self.idle_since = None;
         self.close_now = false;
@@ -371,6 +475,44 @@ impl Router {
             client.queued.push(text);
             return;
         };
+        // A command the router only passes on: renumbered, and sent on the
+        // client's own session when it names none.
+        let sh = shape(&text);
+        if let (Some((id, end)), Some(method)) = (sh.id, sh.method) {
+            let special = matches!(
+                method,
+                CLOSE_IF_UNUSED
+                    | "Browser.close"
+                    | "Browser.crash"
+                    | "Browser.crashGpuProcess"
+                    | "Target.attachToTarget"
+                    | "Target.attachToBrowserTarget"
+                    | "Target.createBrowserContext"
+                    | "Target.disposeBrowserContext"
+            );
+            if !special {
+                let addressed = match sh.session {
+                    None => true,
+                    Some((s, _)) => self.owners.get(s) == Some(&cid),
+                };
+                if !addressed {
+                    client.send(refusal(id, crate::cdp::SESSION_GONE));
+                    return;
+                }
+                let global = self.next_id;
+                self.next_id += 1;
+                self.pending.insert(global, Pending::Client { client: cid, id, kind: Kind::Plain });
+                let mut out = with_id(&text, end, global);
+                if sh.session.is_none() {
+                    out.pop();
+                    out.push_str(",\"sessionId\":");
+                    out.push_str(&quoted(&root));
+                    out.push('}');
+                }
+                let _ = self.to_chrome.send(out);
+                return;
+            }
+        }
         let Ok(message) = serde_json::from_str::<Envelope>(&text) else { return };
         let (Some(id), Some(method)) = (message.id, message.method.as_deref()) else { return };
         let session = match message.session_id.as_deref() {
@@ -382,8 +524,16 @@ impl Router {
             }
         };
         if method == CLOSE_IF_UNUSED {
-            self.close_now = true;
-            client.send(answer(id, None, None, None));
+            // Closed as soon as this client is gone, if no other uses the
+            // browser; with others, it keeps its grace period after them.
+            let others = self.clients.len().saturating_sub(1);
+            if others == 0 {
+                self.close_now = true;
+            }
+            let result = RawValue::from_string(format!("{{\"others\":{others}}}")).ok();
+            if let Some(client) = self.clients.get(&cid) {
+                client.send(answer(id, result.as_deref(), None, None));
+            }
             return;
         }
         if matches!(method, "Browser.close" | "Browser.crash" | "Browser.crashGpuProcess") {
@@ -407,6 +557,30 @@ impl Router {
     }
 
     fn on_chrome(&mut self, text: &str) {
+        // An answer to a plain command, or an event the router does not
+        // read: passed on with string edits.
+        let sh = shape(text);
+        if let Some((global, end)) = sh.id {
+            if let Some(Pending::Client { kind: Kind::Plain, .. }) = self.pending.get(&global) {
+                let Some(Pending::Client { client: cid, id, .. }) = self.pending.remove(&global) else { return };
+                let Some(client) = self.clients.get(&cid) else { return };
+                let out = match sh.session {
+                    Some((s, at)) if client.root.as_deref() == Some(s) => with_id(&without_session(text, at), end, id),
+                    _ => with_id(text, end, id),
+                };
+                client.send(out);
+                return;
+            }
+        } else if let (Some(method), Some((session, at))) = (sh.method, sh.session) {
+            if !matches!(method, "Target.attachedToTarget" | "Target.detachedFromTarget") {
+                let Some(&cid) = self.owners.get(session) else { return };
+                if let Some(client) = self.clients.get(&cid) {
+                    let root = client.root.as_deref() == Some(session);
+                    client.send(if root { without_session(text, at) } else { text.to_string() });
+                }
+                return;
+            }
+        }
         let Ok(message) = serde_json::from_str::<Envelope>(text) else { return };
         if let Some(id) = message.id {
             match self.pending.remove(&id) {
@@ -515,8 +689,8 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let (to_chrome, mut from_chrome) = match browser.take_raw() {
-        Ok(link) => link,
+    let to_chrome = match browser.raw_writer() {
+        Ok(writer) => writer,
         Err(e) => {
             eprintln!("navigera: {e:#}");
             browser.close();
@@ -541,44 +715,7 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
     let pid_file = socket.with_extension("pid");
     let _ = std::fs::write(&pid_file, format!("{}\n", std::process::id()));
 
-    let (tx, rx) = mpsc::channel::<Msg>();
-    {
-        let tx = tx.clone();
-        runtime.spawn(async move {
-            while let Some(text) = from_chrome.recv().await {
-                if tx.send(Msg::Chrome(text)).is_err() {
-                    return;
-                }
-            }
-            let _ = tx.send(Msg::ChromeGone);
-        });
-    }
-    {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let mut next = 1u64;
-            loop {
-                let Ok(stream) = listener.accept() else { continue };
-                let id = next;
-                next += 1;
-                if !serve_client(id, stream, &tx) {
-                    return;
-                }
-            }
-        });
-    }
-    {
-        let tx = tx.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(500));
-            if tx.send(Msg::Tick).is_err() {
-                return;
-            }
-        });
-    }
-    drop(tx);
-
-    let mut router = Router {
+    let router = Arc::new(Mutex::new(Router {
         to_chrome,
         // Chrome takes ids that fit an int32; the launch used a few low ones.
         next_id: 1 << 30,
@@ -587,77 +724,82 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
         owners: HashMap::new(),
         idle_since: Some(Instant::now()),
         close_now: false,
-    };
+    }));
+    // The browser's messages are routed on the task that reads them: no
+    // hop to another thread on the way to the client's socket.
+    {
+        let router = Arc::clone(&router);
+        browser.take_raw(Box::new(move |text| {
+            if let Ok(mut router) = router.lock() {
+                router.on_chrome(text);
+            }
+        }));
+    }
     // The browser-level session the launch opened watches every target;
     // nothing reads that here.
-    router.send_chrome(Pending::Host, "Target.setDiscoverTargets", "{\"discover\":false}", None);
+    if let Ok(mut r) = router.lock() {
+        r.send_chrome(Pending::Host, "Target.setDiscoverTargets", "{\"discover\":false}", None);
+    }
+    {
+        let router = Arc::clone(&router);
+        std::thread::spawn(move || {
+            let mut next = 1u64;
+            loop {
+                let Ok(stream) = listener.accept() else { continue };
+                serve_client(next, stream, &router);
+                next += 1;
+            }
+        });
+    }
     let lock_path = socket.with_extension("lock");
     let why = loop {
-        let Ok(msg) = rx.recv() else { break "the router lost its inputs".to_string() };
-        match msg {
-            Msg::New(id, out) => router.new_client(id, out),
-            Msg::Client(id, text) => router.on_client(id, text),
-            Msg::Gone(id) => router.gone(id),
-            Msg::Chrome(text) => router.on_chrome(&text),
-            Msg::ChromeGone => break format!("the browser exited ({})", browser.death_report()),
-            Msg::Tick => {
-                let wait = if router.close_now { Duration::ZERO } else { grace };
-                let idle = router.idle_since.is_some_and(|since| since.elapsed() >= wait);
-                if !idle {
-                    continue;
-                }
-                // A session joining holds the lock from its connect until
-                // its context exists: not now, then.
-                let Ok(lock) = lock_file(&lock_path) else { continue };
-                if lock.try_lock().is_err() {
-                    continue;
-                }
-                // Messages that came in meanwhile (a client that connected
-                // just now) count before deciding.
-                while let Ok(msg) = rx.try_recv() {
-                    match msg {
-                        Msg::New(id, out) => router.new_client(id, out),
-                        Msg::Client(id, text) => router.on_client(id, text),
-                        Msg::Gone(id) => router.gone(id),
-                        Msg::Chrome(text) => router.on_chrome(&text),
-                        Msg::ChromeGone | Msg::Tick => {}
-                    }
-                }
-                if router.clients.is_empty() {
-                    // Gone before the lock is let go: the next session to
-                    // take it starts a new host.
-                    let _ = std::fs::remove_file(&socket);
-                    break format!("no session for {} s", grace.as_secs());
-                }
-            }
+        std::thread::sleep(Duration::from_millis(250));
+        if browser.is_closed() {
+            break format!("the browser exited ({})", browser.death_report());
+        }
+        let Ok(r) = router.lock() else { break "the router failed".to_string() };
+        let wait = if r.close_now { Duration::ZERO } else { grace };
+        if !r.idle_since.is_some_and(|since| since.elapsed() >= wait) {
+            continue;
+        }
+        // A session joining holds the lock from its connect until its
+        // context exists: not now, then. Holding the router, no client can
+        // arrive while this decides.
+        let Ok(lock) = lock_file(&lock_path) else { continue };
+        if lock.try_lock().is_err() {
+            continue;
+        }
+        if r.clients.is_empty() {
+            // Gone before the lock is let go: the next session to take it
+            // starts a new host.
+            let _ = std::fs::remove_file(&socket);
+            break format!("no session for {} s", grace.as_secs());
         }
     };
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(&pid_file);
-    // Every client's connection ends with its writer.
-    router.clients.clear();
+    // Every client's connection ends with its socket.
+    if let Ok(mut r) = router.lock() {
+        for client in r.clients.values() {
+            client.close();
+        }
+        r.clients.clear();
+    }
     browser.close();
+    drop(runtime);
     eprintln!("navigera: shared browser closed: {why}");
     ExitCode::SUCCESS
 }
 
-/// Start a client's reader and writer; false once the router is gone.
-fn serve_client(id: u64, stream: Stream, tx: &mpsc::Sender<Msg>) -> bool {
-    let Ok(read_half) = stream.try_clone() else { return true };
-    let (out, outgoing) = mpsc::channel::<Vec<u8>>();
-    if tx.send(Msg::New(id, out)).is_err() {
-        return false;
+/// Take a client: its socket is written by whoever routes to it, and a
+/// thread of its own reads it and routes what it sends.
+fn serve_client(id: u64, stream: Stream, router: &Arc<Mutex<Router>>) {
+    let Ok(read_half) = stream.try_clone() else { return };
+    let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
+    if let Ok(mut r) = router.lock() {
+        r.new_client(id, Out::Socket(stream));
     }
-    std::thread::spawn(move || {
-        let mut stream = stream;
-        for bytes in outgoing {
-            if stream.write_all(&bytes).is_err() {
-                break;
-            }
-        }
-        let _ = stream.shutdown(std::net::Shutdown::Both);
-    });
-    let tx = tx.clone();
+    let router = Arc::clone(router);
     std::thread::spawn(move || {
         let mut reader = BufReader::with_capacity(256 * 1024, read_half);
         let mut buf = Vec::with_capacity(4096);
@@ -670,15 +812,15 @@ fn serve_client(id: u64, stream: Stream, tx: &mpsc::Sender<Msg>) -> bool {
                         buf.pop();
                     }
                     let Ok(text) = String::from_utf8(std::mem::take(&mut buf)) else { continue };
-                    if tx.send(Msg::Client(id, text)).is_err() {
-                        return;
-                    }
+                    let Ok(mut r) = router.lock() else { return };
+                    r.on_client(id, text);
                 }
             }
         }
-        let _ = tx.send(Msg::Gone(id));
+        if let Ok(mut r) = router.lock() {
+            r.gone(id);
+        }
     });
-    true
 }
 
 #[cfg(test)]
@@ -702,6 +844,56 @@ mod tests {
         let refused: serde_json::Value = serde_json::from_str(&refusal(9, NOT_CLOSED)).unwrap();
         assert_eq!(refused["id"], 9);
         assert_eq!(refused["error"]["message"], NOT_CLOSED);
+    }
+
+    #[test]
+    fn the_envelope_is_read_without_parsing_and_only_where_it_is_certain() {
+        let sh = shape(r#"{"id":42,"result":{"nodes":[{"sessionId":"inner"}]},"sessionId":"S1"}"#);
+        assert_eq!(sh.id, Some((42, 8)));
+        assert_eq!(sh.session.map(|s| s.0), Some("S1"));
+        // A nested sessionId at the end is not the message's.
+        let sh = shape(r#"{"id":7,"result":{"sessionId":"inner"}}"#);
+        assert_eq!((sh.id.map(|i| i.0), sh.session), (Some(7), None));
+        // Quotes inside strings are escaped, so they can't fake the suffix.
+        let sh = shape(r#"{"id":3,"result":{},"note":"a,\"sessionId\":\"x"}"#);
+        assert!(sh.id.is_some());
+        assert_eq!(sh.session, None);
+        let sh = shape(r#"{"method":"Page.loadEventFired","params":{"t":1},"sessionId":"P"}"#);
+        assert_eq!((sh.id, sh.method, sh.session.map(|s| s.0)), (None, Some("Page.loadEventFired"), Some("P")));
+        let sh = shape(r#"{"id":9,"method":"Runtime.evaluate","params":{"expression":"1"}}"#);
+        assert_eq!((sh.id.map(|i| i.0), sh.method, sh.session), (Some(9), Some("Runtime.evaluate"), None));
+        // Not in the shape: the router parses it.
+        assert_eq!(shape(r#"{"result":{},"id":1}"#), Shape { id: None, method: None, session: None });
+        // The edits.
+        let text = r#"{"id":42,"result":{"x":1},"sessionId":"S1"}"#;
+        let sh = shape(text);
+        let (end, at) = (sh.id.unwrap().1, sh.session.unwrap().1);
+        assert_eq!(with_id(&without_session(text, at), end, 5), r#"{"id":5,"result":{"x":1}}"#);
+        assert_eq!(with_id(text, end, 5), r#"{"id":5,"result":{"x":1},"sessionId":"S1"}"#);
+    }
+
+    /// The router's string edits give what a parse and rewrite gave:
+    /// the client's own id back, its root session stripped, a command
+    /// with no session sent on the root.
+    #[test]
+    fn passed_on_messages_come_out_as_before() {
+        let (mut r, mut chrome) = router();
+        let (a_out, a) = mpsc::channel();
+        r.new_client(1, Out::Channel(a_out));
+        let attach = json(&chrome.try_recv().unwrap());
+        r.on_chrome(&format!(r#"{{"id":{},"result":{{"sessionId":"RA"}}}}"#, attach["id"]));
+        r.on_client(1, r#"{"id":11,"method":"Target.getTargets","params":{}}"#.into());
+        let sent = json(&chrome.try_recv().unwrap());
+        assert_eq!((sent["method"].as_str(), sent["sessionId"].as_str()), (Some("Target.getTargets"), Some("RA")));
+        r.on_chrome(&format!(r#"{{"id":{},"result":{{"targetInfos":[]}},"sessionId":"RA"}}"#, sent["id"]));
+        assert_eq!(received(&a), vec![json(r#"{"id":11,"result":{"targetInfos":[]}}"#)]);
+        // A tab session's command keeps its session both ways.
+        r.owners.insert("PA".into(), 1);
+        r.on_client(1, r#"{"id":12,"method":"Runtime.evaluate","params":{"expression":"1"},"sessionId":"PA"}"#.into());
+        let sent = json(&chrome.try_recv().unwrap());
+        assert_eq!(sent["sessionId"], "PA");
+        r.on_chrome(&format!(r#"{{"id":{},"result":{{"result":{{"value":1}}}},"sessionId":"PA"}}"#, sent["id"]));
+        assert_eq!(received(&a), vec![json(r#"{"id":12,"result":{"result":{"value":1}},"sessionId":"PA"}"#)]);
     }
 
     #[test]
@@ -750,8 +942,8 @@ mod tests {
         let (mut r, mut chrome) = router();
         let (a_out, a) = mpsc::channel();
         let (b_out, b) = mpsc::channel();
-        r.new_client(1, a_out);
-        r.new_client(2, b_out);
+        r.new_client(1, Out::Channel(a_out));
+        r.new_client(2, Out::Channel(b_out));
         let attach_a = json(&chrome.try_recv().unwrap());
         let attach_b = json(&chrome.try_recv().unwrap());
         assert_eq!(attach_a["method"], "Target.attachToBrowserTarget");

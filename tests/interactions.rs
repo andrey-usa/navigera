@@ -451,7 +451,9 @@ fn a_click_on_a_target_that_never_stops_still_lands() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("never-stops", &[]);
     s.ok(&["goto", &format!("{}/never-stops", site.url)]);
-    s.ok(&["click", "--selector", "#drifter"]);
+    let (ms, _) = timed(&s, &["click", "--selector", "#drifter"]);
+    // About a second for the drift to stop, not the whole element wait.
+    assert!(ms < 2500.0, "the click on a drifting button took {ms} ms");
     let status = s.text(&["get", "text", "--selector", "#status"]);
     // The drift is +/-12px around x=200, the button 60px wide: a click at
     // the last-read centre always lands on it once the settle budget ends
@@ -1317,6 +1319,38 @@ fn median(mut v: Vec<f64>) -> f64 {
     v[v.len() / 2]
 }
 
+/// A long poll (a request held open, reconnected) and irregular analytics
+/// beacons are background traffic: the first snapshot waits at most about
+/// a second for the held request, and later ones don't wait on either.
+#[test]
+fn long_polls_and_beacons_dont_hold_snapshots() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("bg", &[]);
+    s.ok(&["goto", &format!("{}/long-poll?hold=2500", site.url)]);
+    let (first, _) = timed(&s, &["ax"]);
+    assert!(first < 2000.0, "first ax on a long-poll page took {first} ms (the cap is 3 s)");
+    let (second, _) = timed(&s, &["ax"]);
+    assert!(second < 700.0, "second ax took {second} ms");
+    // After the reconnect: the same URL is a long poll, not data.
+    s.ok(&["wait", "--text", "reconnected 1"]);
+    let after: Vec<f64> = (0..3).map(|_| timed(&s, &["ax"]).0).collect();
+    assert!(median(after.clone()) < 700.0, "ax after a reconnect took {after:?} ms");
+
+    // Right after load: the first beacon answered 204, so it held nothing
+    // past its own answer (the faster of two loads: a loaded runner's
+    // fixture server can be slow to answer one).
+    let first = (0..2)
+        .map(|_| {
+            s.ok(&["goto", &format!("{}/beacons", site.url)]);
+            timed(&s, &["ax"]).0
+        })
+        .fold(f64::MAX, f64::min);
+    assert!(first < 450.0, "first ax on a page sending beacons took {first} ms (the quiet window is 500)");
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let beacons: Vec<f64> = (0..5).map(|_| timed(&s, &["ax"]).0).collect();
+    assert!(median(beacons.clone()) < 700.0, "ax on a page sending beacons took {beacons:?} ms");
+}
+
 /// A snapshot waits for the network to go quiet so an SPA's "Loading..." list
 /// has landed, but a request repeated at a steady interval is a poll and
 /// doesn't hold it; `--no-wait` skips the wait.
@@ -1459,4 +1493,173 @@ fn ax_with_a_limit_on_a_big_table_stops_at_the_limit() {
     assert_eq!(s.text(&["get", "text", "--selector", "#out"]), "edit 7");
     let r = s.ok(&["click", "--selector", "tr:nth-child(3) button"]);
     assert!(r.is_object(), "{r}");
+}
+
+/// Text in a page of `<div>`s shares lines (a line per `<div>` made such a
+/// page over twice the size), and a cut says how much it left out and the
+/// ref that reads all of it.
+#[test]
+fn text_shares_lines_and_a_cut_says_how_to_read_the_rest() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("text", &[]);
+    s.ok(&["goto", &format!("{}/div-cells", site.url)]);
+    let tree = s.text(&["ax", "--limit", "0"]);
+    let text_lines = tree.lines().filter(|l| l.starts_with("- text: ")).count();
+    assert!(text_lines < 80, "3,000 cells took {text_lines} lines:\n{tree}");
+    assert!(tree.contains("r0c0 r0c1") && tree.contains("r299c9") && tree.contains("- button \"Next\""), "{tree}");
+    for i in [0, 150, 299] {
+        for j in 0..10 {
+            assert!(tree.contains(&format!("r{i}c{j}")), "r{i}c{j} is missing:\n{tree}");
+        }
+    }
+
+    let long = "Lorem ipsum dolor sit amet. ".repeat(40);
+    s.ok(&["goto", &format!("{}/long-text", site.url)]);
+    let tree = s.text(&["ax"]);
+    let refs: Vec<&str> = tree.match_indices("chars: get text ").map(|(at, m)| &tree[at + m.len()..]).collect();
+    assert_eq!(refs.len(), 2, "both cuts say how to read the rest:\n{tree}");
+    let omitted = format!("(+{} chars", long.trim().chars().count() - 300);
+    assert_eq!(tree.matches(&omitted).count(), 2, "{tree}");
+    for r in refs {
+        let id: String = r.chars().take_while(char::is_ascii_digit).collect();
+        assert_eq!(s.text(&["get", "text", &id]), long.trim(), "get text {id}");
+    }
+}
+
+/// A banner with controls of its own that stays over the button is said
+/// after about a second, naming its controls; an overlay over a page that
+/// is still fetching is waited for, as long as the element wait.
+#[test]
+fn a_cover_that_stays_is_said_quickly_and_a_loading_one_is_waited_for() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("covers", &[]);
+    s.ok(&["goto", &format!("{}/cookie-banner", site.url)]);
+    let t = std::time::Instant::now();
+    let err = s.fails(&["click", "--selector", "#buy"]);
+    let ms = t.elapsed().as_millis();
+    assert!(ms < 2500, "a banner that stays took {ms} ms to report");
+    assert!(err.contains("div#consent") && err.contains("\"Accept\", \"Reject\""), "{err}");
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "waiting");
+    s.ok(&["click", "--role", "button", "--name", "Accept"]);
+    s.ok(&["click", "--selector", "#buy"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "bought");
+
+    s.ok(&["goto", &format!("{}/loading-cover", site.url)]);
+    s.ok(&["click", "--selector", "#save"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "saved");
+}
+
+/// A control with no name or text says what the page marks it with: a
+/// tooltip attribute, its icon's class or sprite symbol, its image's file,
+/// or the description it points to.
+#[test]
+fn a_nameless_control_says_what_the_page_marks_it_with() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("icons", &[]);
+    let page = concat!(
+        "<title>icons</title>",
+        "<button class=icon-btn><i class='fa fa-solid fa-trash'></i></button>",
+        "<button class=icon-btn><svg width=16 height=16><use href='%23i-close'></use></svg></button>",
+        "<div role=button tabindex=0 class=tb data-tooltip=Archive><svg width=16 height=16></svg></div>",
+        "<a href='/x' class=nav><img src='/icons/home.png' width=16 height=16></a>",
+        "<span class=close onclick=1 title='Close panel' style='display:inline-block;width:16px;height:16px'></span>",
+        "<button class=x aria-describedby=tip><svg width=16 height=16></svg></button><div role=tooltip id=tip>Share</div>",
+    );
+    s.ok(&["goto", &format!("data:text/html,{page}")]);
+    let tree = s.text(&["ax"]);
+    for hint in [
+        "button .icon-btn icon=\"fa-trash\" [ref=",
+        "button .icon-btn icon=\"i-close\" [ref=",
+        "button .tb data-tooltip=\"Archive\" [ref=",
+        "link .nav img=\"home.png\" [ref=",
+        "clickable .close title=\"Close panel\" [ref=",
+        "button .x description=\"Share\" [ref=",
+    ] {
+        assert!(tree.contains(hint), "{hint}:\n{tree}");
+    }
+}
+
+/// On these pages the tree built from the DOM snapshot (what a large page
+/// gets) prints exactly what Chrome's accessibility tree does, refs
+/// included: both are read from one page load (`NAVIGERA_AX_SOURCE=both`).
+#[test]
+fn the_dom_snapshot_tree_prints_what_chromes_tree_does() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let pages = [
+        "/big-table",
+        "/div-cells",
+        "/long-text",
+        "/cookie-banner",
+        "/stale-ref",
+        "/drag-native",
+        "/drag-position",
+        "/hidden-layers",
+        "/iframe-form",
+        "/srcdoc",
+        "/multi-select",
+        "/nbsp-select",
+        "/shadow-css",
+        "/overlapped",
+        "/right-click",
+        "/card-radios",
+        "/combobox",
+        "/typed-only",
+        "/lazy-box",
+        "/honesty",
+        "/fillwait",
+        "/effects",
+    ];
+    let mut input = String::new();
+    for (i, page) in pages.iter().enumerate() {
+        input.push_str(&format!(
+            "{}\n",
+            serde_json::json!({ "id": 1000 + i, "op": "goto", "url": format!("{}{page}", site.url) })
+        ));
+        input.push_str(&format!("{}\n", serde_json::json!({ "id": i, "op": "ax", "format": "text", "limit": 0 })));
+    }
+    // A snapshot scoped to one row of the large table.
+    input.push_str(&format!(
+        "{}\n",
+        serde_json::json!({ "id": 2000, "op": "goto", "url": format!("{}/big-table", site.url) })
+    ));
+    input.push_str(&format!(
+        "{}\n",
+        serde_json::json!({ "id": 500, "op": "ax", "format": "text", "limit": 0, "selector": "#rows tr:nth-child(3)" })
+    ));
+    input.push_str("{\"id\":99999,\"op\":\"quit\"}\n");
+    let mut child = Command::new(tool_exe())
+        .args(["--own-browser", "serve"])
+        .env("NAVIGERA_AX_SOURCE", "both")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("navigera serve");
+    {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    let mut checked = 0;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let r: Value = serde_json::from_str(line).unwrap();
+        let Some(i) = r["id"].as_u64().filter(|i| *i < 1000) else { continue };
+        if i == 500 {
+            let text = r["result"].as_str().unwrap_or_else(|| panic!("scoped: {r}"));
+            let (chrome, dom) = text.split_once("\n=== DOM snapshot tree ===\n").unwrap();
+            assert_eq!(dom, chrome, "a scoped snapshot differs");
+            assert!(dom.contains("cell \"Item 2\"") && !dom.contains("Item 3"), "{dom}");
+            checked += 1;
+            continue;
+        }
+        let page = pages[i as usize];
+        let text = r["result"].as_str().unwrap_or_else(|| panic!("{page}: {r}"));
+        let (chrome, dom) =
+            text.split_once("\n=== DOM snapshot tree ===\n").unwrap_or_else(|| panic!("{page}: {text}"));
+        assert_eq!(dom, chrome, "{page}: the DOM snapshot tree differs from Chrome's");
+        checked += 1;
+    }
+    assert_eq!(checked, pages.len() + 1);
 }
