@@ -4080,11 +4080,11 @@ impl Page {
     /// An app window as the app shows it: whether it is hidden (an Electron
     /// app's helper or dropdown window, made with `show: false`), and its
     /// area, to pick the window a user would look at.
-    pub fn window_shown(&self, timeout: Duration) -> (bool, f64) {
+    pub fn window_shown(&self, timeout: Duration) -> Option<(bool, f64)> {
         let v = self
             .evaluate_raw("[document.visibilityState === 'hidden', window.innerWidth * window.innerHeight]", timeout)
-            .unwrap_or(Value::Null);
-        (v[0].as_bool().unwrap_or(false), v[1].as_f64().unwrap_or(0.0))
+            .ok()?;
+        Some((v[0].as_bool()?, v[1].as_f64().unwrap_or(0.0)))
     }
 
     /// The document has loaded and shows something to read or use (text,

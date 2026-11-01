@@ -282,7 +282,9 @@ fn best_window(pages: &[crate::cdp::Page], timeout: Duration) -> Option<usize> {
     pages
         .iter()
         .enumerate()
-        .map(|(i, page)| (i, page.window_shown(timeout)))
+        // A window that can't say yet (its page has no context) is not
+        // taken for a shown one.
+        .filter_map(|(i, page)| page.window_shown(timeout).map(|shown| (i, shown)))
         .filter(|(_, (hidden, _))| !hidden)
         .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
         .map(|(i, _)| i)
@@ -1000,11 +1002,13 @@ impl BrowserSession {
                 if !pages.is_empty() {
                     break 0;
                 }
-                bail!(
-                    "the Electron app opened no window within {} ms{}",
-                    wait.as_millis(),
-                    if browser.is_closed() { " (it exited)" } else { "" }
-                );
+                if browser.is_closed() {
+                    bail!(
+                        "the Electron app exited before it opened a window{}",
+                        crate::cdp::electron_exit_note(browser.exit_status_within(Duration::from_secs(1)))
+                    );
+                }
+                bail!("the Electron app opened no window within {} ms", wait.as_millis());
             }
             std::thread::sleep(Duration::from_millis(50));
         };
@@ -1337,7 +1341,8 @@ impl BrowserSession {
                     self.apply_init_scripts(&page);
                     // An app's hidden window (a dropdown, a helper) is a tab,
                     // but not the one the session goes on in.
-                    let hidden = self.is_electron() && page.window_shown(Duration::from_millis(1000)).0;
+                    let hidden = self.is_electron()
+                        && page.window_shown(Duration::from_millis(1000)).is_some_and(|(hidden, _)| hidden);
                     self.pages.push(page);
                     if !hidden {
                         self.active = self.pages.len() - 1;

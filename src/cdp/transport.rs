@@ -57,6 +57,20 @@ pub struct LaunchedChrome {
 /// Ensures a failed launch never leaks a Chrome process (whose DevTools stderr
 /// we captured) — a failed `target.createTarget`-style discovery previously
 /// left browser processes running.
+/// How an Electron app that quit during launch ended, as a parenthesis for
+/// the error: a clean exit at once is what a single-instance app does when
+/// another copy holds its lock (it hands its arguments over and quits).
+pub fn electron_exit_note(status: Option<std::process::ExitStatus>) -> String {
+    match status {
+        Some(s) if s.success() => format!(
+            " ({s}: a single-instance app exits like this when a copy of it is already running: close that copy, \
+             or quit the session that started it)"
+        ),
+        Some(s) => format!(" ({s})"),
+        None => String::new(),
+    }
+}
+
 struct KillOnDrop(Option<Child>);
 
 impl KillOnDrop {
@@ -227,17 +241,9 @@ pub fn launch_electron(exe: &str, args: &[String], no_sandbox: bool) -> Result<L
         if let Ok(Some(status)) = kill.as_mut().try_wait() {
             thread::sleep(Duration::from_millis(20));
             let _ = kill.disarm().wait();
-            // A clean exit at once is what a single-instance app does when
-            // another copy holds its lock: it hands its arguments over and
-            // quits.
-            let hint = if status.success() {
-                " (a single-instance app exits like this when a copy of it is already running: close that copy, \
-                 or quit the session that started it)"
-            } else {
-                ""
-            };
             return Err(anyhow!(
-                "the Electron app exited during launch (status {status}) before it opened a DevTools port{hint}; its stderr:\n{}",
+                "the Electron app exited during launch before it opened a DevTools port{}; its stderr:\n{}",
+                electron_exit_note(Some(status)),
                 capture.tail()
             ));
         }

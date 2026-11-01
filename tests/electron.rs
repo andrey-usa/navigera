@@ -339,7 +339,9 @@ fn a_single_instance_app_already_running_is_named() {
     let (started, r) = run(&second, &["start", "--electron", app, "--electron-arg=--single-instance"]);
     assert!(!started, "{r}");
     let text = r.to_string();
-    assert!(text.contains("exited during launch") && text.contains("single-instance"), "{r}");
+    // Where it quits (before its DevTools port, after it, while navigera
+    // connects) depends on the machine; the error says it exited, and why.
+    assert!(text.contains("exited") && text.contains("single-instance"), "{r}");
     // The first copy is unharmed.
     assert!(ax(&first).contains("Orders"));
     ok(&first, &["quit"]);

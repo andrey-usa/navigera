@@ -165,9 +165,24 @@ impl Browser {
         let started = std::time::Instant::now();
         let launched = transport::launch_electron(exe, args, no_sandbox)?;
         crate::timing::record("devtools_url", started);
-        let client = handle
-            .block_on(CdpClient::connect(&launched.ws_url))
-            .with_context(|| format!("connect to the Electron app at {}", launched.ws_url))?;
+        let client = match handle.block_on(CdpClient::connect(&launched.ws_url)) {
+            Ok(client) => client,
+            Err(e) => {
+                // The app may have quit right after opening its port (a
+                // single-instance app whose other copy is running).
+                let mut child = launched.child;
+                let status = wait_exit(&mut child, Duration::from_secs(1));
+                if status.is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(e.context(format!(
+                    "connect to the Electron app at {}{}",
+                    launched.ws_url,
+                    transport::electron_exit_note(status)
+                )));
+            }
+        };
         let mut browser = Self::finish(handle, client, Some(launched.child), None, launched.ws_url);
         browser.stderr = Some(launched.stderr);
         browser.job = launched.job;
@@ -263,6 +278,13 @@ impl Browser {
     /// Has the connection to the browser ended?
     pub fn is_closed(&self) -> bool {
         self.client.is_closed()
+    }
+
+    /// How the browser's own process (one navigera launched) ended, waiting
+    /// up to `wait` for it to.
+    pub fn exit_status_within(&self, wait: Duration) -> Option<std::process::ExitStatus> {
+        let mut slot = self.child.lock().ok()?;
+        wait_exit(slot.as_mut()?, wait)
     }
 
     /// How many browser contexts other than the default one are open.
@@ -760,6 +782,20 @@ fn lightpanda_serve_args(port: u16) -> Vec<String> {
 fn free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind 127.0.0.1:0 for a free port")?;
     Ok(listener.local_addr()?.port())
+}
+
+/// The child's exit status once it has exited, polling for up to `wait`.
+fn wait_exit(child: &mut std::process::Child, wait: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[cfg(test)]
