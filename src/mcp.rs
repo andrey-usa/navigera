@@ -599,9 +599,13 @@ impl<'a> Server<'a> {
         }
         let command = match command {
             // MCP returns the image itself; the file is only a hand-off.
-            Command::Screenshot { full_page, no_wait, .. } => {
-                Command::Screenshot { path: Some(screenshot_path()), full_page, no_wait, quality: None }
-            }
+            Command::Screenshot { full_page, no_wait, .. } => Command::Screenshot {
+                path: Some(screenshot_path()),
+                full_page,
+                no_wait,
+                quality: None,
+                timeout_ms: None,
+            },
             other => other,
         };
         self.driver()?.run_op(&command).map_err(|e| format!("{e:#}"))

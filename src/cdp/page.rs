@@ -4152,7 +4152,34 @@ impl Page {
         if full_page {
             params["captureBeyondViewport"] = Value::Bool(true);
         }
-        let res = self.send("Page.captureScreenshot", params, timeout)?;
+        // A capture asked for while the page is replacing its document (a click
+        // that confirm()s, posts and reloads) can be lost: Chrome never answers it,
+        // and the next capture works at once. So with no answer after 400 ms it is
+        // asked for again, and whichever answers first is taken: a slow capture
+        // that is only slow (a long full page) still answers in its own time.
+        let started = std::time::Instant::now();
+        let session = Some(self.session_id.as_str());
+        let res = self.block_on(async {
+            let first = self.client.send("Page.captureScreenshot", params.clone(), session, timeout);
+            tokio::pin!(first);
+            tokio::select! {
+                r = &mut first => return r,
+                _ = tokio::time::sleep(timeout.min(Duration::from_millis(400))) => {}
+            }
+            let left = timeout.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return first.await;
+            }
+            let second = self.client.send("Page.captureScreenshot", params, session, left);
+            tokio::pin!(second);
+            tokio::select! {
+                r = &mut first => match r {
+                    Ok(v) => Ok(v),
+                    Err(_) => second.await,
+                },
+                r = &mut second => r,
+            }
+        })?;
         let data =
             res.get("data").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("captureScreenshot: no data"))?;
         base64::engine::general_purpose::STANDARD.decode(data).context("screenshot base64 decode")

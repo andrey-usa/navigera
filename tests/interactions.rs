@@ -1781,6 +1781,8 @@ fn a_screenshot_with_a_quality_is_a_jpeg() {
     let r = s.ok(&["screenshot", "--quality", "60", "--path", &jpg.display().to_string()]);
     assert!(r["bytes"].as_u64().unwrap_or(0) > 0, "{r}");
     s.ok(&["screenshot", "--path", &png.display().to_string()]);
+    // `--timeout-ms` bounds the capture (a page that never answers must not hold it for 35 s).
+    s.ok(&["screenshot", "--quality", "60", "--timeout-ms", "5000", "--path", &jpg.display().to_string()]);
     let (j, p) = (std::fs::read(&jpg).unwrap(), std::fs::read(&png).unwrap());
     assert_eq!(&j[..3], &[0xFF, 0xD8, 0xFF], "a JPEG");
     assert_eq!(&p[..4], b"\x89PNG", "a PNG without --quality");
@@ -1794,4 +1796,39 @@ fn a_screenshot_with_a_quality_is_a_jpeg() {
         assert!(!out.status.success() && e.contains("--quality takes 1 to 100"), "{bad}: {e}");
     }
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A capture asked for right after a click that confirm()s, posts and reloads
+/// the page used to go unanswered for the session's whole 35 s timeout.
+#[test]
+fn a_screenshot_right_after_a_confirmed_reload_is_not_lost() {
+    let (true, Some(shop)) = (chrome(), bench_site()) else { return };
+    let s = Session::start("confirm-shot", &[]);
+    s.ok(&["goto", &format!("{}/shop/p/101", shop.url)]);
+    s.ok(&["click", "--selector", "#cookie-accept"]);
+    s.ok(&["click", "--selector", "#detail-add"]);
+    s.ok(&["goto", &format!("{}/cart", shop.url)]);
+    s.ok(&["dialog", "--accept"]);
+    s.ok(&["click", "--selector", "[data-remove=\"101\"]"]);
+    let dir = std::env::temp_dir().join(format!("nv-confirm-shot-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let started = std::time::Instant::now();
+    s.ok(&["screenshot", "--no-wait", "--timeout-ms", "10000", "--path", &dir.join("a.png").display().to_string()]);
+    assert!(started.elapsed().as_secs_f64() < 3.0, "the capture took {:?}", started.elapsed());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn bench_site() -> Option<Site> {
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let mut child = Command::new(python)
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/bench/site/server.py"))
+        .args(["--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .ok()?;
+    let mut line = String::new();
+    BufReader::new(child.stdout.take()?).read_line(&mut line).ok()?;
+    let url = line.trim().strip_prefix("LISTENING ")?.to_string();
+    Some(Site { child, url })
 }

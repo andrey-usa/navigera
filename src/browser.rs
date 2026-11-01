@@ -2617,7 +2617,12 @@ impl BrowserSession {
 
     /// A JPEG at `quality` (1-100) when given, else a PNG.
     pub fn screenshot_as(&self, full_page: bool, quality: Option<u8>) -> Result<Vec<u8>> {
-        self.active_tab().screenshot_as(self.timeout(None), full_page, quality)
+        self.screenshot_in(full_page, quality, None)
+    }
+
+    /// [`Self::screenshot_as`] giving up after `timeout_ms` (default: the session's).
+    pub fn screenshot_in(&self, full_page: bool, quality: Option<u8>, timeout_ms: Option<f64>) -> Result<Vec<u8>> {
+        self.active_tab().screenshot_as(self.timeout(timeout_ms), full_page, quality)
     }
 
     /// True when this session drives Lightpanda rather than Chromium.

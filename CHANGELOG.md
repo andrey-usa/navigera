@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `screenshot --timeout-ms <n>` bounds the capture (default: the session
+  timeout).
 - `start --electron <app>` drives an Electron desktop app: navigera
   launches it with a DevTools port, waits for its first window and adopts
   its windows as tabs, the ones it opens later included (they have no
@@ -62,6 +64,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `screenshot --no-wait` right after a click that confirm()s, posts and
+  reloads the page could go unanswered for the whole 35 s timeout: Chrome
+  loses a capture asked for while the document is being replaced, and the
+  next one works at once. With no answer after 400 ms the capture is asked
+  for again and the first answer is taken: about 0.43 s there, and a
+  capture that is only slow still answers in its own time.
 - An icon-only button with nothing to name it by now says what kind of icon
   it is: an inline style's background image (`img="bell.svg"`), an icon
   component's test id (`icon="DeleteIcon"`), and, failing all,

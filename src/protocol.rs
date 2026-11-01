@@ -759,6 +759,9 @@ pub enum Command {
         /// `--quality <1-100>`: a JPEG at that quality instead of a PNG.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<u8>,
+        /// `--timeout-ms <n>`: give up on the capture after this long (default: the session's).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
     },
     /// List open tabs: index, target id, and whether it is the active tab.
     #[serde(rename = "tab-list")]
@@ -1100,7 +1103,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
-    ("screenshot", "[--path <f.png>] [--full-page] [--quality <1-100>] [--no-wait]", "PNG (a JPEG with --quality) of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
+    ("screenshot", "[--path <f.png>] [--full-page] [--quality <1-100>] [--timeout-ms <n>] [--no-wait]", "PNG (a JPEG with --quality) of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
     ("reset", "[--all]", "a clean slate in the same browser: a new browser context (no cookies, storage or cache from before) with one blank tab; the old tabs close (`set`, routes, credentials, init scripts, the dialog answer and `downloads --dir` stay; --all drops them too)"),
     ("tab-new", "[<url>]", "open a tab and make it active"),
     ("tab-list", "", "list tabs"),
@@ -2296,6 +2299,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 },
                 None => None,
             },
+            timeout_ms,
         },
         unknown => {
             let hint = suggest(unknown).map(|s| format!(" — did you mean `{s}`?")).unwrap_or_default();
@@ -3804,7 +3808,7 @@ impl Driver {
                 self.session.close_page(index).map_err(|e| anyhow::anyhow!("tab-close {index}: {e:#}"))?;
                 Ok(self.state_json())
             }
-            Command::Screenshot { path, full_page, quality, .. } => {
+            Command::Screenshot { path, full_page, quality, timeout_ms, .. } => {
                 let path = path.clone().unwrap_or_else(|| {
                     format!(
                         "shot-{}.{}",
@@ -3816,7 +3820,7 @@ impl Driver {
                     )
                 });
                 let bytes = s
-                    .screenshot_as(full_page.unwrap_or(false), *quality)
+                    .screenshot_in(full_page.unwrap_or(false), *quality, *timeout_ms)
                     .map_err(|e| anyhow::anyhow!("screenshot: {e:#}"))?;
                 write_own(&path, &bytes).map_err(|e| anyhow::anyhow!("screenshot: writing {path}: {e:#}"))?;
                 // Report where it really went (a relative path is relative

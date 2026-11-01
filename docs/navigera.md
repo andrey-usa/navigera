@@ -131,7 +131,7 @@ another process are reachable by ref only.
 | `history` | `--clear` empties it | `{history: [{command, at, url, page, locators?}]}` (`page`: the title, the visible `h1` and the status/alert messages showing after the action): the actions the session ran (navigation, clicks, typing, selects, uploads, drags, scrolls, tabs, dialogs, and the waits between; not reads or `eval`), oldest first, the last 1000; one on a ref has the `locate` of its element from just before it ran (and `secret: true` for a password field), so `primavera from-session` can write it as a test |
 | `title` / `url` | — | string / state |
 | `back` / `forward` / `reload` | — | state |
-| `screenshot` | `[<path>]` or `--path`; `--full-page`; `--quality <1-100>` (a JPEG at that quality, not a PNG: about a quarter of the bytes for a page of text) | `{path, bytes}` |
+| `screenshot` | `[<path>]` or `--path`; `--full-page`; `--quality <1-100>` (a JPEG at that quality, not a PNG: about a quarter of the bytes for a page of text); `--timeout-ms <n>` (give up on the capture after n ms; default: the session timeout) | `{path, bytes}` |
 | `reset` | | `{tabs, active, url}`: a new browser context (no cookies, storage or cache from before) with one blank tab, in the same browser (about 40 ms); the old tabs close; `set`, routes, credentials, init scripts, the dialog answer and the `downloads --dir` stay (`reset --all` drops them, as in a new session). Chrome only |
 | `tab-new` | `[<url>]` | `{tabs:[{index,target,active}], active, url}`; a tab that was closed under the session (the user closed it, or the page did) shows `closed: true` until `tab-new` replaces it, and ops that need it say so |
 | `tab-list` | — | same |
