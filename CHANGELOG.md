@@ -21,6 +21,24 @@ All notable changes to this project are documented here. The format follows
   fixture app that saves a form through its main process and opens a
   second window.
 
+### Changed
+
+- A snapshot right after an action whose own requests have started (a
+  click that fetches) waits for those requests and 100 ms more, not the
+  whole 500 ms quiet window: a click that loads data for 200 ms is read
+  about 300 ms later instead of about 750, with the data in it. Traffic
+  that hasn't started yet (a page's data after it loads) still gets the
+  whole window, and a window set with `set network-quiet` holds after
+  actions too.
+
+### Fixed
+
+- A scoped `ax` (`--selector`, a ref) on a large page builds only the
+  scope's tree again, instead of the whole page's and then cutting it:
+  a header on a 2,000-row page 336 -> 166 ms, on 4,000 rows 605 -> 360 ms
+  (0.6.5: about 214 ms on 2,000 rows). A large scope stays on the fast
+  path (the 2,000-row table itself: 299 ms; Chrome's tree takes 1.4 s).
+
 ## [0.7.0] - 2026-11-01
 
 ### Changed

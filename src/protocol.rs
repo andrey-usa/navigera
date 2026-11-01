@@ -890,6 +890,11 @@ pub struct SessionConfig {
 /// (`set network-quiet <ms>`, default 500 ms).
 const NETWORK_QUIET_MAX: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// The quiet a snapshot waits for after an action's own requests have
+/// started (see [`crate::cdp::events::Shared::action_traffic_seen`]): long enough for a request
+/// its response starts and for the page to render the data.
+const AFTER_ACTION_QUIET: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Default idle shutdown for session servers: an agent that forgot its
 /// session (or crashed) leaves it for this long at most.
 pub const DEFAULT_IDLE_TIMEOUT_S: u64 = 600;
@@ -2792,7 +2797,14 @@ impl Driver {
                 && !command.no_wait()
                 && !self.session.quiet_synced()
             {
-                let window = self.session.network_quiet_window();
+                // After an action whose requests have started (a click's
+                // fetch), those requests and a short settle are the wait;
+                // the whole window is for traffic not started yet (a page's
+                // data after it loads). A window the session chose holds.
+                let mut window = self.session.network_quiet_window();
+                if !self.session.network_quiet_chosen() && self.session.action_traffic_seen() {
+                    window = window.min(AFTER_ACTION_QUIET);
+                }
                 let (_, waited) = self.session.network_quiet_waited(window, budget.min(NETWORK_QUIET_MAX));
                 quiet_waited_ms = waited.as_millis() as u64;
             }
@@ -2833,6 +2845,9 @@ impl Driver {
                 e["secret"] = json!(true);
             }
             e["locators"] = found.and_then(|v| v.get("locators").cloned()).unwrap_or_else(|| json!([]));
+        }
+        if command.is_action() {
+            self.session.mark_action();
         }
         let result = self.dispatch(command).map_err(|e| {
             let msg = format!("{e:#}");
@@ -3852,6 +3867,32 @@ impl Command {
     }
 
     /// `--no-wait`: no network-quiet wait before this command reads the page.
+    /// Acts on the page the way a user would (or runs the page's code), so
+    /// the requests that follow are its doing (see `mark_action`).
+    fn is_action(&self) -> bool {
+        matches!(
+            self,
+            Command::Click { .. }
+                | Command::Dblclick { .. }
+                | Command::Fill { .. }
+                | Command::Type { .. }
+                | Command::InsertText { .. }
+                | Command::Press { .. }
+                | Command::KeyDown { .. }
+                | Command::KeyUp { .. }
+                | Command::Select { .. }
+                | Command::SetChecked { .. }
+                | Command::Hover { .. }
+                | Command::Mouse { .. }
+                | Command::Drag { .. }
+                | Command::Scroll { .. }
+                | Command::Upload { .. }
+                | Command::Focus { .. }
+                | Command::Eval { .. }
+                | Command::Dialog { .. }
+        )
+    }
+
     fn no_wait(&self) -> bool {
         match self {
             Command::Screenshot { no_wait, .. } | Command::Find { no_wait, .. } | Command::Check { no_wait, .. } => {

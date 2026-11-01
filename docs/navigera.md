@@ -222,8 +222,12 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   `goto … && … ax` shows a single-page app's list, not its "Loading…"
   placeholder. A request to a URL the page has already fetched twice at a
   steady interval is a poll and doesn't count, so a dashboard that refreshes
-  every few hundred milliseconds is read at once. `--no-wait` (on `ax`,
-  `screenshot`, `find`, `check` and `--find`) skips the wait.
+  every few hundred milliseconds is read at once. After an action whose
+  own requests have started (a click that fetches), the snapshot waits for
+  those requests and 100 ms more, not the whole window: a click that loads
+  data for 200 ms is read about 300 ms later, with the data. A window set
+  with `set network-quiet <ms>` holds after actions too. `--no-wait` (on
+  `ax`, `screenshot`, `find`, `check` and `--find`) skips the wait.
 - **Clicks** are trusted mouse events at the element's centre after
   scrolling it into view, once the element has stopped moving: CSS
   animations and transitions running on it or an ancestor (a dialog sliding

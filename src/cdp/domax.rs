@@ -70,14 +70,41 @@ const SKIP: &[&str] =
     &["HEAD", "SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "TITLE", "META", "LINK", "BASE", "BR", "WBR", "DATALIST"];
 
 pub fn build(snap: &Value) -> Option<Built> {
+    build_from(snap, None)
+}
+
+/// The tree of one element's subtree (`ax --selector`, a ref scope): the
+/// element is the first node, frames inside it follow. Building only the
+/// scope keeps a scoped snapshot of a large page from paying for the
+/// whole page's tree. `None` when the element is not in the snapshot;
+/// no nodes when it is hidden (it, or an ancestor, is not exposed).
+pub fn build_scoped(snap: &Value, scope_backend: u64) -> Option<Built> {
+    build_from(snap, Some(scope_backend))
+}
+
+fn build_from(snap: &Value, scope: Option<u64>) -> Option<Built> {
     let strings: Vec<&str> = snap.get("strings")?.as_array()?.iter().map(|v| v.as_str().unwrap_or("")).collect();
     let documents = snap.get("documents")?.as_array()?;
     let docs: Vec<Doc> = documents.iter().map(|d| Doc::new(d, &strings)).collect();
     let main = docs.first()?;
     let mut frames = Vec::new();
     let mut nodes = Vec::new();
+    // Where the walk starts: each document's root, or the scope element in
+    // whichever document holds it.
+    let mut start: Option<(usize, usize)> = None;
+    if let Some(backend) = scope {
+        let found = docs
+            .iter()
+            .enumerate()
+            .find_map(|(d, doc)| doc.backend.iter().position(|&b| b == backend as i64).map(|i| (d, i)));
+        let (d, i) = found?;
+        if !docs[d].exposed_with_ancestors(i) {
+            return Some(Built { nodes, frames, title: main.title.to_string(), url: main.url.to_string() });
+        }
+        start = Some((d, i));
+    }
     // Frames hang under their <iframe>; each is a document of its own.
-    let mut queue = vec![(0usize, None::<u64>)];
+    let mut queue = vec![(start.map_or(0, |(d, _)| d), None::<u64>)];
     let mut seen = HashSet::new();
     while let Some((d, owner)) = queue.pop() {
         if !seen.insert(d) || d >= docs.len() {
@@ -85,7 +112,11 @@ pub fn build(snap: &Value) -> Option<Built> {
         }
         let mut out = Vec::new();
         let mut owned = Vec::new();
-        docs[d].emit(d, &mut out, &mut owned);
+        let from = match (owner, start) {
+            (None, Some((_, i))) => Some(i),
+            _ => None,
+        };
+        docs[d].emit(d, from, &mut out, &mut owned);
         for (iframe_backend, child_doc) in owned {
             queue.push((child_doc, Some(iframe_backend)));
         }
@@ -1158,8 +1189,26 @@ impl<'a> Doc<'a> {
 
     /// Append this document's nodes to `out`; `frames` gets each
     /// <iframe> with a document in the snapshot.
-    fn emit(&self, d: usize, out: &mut Vec<Value>, frames: &mut Vec<(u64, usize)>) {
-        let Some(root) = (0..self.ty.len()).find(|&i| self.ty[i] == 9) else { return };
+    /// Is `i` in the tree with every ancestor up to its document (through
+    /// shadow hosts)? A scoped walk starts below them, so it checks.
+    fn exposed_with_ancestors(&self, i: usize) -> bool {
+        let mut at = i as i64;
+        for _ in 0..4096 {
+            if at < 0 {
+                return true;
+            }
+            if !self.shown(at as usize) {
+                return false;
+            }
+            at = self.parent[at as usize];
+        }
+        false
+    }
+
+    /// Emit the AX nodes of document `d` from its root, or from `from` (a
+    /// scoped snapshot's element) down.
+    fn emit(&self, d: usize, from: Option<usize>, out: &mut Vec<Value>, frames: &mut Vec<(u64, usize)>) {
+        let Some(root) = from.or_else(|| (0..self.ty.len()).find(|&i| self.ty[i] == 9)) else { return };
         let id = |i: usize| format!("d{d}n{i}");
         // Iterative walk: (node, parent AX id).
         let mut stack: Vec<(usize, Option<String>)> = vec![(root, None)];
@@ -1420,6 +1469,39 @@ mod tests {
             "- main:\n  - heading \"Orders\" [level=2]\n  - searchbox \"Search\" [required, ref=7]\n  \
              - link \"Next page\" [ref=8] url=http://x.test/c?x=1\n  - button \"Close\" [ref=10]: X"
         );
+    }
+
+    /// A scoped build holds the element's subtree only, named as in the
+    /// whole tree (a `<label for>` outside the scope still names a field);
+    /// a hidden element, or one inside a hidden ancestor, gives no nodes;
+    /// an element not in the snapshot gives none at all.
+    #[test]
+    fn a_scoped_build_holds_the_scope_only() {
+        let specs: &[Spec] = &[
+            ("MAIN", 0, &[], None, true),
+            ("H2", 1, &[], None, true),
+            ("#text", 2, &[], Some("Orders"), true),
+            ("LABEL", 1, &[("for", "q")], None, true),
+            ("#text", 4, &[], Some("Search"), true),
+            ("FORM", 1, &[], None, true),
+            ("INPUT", 6, &[("id", "q"), ("type", "search")], None, true),
+            ("DIV", 1, &[("hidden", "")], None, false),
+            ("DIV", 1, &[("aria-hidden", "true")], None, true),
+            ("SPAN", 9, &[], None, true),
+            ("#text", 10, &[], Some("hidden too"), true),
+        ];
+        let snapshot = snap(specs);
+        // Spec k is node k + 1, backend id k + 2.
+        let form = 7;
+        let built = build_scoped(&snapshot, form).unwrap();
+        assert_eq!(built.nodes.first().and_then(|n| n["backendDOMNodeId"].as_u64()), Some(form));
+        assert!(built.nodes.iter().all(|n| n["name"]["value"] != "Orders"), "outside the scope");
+        let opts = super::super::ax::Options { root_backend_id: Some(form), ..Default::default() };
+        let out = super::super::ax::render("", &built.nodes, &built.frames, &opts).text;
+        assert_eq!(out, "- form:\n  - searchbox \"Search\" [ref=8]");
+        assert!(build_scoped(&snapshot, 9).unwrap().nodes.is_empty(), "a hidden element");
+        assert!(build_scoped(&snapshot, 11).unwrap().nodes.is_empty(), "inside an aria-hidden ancestor");
+        assert!(build_scoped(&snapshot, 999).is_none(), "not in the snapshot");
     }
 
     #[test]

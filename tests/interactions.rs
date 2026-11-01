@@ -1414,6 +1414,33 @@ fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
     assert!(r["result"].as_str().unwrap_or("").contains("Alpha"));
 }
 
+/// After a click whose fetch has started, the snapshot waits for that fetch
+/// and a short settle, not the whole quiet window: the list is there, well
+/// before the 200 ms fetch plus 500 ms of quiet it used to take. A window
+/// the session set holds after actions too.
+#[test]
+fn a_snapshot_after_a_click_that_fetches_waits_for_the_fetch_not_the_window() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("after-click", &[]);
+    let mut times = Vec::new();
+    for _ in 0..3 {
+        s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
+        s.ok(&["click", "--role", "button", "--name", "Go"]);
+        let (ms, r) = timed(&s, &["ax"]);
+        let tree = r.as_str().unwrap_or("");
+        assert!(tree.contains("Alpha") && !tree.contains("Loading"), "{tree}");
+        times.push(ms);
+    }
+    assert!(median(times.clone()) < 650.0, "ax after a click that fetches took {times:?} ms");
+
+    s.ok(&["set", "network-quiet", "800"]);
+    s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
+    s.ok(&["click", "--role", "button", "--name", "Go"]);
+    let (ms, r) = timed(&s, &["ax"]);
+    assert!(r.as_str().unwrap_or("").contains("Alpha"), "{r}");
+    assert!(ms >= 800.0, "a chosen window holds after a click: {ms} ms");
+}
+
 /// The default quiet window reads a list that arrives in two fetches with
 /// a 400 ms gap between them; a 250 ms window ends in the gap and reads
 /// only the first half. That is why the default stays 500 ms and 250 ms

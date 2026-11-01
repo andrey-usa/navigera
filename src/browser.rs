@@ -2011,6 +2011,17 @@ impl BrowserSession {
         self.active_tab().quiet_synced()
     }
 
+    /// An action is about to run on the active tab.
+    pub fn mark_action(&self) {
+        self.active_tab().mark_action();
+    }
+
+    /// The last action's own requests have started on the active tab, with
+    /// no navigation since.
+    pub fn action_traffic_seen(&self) -> bool {
+        self.active_tab().action_traffic_seen()
+    }
+
     /// A `wait` just succeeded on the active tab.
     pub fn mark_quiet_synced(&self) {
         self.active_tab().mark_quiet_synced();
@@ -2019,6 +2030,12 @@ impl BrowserSession {
     /// This session's snapshot network-quiet window.
     pub fn network_quiet_window(&self) -> Duration {
         Duration::from_millis(*self.network_quiet_ms.lock().unwrap())
+    }
+
+    /// Whether `set network-quiet` chose a window other than the default
+    /// (then it holds after actions too).
+    pub fn network_quiet_chosen(&self) -> bool {
+        *self.network_quiet_ms.lock().unwrap() != DEFAULT_NETWORK_QUIET_MS
     }
 
     /// `set network-quiet <ms>`: the snapshot quiet window for this

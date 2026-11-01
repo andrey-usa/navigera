@@ -105,6 +105,10 @@ pub struct NetState {
     /// [`Shared::net_state`]): a new one after the sync means the page
     /// changed after the agent synced with it.
     pub seq: u64,
+    /// The request count and navigation generation when the agent's last
+    /// action (a click, a key, a fill) started: requests after it, with no
+    /// navigation since, are that action's own traffic.
+    pub action: Option<(u64, u64)>,
 }
 
 impl NetState {
@@ -419,6 +423,25 @@ impl Shared {
     /// snapshot skip check: the first is the sequence a `wait` records.
     pub fn net_seq_pending(&self, session_id: &str) -> (u64, usize) {
         self.net.lock().unwrap().get_mut(session_id).map(|n| (n.seq, n.live_pending())).unwrap_or((0, 0))
+    }
+
+    /// An action is about to run on this tab (see [`NetState::action`]).
+    pub fn mark_action(&self, session_id: &str, nav_generation: u64) {
+        let mut net = self.net.lock().unwrap();
+        let state = net.entry(session_id.to_string()).or_default();
+        state.action = Some((state.seq, nav_generation));
+    }
+
+    /// Has the last action's own traffic started (a request since it, no
+    /// navigation since)? Then the snapshot after it waits for those
+    /// requests and a short settle, not the whole quiet window, which is
+    /// there for traffic that hasn't started yet (a debounced search, a
+    /// page's data fetch after it loads).
+    pub fn action_traffic_seen(&self, session_id: &str, nav_generation: u64) -> bool {
+        let net = self.net.lock().unwrap();
+        net.get(session_id).and_then(|n| n.action.map(|a| (a, n.seq))).is_some_and(
+            |((seq_then, generation_then), seq_now)| seq_now > seq_then && generation_then == nav_generation,
+        )
     }
 
     /// The request sequence a `wait` last recorded on this tab, if any.

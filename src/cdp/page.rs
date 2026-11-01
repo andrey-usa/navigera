@@ -2047,6 +2047,17 @@ impl Page {
         }
     }
 
+    /// An action is about to run here (see [`Shared::mark_action`]).
+    pub fn mark_action(&self) {
+        self.shared.mark_action(&self.session_id, self.nav_generation());
+    }
+
+    /// The last action's own requests have started, with no navigation
+    /// since (see [`Shared::action_traffic_seen`]).
+    pub fn action_traffic_seen(&self) -> bool {
+        self.shared.action_traffic_seen(&self.session_id, self.nav_generation())
+    }
+
     /// A `wait` just succeeded on this tab: remember when, for the next
     /// snapshot's skip check.
     pub fn mark_quiet_synced(&self) {
@@ -4658,27 +4669,31 @@ impl Page {
     /// The text tree built from the DOM snapshot (see `domax`): one
     /// snapshot serves the tree and the clickable elements.
     fn ax_tree_dom(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        // A scope is found first: only its subtree is built.
+        let root_backend_id = match &opts.scope {
+            Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
+            None => None,
+        };
         let started = std::time::Instant::now();
         let snap = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
         crate::timing::record("ax_dom_snapshot", started);
         let started = std::time::Instant::now();
         let clicks = clickables_from(&snap);
-        let built = domax::build(&snap).ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
+        let built = match root_backend_id {
+            Some(backend) => domax::build_scoped(&snap, backend),
+            None => domax::build(&snap),
+        }
+        .ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
         drop(snap);
         crate::timing::record("ax_dom_build", started);
-        let root_backend_id = match &opts.scope {
-            Some(target) => {
-                let backend = self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?;
-                let has = |nodes: &[Value]| {
-                    nodes.iter().any(|n| n.get("backendDOMNodeId").and_then(Value::as_u64) == Some(backend))
-                };
-                if !has(&built.nodes) && !built.frames.iter().any(|f| has(&f.nodes)) {
-                    bail!("the scope is not in the snapshot's tree");
-                }
-                Some(backend)
+        if let Some(backend) = root_backend_id {
+            let has = |nodes: &[Value]| {
+                nodes.iter().any(|n| n.get("backendDOMNodeId").and_then(Value::as_u64) == Some(backend))
+            };
+            if !has(&built.nodes) && !built.frames.iter().any(|f| has(&f.nodes)) {
+                bail!("the scope is not in the snapshot's tree");
             }
-            None => None,
-        };
+        }
         let url = built.url.clone();
         let origin = url
             .find("://")
