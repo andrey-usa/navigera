@@ -191,6 +191,14 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   selector prints the page's whole text as it reads (`innerText`).
 - A named node with one same-named actionable child is printed on one line,
   for example `heading "X": link [ref=7]`.
+- A ref outlives a re-render of its element: when an op finds its element
+  gone (a list redrawn, a button replaced after a state change), the
+  element is looked for again by the role and name the snapshot printed,
+  among those of that role and name in the snapshot's scope, and acted on
+  when there are as many of them as the snapshot had and the document and
+  URL are the same. The result's note says so (`ref 17 was re-rendered:
+  this acted on button "Save", now ref 48`). Otherwise the op fails as
+  before (`that ref is stale … run ax for fresh refs`).
 - `[ref=N]` (a backend DOM node id) appears on actionable nodes: interactive
   roles and focusable elements, and what the page made clickable without
   saying so (an element with a click, mousedown or mouseup handler of its

@@ -152,6 +152,9 @@ pub struct Rendered {
     /// Texts, names and values cut short, and the characters they left out.
     pub cuts: usize,
     pub cut_chars: usize,
+    /// Each printed ref's element by its role and full name, in document
+    /// order: what finds it again once a re-render replaced it.
+    pub refs: Vec<(u64, String, String)>,
 }
 
 fn field<'a>(node: &'a Value, key: &str) -> &'a Value {
@@ -284,6 +287,8 @@ struct Tree<'a> {
     /// Texts cut short so far, and the characters they left out.
     cuts: std::cell::Cell<usize>,
     cut_chars: std::cell::Cell<usize>,
+    /// Refs printed so far, with the role and name they were printed under.
+    refs: Vec<(u64, String, String)>,
 }
 
 impl<'a> Tree<'a> {
@@ -664,6 +669,9 @@ impl<'a> Tree<'a> {
                     }
                 }
                 tags.push(format!("ref={id}"));
+                if shown_role == role && !name.is_empty() {
+                    self.refs.push((id, role.clone(), name.clone()));
+                }
             }
         }
         if !tags.is_empty() {
@@ -866,6 +874,10 @@ impl<'a> Tree<'a> {
         if let Some(id) = backend_id(&self.nodes[idx]) {
             if self.wants_ref(idx, role) {
                 tags.push(format!("ref={id}"));
+                let name = self.name(idx);
+                if !name.is_empty() {
+                    self.refs.push((id, role.to_string(), name));
+                }
             }
         }
         if !tags.is_empty() {
@@ -962,6 +974,7 @@ fn render_inner(
         boundary: Vec::new(),
         cuts: std::cell::Cell::new(0),
         cut_chars: std::cell::Cell::new(0),
+        refs: Vec::new(),
     };
     for n in nodes.iter().chain(frames.iter().flat_map(|f| f.nodes.iter())) {
         tree.insert(n.clone());
@@ -1006,6 +1019,7 @@ fn render_inner(
     let lazy = tree.fetch.is_some();
     let tree_stopped = tree.stopped;
     let (cuts, cut_chars) = (tree.cuts.get(), tree.cut_chars.get());
+    let refs = std::mem::take(&mut tree.refs);
     let total = tree.lines.len();
     let mut lines = tree.lines;
     let mut truncated = 0;
@@ -1024,7 +1038,7 @@ fn render_inner(
         let at = usize::from(!header.is_empty()).min(lines.len());
         lines.insert(at, cut_summary(cuts, cut_chars));
     }
-    (Rendered { lines: lines.len(), text: lines.join("\n"), truncated, cuts, cut_chars }, fetch_failed)
+    (Rendered { lines: lines.len(), text: lines.join("\n"), truncated, cuts, cut_chars, refs }, fetch_failed)
 }
 
 /// The line that says a snapshot cut text, and how to read it in full.

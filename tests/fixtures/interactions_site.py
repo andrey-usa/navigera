@@ -32,6 +32,8 @@ getting wrong, one page each, built the way those sites behave:
 /beacons        analytics POSTs at irregular 100-900 ms intervals, answered 204
 /one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
 /click-fetch    a button that starts a 200 ms fetch, then brings a list
+/rerender       a list whose rows and Save button are drawn again (new elements)
+                by Redraw; Add row adds a fourth, Route pushes a new URL
 /legal          a 1,500-clause agreement (~130 KB of text), every 10th
                 clause long enough to be cut in a snapshot
 /two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
@@ -99,6 +101,35 @@ def clause(n):
             f" is thirty days from that notice. Penalty schedule {n} applies to any breach not cured in time."
     return f"<p>{text}</p>"
 
+
+PAGES["/rerender"] = ("rerender", "", """
+<p id=status>idle</p>
+<div id=app></div>
+<button id=redraw>Redraw</button> <button id=add>Add row</button> <button id=route>Route</button>
+<script>
+let rows = ['alpha', 'beta', 'gamma'];
+function draw() {
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+  for (const [i, r] of rows.entries()) {
+    const li = document.createElement('div');
+    li.textContent = r + ' ';
+    const b = document.createElement('button');
+    b.textContent = 'Edit';
+    b.onclick = () => { document.getElementById('status').textContent = 'edit ' + r; };
+    li.appendChild(b);
+    app.appendChild(li);
+  }
+  const save = document.createElement('button');
+  save.textContent = 'Save';
+  save.onclick = () => { document.getElementById('status').textContent = 'saved'; };
+  app.appendChild(save);
+}
+draw();
+document.getElementById('redraw').onclick = draw;
+document.getElementById('add').onclick = () => { rows.push('delta'); draw(); };
+document.getElementById('route').onclick = () => { history.pushState({}, '', '/rerender?view=2'); draw(); };
+</script>""")
 
 PAGES["/legal"] = ("agreement", "", "<main><h1>Master Services Agreement</h1>" + "".join(
     (f"<h2>Section {n // 50 + 1}</h2>" if n % 50 == 0 else "") + clause(n) for n in range(1500)

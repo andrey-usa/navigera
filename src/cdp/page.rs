@@ -1919,7 +1919,26 @@ pub struct Page {
     pointer: Arc<std::sync::Mutex<Pointer>>,
     /// Set while the tab's last command timed out (see [`STALLED_WAIT`]).
     stalled: Arc<std::sync::atomic::AtomicBool>,
+    /// What each ref a snapshot printed was (see [`Page::refind`]).
+    seen_refs: Arc<std::sync::Mutex<std::collections::HashMap<u64, SeenRef>>>,
 }
+
+/// A ref as a snapshot printed it: its element's role and full name, its
+/// place among the snapshot's elements of that role and name (and how many
+/// there were), the scope the snapshot was taken in, and the document.
+#[derive(Clone, Debug)]
+struct SeenRef {
+    role: String,
+    name: String,
+    nth: usize,
+    of: usize,
+    scope: Option<u64>,
+    url: String,
+    generation: u64,
+}
+
+/// The refs one tab remembers, at most (oldest snapshot's dropped first).
+const SEEN_REFS_MAX: usize = 50_000;
 
 impl Page {
     pub fn new(
@@ -1938,7 +1957,88 @@ impl Page {
             worlds: Default::default(),
             pointer: Default::default(),
             stalled: Default::default(),
+            seen_refs: Default::default(),
         }
+    }
+
+    /// Remember what a snapshot's refs were (see [`Page::refind`]).
+    fn remember_refs(&self, refs: &[(u64, String, String)], url: &str, scope: Option<u64>) {
+        let started = std::time::Instant::now();
+        self.remember_refs_inner(refs, url, scope);
+        crate::timing::record("ax_remember_refs", started);
+    }
+
+    fn remember_refs_inner(&self, refs: &[(u64, String, String)], url: &str, scope: Option<u64>) {
+        let generation = self.nav_generation();
+        let mut counts: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
+        for (_, role, name) in refs {
+            *counts.entry((role, name)).or_default() += 1;
+        }
+        let mut nth: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
+        let mut seen = self.seen_refs.lock().unwrap();
+        if seen.len() + refs.len() > SEEN_REFS_MAX {
+            seen.clear();
+        }
+        for (id, role, name) in refs {
+            let at = nth.entry((role, name)).or_default();
+            seen.insert(
+                *id,
+                SeenRef {
+                    role: role.clone(),
+                    name: name.clone(),
+                    nth: *at,
+                    of: counts[&(role.as_str(), name.as_str())],
+                    scope,
+                    url: url.to_string(),
+                    generation,
+                },
+            );
+            *at += 1;
+        }
+    }
+
+    /// The element a stale ref stood for, found again after a re-render:
+    /// on the same document and URL, among the elements of the ref's role
+    /// and name (in the snapshot's scope), the one at its place, when there
+    /// are as many of them as the snapshot had. Returns the new ref and how
+    /// the element reads (`button "Save"`). None when that isn't certain.
+    pub fn refind(&self, node: u64, timeout: Duration) -> Option<(u64, String)> {
+        let seen = self.seen_refs.lock().unwrap().get(&node).cloned()?;
+        if seen.generation != self.nav_generation() || self.url(timeout).ok()? != seen.url {
+            return None;
+        }
+        let root = match seen.scope {
+            Some(scope) => scope,
+            None => {
+                let doc = self.send("DOM.getDocument", json!({ "depth": 0 }), timeout).ok()?;
+                doc.pointer("/root/backendNodeId")?.as_u64()?
+            }
+        };
+        let found = self
+            .send(
+                "Accessibility.queryAXTree",
+                json!({ "backendNodeId": root, "accessibleName": seen.name, "role": seen.role }),
+                timeout,
+            )
+            .ok()?;
+        let nodes: Vec<u64> = found
+            .get("nodes")?
+            .as_array()?
+            .iter()
+            .filter(|n| n.get("ignored").and_then(Value::as_bool) != Some(true))
+            .filter_map(|n| n.get("backendDOMNodeId").and_then(Value::as_u64))
+            .collect();
+        if nodes.len() != seen.of {
+            return None;
+        }
+        let now = *nodes.get(seen.nth)?;
+        if now == node {
+            return None;
+        }
+        let what = format!("{} {}", seen.role, serde_json::to_string(&seen.name).unwrap_or_default());
+        // The new ref is the same element: found again after the next one.
+        self.seen_refs.lock().unwrap().insert(now, seen);
+        Some((now, what))
     }
 
     pub fn target_id(&self) -> &str {
@@ -4755,6 +4855,7 @@ impl Page {
             },
         );
         crate::timing::record("ax_render", started);
+        self.remember_refs(&rendered.refs, &url, root_backend_id);
         Ok(Value::String(rendered.text))
     }
 
@@ -4861,6 +4962,7 @@ impl Page {
         if failed {
             bail!("lazy AX fetch failed");
         }
+        self.remember_refs(&rendered.refs, &url, scoped_backend);
         Ok(Value::String(rendered.text))
     }
 
@@ -4935,6 +5037,7 @@ impl Page {
             },
         );
         crate::timing::record("ax_render", started);
+        self.remember_refs(&rendered.refs, &url, root_backend_id);
         let mut text = rendered.text;
         // Lightpanda's tree stops at a shadow root; what is inside is read
         // from the page instead, without refs (see SHADOW_AX).

@@ -901,6 +901,13 @@ pub struct SessionConfig {
 /// (`set network-quiet <ms>`, default 500 ms).
 const NETWORK_QUIET_MAX: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// An op failed because its ref's element left the page (or the node is
+/// gone): the case a re-rendered element is found again for.
+fn stale_ref(e: &anyhow::Error) -> bool {
+    let m = format!("{e:#}");
+    m.contains("that ref is stale") || m.contains("element is gone from the page")
+}
+
 /// The quiet a snapshot waits for after an action's own requests have
 /// started (see [`crate::cdp::events::Shared::action_traffic_seen`]): long enough for a request
 /// its response starts and for the page to render the data.
@@ -2882,6 +2889,28 @@ impl Driver {
                 e
             }
         });
+        // A ref the page re-rendered (a list redrawn, a button replaced
+        // after a state change): the same element is acted on, found again
+        // by the role, name and place the snapshot showed, when that is
+        // certain; the note says so.
+        let mut refound = None;
+        let result = match result {
+            Err(e) if stale_ref(&e) => {
+                let mut again = command.clone();
+                match again
+                    .target_mut()
+                    .and_then(|t| t.node_ref)
+                    .and_then(|old| self.session.refind(old).map(|(new, what)| (old, new, what)))
+                {
+                    Some((old, new, what)) => {
+                        refound = Some(format!("ref {old} was re-rendered: this acted on {what}, now ref {new}"));
+                        self.dispatch(&command.with_ref(new))
+                    }
+                    None => Err(e),
+                }
+            }
+            other => other,
+        };
         // The tab closed while the op ran, or before its event was read.
         let result = match result {
             Err(e) if format!("{e:#}").contains("Session with given id not found") => {
@@ -2917,6 +2946,7 @@ impl Driver {
             self.history.push(e);
         }
         let mut notes = if result.is_ok() { self.session.follow_popups(op_timeout_ms(command)) } else { Vec::new() };
+        notes.extend(refound.filter(|_| result.is_ok()));
         if result.is_ok() {
             // A `wait` that succeeded synced the agent with the page: the
             // next snapshot skips its quiet wait while no request happens.

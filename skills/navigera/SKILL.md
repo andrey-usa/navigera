@@ -128,8 +128,10 @@ page "Checkout — Acme" http://shop.test/checkout
 ```
 
 - `[ref=N]` marks what you can act on: pass the number to `click`/`fill`/
-  `select`/… (`@12`, `e12` and `ref=12` work too). Refs go stale when the
-  page navigates or re-renders: take a fresh `ax` before using an old one.
+  `select`/… (`@12`, `e12` and `ref=12` work too). A ref whose element the
+  page drew again (same role, name and place) still works, and the result's
+  note names the new ref; after a navigation, or when the page changed more
+  than that, the ref is stale: take a fresh `ax`.
 - `clickable [ref=N]: <text>` is something the page made clickable without
   saying so (a row, a card, an icon): click it by ref like a button, before
   reaching for `eval`. One with no text shows its `#id` or `.class` and

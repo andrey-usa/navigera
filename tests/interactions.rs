@@ -1574,6 +1574,54 @@ fn text_shares_lines_and_a_cut_says_how_to_read_the_rest() {
     assert_eq!(page.matches("The Supplier shall keep obligation").count(), 1500);
 }
 
+/// A ref whose element the page drew again (a list redrawn, a button
+/// replaced) acts on the same element, found by the role, name and place
+/// the snapshot showed, and says so; when the page changed more than that
+/// (another row of that name, a new URL) the stale ref still fails.
+#[test]
+fn a_redrawn_element_is_found_again_by_its_ref() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("rerender", &[]);
+    s.ok(&["goto", &format!("{}/rerender", site.url)]);
+    let tree = s.text(&["ax"]);
+    let refs = |tree: &str, name: &str| -> Vec<String> {
+        tree.lines()
+            .filter(|l| l.contains(&format!("button \"{name}\"")))
+            .filter_map(|l| l.split("ref=").nth(1))
+            .map(|r| r.chars().take_while(char::is_ascii_digit).collect())
+            .collect()
+    };
+    let (save, edits) = (refs(&tree, "Save")[0].clone(), refs(&tree, "Edit"));
+    assert_eq!(edits.len(), 3, "{tree}");
+
+    s.ok(&["click", "--role", "button", "--name", "Redraw"]);
+    let (ok, r) = s.run(&["click", &save]);
+    assert!(ok, "{r}");
+    let note = r["notes"][0].as_str().unwrap_or("");
+    assert!(note.starts_with(&format!("ref {save} was re-rendered: this acted on button \"Save\", now ref ")), "{r}");
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "saved");
+    // The second of three same-named buttons stays the second; twice over.
+    s.ok(&["click", "--role", "button", "--name", "Redraw"]);
+    s.ok(&["click", &edits[1]]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "edit beta");
+    s.ok(&["click", "--role", "button", "--name", "Redraw"]);
+    s.ok(&["click", &edits[1]]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "edit beta");
+
+    // A fourth Edit: which one it was is no longer certain.
+    let tree = s.text(&["ax"]);
+    let edit = refs(&tree, "Edit")[1].clone();
+    s.ok(&["click", "--role", "button", "--name", "Add row"]);
+    let (ok, r) = s.run(&["click", &edit]);
+    assert!(!ok && r.to_string().contains("that ref is stale"), "{r}");
+    // Another URL: another view, even with the same buttons.
+    let tree = s.text(&["ax"]);
+    let save = refs(&tree, "Save")[0].clone();
+    s.ok(&["click", "--role", "button", "--name", "Route"]);
+    let (ok, r) = s.run(&["click", &save]);
+    assert!(!ok && r.to_string().contains("that ref is stale"), "{r}");
+}
+
 /// A banner with controls of its own that stays over the button is said
 /// after about a second, naming its controls; an overlay over a page that
 /// is still fetching is waited for, as long as the element wait.

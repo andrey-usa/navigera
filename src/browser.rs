@@ -2011,6 +2011,12 @@ impl BrowserSession {
         self.active_tab().quiet_synced()
     }
 
+    /// The element a stale ref stood for, found again after a re-render
+    /// (see [`crate::cdp::page::Page::refind`]): the new ref and how it reads.
+    pub fn refind(&self, node: u64) -> Option<(u64, String)> {
+        self.active_tab().refind(node, self.timeout(None))
+    }
+
     /// An action is about to run on the active tab.
     pub fn mark_action(&self) {
         self.active_tab().mark_action();

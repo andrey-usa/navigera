@@ -29,6 +29,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- A ref outlives a re-render of its element: an op whose element the page
+  drew again (a list redrawn, a button replaced after a state change) is
+  done on the same element, found by the role, name and place the snapshot
+  printed, and the note says so (`ref 17 was re-rendered: this acted on
+  button "Save", now ref 48`). When that is not certain (another element of
+  that role and name, another URL, a navigation) the op fails as before.
+  Remembering what the refs were costs about 5 ms on a 2,000-row snapshot.
 - Long text in snapshots: a snapshot that cut anything says so under its
   first line, with how many texts and characters and how to read them
   (`… 150 texts cut short here (11,553 chars left out): …`). When the
