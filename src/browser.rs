@@ -2614,6 +2614,15 @@ impl BrowserSession {
         self.browser.shared().adopt_windows.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// `eval --main`: JavaScript in an Electron app's main process (see
+    /// [`Browser::eval_main`]).
+    pub fn eval_main(&self, expression: &str, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+        if !self.is_electron() {
+            bail!("--main runs in an Electron app's main process: start the session with --electron <app>");
+        }
+        self.browser.eval_main(expression, self.timeout(timeout_ms))
+    }
+
     /// The CDP WebSocket endpoint this session is attached to.
     pub fn endpoint(&self) -> String {
         self.browser.ws_url().to_string()

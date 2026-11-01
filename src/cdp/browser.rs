@@ -4,7 +4,7 @@ use std::process::Child;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use std::sync::Arc;
@@ -48,6 +48,10 @@ pub struct Browser {
     /// Windows: kill-on-close job holding the browser tree, so Chrome dies
     /// with this process even when it is killed (see `procjob`).
     job: Option<super::procjob::ProcJob>,
+    /// An Electron app's main process (Node's inspector), and a client on
+    /// it once `eval --main` has connected.
+    node_ws: Option<String>,
+    node_client: Mutex<Option<CdpClient>>,
 }
 
 impl Browser {
@@ -113,6 +117,8 @@ impl Browser {
             stderr: None,
             shared,
             job: None,
+            node_ws: None,
+            node_client: Mutex::new(None),
         })
     }
 
@@ -165,8 +171,57 @@ impl Browser {
         let mut browser = Self::finish(handle, client, Some(launched.child), None, launched.ws_url);
         browser.stderr = Some(launched.stderr);
         browser.job = launched.job;
+        browser.node_ws = launched.node_ws;
         browser.shared.adopt_windows.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(browser)
+    }
+
+    /// Run JavaScript in an Electron app's main process (`eval --main`):
+    /// an expression, or a function called with the `electron` module
+    /// (`({ app }) => app.getName()`). Awaited; the result comes back as
+    /// JSON.
+    pub fn eval_main(&self, expression: &str, timeout: Duration) -> Result<Value> {
+        let Some(ws) = self.node_ws.as_deref() else {
+            bail!(
+                "the app's main process has no inspector: it was not started with --electron, or the app turns \
+                 Node's --inspect switch off (Electron's EnableNodeCliInspectArguments fuse)"
+            );
+        };
+        let client = {
+            let mut slot = self.node_client.lock().unwrap();
+            if slot.is_none() {
+                let connected = self
+                    .block_on(CdpClient::connect(ws))
+                    .with_context(|| format!("connect to the app's main process at {ws}"))?;
+                *slot = Some(connected);
+            }
+            slot.clone().expect("connected above")
+        };
+        let script = format!(
+            "(async () => {{\n\
+             const load = globalThis.process && process.mainModule\n\
+               ? (m) => process.mainModule.require(m)\n\
+               : process.getBuiltinModule('module').createRequire(process.execPath);\n\
+             const electron = load('electron');\n\
+             const value = ({expression}\n);\n\
+             return typeof value === 'function' ? await value(electron) : await value;\n\
+             }})()"
+        );
+        let res = self.block_on(client.send(
+            "Runtime.evaluate",
+            json!({ "expression": script, "awaitPromise": true, "returnByValue": true }),
+            None,
+            timeout,
+        ))?;
+        if let Some(details) = res.get("exceptionDetails") {
+            let text = details
+                .pointer("/exception/description")
+                .and_then(Value::as_str)
+                .or_else(|| details.get("text").and_then(Value::as_str))
+                .unwrap_or("the script threw");
+            bail!("{}", text.lines().next().unwrap_or(text));
+        }
+        Ok(res.pointer("/result/value").cloned().unwrap_or(Value::Null))
     }
 
     /// Connect to a browser someone else runs (`--attach`, `--profile`).
@@ -242,6 +297,8 @@ impl Browser {
             shared,
             stderr: None,
             job: None,
+            node_ws: None,
+            node_client: Mutex::new(None),
         }
     }
 
@@ -639,6 +696,9 @@ impl Browser {
     pub fn close(&self) {
         let started = std::time::Instant::now();
         self.client.shutdown();
+        if let Some(node) = self.node_client.lock().ok().and_then(|mut slot| slot.take()) {
+            node.shutdown();
+        }
         let profile = self.profile_dir.lock().ok().and_then(|mut slot| slot.take());
         let Some(mut child) = self.child.lock().ok().and_then(|mut slot| slot.take()) else {
             drop(profile);

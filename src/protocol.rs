@@ -435,6 +435,9 @@ pub enum Command {
         expression: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<f64>,
+        /// An Electron app's main process instead of the page (`--main`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        main: bool,
     },
     /// Page title.
     #[serde(rename = "title")]
@@ -1050,7 +1053,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
-    ("eval", "<js> | --file <path.js> | -", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin"),
+    ("eval", "<js> | --file <path.js> | - [--main]", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin; --main (Electron) runs it in the app's main process, a function getting the electron module"),
     ("text", "--selector <css>", "textContent of the first match"),
     ("find", "<description>", "the element a description means, chosen by a decision model (set NAVIGERA_DECIDER_KEY; README: Decisions by a fast model); element ops also take --find <description>"),
     ("title", "", "page title"),
@@ -2043,6 +2046,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             Command::InsertText { value, target: target_args(&mut args, true)?, timeout_ms }
         }
         "eval" | "evaluate" => {
+            let main = extract_present(&mut args, "--main");
             // `--file <path>` and `-` (stdin) keep the script away from the
             // shell's quoting rules (PowerShell mangles quotes and backslashes).
             let expression = match (str_flag(&mut args, "--file")?, str_flag(&mut args, "--expression")?) {
@@ -2061,7 +2065,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                     None => return Err(need("eval", "a JS expression, --file <path> or - (stdin)")),
                 },
             };
-            Command::Eval { expression: expression.trim_start_matches('\u{feff}').to_string(), timeout_ms }
+            Command::Eval { expression: expression.trim_start_matches('\u{feff}').to_string(), timeout_ms, main }
         }
         "title" => Command::Title {},
         "ax" | "snapshot" => Command::Ax {
@@ -3303,7 +3307,10 @@ impl Driver {
                     .map_err(|e| anyhow::anyhow!("text {selector:?}: {e:#}"))?;
                 Ok(json!(text))
             }
-            Command::Eval { expression, timeout_ms } => {
+            Command::Eval { expression, timeout_ms, main: true } => {
+                s.eval_main(expression, *timeout_ms).map_err(|e| anyhow::anyhow!("eval --main: {e:#}"))
+            }
+            Command::Eval { expression, timeout_ms, main: false } => {
                 let value = s.evaluate_user(expression, *timeout_ms).map_err(|e| anyhow::anyhow!("eval: {e:#}"))?;
                 Ok(value)
             }
@@ -4456,7 +4463,16 @@ mod tests {
             .expect("valid invocation");
         assert!(parsed.config.pretty, "globals may trail the command");
         assert_eq!(parsed.config.engine, "chrome");
-        assert_eq!(parsed.command, Some(Command::Eval { expression: "() => 40 + 2".into(), timeout_ms: None }));
+        assert_eq!(
+            parsed.command,
+            Some(Command::Eval { expression: "() => 40 + 2".into(), timeout_ms: None, main: false })
+        );
+        let parsed =
+            parse_args(argv(&["navigera", "-s", "app", "eval", "--main", "({ app }) => app.getName()"])).unwrap();
+        assert_eq!(
+            parsed.command,
+            Some(Command::Eval { expression: "({ app }) => app.getName()".into(), timeout_ms: None, main: true })
+        );
     }
 
     #[test]
@@ -4546,7 +4562,7 @@ mod tests {
         );
         assert_eq!(
             cmd(&["eval", "document.title"]),
-            Command::Eval { expression: "document.title".into(), timeout_ms: None }
+            Command::Eval { expression: "document.title".into(), timeout_ms: None, main: false }
         );
         assert_eq!(
             cmd(&["wait", "--text", "Order placed"]),

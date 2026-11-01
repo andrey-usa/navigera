@@ -201,9 +201,13 @@ pub fn tools() -> Vec<Value> {
         tool(
             "browser_evaluate",
             "Run JavaScript in the page and return its JSON result; an arrow function is called, a promise awaited. \
-             Use it to extract many items at once.",
+             Use it to extract many items at once. In an Electron app (navigera mcp --electron), main: true runs it in \
+             the app's main process, a function getting the electron module.",
             object(
-                props(&[json!({"expression": {"type": "string", "description": "A JavaScript expression or arrow function"}})]),
+                props(&[
+                    json!({"expression": {"type": "string", "description": "A JavaScript expression or arrow function"}}),
+                    json!({"main": {"type": "boolean", "description": "Electron only: run in the app's main process"}}),
+                ]),
                 &["expression"],
             ),
             false,

@@ -36,6 +36,8 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The stderr line Chrome prints once the browser DevTools WebSocket is live.
 const DEVTOOLS_LISTENING: &str = "DevTools listening on ws://";
+/// Node's inspector line (`--inspect`), in an Electron app's main process.
+const NODE_LISTENING: &str = "Debugger listening on";
 
 /// Bytes of captured stderr retained for launch-failure messages.
 const STDERR_TAIL_BYTES: usize = 2000;
@@ -188,6 +190,9 @@ pub fn launch_chrome(
 pub struct LaunchedElectron {
     pub child: Child,
     pub ws_url: String,
+    /// The main process's Node inspector (`--inspect=0`), when the app
+    /// allows it (a packaged app may turn the switch off).
+    pub node_ws: Option<String>,
     pub stderr: StderrTail,
     /// Windows: the kill-on-close job holding the app (see `procjob`).
     pub job: Option<super::procjob::ProcJob>,
@@ -202,7 +207,8 @@ pub struct LaunchedElectron {
 /// start (root), `--no-sandbox` is added, as for Chrome.
 pub fn launch_electron(exe: &str, args: &[String], no_sandbox: bool) -> Result<LaunchedElectron> {
     let mut cmd = Command::new(exe);
-    cmd.arg("--remote-debugging-port=0");
+    // The main process's inspector too, for `eval --main`.
+    cmd.arg("--inspect=0").arg("--remote-debugging-port=0");
     if no_sandbox {
         cmd.arg("--no-sandbox");
     }
@@ -234,10 +240,18 @@ pub fn launch_electron(exe: &str, args: &[String], no_sandbox: bool) -> Result<L
             ));
         }
     };
+    // Node prints its inspector before Chromium starts its DevTools server;
+    // give a slow line a moment.
+    let mut node_ws = capture.find_ws_after(NODE_LISTENING);
+    let waited = Instant::now();
+    while node_ws.is_none() && waited.elapsed() < Duration::from_millis(500) {
+        thread::sleep(Duration::from_millis(20));
+        node_ws = capture.find_ws_after(NODE_LISTENING);
+    }
     // Kept capturing for the app's lifetime: a crash later is explained by
     // its last lines.
     let stderr = capture.tail_handle();
-    Ok(LaunchedElectron { child: kill.disarm(), ws_url, stderr, job })
+    Ok(LaunchedElectron { child: kill.disarm(), ws_url, node_ws, stderr, job })
 }
 
 /// A browser launched with `--remote-debugging-pipe`: CDP runs over two
@@ -470,6 +484,17 @@ impl Capture {
                 None
             }
         }
+    }
+
+    /// The first `ws://` URL captured after `marker` (Node's `Debugger
+    /// listening on ws://…` in an Electron app's main process).
+    fn find_ws_after(&self, marker: &str) -> Option<String> {
+        let b = self.buf.lock().ok()?;
+        let text = String::from_utf8_lossy(&b);
+        let at = text.find(marker)? + marker.len();
+        let rest = &text[at..];
+        let start = rest.find("ws://")?;
+        rest[start..].split_whitespace().next().map(str::to_string)
     }
 
     /// Last `STDERR_TAIL_BYTES` chars of captured stderr (best-effort).

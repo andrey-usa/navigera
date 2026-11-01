@@ -17,6 +17,10 @@ All notable changes to this project are documented here. The format follows
   `--electron-arg <arg>` passes arguments to the app. `quit` ends the app.
   `tab-new`, `reset`, `show` and `hide` say why they don't apply. `navigera
   mcp --electron <app>` gives an IDE agent the same.
+- `eval --main <js>` in an Electron session runs JavaScript in the app's
+  main process (Node's inspector, `--inspect=0` at launch): an expression,
+  or a function called with the `electron` module, awaited. MCP's
+  `browser_evaluate` takes `main: true`.
 - CI runs an Electron end-to-end test on Linux, macOS and Windows: a
   fixture app that saves a form through its main process and opens a
   second window.

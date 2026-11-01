@@ -79,6 +79,11 @@ fn eval(session: &str, js: &str) -> Value {
     ok(session, &["eval", js])
 }
 
+/// `eval --main`: in the app's main process.
+fn eval_main(session: &str, js: &str) -> Value {
+    ok(session, &["eval", "--main", js])
+}
+
 /// Poll `probe` until it gives a value, for up to `within`.
 fn wait_for<T>(within: Duration, what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + within;
@@ -153,6 +158,16 @@ fn an_electron_app_is_driven_through_its_windows() {
     let agent = eval(&session, "navigator.userAgent");
     assert!(agent.as_str().is_some_and(|ua| ua.contains("Electron/")), "{agent}");
 
+    // The main process: a function gets the electron module, an expression
+    // is evaluated, a promise is awaited.
+    assert_eq!(eval_main(&session, "({ app }) => app.getName()"), "navigera-electron-fixture");
+    let version = eval_main(&session, "process.versions.electron");
+    assert!(version.as_str().is_some_and(|v| v.starts_with("45.")), "{version}");
+    assert_eq!(eval_main(&session, "async ({ app }) => { await app.whenReady(); return app.isReady(); }"), true);
+    assert_eq!(eval_main(&session, "({ BrowserWindow }) => BrowserWindow.getAllWindows().length"), 1);
+    let (thrown, r) = run(&session, &["eval", "--main", "() => { throw new Error('nope') }"]);
+    assert!(!thrown && r.to_string().contains("nope"), "{r}");
+
     // A save goes through the main process (IPC) and back.
     ok(&session, &["fill", "--label", "Customer", "Ada"]);
     ok(&session, &["fill", "--label", "Quantity", "3"]);
@@ -176,6 +191,7 @@ fn an_electron_app_is_driven_through_its_windows() {
     });
     let tabs = ok(&session, &["tab-list"]);
     assert_eq!(tabs["active"], 1, "{tabs}");
+    assert_eq!(eval_main(&session, "({ BrowserWindow }) => BrowserWindow.getAllWindows().length"), 2);
     wait_for(Duration::from_secs(5), "the Settings window's content", || {
         ax(&session).contains("heading \"Settings\"").then_some(())
     });

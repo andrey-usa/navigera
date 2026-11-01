@@ -209,11 +209,13 @@ pub const EXAMPLES: &[Help] = &[
         &[
             ("navigera -s s eval \"() => document.title\"", ""),
             ("navigera -s s eval \"() => document.links.length\"", ""),
+            ("navigera -s app eval --main \"({ app }) => app.getName()\"", "Electron: the main process"),
         ],
         &[
             ("<js>", "the JavaScript to run; arrow functions are called"),
             ("--file <path.js>", "read the script from this file"),
             ("-", "read the script from stdin"),
+            ("--main", "Electron: run in the app's main process; a function gets the electron module"),
         ],
     ),
     (

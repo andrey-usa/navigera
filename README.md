@@ -145,11 +145,15 @@ navigera -s app start --electron ./my-app       # the window the app opens first
 navigera -s app --raw ax
 navigera -s app click --role button --name "Settings"
 navigera -s app tab-list                        # the app's new window is a tab, and the active one
+navigera -s app eval --main "({ app }) => app.getPath('userData')"   # the app's main process
 navigera -s app quit                            # ends the app
 ```
 
 Windows the app opens later are adopted as they appear; a window that
-closes itself is dropped, and the session goes on in the one before. The app
+closes itself is dropped, and the session goes on in the one before.
+`eval --main` runs JavaScript in the app's main process (Node), where a
+function gets the `electron` module: read the app's state, call its IPC
+handlers' logic, check what a menu or dialog would do. The app
 runs as it would for a person (a visible window, its own profile and
 storage), so `show`, `hide`, `reset` and `tab-new` don't apply. On Linux it
 needs a display (`xvfb-run` on a server).

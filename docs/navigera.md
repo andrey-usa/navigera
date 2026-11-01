@@ -614,7 +614,14 @@ first tab.
 | a name with no path, not a file here | that command, found on `PATH` |
 
 `--electron-arg <arg>` (repeatable; `--electron-arg=<arg>` for one that
-starts with a dash) adds arguments after the app. Every window the app
+starts with a dash) adds arguments after the app. The app also starts with
+`--inspect=0`, Node's inspector on its main process: `eval --main <js>`
+runs there (an expression, or a function called with the `electron`
+module, awaited: `eval --main "({ app, BrowserWindow }) =>
+BrowserWindow.getAllWindows().length"`); MCP clients pass `main: true` to
+`browser_evaluate`. An app that turns the switch off (Electron's
+`EnableNodeCliInspectArguments` fuse) still runs; `eval --main` then says
+so. Every window the app
 opens is adopted as a tab and becomes the active one, though it has no
 opener as a popup does; DevTools windows are not. A window that closes
 itself is dropped and the session goes on in the one before it. `quit`

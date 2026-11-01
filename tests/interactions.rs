@@ -1439,6 +1439,10 @@ fn a_snapshot_after_a_click_that_fetches_waits_for_the_fetch_not_the_window() {
     let (ms, r) = timed(&s, &["ax"]);
     assert!(r.as_str().unwrap_or("").contains("Alpha"), "{r}");
     assert!(ms >= 800.0, "a chosen window holds after a click: {ms} ms");
+
+    // `eval --main` is for an Electron app's main process.
+    let (ok, r) = s.run(&["eval", "--main", "1"]);
+    assert!(!ok && r.to_string().contains("--electron"), "{r}");
 }
 
 /// The default quiet window reads a list that arrives in two fetches with
