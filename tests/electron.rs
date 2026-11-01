@@ -110,6 +110,23 @@ fn tab_count(session: &str) -> usize {
     ok(session, &["tab-list"])["tabs"].as_array().map_or(0, Vec::len)
 }
 
+/// What each window says about itself (for a failure message): its
+/// visibility, size, focus and page. Moves the session between tabs.
+fn windows_report(session: &str) -> String {
+    let tabs = ok(session, &["tab-list"]);
+    let mut out = format!("tab-list: {tabs}");
+    for tab in tabs["tabs"].as_array().into_iter().flatten() {
+        let Some(target) = tab["target"].as_str() else { continue };
+        let (_, selected) = run(session, &["tab-select", target]);
+        let (_, state) = run(
+            session,
+            &["eval", "[document.visibilityState, innerWidth, innerHeight, document.hasFocus(), location.pathname]"],
+        );
+        out.push_str(&format!("\n{target}: {} {}", state["result"], selected["error"]));
+    }
+    out
+}
+
 /// Ends the session (and with it the app) if the test fails midway.
 struct Quit(String);
 
@@ -158,7 +175,7 @@ fn an_electron_app_is_driven_through_its_windows() {
     // The session starts on the window the app shows (not the hidden helper),
     // once it shows something: the late form is there without a wait.
     let tree = ax(&session);
-    assert!(tree.contains("heading \"Orders\""), "{tree}");
+    assert!(tree.contains("heading \"Orders\""), "{tree}\n{}", windows_report(&session));
     let tabs = ok(&session, &["tab-list"]);
     assert_eq!(tabs["tabs"].as_array().map(Vec::len), Some(2), "the helper is a tab too: {tabs}");
     assert!(tabs["url"].as_str().is_some_and(|u| u.contains("index.html")), "{tabs}");
@@ -412,7 +429,7 @@ fn an_electron_app_already_running_is_attached() {
     // The app's windows are the tabs; the session is in the one it shows.
     assert_eq!(tab_count(&session), 2, "the main window and the hidden helper");
     let tree = ax(&session);
-    assert!(tree.contains("heading \"Orders\""), "{tree}");
+    assert!(tree.contains("heading \"Orders\""), "{tree}\n{}", windows_report(&session));
     // A window the app opens later is adopted, though nothing opened it from
     // a page.
     ok(&session, &["click", "--role", "button", "--name", "Settings"]);

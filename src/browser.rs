@@ -967,7 +967,18 @@ impl BrowserSession {
             if pages.is_empty() {
                 bail!("the Electron app at {ws_url} has no window open to work in");
             }
-            let active = best_window(&pages, &browser, Duration::from_millis(2000), false).unwrap_or(0);
+            // Each window says what it shows once its page has a context.
+            let until = std::time::Instant::now() + Duration::from_secs(3);
+            let check = Duration::from_millis(1000);
+            let active = loop {
+                if let Some(i) = best_window(&pages, &browser, check, true) {
+                    break i;
+                }
+                if std::time::Instant::now() >= until {
+                    break best_window(&pages, &browser, check, false).unwrap_or(0);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
             browser.shared().take_opened();
             (pages, active)
         } else {
