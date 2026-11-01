@@ -32,6 +32,13 @@ know:
 
 ### Added
 
+- `batch [<file> | -] [--keep-going]` runs several steps in one call over
+  one connection: one command per line, written as on the command line, or
+  JSON ops. Every line is parsed before anything runs; the first failure
+  stops the rest. It prints one response: what the steps read, the page
+  state once, notes tagged with their step. A six-step form flow is one
+  call instead of six (590 characters of output instead of 1,764; 62 with
+  `--raw`).
 - `route --har <file>` answers requests from a recorded HAR: the first
   unused entry with the request's method and URL, then the last one again
   (a page that polls keeps getting the final answer). Requests the HAR has

@@ -566,6 +566,18 @@ pub const EXAMPLES: &[Help] = &[
     ),
     ("profiles", &[("navigera profiles", "")], &[]),
     (
+        "batch",
+        &[
+            ("navigera -s s batch steps.txt", "goto, fill, click … in one call"),
+            ("navigera -s s --raw batch -", "steps on stdin; print only what they read"),
+            ("navigera -s s batch flow.txt --keep-going", "run every step even after a failure"),
+        ],
+        &[
+            ("<file> | -", "the steps: one command per line, or JSON ops; - (or nothing) reads stdin"),
+            ("--keep-going", "run the remaining steps after a failure"),
+        ],
+    ),
+    (
         "sessions",
         &[
             ("navigera sessions", "name, pid, idle time, browser, memory of each"),

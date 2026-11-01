@@ -35,9 +35,20 @@ navigera -s work --raw ax                 # look again to verify
 navigera -s work quit                     # done
 ```
 
-- Chain steps you are sure of and end with a look:
-  `navigera -s work fill 21 "Ada" && navigera -s work click 30 && navigera -s work --raw ax`.
-  A failing step stops the chain. Fewer calls = fewer tokens.
+- Steps you are sure of go in one `batch` call, one command per line,
+  ending with a look; a failing step stops it and names its line. One call
+  instead of four: fewer turns, fewer tokens. It prints only what the steps
+  read (and the page state once when none did):
+
+```bash
+navigera -s work --raw batch <<'EOF'
+fill --label Email "ada@example.com"
+check --label "I accept the terms"
+click --role button --name Save
+ax --selector form
+EOF
+```
+
 - `ax` waits (up to 3 s) for data the page is still fetching, so a
   `goto … && … ax` chain shows the loaded page, not "Loading…". A page that
   polls doesn't hold it; `--no-wait` skips it.

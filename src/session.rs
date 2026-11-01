@@ -503,6 +503,76 @@ fn quit_session(path: &std::path::Path) -> bool {
 }
 
 /// Client: send one command to the session server and print its response.
+/// `batch` on a session: every step over one connection, in order, each
+/// answered before the next is sent; the first failure stops the rest
+/// unless `keep_going`.
+pub fn batch(
+    config: &SessionConfig,
+    name: &str,
+    steps: &[crate::protocol::BatchStep],
+    keep_going: bool,
+    output: &mut dyn Write,
+) -> ExitCode {
+    let started = Instant::now();
+    let path = match socket_path(name) {
+        Ok(path) => path,
+        Err(e) => return fail(output, config, e.to_string()),
+    };
+    let stream = match connect(&path) {
+        Ok(stream) => stream,
+        Err(e) => {
+            return fail(
+                output,
+                config,
+                format!(
+                    "no navigera session at {} ({e}); start one with `{} -s {name} start`",
+                    path.display(),
+                    crate::cli::program()
+                ),
+            )
+        }
+    };
+    let mut reader = match stream.try_clone() {
+        Ok(read_half) => BufReader::new(read_half),
+        Err(e) => return fail(output, config, format!("session connection: {e}")),
+    };
+    let caller = caller_id();
+    let mut responses = Vec::new();
+    for (i, step) in steps.iter().enumerate() {
+        let mut request = match serde_json::to_value(&step.command) {
+            Ok(value) => value,
+            Err(e) => return fail(output, config, format!("encode step {}: {e}", i + 1)),
+        };
+        request["id"] = json!(i + 1);
+        if let Some(caller) = &caller {
+            request[CALLER] = json!(caller);
+        }
+        localize_request(&mut request, config);
+        let mut writer = &stream;
+        if writer.write_all(format!("{request}\n").as_bytes()).and_then(|_| writer.flush()).is_err() {
+            responses.push(json!({ "id": i + 1, "ok": false, "error": "session closed the connection" }));
+            break;
+        }
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        let response: Value = serde_json::from_str(line.trim()).unwrap_or_else(|_| {
+            json!({ "id": i + 1, "ok": false, "error": "session ended without a response (see its log next to the socket)" })
+        });
+        let failed = response["ok"] != true;
+        responses.push(response);
+        if (failed && !keep_going) || matches!(step.command, Command::Quit { .. }) {
+            break;
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let response = protocol::batch_response(steps, &responses, started.elapsed().as_secs_f64() * 1000.0);
+    if protocol::print_batch(output, &response, config) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 pub fn client(config: &SessionConfig, name: &str, command: &Command, output: &mut dyn Write) -> ExitCode {
     let path = match socket_path(name) {
         Ok(path) => path,

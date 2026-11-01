@@ -411,3 +411,49 @@ fn har_replay_and_modified_responses() {
         assert!(r.to_string().contains("BLOCKED_BY_CLIENT") || r["ok"] == false, "[{engine}] {r}");
     }
 }
+
+/// `batch`: a form flow in one call; a failing step stops the rest (or not,
+/// with --keep-going); a bad line runs nothing.
+#[test]
+fn a_batch_runs_steps_in_one_call() {
+    let Some(site) = edge_site() else { return };
+    let base = &site.base;
+    for (engine, bin) in engines() {
+        let a = Agent::new("batch", engine, bin);
+        let dir = std::env::temp_dir();
+        let file = |name: &str, text: String| {
+            let path = dir.join(format!("nv-batch-{name}-{engine}-{}.txt", std::process::id()));
+            std::fs::write(&path, text).unwrap();
+            path.display().to_string()
+        };
+        let flow = file(
+            "flow",
+            format!(
+                "# the form, start to end\ngoto {base}/form\nfill --label 'Email address' a@b.c\n\
+                 check --label 'I accept the terms'\nclick --testid save-btn\ntext --selector '#out'\n"
+            ),
+        );
+        let r = a.response(&["batch", &flow]);
+        assert_eq!((r["result"]["steps"].as_u64(), r["result"]["ran"].as_u64()), (Some(5), Some(5)), "[{engine}] {r}");
+        let results = r["result"]["results"].as_array().unwrap();
+        assert_eq!(results.last().unwrap()["result"], "saved", "[{engine}] {r}");
+        assert!(r["result"]["state"]["url"].as_str().unwrap().ends_with("/form"), "[{engine}] {r}");
+        assert_eq!(a.ok(&["eval", "document.querySelector('[placeholder]').value"]), "a@b.c", "[{engine}]");
+
+        let bad = file("bad", format!("goto {base}/form\nclick --text Nowhere --timeout-ms 300\neval '1 + 1'\n"));
+        let r = a.run(&["batch", &bad]);
+        assert_eq!((r["ok"].as_bool(), r["result"]["ran"].as_u64()), (Some(false), Some(2)), "[{engine}] {r}");
+        assert!(r["error"].as_str().unwrap().starts_with("step 2 (line 2: click --text Nowhere"), "[{engine}] {r}");
+        let r = a.run(&["batch", &bad, "--keep-going"]);
+        assert_eq!(r["result"]["ran"], 3, "[{engine}] {r}");
+        assert_eq!(r["result"]["results"][0]["result"], 2, "[{engine}] {r}");
+
+        let typo = file("typo", format!("goto {base}/console\nclik --text Save\n"));
+        let r = a.run(&["batch", &typo]);
+        assert!(r["ok"] == false && r["error"].as_str().unwrap().contains("nothing ran"), "[{engine}] {r}");
+        assert!(
+            a.ok(&["url"])["url"].as_str().unwrap_or_default().ends_with("/form"),
+            "[{engine}] the bad file ran nothing"
+        );
+    }
+}

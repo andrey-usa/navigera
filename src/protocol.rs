@@ -1033,6 +1033,11 @@ fn extract_attach(args: &mut std::collections::VecDeque<String>) -> Result<Optio
 /// Commands that never touch a browser.
 #[derive(Debug, PartialEq)]
 pub enum Local {
+    /// Run several steps in one call: from a file, or stdin (`None`/`-`).
+    Batch {
+        source: Option<String>,
+        keep_going: bool,
+    },
     /// Print the embedded SKILL.md.
     Skill,
     /// Write SKILL.md to `<dir>/navigera/SKILL.md`.
@@ -1135,6 +1140,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("quit", "[--close-browser]", "close the browser and the session server; attached (--attach/--profile): only disconnect, unless --close-browser"),
     ("serve", "", "for programs: read one JSON command per line on stdin (`{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}`) and answer each on stdout; the protocol is in docs/navigera.md"),
     ("mcp", "[--headed] [--profile <name> | --attach [<where>] | --electron <app>]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
+    ("batch", "[<file> | -] [--keep-going]", "run several steps in one call (one process, one connection): one command per line (`goto /form`, `fill --label Email a@b.c`; # comments) or JSON ops as `serve` takes them; stops at the first failure (--keep-going runs the rest); prints what the steps read and the page state once; reads stdin without a file"),
     ("sessions", "[--clean [--all] [--idle <s>]]", "list the named sessions (pid, idle time, browser, memory) and the shared browsers; --clean quits the ones idle 5 min or more and drops dead ones, --all quits every one"),
     ("profiles", "", "list what a session can be handed: your browsers' profiles (name, email, whether --attach can reach them now) and navigera's own --profile browsers"),
     ("skill", "", "print the agent skill (usage guide) for this version"),
@@ -1718,6 +1724,14 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 return invalid(format!("unexpected argument {extra:?} after mcp"));
             }
             return Ok(ParsedArgs { config, command: None, start: false, local: None, mcp: true });
+        }
+        "batch" => {
+            let keep_going = extract_present(&mut args, "--keep-going");
+            let source = positional(&mut args);
+            if let Some(extra) = args.pop_front() {
+                return invalid(format!("unexpected argument {extra:?} after batch (one file, or - for stdin)"));
+            }
+            return parsed(config, None, false, Some(Local::Batch { source, keep_going }));
         }
         "skill" => return parsed(config, None, false, Some(Local::Skill)),
         // Not in the help: sessions start it.
@@ -4785,6 +4799,290 @@ pub fn oneshot(config: &SessionConfig, command: &Command, output: &mut dyn Write
 }
 
 /// Run a browser-less command (`skill`, `install-skill`, `--version`).
+/// One step of a `batch`: where it was written and the command.
+#[derive(Debug, Clone)]
+pub struct BatchStep {
+    pub line: usize,
+    pub text: String,
+    pub command: Command,
+}
+
+/// Split a command line the way a POSIX shell would for plain words:
+/// whitespace separates, '…' is literal, "…" and a bare \ escape.
+fn split_words(line: &str) -> Result<Vec<String>, String> {
+    let (mut words, mut cur, mut any) = (Vec::new(), String::new(), false);
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                any = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(c) => cur.push(c),
+                        None => return Err("unclosed '".into()),
+                    }
+                }
+            }
+            '"' => {
+                any = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(c @ ('"' | '\\' | '$' | '`')) => cur.push(c),
+                            Some(c) => {
+                                cur.push('\\');
+                                cur.push(c);
+                            }
+                            None => return Err("unclosed \"".into()),
+                        },
+                        Some(c) => cur.push(c),
+                        None => return Err("unclosed \"".into()),
+                    }
+                }
+            }
+            '\\' => {
+                any = true;
+                if let Some(c) = chars.next() {
+                    cur.push(c);
+                }
+            }
+            c if c.is_whitespace() => {
+                if any {
+                    words.push(std::mem::take(&mut cur));
+                    any = false;
+                }
+            }
+            c => {
+                any = true;
+                cur.push(c);
+            }
+        }
+    }
+    if any {
+        words.push(cur);
+    }
+    Ok(words)
+}
+
+/// The steps of a batch file: one command per line as on the command line
+/// (without `navigera` and the session), or JSON ops (an object, or an
+/// array of them, per line). Blank lines and `#` comments are skipped.
+pub fn batch_steps(text: &str) -> Result<Vec<BatchStep>, String> {
+    let mut steps = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = i + 1;
+        let t = raw.trim().trim_start_matches('\u{feff}');
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if t.starts_with('{') || t.starts_with('[') {
+            let value: Value = serde_json::from_str(t).map_err(|e| format!("line {line}: not JSON: {e}"))?;
+            let ops = match value {
+                Value::Array(items) => items,
+                one => vec![one],
+            };
+            for op in ops {
+                let text = op.to_string();
+                let command: Command =
+                    serde_json::from_value(op).map_err(|e| format!("line {line}: not a command: {e}"))?;
+                steps.push(BatchStep { line, text, command });
+            }
+            continue;
+        }
+        let words = split_words(t).map_err(|e| format!("line {line}: {e}"))?;
+        let argv = std::iter::once("navigera".to_string()).chain(words);
+        let parsed = match parse_args(argv) {
+            Ok(parsed) => parsed,
+            Err(ArgsError::Help(_)) => return Err(format!("line {line}: help is not a step: {t}")),
+            Err(ArgsError::Invalid(e)) => return Err(format!("line {line}: {e}")),
+        };
+        if parsed.config.session.is_some() {
+            return Err(format!("line {line}: a step can't name a session (the batch runs on one): {t}"));
+        }
+        match parsed.command {
+            Some(command) if parsed.local.is_none() && !parsed.start && !parsed.mcp => {
+                steps.push(BatchStep { line, text: t.to_string(), command })
+            }
+            _ => {
+                return Err(format!(
+                    "line {line}: not a step a batch can run (start, serve, mcp, batch, sessions…): {t}"
+                ))
+            }
+        }
+    }
+    Ok(steps)
+}
+
+/// The keys of the page state an action reports.
+const STATE_KEYS: &[&str] = &["tab", "tabs", "url", "title", "closed", "loading"];
+
+/// A result split into what the op itself said and the page state it
+/// carries (an object holding `url`), either may be absent.
+pub fn split_state(result: &Value) -> (Option<Value>, Option<Value>) {
+    match result {
+        Value::Object(map) if map.contains_key("url") => {
+            let (state, rest): (serde_json::Map<String, Value>, serde_json::Map<String, Value>) =
+                map.clone().into_iter().partition(|(k, _)| STATE_KEYS.contains(&k.as_str()));
+            ((!rest.is_empty()).then_some(Value::Object(rest)), Some(Value::Object(state)))
+        }
+        Value::Null => (None, None),
+        other => (Some(other.clone()), None),
+    }
+}
+
+/// The one response a batch prints: what the steps read or said (actions
+/// that only moved the page say nothing), the page state once, every
+/// note with its step, and the failure(s).
+pub fn batch_response(steps: &[BatchStep], responses: &[Value], elapsed_ms: f64) -> Value {
+    let (mut results, mut notes, mut failed) = (Vec::new(), Vec::new(), Vec::new());
+    let mut state = Value::Null;
+    for (i, (step, r)) in steps.iter().zip(responses).enumerate() {
+        let n = i + 1;
+        for note in r.get("notes").and_then(Value::as_array).into_iter().flatten() {
+            notes.push(json!(format!("step {n}: {}", note.as_str().unwrap_or_default())));
+        }
+        for d in r.get("dialogs").and_then(Value::as_array).into_iter().flatten() {
+            notes.push(json!(format!(
+                "step {n}: a {} dialog {} was answered",
+                d["type"].as_str().unwrap_or("dialog"),
+                d["message"]
+            )));
+        }
+        if r.get("ok").and_then(Value::as_bool) != Some(true) {
+            failed.push(json!({ "step": n, "line": step.line, "do": step.text, "error": r.get("error").cloned().unwrap_or(Value::Null) }));
+            continue;
+        }
+        let (own, st) = split_state(r.get("result").unwrap_or(&Value::Null));
+        if let Some(own) = own {
+            results.push(json!({ "step": n, "do": step.text, "result": own }));
+        }
+        if let Some(st) = st {
+            state = st;
+        }
+    }
+    let ok = failed.is_empty() && responses.len() == steps.len();
+    let mut result = json!({ "steps": steps.len(), "ran": responses.len(), "results": results });
+    if !state.is_null() {
+        result["state"] = state;
+    }
+    let mut out =
+        json!({ "id": null, "ok": ok, "result": result, "elapsed_ms": (elapsed_ms * 1000.0).round() / 1000.0 });
+    if !notes.is_empty() {
+        out["notes"] = json!(notes);
+    }
+    if let Some(first) = failed.first() {
+        let skipped = steps.len() - responses.len();
+        out["error"] = json!(format!(
+            "step {} (line {}: {}) failed: {}{}",
+            first["step"],
+            first["line"],
+            first["do"].as_str().unwrap_or_default(),
+            first["error"].as_str().unwrap_or("unknown error"),
+            if skipped > 0 {
+                format!("; {skipped} later step(s) not run (--keep-going runs them)")
+            } else {
+                String::new()
+            }
+        ));
+        out["result"]["failed"] = json!(failed);
+    }
+    out
+}
+
+/// How a batch prints: the whole response as JSON, or (`--raw`) each
+/// result on its own line (the page state when no step read anything),
+/// notes and the failure on stderr.
+pub fn print_batch(output: &mut dyn Write, response: &Value, config: &SessionConfig) -> bool {
+    let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if !config.raw {
+        return print_cli_response(output, response, config);
+    }
+    for n in response.get("notes").and_then(Value::as_array).into_iter().flatten() {
+        eprintln!("note: {}", n.as_str().unwrap_or_default());
+    }
+    let results = response.pointer("/result/results").and_then(Value::as_array).cloned().unwrap_or_default();
+    for r in &results {
+        match &r["result"] {
+            Value::String(s) => {
+                let _ = writeln!(output, "{s}");
+            }
+            other => {
+                let _ = writeln!(output, "{other}");
+            }
+        }
+    }
+    if results.is_empty() {
+        if let Some(state) = response.pointer("/result/state") {
+            let _ = writeln!(output, "{state}");
+        }
+    }
+    if let Some(e) = response.get("error").and_then(Value::as_str) {
+        eprintln!("error: {e}");
+    }
+    let _ = output.flush();
+    ok
+}
+
+/// `batch`: read the steps, run them on the session (or, without one, on a
+/// browser launched for the batch), print one response.
+fn run_batch(source: Option<&str>, keep_going: bool, config: &SessionConfig, output: &mut dyn Write) -> ExitCode {
+    let text = match source {
+        None | Some("-") => {
+            let mut text = String::new();
+            match io::Read::read_to_string(&mut io::stdin(), &mut text) {
+                Ok(_) => text,
+                Err(e) => return batch_fail(output, config, format!("batch: read stdin: {e}")),
+            }
+        }
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => return batch_fail(output, config, format!("batch {path}: {e}")),
+        },
+    };
+    let steps = match batch_steps(&text) {
+        Ok(steps) if steps.is_empty() => return batch_fail(output, config, "batch: no steps".into()),
+        Ok(steps) => steps,
+        Err(e) => return batch_fail(output, config, format!("batch: {e} (nothing ran)")),
+    };
+    if let Some(name) = config.session.clone().or_else(crate::session::env_session) {
+        return crate::session::batch(config, &name, &steps, keep_going, output);
+    }
+    let started = Instant::now();
+    let mut driver = match Driver::launch(config) {
+        Ok(driver) => driver,
+        Err(e) => return batch_fail(output, config, format!("{e:#}")),
+    };
+    let mut responses = Vec::new();
+    for (i, step) in steps.iter().enumerate() {
+        let t = Instant::now();
+        let id = json!(i + 1);
+        let response = match driver.run_op(&step.command) {
+            Ok(outcome) => outcome_response(id, outcome, t),
+            Err(e) => err_response(id, format!("{e:#}"), t),
+        };
+        let response = serde_json::to_value(&response).unwrap_or(Value::Null);
+        let failed = response["ok"] != true;
+        responses.push(response);
+        if (failed && !keep_going) || matches!(step.command, Command::Quit { .. }) {
+            break;
+        }
+    }
+    driver.session().close();
+    let response = batch_response(&steps, &responses, started.elapsed().as_secs_f64() * 1000.0);
+    if print_batch(output, &response, config) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn batch_fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCode {
+    print_cli_response(output, &json!({ "id": null, "ok": false, "error": plain_error(&error) }), config);
+    ExitCode::from(2)
+}
+
 pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) -> ExitCode {
     match local {
         Local::Version => {
@@ -4797,6 +5095,7 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
         }
         Local::BrowserHost => crate::shared::serve_host(config),
         Local::Sessions { clean, all, idle_s } => crate::session::sessions(config, *clean, *all, *idle_s, output),
+        Local::Batch { source, keep_going } => run_batch(source.as_deref(), *keep_going, config, output),
         Local::Profiles => {
             let response = json!({ "id": null, "ok": true, "result": crate::cdp::import::list_profiles() });
             if print_cli_response(output, &response, config) {
@@ -4903,6 +5202,50 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn batch_lines_split_like_a_shell_and_parse_as_steps() {
+        assert_eq!(
+            split_words(r#"fill --label 'Email address' "a \"b\" c" x\ y"#).unwrap(),
+            ["fill", "--label", "Email address", "a \"b\" c", "x y"]
+        );
+        assert!(split_words("eval 'oops").is_err());
+        let steps =
+            batch_steps("# a flow\n\ngoto /form\nfill --label Email a@b.c\n[{\"op\":\"title\"},{\"op\":\"url\"}]\n")
+                .unwrap();
+        assert_eq!(steps.len(), 4);
+        assert_eq!((steps[0].line, steps[1].line, steps[2].line, steps[3].line), (3, 4, 5, 5));
+        assert!(matches!(steps[1].command, Command::Fill { .. }));
+        assert!(batch_steps("goto /a\nstart").unwrap_err().starts_with("line 2:"));
+        assert!(batch_steps("-s other goto /a").unwrap_err().contains("can't name a session"));
+        assert!(batch_steps("frobnicate").unwrap_err().starts_with("line 1:"));
+    }
+
+    #[test]
+    fn a_batch_reports_reads_once_and_the_state_once() {
+        let steps = batch_steps("goto /a\nselect --label Size L\neval 1\nclick --text Nope\neval 2").unwrap();
+        let st = json!({ "tab": 0, "tabs": 1, "url": "http://h/a", "title": "A" });
+        let mut sel = st.clone();
+        sel["selected"] = json!(["L"]);
+        let responses = vec![
+            json!({ "ok": true, "result": st }),
+            json!({ "ok": true, "result": sel, "notes": ["n1"] }),
+            json!({ "ok": true, "result": 1 }),
+            json!({ "ok": false, "error": "no element" }),
+        ];
+        let r = batch_response(&steps, &responses, 1.0);
+        assert_eq!(r["ok"], false);
+        assert_eq!(r["result"]["ran"], 4);
+        assert_eq!(r["result"]["results"].as_array().unwrap().len(), 2);
+        assert_eq!(r["result"]["results"][0]["result"], json!({ "selected": ["L"] }));
+        assert_eq!(r["result"]["state"]["title"], "A");
+        assert_eq!(r["notes"][0], "step 2: n1");
+        let e = r["error"].as_str().unwrap();
+        assert!(
+            e.starts_with("step 4 (line 4: click --text Nope) failed: no element") && e.contains("1 later step"),
+            "{e}"
+        );
+    }
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()

@@ -80,6 +80,21 @@ navigera -s work wait --text "Saved"
 navigera -s work quit
 ```
 
+Steps you are sure of go in one call, one model turn: `batch` reads one
+command per line (or JSON ops) and prints what the steps read and the page
+state once, stopping at the first failure:
+
+```sh
+navigera -s work --raw batch <<'EOF'
+goto https://example.com/signup
+fill --label Email ada@example.com
+select --label Plan Pro
+check --label "I accept the terms"
+click --role button --name "Create account"
+text --selector .welcome
+EOF
+```
+
 ```text
 page "Checkout — Acme" http://shop.test/checkout
 - main:
