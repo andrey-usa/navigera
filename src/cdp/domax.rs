@@ -712,6 +712,8 @@ impl<'a> Doc<'a> {
             "svg" | "SVG" => "SvgRoot",
             "HR" => "separator",
             "PROGRESS" => "progressbar",
+            // Chrome's own role for it (no ARIA one).
+            "CANVAS" => "Canvas",
             "METER" => "meter",
             "OUTPUT" => "status",
             "IFRAME" | "FRAME" => "Iframe",

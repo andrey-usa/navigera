@@ -106,6 +106,11 @@ know:
   (static Linux build, median of 32, interleaved, warm). Most of what
   remains is Chrome's capture. macOS and Windows gain all but the
   allocator.
+- Pages of 800 to 3,000 DOM nodes are read from the DOM snapshot too, not
+  Chrome's accessibility tree: about five times faster (a 1,500-element
+  page: 166-201 ms to 29-40 ms), the same text on 54 of 56 fixture and
+  benchmark pages. Smaller pages keep Chrome's tree. A `<canvas>` has
+  Chrome's `Canvas` role in the snapshot tree too.
 
 ### Fixed
 

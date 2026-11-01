@@ -5187,8 +5187,12 @@ const LAZY_CALLS_PER_NODE: f64 = 0.25;
 /// (see `domax`), not Chrome's accessibility tree, which costs about a
 /// tenth of a millisecond per node read in full and three times that read
 /// lazily: a 2,000-row table (18,000 nodes) took 2.1 s for the tree and
-/// 0.19 s for the snapshot. Smaller pages keep Chrome's tree.
-const DOM_TREE_NODES: u64 = 3000;
+/// 0.19 s for the snapshot; a 1,500-element page 166-201 ms against 29-40.
+/// The snapshot tree is the same text on 43 of the 45 fixture pages (not:
+/// Chrome's JSON viewer, whose controls the snapshot doesn't hold, and a
+/// canvas role since mapped). Small pages, where the difference is a few
+/// ms, keep Chrome's tree.
+const DOM_TREE_NODES: u64 = 800;
 
 /// How long `close_target` waits for the page to go after `Page.close`.
 const CLOSE_WAIT: Duration = Duration::from_millis(1500);
