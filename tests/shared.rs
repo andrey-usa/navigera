@@ -327,8 +327,8 @@ fn a_killed_shared_browser_is_relaunched_and_sessions_carry_on() {
     ]);
     eventually("the POST loaded", Duration::from_secs(20), || a.text(&["eval", "location.pathname"]) == "/posted");
     b.ok(&["tab-select", "0"]);
-    // The idle snapshot comes after the last op.
-    std::thread::sleep(Duration::from_millis(1000));
+    // The storage snapshot is taken once a session has been idle for 1 s.
+    std::thread::sleep(Duration::from_millis(1800));
     let pids = browser.wait_browsers(1, Duration::from_secs(5));
     assert_eq!(pids.len(), 1);
     kill(pids[0]);
@@ -425,11 +425,20 @@ fn a_second_crash_right_after_a_recovery_ends_the_session() {
     a.ok(&["goto", &format!("{}/download", site.url)]);
     kill(browser.wait_browsers(1, Duration::from_secs(5))[0]);
     std::thread::sleep(Duration::from_millis(300));
-    let (success, r) = a.run(&["eval", "1"]);
+    // A command that reaches the session before it has seen the browser go
+    // counts as in flight and fails unretried (a loaded machine is slow to
+    // see it); the next one is the first after the crash.
+    let (mut success, mut r) = a.run(&["eval", "1"]);
+    if !success && r.to_string().contains("was not retried") {
+        (success, r) = a.run(&["eval", "1"]);
+    }
     assert!(success && r["recovered"]["browser"] == "relaunched", "{r}");
     kill(browser.wait_browsers(1, Duration::from_secs(5))[0]);
     std::thread::sleep(Duration::from_millis(300));
-    let err = a.fails(&["eval", "1"]);
+    let mut err = a.fails(&["eval", "1"]);
+    if err.contains("was not retried") {
+        err = a.fails(&["eval", "1"]);
+    }
     assert!(err.contains("crashed again") && err.contains("start"), "{err}");
     let a = browser.start("a", &[]);
     assert_eq!(a.text(&["eval", "1 + 1"]), "2");

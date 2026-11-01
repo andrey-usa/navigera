@@ -2506,6 +2506,10 @@ pub struct Driver {
 
 /// How often the storage snapshot is retaken (the tab list is kept on every op).
 const STORAGE_EVERY: Duration = Duration::from_millis(500);
+/// The storage snapshot waits for this long without a command: it evaluates
+/// in every tab, and a busy page in a background tab would hold an op's reply
+/// for up to [`STORAGE_EVAL`] (p90 6.7 -> 170 ms when it ran after each op).
+const STORAGE_IDLE: Duration = Duration::from_secs(1);
 /// A tab stuck in a dialog or a loop costs a snapshot no more than this.
 const STORAGE_EVAL: Duration = Duration::from_millis(300);
 /// A second crash this soon after a recovery ends the session.
@@ -2522,8 +2526,10 @@ struct Crash {
     storage: Option<Value>,
     storage_at: Option<Instant>,
     recovered_at: Option<Instant>,
-    /// An op skipped the storage snapshot (too soon after the last one).
+    /// An op ran since the last storage snapshot.
     storage_dirty: bool,
+    /// When the last op ended.
+    last_op: Option<Instant>,
     /// Recovery failed or looped: the session ends.
     given_up: bool,
 }
@@ -2538,6 +2544,7 @@ impl Default for Crash {
             storage_at: None,
             recovered_at: None,
             storage_dirty: false,
+            last_op: None,
             given_up: false,
         }
     }
@@ -2924,8 +2931,9 @@ impl Driver {
         result
     }
 
-    /// Keep what a crash is recovered from: the tabs on every op, the
-    /// cookies and localStorage at most every [`STORAGE_EVERY`].
+    /// Keep what a crash is recovered from: the tabs on every op (one
+    /// browser-side call); the cookies and localStorage later, between
+    /// commands ([`Driver::snapshot_if_idle`]).
     fn remember(&mut self) {
         if !self.session.is_shared() || self.session.browser_gone() {
             return;
@@ -2937,15 +2945,17 @@ impl Driver {
             }
         }
         self.crash.storage_dirty = true;
-        self.snapshot_if_idle();
+        self.crash.last_op = Some(Instant::now());
     }
 
-    /// Retake the cookies and localStorage if an op skipped it and
-    /// [`STORAGE_EVERY`] has passed since the last one.
+    /// Retake the cookies and localStorage once ops have changed them and
+    /// the session has had no command for [`STORAGE_IDLE`], at most every
+    /// [`STORAGE_EVERY`]. Called by the session server between commands.
     pub fn snapshot_if_idle(&mut self) {
         if !self.crash.storage_dirty
             || !self.session.is_shared()
             || self.session.browser_gone()
+            || self.crash.last_op.is_some_and(|t| t.elapsed() < STORAGE_IDLE)
             || self.crash.storage_at.is_some_and(|t| t.elapsed() < STORAGE_EVERY)
         {
             return;

@@ -450,6 +450,9 @@ window.ink = (x, y) => g.getImageData(x, y, 1, 1).data[3];
 </script>
 """)
 
+# What a form POST to /posted shows, and what reopening it with GET shows.
+PAGES["/posted"] = ("posted", "", """<p>posted</p>""")
+
 PAGES["/download"] = ("download", "", """
 <a id=dl href="/file.csv">Download CSV</a>
 <button id=blob type=button>Save notes</button>
@@ -785,6 +788,16 @@ class Handler(BaseHTTPRequestHandler):
         if urlparse(self.path).path == "/collect":
             self.send_response(204)
             self.end_headers()
+            return
+        # A page a form POST loads (an empty 404 would become Chrome's own
+        # error page, which has no path of its own).
+        if urlparse(self.path).path == "/posted":
+            body = b"<!doctype html><title>posted</title><p>posted</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         self.send_response(404)
         self.end_headers()
