@@ -167,6 +167,14 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   one `DOMSnapshot.captureSnapshot` for what is clickable (Chrome only).
   Same-origin and in-process iframes are spliced in under their `Iframe`
   node, and open shadow roots are included.
+- A page of more than 3,000 DOM nodes is read from that one DOM snapshot
+  instead: the tree is built from it (roles, names, states and values as
+  Chrome computes them) and printed the same way, refs included, in about a
+  fifth of the time (a 2,000-row table: 325 ms for the whole tree, where
+  Chrome's tree took 1.8 s). What it does not model: a modal `<dialog>`'s
+  modality, the inner fields of date and time inputs, and closed shadow
+  roots. `NAVIGERA_AX_SOURCE=chrome` (or `dom`) picks one source for every
+  page; `both` prints Chrome's tree, then the snapshot's, of one page load.
 - Wrapper nodes (`generic`, label boxes) are collapsed, and text that repeats
   an ancestor's name or a neighbouring control's label is dropped.
 - Adjacent text shares `- text:` lines of up to 300 characters (a grid of

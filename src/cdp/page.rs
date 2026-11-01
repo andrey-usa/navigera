@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 
 use super::ax;
 use super::client::CdpClient;
+use super::domax;
 use super::events::Shared;
 use super::logs::Report;
 
@@ -4076,14 +4077,28 @@ impl Page {
     /// `.class` for each element, to tell apart actionable elements that
     /// have no name or text.
     fn clickables(&self, timeout: Duration) -> ax::Clickables {
+        match self.dom_snapshot(timeout) {
+            Some(snap) => clickables_from(&snap),
+            None => ax::Clickables::default(),
+        }
+    }
+
+    /// `DOMSnapshot.captureSnapshot` with the styles [`clickables_from`]
+    /// and the tree built from the snapshot read (cursor, pointer-events,
+    /// opacity, visibility, display, content). No `includeDOMRects`: `layout.bounds`
+    /// is always there, and the extra offset/client/scroll rects were about
+    /// two thirds of the call's time on a 2,000-row table.
+    fn dom_snapshot(&self, timeout: Duration) -> Option<Value> {
+        let params =
+            json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility", "display", "content"] });
+        self.send("DOMSnapshot.captureSnapshot", params, timeout).ok()
+    }
+}
+
+/// What a snapshot shows a user could click (see [`Page::clickables`]).
+fn clickables_from(snap: &Value) -> ax::Clickables {
+    {
         let mut out = ax::Clickables::default();
-        // No `includeDOMRects`: `layout.bounds` (all this reads) is always
-        // there, and the extra offset/client/scroll rects were about two
-        // thirds of the call's time on a 2,000-row table.
-        let params = json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility"] });
-        let Ok(snap) = self.send("DOMSnapshot.captureSnapshot", params, timeout) else {
-            return out;
-        };
         let strings: Vec<&str> = snap
             .get("strings")
             .and_then(Value::as_array)
@@ -4419,7 +4434,9 @@ impl Page {
         }
         out
     }
+}
 
+impl Page {
     /// Backend node id of the element `target` names (for `ax --selector`).
     fn backend_id(&self, target: &Target, wait: Duration, timeout: Duration) -> Result<u64> {
         if let Target::Ref(node) = target {
@@ -4577,19 +4594,49 @@ impl Page {
     }
 
     fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        let tree_opts = !opts.json && opts.max_depth.is_none() && !self.shared.is_single_target();
+        // A large page's tree is built from the DOM snapshot; anything that
+        // path can't serve falls back to Chrome's tree below.
+        // `NAVIGERA_AX_SOURCE=chrome|dom` picks one (for comparing them).
+        let forced = std::env::var("NAVIGERA_AX_SOURCE").ok();
+        let nodes = if tree_opts && forced.is_none() { self.dom_nodes(timeout) } else { None };
+        // `both`: Chrome's tree, a separator line, then the snapshot's, of
+        // the same page load (for checking one against the other).
+        if tree_opts && forced.as_deref().map(str::trim) == Some("both") {
+            let chrome = self.ax_tree_full(timeout, opts, None)?;
+            let dom = self.ax_tree_dom(timeout, opts)?;
+            return Ok(Value::String(format!(
+                "{}\n=== DOM snapshot tree ===\n{}",
+                chrome.as_str().unwrap_or(""),
+                dom.as_str().unwrap_or("")
+            )));
+        }
+        let from_dom = tree_opts
+            && match forced.as_deref().map(str::trim) {
+                Some("dom") => true,
+                Some(_) => false,
+                None => nodes.is_some_and(|n| n > DOM_TREE_NODES),
+            };
+        if from_dom {
+            match self.ax_tree_dom(timeout, opts) {
+                Ok(text) => return Ok(text),
+                Err(e) => crate::timing::log(&format!("[ax] DOM snapshot tree failed, reading Chrome's: {e:#}")),
+            }
+        }
         // The text tree stops at the output limit, so on a large page it
         // need not read the whole tree: fetch lazily from the root and
         // stop. Anything the lazy path cannot serve (JSON, a depth cap,
         // no limit, a browser without the lazy calls) reads the full tree
         // exactly as before, and a failed lazy fetch falls back to it.
-        if !opts.json && opts.max_depth.is_none() && opts.limit > 0 && !self.shared.is_single_target() {
+        if tree_opts && opts.limit > 0 {
             // A scoped snapshot reads its subtree lazily, whatever the page;
             // a whole page is read lazily when it is well past the limit,
             // and only while the walk costs less than one full read would
             // (see LAZY_CALLS_PER_NODE).
+            let nodes = if forced.is_some() { self.dom_nodes(timeout) } else { nodes };
             let (lazy, budget) = match &opts.scope {
                 Some(_) => (true, None),
-                None => match self.dom_nodes(timeout) {
+                None => match nodes {
                     Some(nodes) => (nodes > opts.limit as u64 * 4, Some((nodes as f64 * LAZY_CALLS_PER_NODE) as usize)),
                     // An unknown count: the lazy walk, as before.
                     None => (true, None),
@@ -4606,6 +4653,53 @@ impl Page {
             }
         }
         self.ax_tree_full(timeout, opts, None)
+    }
+
+    /// The text tree built from the DOM snapshot (see `domax`): one
+    /// snapshot serves the tree and the clickable elements.
+    fn ax_tree_dom(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        let started = std::time::Instant::now();
+        let snap = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
+        crate::timing::record("ax_dom_snapshot", started);
+        let started = std::time::Instant::now();
+        let clicks = clickables_from(&snap);
+        let built = domax::build(&snap).ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
+        drop(snap);
+        crate::timing::record("ax_dom_build", started);
+        let root_backend_id = match &opts.scope {
+            Some(target) => {
+                let backend = self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?;
+                let has = |nodes: &[Value]| {
+                    nodes.iter().any(|n| n.get("backendDOMNodeId").and_then(Value::as_u64) == Some(backend))
+                };
+                if !has(&built.nodes) && !built.frames.iter().any(|f| has(&f.nodes)) {
+                    bail!("the scope is not in the snapshot's tree");
+                }
+                Some(backend)
+            }
+            None => None,
+        };
+        let url = built.url.clone();
+        let origin = url
+            .find("://")
+            .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
+            .unwrap_or_default();
+        let started = std::time::Instant::now();
+        let rendered = ax::render(
+            &format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default()),
+            &built.nodes,
+            &built.frames,
+            &ax::Options {
+                all_refs: opts.all_refs,
+                limit: opts.limit,
+                root_backend_id,
+                origin,
+                clicks,
+                lazy_budget: None,
+            },
+        );
+        crate::timing::record("ax_render", started);
+        Ok(Value::String(rendered.text))
     }
 
     /// The page's DOM node count (`Memory.getDOMCounters`), what one full
@@ -4861,6 +4955,13 @@ impl Page {
 /// 2,000-row one (18,008 nodes; full 1,849, lazy 1,318) lazily, and so does
 /// one of 4,000 rows (full 5,233, lazy 1,969).
 const LAZY_CALLS_PER_NODE: f64 = 0.25;
+
+/// A page of more DOM nodes than this is read from the DOM snapshot
+/// (see `domax`), not Chrome's accessibility tree, which costs about a
+/// tenth of a millisecond per node read in full and three times that read
+/// lazily: a 2,000-row table (18,000 nodes) took 2.1 s for the tree and
+/// 0.19 s for the snapshot. Smaller pages keep Chrome's tree.
+const DOM_TREE_NODES: u64 = 3000;
 
 /// How long `close_target` waits for the page to go after `Page.close`.
 const CLOSE_WAIT: Duration = Duration::from_millis(1500);

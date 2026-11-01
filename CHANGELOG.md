@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `ax` on a large page (over 3,000 DOM nodes) builds the tree from the DOM
+  snapshot it already takes for clickable elements, instead of reading
+  Chrome's accessibility tree, which costs about a millisecond per table
+  row. The output is the same (roles, names, states, values, refs): on 22
+  fixture pages and on Wikipedia, Python's and MDN's docs, GitHub, BBC,
+  httpbin and four QA practice sites the two trees print the same but for a
+  handful of lines (a time input's inner fields, very long cell names that
+  Chrome cuts). Table of 1,000 / 2,000 / 4,000 rows, whole tree: 730 /
+  1,789 / 4,671 ms before, 155 / 325 / 681 ms now (Playwright's
+  `ariaSnapshot`: 238 / 476 / 975 ms); with the default limit 149 / 317 /
+  604 ms. `NAVIGERA_AX_SOURCE=chrome|dom` picks the source.
+
 - Adjacent text in a snapshot shares lines of up to 300 characters instead
   of taking a line per element: a page of 3,000 `<div>` cells went from
   3,001 lines (39 KB) to 51 lines (15 KB). A control or any other element

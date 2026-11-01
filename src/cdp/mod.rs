@@ -18,6 +18,7 @@ pub mod attach;
 pub mod ax;
 mod browser;
 mod client;
+mod domax;
 pub mod downloads;
 mod events;
 pub mod import;

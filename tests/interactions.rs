@@ -1574,3 +1574,86 @@ fn a_nameless_control_says_what_the_page_marks_it_with() {
         assert!(tree.contains(hint), "{hint}:\n{tree}");
     }
 }
+
+/// On these pages the tree built from the DOM snapshot (what a large page
+/// gets) prints exactly what Chrome's accessibility tree does, refs
+/// included: both are read from one page load (`NAVIGERA_AX_SOURCE=both`).
+#[test]
+fn the_dom_snapshot_tree_prints_what_chromes_tree_does() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let pages = [
+        "/big-table",
+        "/div-cells",
+        "/long-text",
+        "/cookie-banner",
+        "/stale-ref",
+        "/drag-native",
+        "/drag-position",
+        "/hidden-layers",
+        "/iframe-form",
+        "/srcdoc",
+        "/multi-select",
+        "/nbsp-select",
+        "/shadow-css",
+        "/overlapped",
+        "/right-click",
+        "/card-radios",
+        "/combobox",
+        "/typed-only",
+        "/lazy-box",
+        "/honesty",
+        "/fillwait",
+        "/effects",
+    ];
+    let mut input = String::new();
+    for (i, page) in pages.iter().enumerate() {
+        input.push_str(&format!(
+            "{}\n",
+            serde_json::json!({ "id": 1000 + i, "op": "goto", "url": format!("{}{page}", site.url) })
+        ));
+        input.push_str(&format!("{}\n", serde_json::json!({ "id": i, "op": "ax", "format": "text", "limit": 0 })));
+    }
+    // A snapshot scoped to one row of the large table.
+    input.push_str(&format!(
+        "{}\n",
+        serde_json::json!({ "id": 2000, "op": "goto", "url": format!("{}/big-table", site.url) })
+    ));
+    input.push_str(&format!(
+        "{}\n",
+        serde_json::json!({ "id": 500, "op": "ax", "format": "text", "limit": 0, "selector": "#rows tr:nth-child(3)" })
+    ));
+    input.push_str("{\"id\":99999,\"op\":\"quit\"}\n");
+    let mut child = Command::new(tool_exe())
+        .args(["--own-browser", "serve"])
+        .env("NAVIGERA_AX_SOURCE", "both")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("navigera serve");
+    {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    let mut checked = 0;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let r: Value = serde_json::from_str(line).unwrap();
+        let Some(i) = r["id"].as_u64().filter(|i| *i < 1000) else { continue };
+        if i == 500 {
+            let text = r["result"].as_str().unwrap_or_else(|| panic!("scoped: {r}"));
+            let (chrome, dom) = text.split_once("\n=== DOM snapshot tree ===\n").unwrap();
+            assert_eq!(dom, chrome, "a scoped snapshot differs");
+            assert!(dom.contains("cell \"Item 2\"") && !dom.contains("Item 3"), "{dom}");
+            checked += 1;
+            continue;
+        }
+        let page = pages[i as usize];
+        let text = r["result"].as_str().unwrap_or_else(|| panic!("{page}: {r}"));
+        let (chrome, dom) =
+            text.split_once("\n=== DOM snapshot tree ===\n").unwrap_or_else(|| panic!("{page}: {text}"));
+        assert_eq!(dom, chrome, "{page}: the DOM snapshot tree differs from Chrome's");
+        checked += 1;
+    }
+    assert_eq!(checked, pages.len() + 1);
+}
