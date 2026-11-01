@@ -1256,6 +1256,15 @@ impl BrowserSession {
         self.pages.iter().map(|p| p.target_id().to_string()).collect()
     }
 
+    /// Each tab's URL and title, by target id (none when the browser can't
+    /// list its targets).
+    pub fn tab_infos(&self) -> std::collections::HashMap<String, (String, String)> {
+        if self.lightpanda {
+            return Default::default();
+        }
+        self.browser.target_infos().unwrap_or_default()
+    }
+
     /// Whether the tab is an Electron app's `<webview>` (inside one of its
     /// windows), not a window.
     pub fn is_embedded(&self, target_id: &str) -> bool {

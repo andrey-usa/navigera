@@ -2719,6 +2719,7 @@ impl Driver {
     fn tabs_json(&self) -> Value {
         let active = self.session.active_page();
         let closed = self.session.closed_tab();
+        let infos = self.session.tab_infos();
         let tabs: Vec<Value> = self
             .session
             .page_targets()
@@ -2728,6 +2729,10 @@ impl Driver {
                 let mut tab = json!({ "index": index, "target": target, "active": index == active });
                 if closed == Some(target.as_str()) {
                     tab["closed"] = json!(true);
+                }
+                if let Some((url, title)) = infos.get(&target) {
+                    tab["url"] = json!(url);
+                    tab["title"] = json!(title);
                 }
                 if self.session.is_embedded(&target) {
                     tab["webview"] = json!(true);

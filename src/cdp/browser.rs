@@ -608,6 +608,22 @@ impl Browser {
         Ok(v.get("userAgent").and_then(Value::as_str).unwrap_or_default().to_string())
     }
 
+    /// Each page (and `<webview>`) target's URL and title, by target id.
+    pub fn target_infos(&self) -> Result<std::collections::HashMap<String, (String, String)>> {
+        self.block_on(async {
+            let targets = self.client.send("Target.getTargets", json!({}), None, CMD_TIMEOUT).await?;
+            let text = |t: &Value, key: &str| t.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+            Ok(targets
+                .get("targetInfos")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|t| matches!(t.get("type").and_then(Value::as_str), Some("page" | "webview")))
+                .map(|t| (text(t, "targetId"), (text(t, "url"), text(t, "title"))))
+                .collect())
+        })
+    }
+
     /// List open tab targets: (target_id, url). In an Electron app, its
     /// `<webview>`s too (marked in [`Shared::embedded`]).
     pub fn tab_targets(&self) -> Result<Vec<(String, String)>> {

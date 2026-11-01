@@ -53,6 +53,9 @@ know:
   session starts in the largest one it shows, instead of opening a blank
   tab the app has no use for. `quit` leaves the app running; `quit
   --close-browser` ends it.
+- `tab-list` (and `tab-new`, `reset`) give each tab's `url` and `title`,
+  so a tab can be chosen without selecting each one to look: an Electron
+  app's windows, a popup, the tabs of an attached browser.
 - An Electron app's `<webview>`s are tabs: `tab-list` marks them
   `"webview": true`, `tab-select` goes into one to read and act in it, and
   the session never moves into one by itself (it is part of a window).

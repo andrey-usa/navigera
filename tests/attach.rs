@@ -324,6 +324,9 @@ fn a_tab_closed_while_an_op_waits_on_it_ends_the_op() {
     ok(&s, &["start", "--attach", &format!("ws://127.0.0.1:{port}/devtools/page/{id}")]);
     let tabs = ok(&s, &["tab-new", "data:text/html,<title>Second</title>"]);
     let second = tabs["tabs"][1]["target"].as_str().expect("second tab").to_string();
+    // Each tab says what it shows.
+    assert_eq!(tabs["tabs"][1]["title"], "Second", "{tabs}");
+    assert!(tabs["tabs"][1]["url"].as_str().is_some_and(|u| u.starts_with("data:text/html")), "{tabs}");
     let slow = "new Promise(r => setTimeout(() => r(document.title), 20000))";
     let close_soon = |target: String| {
         std::thread::spawn(move || {
