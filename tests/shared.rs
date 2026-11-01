@@ -191,6 +191,18 @@ impl Drop for Session {
     }
 }
 
+/// The first command after the browser was killed. One that reaches the
+/// session before it has seen the browser go counts as in flight and fails
+/// unretried (documented; a CI runner is often that slow to see it); the
+/// next one is then the first after the crash.
+fn after_crash(s: &Session, args: &[&str]) -> (bool, Value) {
+    let (success, r) = s.run(args);
+    if !success && r.to_string().contains("was not retried") {
+        return s.run(args);
+    }
+    (success, r)
+}
+
 /// Wait until `f` holds, or fail with `what`.
 fn eventually(what: &str, within: Duration, mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + within;
@@ -339,8 +351,8 @@ fn a_killed_shared_browser_is_relaunched_and_sessions_carry_on() {
     let started = Instant::now();
     let probe = ["eval", "[localStorage.getItem('who'), document.cookie, location.pathname]"];
     let (ra, rb) = std::thread::scope(|scope| {
-        let ha = scope.spawn(|| a.run(&probe));
-        let hb = scope.spawn(|| b.run(&probe));
+        let ha = scope.spawn(|| after_crash(&a, &probe));
+        let hb = scope.spawn(|| after_crash(&b, &probe));
         (ha.join().unwrap(), hb.join().unwrap())
     });
     assert!(started.elapsed() < Duration::from_secs(15), "recovery took {:?}", started.elapsed());
@@ -387,7 +399,7 @@ fn a_tab_loaded_by_a_post_is_reopened_with_get_and_named() {
     let pids = browser.wait_browsers(1, Duration::from_secs(5));
     kill(pids[0]);
     std::thread::sleep(Duration::from_millis(300));
-    let (success, r) = a.run(&["eval", "location.pathname"]);
+    let (success, r) = after_crash(&a, &["eval", "location.pathname"]);
     assert!(success && r["ok"] == true, "{r}");
     assert_eq!(r["result"], "/posted", "{r}");
     assert_eq!(r["recovered"]["reopened_as_get"], serde_json::json!([0]), "{r}");
@@ -425,20 +437,12 @@ fn a_second_crash_right_after_a_recovery_ends_the_session() {
     a.ok(&["goto", &format!("{}/download", site.url)]);
     kill(browser.wait_browsers(1, Duration::from_secs(5))[0]);
     std::thread::sleep(Duration::from_millis(300));
-    // A command that reaches the session before it has seen the browser go
-    // counts as in flight and fails unretried (a loaded machine is slow to
-    // see it); the next one is the first after the crash.
-    let (mut success, mut r) = a.run(&["eval", "1"]);
-    if !success && r.to_string().contains("was not retried") {
-        (success, r) = a.run(&["eval", "1"]);
-    }
+    let (success, r) = after_crash(&a, &["eval", "1"]);
     assert!(success && r["recovered"]["browser"] == "relaunched", "{r}");
     kill(browser.wait_browsers(1, Duration::from_secs(5))[0]);
     std::thread::sleep(Duration::from_millis(300));
-    let mut err = a.fails(&["eval", "1"]);
-    if err.contains("was not retried") {
-        err = a.fails(&["eval", "1"]);
-    }
+    let (_, r) = after_crash(&a, &["eval", "1"]);
+    let err = r["error"].as_str().unwrap_or_default().to_string();
     assert!(err.contains("crashed again") && err.contains("start"), "{err}");
     let a = browser.start("a", &[]);
     assert_eq!(a.text(&["eval", "1 + 1"]), "2");
