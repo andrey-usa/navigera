@@ -388,7 +388,7 @@ fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Val
         handler(text);
         return;
     }
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
         return;
     };
     if let Some(id) = value.get("id").and_then(Value::as_u64) {
@@ -397,7 +397,8 @@ fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Val
             if let Some(error) = value.get("error") {
                 let _ = responder.send(Err(error.to_string()));
             } else {
-                let result = value.get("result").cloned().unwrap_or(Value::Null);
+                // Moved out, not copied: a snapshot's result is megabytes.
+                let result = value.get_mut("result").map(Value::take).unwrap_or(Value::Null);
                 let _ = responder.send(Ok(result));
             }
         }
