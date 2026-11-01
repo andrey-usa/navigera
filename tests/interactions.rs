@@ -1614,6 +1614,11 @@ fn a_nameless_control_says_what_the_page_marks_it_with() {
         "<a href='/x' class=nav><img src='/icons/home.png' width=16 height=16></a>",
         "<span class=close onclick=1 title='Close panel' style='display:inline-block;width:16px;height:16px'></span>",
         "<button class=x aria-describedby=tip><svg width=16 height=16></svg></button><div role=tooltip id=tip>Share</div>",
+        // Nothing to call the icon by: what kind of icon it is, still.
+        "<button><svg width=16 height=16><path d='M0 0'/></svg></button>",
+        "<button><svg data-testid=DeleteIcon width=16 height=16></svg></button>",
+        "<button><span style=\"display:inline-block;width:16px;height:16px;background:url('/i/bell.svg?v=2')\"></span></button>",
+        "<button><img src='data:image/gif;base64,R0lGODlhAQABAAAAACw=' width=16 height=16></button>",
     );
     s.ok(&["goto", &format!("data:text/html,{page}")]);
     let tree = s.text(&["ax"]);
@@ -1624,6 +1629,10 @@ fn a_nameless_control_says_what_the_page_marks_it_with() {
         "link .nav img=\"home.png\" [ref=",
         "clickable .close title=\"Close panel\" [ref=",
         "button .x description=\"Share\" [ref=",
+        "button icon=\"svg\" [ref=",
+        "button icon=\"DeleteIcon\" [ref=",
+        "button img=\"bell.svg\" [ref=",
+        "button img=\"inline\" [ref=",
     ] {
         assert!(tree.contains(hint), "{hint}:\n{tree}");
     }

@@ -4367,6 +4367,12 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                 }
                 let mut queue = std::collections::VecDeque::from([(i, 0)]);
                 let mut img = None;
+                // Last resorts: a vector icon with nothing to call it by, an
+                // inline (`data:`) image. They still say it is an icon.
+                let mut bare = None;
+                let file_of = |url: &str| -> String {
+                    url.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("").trim().to_string()
+                };
                 let mut seen = 0;
                 while let Some((at, depth)) = queue.pop_front() {
                     seen += 1;
@@ -4380,6 +4386,21 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                     if let Some(class) = attr_of(at, "class").split_whitespace().find(|c| icon_class(c)) {
                         return Some(format!("icon={}", short(class)));
                     }
+                    // An icon component's test id (`<svg data-testid="DeleteIcon">`).
+                    let testid = attr_of(at, "data-testid").trim();
+                    if !testid.is_empty() && matches!(tag_of(at), "svg" | "SVG") {
+                        return Some(format!("icon={}", short(testid)));
+                    }
+                    // A background image set on the element itself.
+                    let style = attr_of(at, "style");
+                    if img.is_none() && style.contains("url(") {
+                        let url = style.split("url(").nth(1).unwrap_or("").split(')').next().unwrap_or("");
+                        let url = url.trim().trim_matches(['"', '\'']);
+                        let file = file_of(url);
+                        if !file.is_empty() && !url.starts_with("data:") {
+                            img = Some(format!("img={}", short(&file)));
+                        }
+                    }
                     match tag_of(at) {
                         "use" | "USE" => {
                             let href = Some(attr_of(at, "href"))
@@ -4392,12 +4413,14 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                         }
                         "IMG" if img.is_none() => {
                             let src = attr_of(at, "src");
-                            let file =
-                                src.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("").trim();
+                            let file = file_of(src);
                             if !file.is_empty() && !src.starts_with("data:") {
-                                img = Some(format!("img={}", short(file)));
+                                img = Some(format!("img={}", short(&file)));
+                            } else if bare.is_none() {
+                                bare = Some(format!("img={}", short("inline")));
                             }
                         }
+                        "svg" | "SVG" if bare.is_none() => bare = Some(format!("icon={}", short("svg"))),
                         _ => {}
                     }
                     if depth < 4 {
@@ -4406,7 +4429,8 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                         }
                     }
                 }
-                img
+                // A description says it better than "an icon" does.
+                img.or(bare.filter(|_| attr_of(i, "aria-describedby").trim().is_empty()))
             };
             for (i, &backend) in backends.iter().enumerate() {
                 if types.get(i) != Some(&1) {

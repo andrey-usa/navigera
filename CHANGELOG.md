@@ -48,6 +48,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- An icon-only button with nothing to name it by now says what kind of icon
+  it is: an inline style's background image (`img="bell.svg"`), an icon
+  component's test id (`icon="DeleteIcon"`), and, failing all,
+  `icon="svg"` or `img="inline"` (a `data:` image), so it no longer reads
+  as a bare `button [ref=N]`.
 - A scoped `ax` (`--selector`, a ref) on a large page builds only the
   scope's tree again, instead of the whole page's and then cutting it:
   a header on a 2,000-row page 336 -> 166 ms, on 4,000 rows 605 -> 360 ms
