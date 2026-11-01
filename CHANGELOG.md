@@ -89,12 +89,16 @@ know:
   that hasn't started yet (a page's data after it loads) still gets the
   whole window, and a window set with `set network-quiet` holds after
   actions too.
-- Snapshots of large pages cost about half as much on Linux: the static
-  Linux build allocates with mimalloc (musl's allocator was several times
-  slower on the small allocations a snapshot makes), and the snapshot is
-  no longer copied while the tree is built and printed. 13,000 nested
-  divs: 520 to 277 ms; a header over a 2,000-row table: 558 to 264 ms
-  (median, warm, same machine). macOS and Windows gain the copies.
+- Snapshots of large pages cost well under half as much on Linux: the
+  static Linux build allocates with mimalloc (musl's allocator was several
+  times slower on the small allocations a snapshot makes), the snapshot is
+  no longer copied while the tree is built and printed, and the tree built
+  from the DOM snapshot is made of typed nodes instead of a JSON map per
+  node. 13,000 nested divs: 525 to 196 ms; a header over a 2,000-row
+  table: 549 to 233 ms (static Linux build, median of 9, warm, same
+  machine). Building and printing that tree now takes about 35 ms of it;
+  the rest is Chrome's capture. macOS and Windows gain all but the
+  allocator.
 
 ### Fixed
 

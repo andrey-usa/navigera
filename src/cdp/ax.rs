@@ -136,11 +136,71 @@ pub struct Clickables {
 }
 
 /// One frame's AX nodes, spliced under the AX node of its owner element
-/// (`<iframe>` backend node id).
+/// (`<iframe>` backend node id): Chrome's JSON, or [`Node`]s.
 #[derive(Clone)]
-pub struct Frame {
+pub struct Frame<N = Value> {
     pub owner_backend_id: u64,
-    pub nodes: Vec<Value>,
+    pub nodes: Vec<N>,
+}
+
+/// A node as the printer reads it: the parts of Chrome's `AXNode` it uses.
+/// Chrome's JSON is read into these ([`Node::from_value`]); the tree built
+/// from a DOM snapshot is made of them directly, without a JSON map per
+/// node.
+#[derive(Clone, Debug, Default)]
+pub struct Node {
+    pub id: String,
+    pub parent: Option<String>,
+    pub children: Vec<String>,
+    pub backend: Option<u64>,
+    pub ignored: bool,
+    pub role: String,
+    /// The name, value and description as text ("" when there is none).
+    pub name: String,
+    pub value: String,
+    pub description: String,
+    /// Properties in order: each name with its `value.value`.
+    pub props: Vec<(String, Option<Value>)>,
+}
+
+impl Node {
+    pub fn from_value(v: &Value) -> Node {
+        let text = |key: &str| match v.get(key).and_then(|f| f.get("value")) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        };
+        let props = v
+            .get("properties")
+            .and_then(Value::as_array)
+            .map(|props| {
+                props
+                    .iter()
+                    .filter_map(|p| {
+                        let name = p.get("name")?.as_str()?.to_string();
+                        Some((name, p.get("value").and_then(|v| v.get("value")).cloned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Node {
+            id: v.get("nodeId").and_then(Value::as_str).unwrap_or("").to_string(),
+            parent: v.get("parentId").and_then(Value::as_str).map(str::to_string),
+            children: child_ids(v),
+            backend: v.get("backendDOMNodeId").and_then(Value::as_u64),
+            ignored: v.get("ignored").and_then(Value::as_bool).unwrap_or(false),
+            role: v.get("role").and_then(|r| r.get("value")).and_then(Value::as_str).unwrap_or("").to_string(),
+            name: text("name"),
+            value: text("value"),
+            description: text("description"),
+            props,
+        }
+    }
+
+    /// A property's value (`checked`, `level`, `url`, …).
+    pub fn prop(&self, name: &str) -> Option<&Value> {
+        self.props.iter().find(|(n, _)| n == name).and_then(|(_, v)| v.as_ref())
+    }
 }
 
 pub struct Rendered {
@@ -157,16 +217,13 @@ pub struct Rendered {
     pub refs: Vec<(u64, String, String)>,
 }
 
-fn field<'a>(node: &'a Value, key: &str) -> &'a Value {
-    node.get(key).and_then(|v| v.get("value")).unwrap_or(&Value::Null)
-}
-
-fn text_of(node: &Value, key: &str) -> String {
-    match field(node, key) {
-        Value::String(s) => squash(s),
-        Value::Number(n) => n.to_string(),
-        _ => String::new(),
-    }
+fn text_of(node: &Node, key: &str) -> String {
+    squash(match key {
+        "name" => &node.name,
+        "value" => &node.value,
+        "description" => &node.description,
+        _ => "",
+    })
 }
 
 /// Collapse runs of whitespace (AX names keep the page's newlines/indent).
@@ -242,8 +299,8 @@ pub type AxFetch = Box<dyn FnMut(&[String]) -> (Vec<Value>, bool)>;
 /// then windows of their children).
 const LAZY_WINDOW: usize = 128;
 
-fn ax_id(node: &Value) -> &str {
-    node.get("nodeId").and_then(Value::as_str).unwrap_or("")
+fn ax_id(node: &Node) -> &str {
+    &node.id
 }
 
 fn child_ids(node: &Value) -> Vec<String> {
@@ -253,8 +310,8 @@ fn child_ids(node: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn backend_id(node: &Value) -> Option<u64> {
-    node.get("backendDOMNodeId").and_then(Value::as_u64)
+fn backend_id(node: &Node) -> Option<u64> {
+    node.backend
 }
 
 struct Tree<'a> {
@@ -262,7 +319,7 @@ struct Tree<'a> {
     /// index (not reference) so fetching more children mid-walk cannot
     /// invalidate a node the walk already holds. The caller's nodes are
     /// borrowed; only fetched ones are owned.
-    nodes: Vec<std::borrow::Cow<'a, Value>>,
+    nodes: Vec<std::borrow::Cow<'a, Node>>,
     by_id: HashMap<String, usize>,
     by_backend: HashMap<u64, usize>,
     frame_roots: HashMap<u64, Vec<usize>>,
@@ -322,7 +379,7 @@ impl<'a> Tree<'a> {
         }
     }
 
-    fn insert(&mut self, node: std::borrow::Cow<'a, Value>) -> usize {
+    fn insert(&mut self, node: std::borrow::Cow<'a, Node>) -> usize {
         let id = ax_id(&node).to_string();
         if let Some(&i) = self.by_id.get(&id) {
             return i;
@@ -353,7 +410,7 @@ impl<'a> Tree<'a> {
     }
 
     fn children_uncached(&mut self, idx: usize) -> Vec<usize> {
-        let ids = child_ids(&self.nodes[idx]);
+        let ids = self.nodes[idx].children.clone();
         if self.fetch.is_some() && ids.iter().any(|id| !self.by_id.contains_key(id)) {
             // This node plus the siblings the walk visits next, in one
             // round trip; siblings already fetched, or not yet known, wait.
@@ -361,9 +418,9 @@ impl<'a> Tree<'a> {
             if !self.fetched.contains(&idx) {
                 todo.push(ax_id(&self.nodes[idx]).to_string());
             }
-            if let Some(parent) = self.nodes[idx].get("parentId").and_then(Value::as_str).map(str::to_string) {
+            if let Some(parent) = self.nodes[idx].parent.clone() {
                 if let Some(&p) = self.by_id.get(&parent) {
-                    let sibs = child_ids(&self.nodes[p]);
+                    let sibs = self.nodes[p].children.clone();
                     if let Some(pos) = sibs.iter().position(|s| s == ax_id(&self.nodes[idx])) {
                         for s in sibs.iter().skip(pos + 1).take(LAZY_WINDOW - 1) {
                             if let Some(&si) = self.by_id.get(s) {
@@ -396,7 +453,7 @@ impl<'a> Tree<'a> {
                         self.fetched.insert(i);
                     }
                     for n in got {
-                        self.insert(std::borrow::Cow::Owned(n));
+                        self.insert(std::borrow::Cow::Owned(Node::from_value(&n)));
                     }
                 }
             }
@@ -434,8 +491,8 @@ impl<'a> Tree<'a> {
         self.stopped = true;
     }
 
-    fn role(node: &Value) -> &str {
-        field(node, "role").as_str().unwrap_or("")
+    fn role(node: &Node) -> &str {
+        &node.role
     }
 
     fn push_line(&mut self, line: String) {
@@ -519,14 +576,14 @@ impl<'a> Tree<'a> {
         if self.is_clickable(idx) {
             return false;
         }
-        if self.nodes[idx].get("ignored").and_then(Value::as_bool).unwrap_or(false) {
+        if self.nodes[idx].ignored {
             return true;
         }
         let role = Self::role(&self.nodes[idx]).to_string();
         if role == "RootWebArea" && !self.is_frame_root(idx) {
             return true;
         }
-        WRAPPERS.contains(&role.as_str()) && self.name(idx).is_empty() && !truthy(prop(&self.nodes[idx], "focusable"))
+        WRAPPERS.contains(&role.as_str()) && self.name(idx).is_empty() && !truthy(self.nodes[idx].prop("focusable"))
     }
 
     fn is_frame_root(&self, idx: usize) -> bool {
@@ -551,13 +608,13 @@ impl<'a> Tree<'a> {
     fn wants_ref(&mut self, idx: usize, role: &str) -> bool {
         self.opts.all_refs
             || INTERACTIVE.contains(&role)
-            || truthy(prop(&self.nodes[idx], "focusable"))
+            || truthy(self.nodes[idx].prop("focusable"))
             || self.is_clickable(idx)
     }
 
-    fn states(node: &Value, role: &str) -> Vec<String> {
+    fn states(node: &Node, role: &str) -> Vec<String> {
         let mut out = Vec::new();
-        match prop(node, "checked") {
+        match node.prop("checked") {
             Some(Value::String(s)) if s == "true" => out.push("checked".into()),
             Some(Value::String(s)) if s == "mixed" => out.push("checked=mixed".into()),
             Some(Value::Bool(true)) => out.push("checked".into()),
@@ -570,24 +627,24 @@ impl<'a> Tree<'a> {
             ("readonly", "readonly"),
             ("modal", "modal"),
         ] {
-            if truthy(prop(node, name)) {
+            if truthy(node.prop(name)) {
                 out.push(label.into());
             }
         }
-        if role != "option" && truthy(prop(node, "selected")) {
+        if role != "option" && truthy(node.prop("selected")) {
             out.push("selected".into());
         }
-        match prop(node, "expanded") {
+        match node.prop("expanded") {
             Some(v) if truthy(Some(v)) => out.push("expanded".into()),
             Some(_) if role != "combobox" => out.push("collapsed".into()),
             _ => {}
         }
-        if let Some(Value::String(s)) = prop(node, "invalid") {
+        if let Some(Value::String(s)) = node.prop("invalid") {
             if s != "false" {
                 out.push("invalid".into());
             }
         }
-        if let Some(level) = prop(node, "level").and_then(Value::as_u64) {
+        if let Some(level) = node.prop("level").and_then(Value::as_u64) {
             out.push(format!("level={level}"));
         }
         out
@@ -645,9 +702,7 @@ impl<'a> Tree<'a> {
         let clickable = self.is_clickable(idx);
         let shown_role = if self.is_frame_root(idx) {
             "document"
-        } else if clickable
-            && (WRAPPERS.contains(&role.as_str()) || self.nodes[idx].get("ignored") == Some(&Value::Bool(true)))
-        {
+        } else if clickable && (WRAPPERS.contains(&role.as_str()) || self.nodes[idx].ignored) {
             "clickable"
         } else {
             role.as_str()
@@ -704,7 +759,7 @@ impl<'a> Tree<'a> {
             line.push_str(&format!(" value={}", self.quote_clip(&value, NAME_MAX)));
         }
         if role == "link" {
-            if let Some(Value::String(url)) = prop(&self.nodes[idx], "url") {
+            if let Some(Value::String(url)) = self.nodes[idx].prop("url") {
                 if !url.is_empty() && !url.starts_with("javascript:") {
                     line.push_str(&format!(" url={}", self.short_url(url)));
                 }
@@ -904,7 +959,7 @@ impl<'a> Tree<'a> {
             line.push_str(&format!(" [{}]", tags.join(", ")));
         }
         if role == "link" {
-            if let Some(Value::String(url)) = prop(&self.nodes[idx], "url") {
+            if let Some(Value::String(url)) = self.nodes[idx].prop("url") {
                 if !url.is_empty() && !url.starts_with("javascript:") {
                     line.push_str(&format!(" url={}", self.short_url(url)));
                 }
@@ -933,7 +988,7 @@ fn collect_options(tree: &mut Tree<'_>, idx: usize, out: &mut Vec<String>) {
     for &child in tree.children(idx).iter() {
         if Tree::role(&tree.nodes[child]) == "option" {
             let mut label = text_of(&tree.nodes[child], "name");
-            if truthy(prop(&tree.nodes[child], "selected")) {
+            if truthy(tree.nodes[child].prop("selected")) {
                 label.push_str(" (selected)");
             }
             out.push(label);
@@ -945,6 +1000,21 @@ fn collect_options(tree: &mut Tree<'_>, idx: usize, out: &mut Vec<String>) {
 
 /// Render the main-frame `nodes` (plus child `frames`) as the text tree.
 pub fn render(header: &str, nodes: &[Value], frames: &[Frame], opts: &Options) -> Rendered {
+    let (nodes, frames) = read_nodes(nodes, frames);
+    render_nodes(header, &nodes, &frames, opts)
+}
+
+/// Chrome's JSON nodes, read as [`Node`]s.
+fn read_nodes(nodes: &[Value], frames: &[Frame]) -> (Vec<Node>, Vec<Frame<Node>>) {
+    let frames = frames
+        .iter()
+        .map(|f| Frame { owner_backend_id: f.owner_backend_id, nodes: f.nodes.iter().map(Node::from_value).collect() })
+        .collect();
+    (nodes.iter().map(Node::from_value).collect(), frames)
+}
+
+/// [`render`] of [`Node`]s.
+pub fn render_nodes(header: &str, nodes: &[Node], frames: &[Frame<Node>], opts: &Options) -> Rendered {
     let rendered = render_inner(header, nodes, frames, opts, None).0;
     // What the cuts saved is small: the whole text costs less than the
     // agent's next call to read it.
@@ -967,14 +1037,15 @@ pub const FULL_TEXT_BUDGET: usize = 32_000;
 /// boundary line may keep a container line whose children fall past the
 /// cut (the full walk would have decided it from those children).
 pub fn render_lazy(header: &str, seed: &[Value], frames: &[Frame], opts: &Options, fetch: AxFetch) -> (Rendered, bool) {
-    render_inner(header, seed, frames, opts, Some(fetch))
+    let (seed, frames) = read_nodes(seed, frames);
+    render_inner(header, &seed, &frames, opts, Some(fetch))
 }
 
-fn render_inner(
+fn render_inner<'a>(
     header: &str,
-    nodes: &[Value],
-    frames: &[Frame],
-    opts: &Options,
+    nodes: &'a [Node],
+    frames: &'a [Frame<Node>],
+    opts: &'a Options,
     fetch: Option<AxFetch>,
 ) -> (Rendered, bool) {
     let mut tree = Tree {
@@ -1001,8 +1072,8 @@ fn render_inner(
         tree.insert(std::borrow::Cow::Borrowed(n));
     }
     for f in frames {
-        if let Some(root) = f.nodes.iter().find(|n| n.get("parentId").is_none()) {
-            if let Some(&root_idx) = root.get("nodeId").and_then(Value::as_str).and_then(|id| tree.by_id.get(id)) {
+        if let Some(root) = f.nodes.iter().find(|n| n.parent.is_none()) {
+            if let Some(&root_idx) = tree.by_id.get(&root.id) {
                 tree.frame_roots.entry(f.owner_backend_id).or_default().push(root_idx);
                 tree.frame_root_ids.insert(root_idx);
             }
@@ -1013,7 +1084,7 @@ fn render_inner(
     }
     let start: Option<usize> = match opts.root_backend_id {
         Some(backend) => tree.by_backend.get(&backend).copied(),
-        None => tree.nodes.iter().position(|n| n.get("parentId").is_none()),
+        None => tree.nodes.iter().position(|n| n.parent.is_none()),
     };
     if let Some(root) = start {
         if tree.is_transparent(root) {

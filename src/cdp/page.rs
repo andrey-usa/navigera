@@ -4883,9 +4883,7 @@ impl Page {
         drop(snap);
         crate::timing::record("ax_dom_build", started);
         if let Some(backend) = root_backend_id {
-            let has = |nodes: &[Value]| {
-                nodes.iter().any(|n| n.get("backendDOMNodeId").and_then(Value::as_u64) == Some(backend))
-            };
+            let has = |nodes: &[ax::Node]| nodes.iter().any(|n| n.backend == Some(backend));
             if !has(&built.nodes) && !built.frames.iter().any(|f| has(&f.nodes)) {
                 bail!("the scope is not in the snapshot's tree");
             }
@@ -4896,7 +4894,7 @@ impl Page {
             .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
             .unwrap_or_default();
         let started = std::time::Instant::now();
-        let rendered = ax::render(
+        let rendered = ax::render_nodes(
             &format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default()),
             &built.nodes,
             &built.frames,
