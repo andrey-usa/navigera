@@ -1,10 +1,12 @@
 # navigera
 
-> navigera drives headless Chrome from the shell, one command per step: a single native Rust binary speaking the Chrome DevTools Protocol, built for AI agents. Pages are read as a compact accessibility tree with [ref=N] handles. Actions are real mouse and keyboard events. A named session keeps one warm browser between shell calls. Tabs, iframes, shadow DOM and dialogs are handled for you.
+> navigera drives headless Chrome, and Electron apps, from the shell, one command per step: a single native Rust binary speaking the Chrome DevTools Protocol, built for AI agents. Pages are read as a compact accessibility tree with [ref=N] handles. Actions are real mouse and keyboard events. A named session keeps one warm browser between shell calls. Tabs, iframes, shadow DOM and dialogs are handled for you.
 
 Install: `curl -fsSL https://raw.githubusercontent.com/andrey-usa/navigera/master/install.sh | sh` (Windows PowerShell: `irm https://raw.githubusercontent.com/andrey-usa/navigera/master/install.ps1 | iex`; or `cargo install --locked --git https://github.com/andrey-usa/navigera navigera`), then `navigera install-skill` to put the version-matched agent guide in ./.agents/skills (`--claude` for ./.claude/skills).
 
 Core loop: `navigera -s work start` → `goto <url>` → `--raw ax` → `click <ref>` / `fill <ref> "<text>"` / `press Enter` → `--raw ax` → `quit`. Every command prints one JSON line (`{"ok":true,"result":…}`), or only the result with `--raw`.
+
+Electron apps: `navigera -s app start --electron ./my-app` launches the app (its directory or main script, a packaged executable or a .app bundle) and drives its windows as tabs; `quit` ends it.
 
 Your own browser: `navigera -s me start --attach` connects to the user's running Chrome 144+ (after they enable chrome://inspect/#remote-debugging and click Allow); `--profile <name>` keeps a separate persistent visible browser. `quit` only disconnects; the browser stays open.
 

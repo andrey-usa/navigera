@@ -1031,7 +1031,7 @@ pub struct ParsedArgs {
 
 /// One op's CLI documentation: (name, synopsis, what it does).
 const OPS: &[(&str, &str, &str)] = &[
-    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless]] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins"),
+    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
     ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
@@ -1088,7 +1088,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("dialog", "--accept [--prompt-text <t>] | --dismiss", "how alert/confirm/prompt are answered (default: accept; every dialog is reported)"),
     ("quit", "[--close-browser]", "close the browser and the session server; attached (--attach/--profile): only disconnect, unless --close-browser"),
     ("serve", "", "for programs: read one JSON command per line on stdin (`{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}`) and answer each on stdout; the protocol is in docs/navigera.md"),
-    ("mcp", "[--headed] [--profile <name> | --attach [<where>]]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
+    ("mcp", "[--headed] [--profile <name> | --attach [<where>] | --electron <app>]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
     ("sessions", "[--clean [--all] [--idle <s>]]", "list the named sessions (pid, idle time, browser, memory) and the shared browsers; --clean quits the ones idle 5 min or more and drops dead ones, --all quits every one"),
     ("profiles", "", "list what a session can be handed: your browsers' profiles (name, email, whether --attach can reach them now) and navigera's own --profile browsers"),
     ("skill", "", "print the agent skill (usage guide) for this version"),
@@ -4882,6 +4882,8 @@ mod tests {
         assert!(matches!(&err, ArgsError::Invalid(m) if m.contains("alternatives")), "{err:?}");
         let err = parse_args(argv(&["navigera", "-s", "app", "start", "--electron-arg", "x"])).unwrap_err();
         assert!(matches!(&err, ArgsError::Invalid(m) if m.contains("add --electron")), "{err:?}");
+        let parsed = parse_args(argv(&["navigera", "mcp", "--electron", "my-app-bin"])).unwrap();
+        assert!(parsed.mcp && parsed.config.electron.as_deref() == Some("my-app-bin"));
         assert_eq!(attach(&["navigera", "-s", "me", "--attach", "start"]).unwrap(), (Some("chrome".into()), true));
         assert_eq!(
             attach(&["navigera", "-s", "me", "start", "--attach", "--headless"]).unwrap().0.as_deref(),

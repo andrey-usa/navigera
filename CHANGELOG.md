@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `start --electron <app>` drives an Electron desktop app: navigera
+  launches it with a DevTools port, waits for its first window and adopts
+  its windows as tabs, the ones it opens later included (they have no
+  opener, unlike a popup). `<app>` is the app's directory or main script
+  (run with the Electron in its `node_modules`), a packaged app's
+  executable, a macOS `.app` bundle or a command on `PATH`;
+  `--electron-arg <arg>` passes arguments to the app. `quit` ends the app.
+  `tab-new`, `reset`, `show` and `hide` say why they don't apply. `navigera
+  mcp --electron <app>` gives an IDE agent the same.
+- CI runs an Electron end-to-end test on Linux, macOS and Windows: a
+  fixture app that saves a form through its main process and opens a
+  second window.
+
 ## [0.7.0] - 2026-11-01
 
 ### Changed

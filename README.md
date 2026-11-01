@@ -6,8 +6,8 @@
 [![PyPI](https://img.shields.io/pypi/v/navigera.svg)](https://pypi.org/project/navigera/)
 [![npm](https://img.shields.io/npm/v/navigera.svg)](https://www.npmjs.com/package/navigera)
 
-**`navigera`** — extremely fast browser automation for AI agents, from the
-shell, one command per step.
+**`navigera`** — extremely fast browser and Electron app automation for AI
+agents, from the shell, one command per step.
 It is a single native binary (Rust, no Node) that speaks the Chrome DevTools
 Protocol directly:
 
@@ -16,6 +16,9 @@ Protocol directly:
 - A warm browser behind a named session survives between shell calls.
 - New tabs, iframes, shadow DOM and `alert`/`confirm` dialogs are handled
   for you.
+- Electron desktop apps (editors, chat clients, internal tools) are driven
+  the same way: `start --electron <app>`, and each of the app's windows is a
+  tab.
 
 > Faster software for a better planet — less energy, less compute, more time for life.
 
@@ -130,6 +133,27 @@ and navigera's own `--profile` browsers. `--profile work` without `--from` is
 a persistent browser you sign in to yourself. Either way navigera works in windows of its own, `quit` only
 disconnects, and `quit --close-browser` waits until the profile is free.
 
+**Electron apps.** `start --electron <app>` launches a desktop app built
+on Electron and drives its windows like tabs: the same tree, refs, clicks,
+waits and `eval`. `<app>` is the app's directory or main script (navigera
+runs the Electron in its `node_modules`), a packaged app's executable, a
+macOS `.app` bundle or a command on `PATH`; `--electron-arg <arg>` passes
+arguments to the app.
+
+```sh
+navigera -s app start --electron ./my-app       # the window the app opens first
+navigera -s app --raw ax
+navigera -s app click --role button --name "Settings"
+navigera -s app tab-list                        # the app's new window is a tab, and the active one
+navigera -s app quit                            # ends the app
+```
+
+Windows the app opens later are adopted as they appear; a window that
+closes itself is dropped, and the session goes on in the one before. The app
+runs as it would for a person (a visible window, its own profile and
+storage), so `show`, `hide`, `reset` and `tab-new` don't apply. On Linux it
+needs a display (`xvfb-run` on a server).
+
 **Natural mode.** `--natural` makes a headless browser look like the browser
 it is: no `HeadlessChrome` in the user agent (page, workers, request
 headers), and a real screen size. `navigator.webdriver` is false in every
@@ -238,6 +262,12 @@ so navigera fills in what its CDP leaves out: shadow roots and password
 fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
 The differences that remain are listed in
 [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md#browsers-and-engines).
+
+**Electron** (`start --electron`) has its own end-to-end test on Linux,
+macOS and Windows: a fixture app whose form is saved through the main
+process over IPC and which opens a second window of its own. The test
+reads and fills the form, follows the new window, closes it from the page
+and checks that `quit` ends the app.
 
 ## Benchmarks
 

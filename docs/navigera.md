@@ -119,7 +119,7 @@ another process are reachable by ref only.
 | `cookies` | `[--all] [--url <u>] [--json]`; `set <name> <value> [--url <u> \| --domain <d>] [--path] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax\|Strict\|None]`; `delete <name>`; `clear` | one cookie per line (`--all`: every cookie in the browser); `set` → `{set}`, `delete` → `{deleted}`, `clear` → `{cleared: true}` |
 | `storage` | `[local\|session] [get [<key>] \| set <key> <value> \| remove <key> \| clear]` | the value, or the whole store as an object |
 | `state` | `save\|load <file.json>` | every cookie (HttpOnly too) and the open tabs' localStorage to a file, or back: `{saved\|loaded, cookies, origins}`. The file is the common storage-state JSON, so one saved by another browser tool loads here, and back. `load` sets the cookies at once and gives each origin's keys to documents of that origin that lack them |
-| `show` / `hide` | — | the session's browser on screen, or off it, with the same tabs (the active one stays active) and sign-ins: a `--profile` browser restarts on its profile, which keeps everything; one navigera launched is replaced by one carrying its cookies and the open tabs' storage. For a step only a person can do (a login, 2FA, a CAPTCHA). `show` needs a display. Not for `--attach`, which is already on screen | state + `visible` |
+| `show` / `hide` | — | the session's browser on screen, or off it, with the same tabs (the active one stays active) and sign-ins: a `--profile` browser restarts on its profile, which keeps everything; one navigera launched is replaced by one carrying its cookies and the open tabs' storage. For a step only a person can do (a login, 2FA, a CAPTCHA). `show` needs a display. Not for `--attach`, which is already on screen, or `--electron`, an app with windows of its own | state + `visible` |
 | `profiles` | — | no session needed: `{browsers: [{browser, user_data_dir, attach_ready, hand_off, profiles: [{dir, name, email, last_used}]}], navigera_profiles: [{name, dir, running}]}`: what `--attach` and `--from` can be pointed at |
 | `pdf` | `[<path>]` or `--path`; `--landscape`; `--background` | `{path, bytes}` |
 | `set` | `viewport <w> <h> [--scale <dpr>] [--mobile]`, `device <name>` (iPhone 15, iPhone 15 Pro Max, iPhone SE, Pixel 8, Galaxy S24, iPad Mini, iPad Pro 11, Laptop, Desktop), `media dark\|light\|print\|reduced-motion\|forced-colors`, `geo <lat> <lon> [--accuracy <m>]`, `offline on\|off`, `headers 'Name: value'…` (or a JSON object), `ua <string>`, `locale <tag>`, `timezone <zone>`, `credentials <user> <password>`; `off` resets one | what was set. Applies to every tab and to tabs opened later |
@@ -415,8 +415,8 @@ own `serve` pays a browser cold start and loses cookies on every run.
 on stdio, for agents that take their tools over MCP: Cline, Roo Code, Kilo
 Code, Continue, VS Code, Claude Desktop, Cursor. Each tool is one serve op, so
 it behaves exactly like the CLI. The browser starts on the first tool call.
-`--headed`, `--profile <name>` (a persistent, signed-in browser) and
-`--attach` work as they do for sessions.
+`--headed`, `--profile <name>` (a persistent, signed-in browser),
+`--attach` and `--electron <app>` work as they do for sessions.
 
 | tool | does |
 |---|---|
@@ -545,7 +545,7 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   headless one. If the shared browser dies, each session's next command
   says so and the session ends; `start` relaunches it. A browser of its
   own instead: `start --own-browser` (or `NAVIGERA_SHARED_BROWSER=0`);
-  `--attach`, `--profile`, Lightpanda and `--transport ws` on Linux/macOS
+  `--attach`, `--profile`, `--electron`, Lightpanda and `--transport ws` on Linux/macOS
   always get one.
 - **`--engine lightpanda`** (experimental; tested on Lightpanda 1.0.1 and the
   nightly) starts `lightpanda serve` with iframes and stylesheets loaded and
@@ -593,6 +593,42 @@ with `--attach` is refused. Chrome 136–143 can't serve its default profile
 at all (the `--remote-debugging-port` switch is ignored for it, and the
 inspect toggle arrives in 144): use `--profile` there, which works on any
 version.
+
+**Electron apps: `--electron <app>`** (with `start`, or `serve`). navigera
+launches the app with a DevTools port of the app's choosing
+(`--remote-debugging-port=0`, read back from its stderr) and nothing else
+of Chrome's launch flags: an app is not a browser, and a throwaway profile
+or headless mode would change how it starts. `start` returns once the app's
+first window is open (up to the navigation timeout); that window is the
+first tab.
+
+| `<app>` | what runs |
+|---|---|
+| the app's directory, or its main script (`.js`, `.cjs`, `.mjs`) | the Electron binary of the `electron` npm package found in `node_modules` from the app upward (`dist/electron`, `dist/Electron.app/Contents/MacOS/Electron`, `dist/electron.exe`), with the app as its first argument |
+| an executable (Electron itself, or a packaged app) | that file; with plain Electron, pass the app with `--electron-arg` |
+| a macOS `.app` bundle | its `Contents/MacOS` executable |
+| a name with no path, not a file here | that command, found on `PATH` |
+
+`--electron-arg <arg>` (repeatable; `--electron-arg=<arg>` for one that
+starts with a dash) adds arguments after the app. Every window the app
+opens is adopted as a tab and becomes the active one, though it has no
+opener as a popup does; DevTools windows are not. A window that closes
+itself is dropped and the session goes on in the one before it. `quit`
+ends the app (its whole process group, or its job object on Windows). A
+sandbox this machine can't give it (root, Ubuntu 24.04's AppArmor rule for
+unprivileged namespaces, a setuid helper that isn't set up) is handled as
+for Chrome: the app runs with `--no-sandbox` and the warning says so.
+
+What differs from a browser session: the app's windows are its own, so
+`tab-new` (the app opens windows itself), `reset` (its storage is its own;
+quit and start again), `show` and `hide` (it is a visible app) are refused
+with that reason. `--electron` is an alternative to `--attach`,
+`--profile` and `--engine lightpanda`, and always gets a process of its own
+(never the shared browser). On Linux the app needs a display: on a server,
+run the session under `xvfb-run`. An app that removes
+`--remote-debugging-port` from its command line can't be driven; `start`
+says so with the app's last stderr lines. CI runs `tests/electron.rs`
+against `tests/fixtures/electron-app` on Linux, macOS and Windows.
 
 **Natural mode: `--natural`** (or `NAVIGERA_NATURAL=1`). What headless
 Chrome shows a page that a windowed one doesn't, removed: the user agent

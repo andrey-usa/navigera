@@ -1,6 +1,6 @@
 ---
 name: navigera
-description: Drive a real headless Chrome from the shell with navigera — one command per step against a warm session. Read pages as a compact accessibility tree with [ref=N], then click/fill/select/press by ref, wait, screenshot, handle tabs, iframes and dialogs. Use for web browsing, scraping, form filling and UI checks instead of writing browser automation scripts.
+description: Drive a real headless Chrome, or an Electron desktop app, from the shell with navigera — one command per step against a warm session. Read pages as a compact accessibility tree with [ref=N], then click/fill/select/press by ref, wait, screenshot, handle tabs, iframes and dialogs. Use for web browsing, scraping, form filling, UI checks and Electron app testing instead of writing browser automation scripts.
 ---
 
 # navigera
@@ -93,6 +93,19 @@ navigera works in a window of its own and never closes the user's tabs.
 step only the person can do (a login, 2FA, a CAPTCHA): `navigera -s me show`
 puts the browser on their screen with its tabs and sign-ins; tell them what
 to do, `wait --url /dashboard --timeout-ms 300000`, then `hide` and carry on.
+
+## Electron apps
+
+```bash
+navigera -s app start --electron ./my-app   # app directory or main script (Electron from its node_modules), a packaged app's executable, or a .app bundle
+navigera -s app --raw ax                    # the window it opened first, read like a page
+navigera -s app tab-list                    # each window is a tab; one the app opens becomes the active tab
+navigera -s app quit                        # ends the app
+```
+
+`--electron-arg <arg>` (repeatable) passes arguments to the app. Every other
+command works as on a page. `tab-new`, `reset`, `show` and `hide` don't: the
+app owns its windows and storage. On a Linux server, run under `xvfb-run`.
 
 ## Reading a page: `ax`
 

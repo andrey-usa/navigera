@@ -15,6 +15,7 @@ pub const EXAMPLES: &[Help] = &[
             ("navigera -s s start", ""),
             ("navigera -s s start --natural", "browser that looks less headless"),
             ("navigera -s s start --parent 4242", "the session ends when process 4242 (the agent) exits"),
+            ("navigera -s app start --electron ./my-app", "an Electron app; its windows are the tabs"),
         ],
         &[
             ("--own-browser", "a browser for this session alone (default: one shared browser, a context each)"),
@@ -25,6 +26,8 @@ pub const EXAMPLES: &[Help] = &[
             ("--from <browser>", "seed the profile with a copy of a browser's sign-ins"),
             ("--from-profile <p>", "which profile --from copies (dir, name or email)"),
             ("--headless", "hide a --profile browser (default: visible)"),
+            ("--electron <app>", "launch an Electron app (its directory, main script or executable); quit ends it"),
+            ("--electron-arg <arg>", "an argument for the app (repeatable)"),
             ("--natural", "no HeadlessChrome user agent, a real screen size"),
             ("--download-dir <dir>", "where this session saves downloads"),
         ],
