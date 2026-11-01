@@ -1111,7 +1111,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
     ("state", "save|load <file.json>", "every cookie and the open tabs' localStorage to a file, or back (`{cookies, origins}`, the common storage-state format): sign in once, reuse it in later sessions"),
-    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password>  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
+    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password> | permissions grant|deny|reset <name>…  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value'] | --modify [--set-header 'Name: value'] [--replace <from> <to>]]] [--har <f> [--not-found abort|continue]]", "fail, answer, or change the responses of requests whose URL matches (* and ? globs); --har answers from a recorded HAR; no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
@@ -2256,7 +2256,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             if !SETTINGS.contains(&what.as_str()) {
                 return invalid(format!(
                     "{op}: unknown setting {what:?}; settings: viewport, device, media, geo, offline, headers, ua, \
-                     locale, timezone, credentials, network-quiet"
+                     locale, timezone, credentials, permissions, network-quiet"
                 ));
             }
             let scale = num_flag(&mut args, "--scale")?;
@@ -4099,6 +4099,33 @@ impl Driver {
                 self.session.set_credentials(creds).map_err(|e| anyhow::anyhow!("set credentials: {e:#}"))?;
                 Ok(json!({ "credentials": if on { "set" } else { "off" } }))
             }
+            Command::Set { what, values, .. } if what == "permissions" || what == "permission" => {
+                let usage =
+                    "set permissions grant|deny|reset <geolocation|notifications|camera|microphone|clipboard|…>…";
+                let (setting, label) = match values.first().map(|v| v.to_ascii_lowercase()).as_deref() {
+                    Some("grant" | "allow") => ("granted", "granted"),
+                    Some("deny" | "block") => ("denied", "denied"),
+                    Some("reset" | "ask" | "prompt") => ("prompt", "reset"),
+                    _ => anyhow::bail!("{usage}"),
+                };
+                let mut browser_names: Vec<&str> = Vec::new();
+                for name in &values[1..] {
+                    let Some(found) = crate::emulate::permission_names(name) else {
+                        anyhow::bail!("set permissions: unknown permission {name:?}; {usage}");
+                    };
+                    browser_names.extend_from_slice(found);
+                }
+                if browser_names.is_empty() {
+                    anyhow::bail!("{usage}");
+                }
+                if self.session.is_lightpanda() {
+                    anyhow::bail!("set permissions: the lightpanda engine has no permissions to set");
+                }
+                self.session
+                    .set_permissions(setting, &browser_names)
+                    .map_err(|e| anyhow::anyhow!("set permissions: {e:#}"))?;
+                Ok(json!({ "permissions": label, "for": values[1..] }))
+            }
             Command::Set { what, values, .. } if what == "network-quiet" => {
                 let ms: u64 = match values.as_slice() {
                     [v] => v.parse().map_err(|_| anyhow::anyhow!("set network-quiet <ms>: got {v:?}"))?,
@@ -4436,6 +4463,8 @@ const SETTINGS: &[&str] = &[
     "geolocation",
     "location",
     "offline",
+    "permissions",
+    "permission",
     "headers",
     "header",
     "ua",

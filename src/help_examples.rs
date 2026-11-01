@@ -342,6 +342,7 @@ pub const EXAMPLES: &[Help] = &[
             ("media dark|light|print|reduced-motion", "the emulated media feature"),
             ("geo <lat> <lon>", "the emulated geolocation"),
             ("offline on|off", "cut or restore the network"),
+            ("permissions grant|deny|reset <name>…", "geolocation, notifications, camera, microphone, clipboard (and midi, sensors, background-sync)"),
             ("headers <Name: value>…", "extra HTTP headers on every request"),
             ("ua <string>", "the user agent string"),
             ("locale <tag>", "the emulated locale, e.g. en-US"),

@@ -32,6 +32,12 @@ know:
 
 ### Added
 
+- `set device` knows 55 devices (recent iPhones, Pixels, Galaxy phones and
+  tablets, iPads, two desktop sizes).
+- `set permissions grant|deny|reset <name>…` sets geolocation,
+  notifications, camera, microphone, clipboard, midi, sensors and
+  background-sync for the session, so a page sees them as granted, denied
+  or still to be asked.
 - `--compact` (and `NAVIGERA_OUTPUT=compact` for a whole shell): `--raw`,
   and an action that left the page as it was prints `ok`, one that moved it
   only its own fields and what changed. Ten steps of a form, a table read

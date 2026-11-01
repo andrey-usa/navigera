@@ -321,6 +321,39 @@ fn emulation() {
 }
 
 #[test]
+fn permissions_are_granted_denied_and_reset_and_more_devices_are_known() {
+    let Some(site) = edge_site() else { return };
+    for (engine, bin) in engines() {
+        if engine != "chrome" {
+            continue;
+        }
+        let a = Agent::new("perm", engine, bin);
+        a.ok(&["goto", &format!("{}/form", site.base)]);
+        let state = |name: &str| {
+            a.text(&["eval", &format!("() => navigator.permissions.query({{ name: '{name}' }}).then(p => p.state)")])
+        };
+        assert_eq!(state("notifications"), "prompt");
+        a.ok(&["set", "permissions", "grant", "notifications", "geolocation"]);
+        assert_eq!(state("notifications"), "granted");
+        assert_eq!(state("geolocation"), "granted");
+        a.ok(&["set", "permissions", "deny", "notifications"]);
+        assert_eq!(state("notifications"), "denied");
+        assert_eq!(state("geolocation"), "granted", "the other permission is untouched");
+        a.ok(&["set", "permissions", "reset", "notifications", "geolocation"]);
+        assert_eq!(state("notifications"), "prompt");
+        a.ok(&["set", "permissions", "grant", "camera", "microphone", "clipboard"]);
+        assert_eq!(state("camera"), "granted");
+        assert_eq!(state("microphone"), "granted");
+        assert!(a.err(&["set", "permissions", "grant", "teleport"]).contains("unknown permission"));
+        assert!(a.err(&["set", "permissions", "grant"]).contains("set permissions"));
+        a.ok(&["set", "device", "iPhone", "16", "Pro"]);
+        assert_eq!(a.ok(&["eval", "[screen.width, devicePixelRatio]"]), serde_json::json!([402, 3]));
+        a.ok(&["set", "device", "Pixel", "9"]);
+        assert_eq!(a.ok(&["eval", "[screen.width, devicePixelRatio]"]), serde_json::json!([360, 3]));
+    }
+}
+
+#[test]
 fn locators_reads_states_and_keys() {
     let Some(site) = edge_site() else { return };
     for (engine, bin) in engines() {

@@ -2046,6 +2046,15 @@ impl BrowserSession {
         let _ = self.browser.grant_permission(permission, self.context.as_deref());
     }
 
+    /// Set browser permissions for this session's pages (`granted`, `denied`
+    /// or `prompt`, the browser's own names, see `emulate::permission_names`).
+    pub fn set_permissions(&self, setting: &str, names: &[&str]) -> Result<()> {
+        for name in names {
+            self.browser.set_permission(name, setting, self.context.as_deref())?;
+        }
+        Ok(())
+    }
+
     fn apply_overrides(&self, page: &Page) {
         let timeout = self.timeout(None);
         for calls in self.overrides.values() {

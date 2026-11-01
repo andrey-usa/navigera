@@ -437,7 +437,12 @@ impl Browser {
     /// Grant a permission (e.g. `geolocation`) to every origin, in one
     /// browser context (the default one without `context`).
     pub fn grant_permission(&self, permission: &str, context: Option<&str>) -> Result<()> {
-        let mut params = json!({ "permission": { "name": permission }, "setting": "granted" });
+        self.set_permission(permission, "granted", context)
+    }
+
+    /// `Browser.setPermission`: `setting` is `granted`, `denied` or `prompt`.
+    pub fn set_permission(&self, permission: &str, setting: &str, context: Option<&str>) -> Result<()> {
+        let mut params = json!({ "permission": { "name": permission }, "setting": setting });
         if let Some(context) = context {
             params["browserContextId"] = json!(context);
         }
