@@ -160,7 +160,9 @@ waits for a window the app shows to have something in it, starts on that
 window (hidden helper windows are tabs, not the active one), and says the
 app's Electron version and whether its main process can be reached. On
 Linux it needs a display: on a server, one `xvfb-run` around the whole
-session.
+session. An app that is already running with a DevTools port
+(`--remote-debugging-port=9222`) is driven with `start --attach 9222`: its
+windows are the tabs, and `quit` leaves it running.
 
 **Natural mode.** `--natural` makes a headless browser look like the browser
 it is: no `HeadlessChrome` in the user agent (page, workers, request

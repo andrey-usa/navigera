@@ -110,6 +110,8 @@ app owns its windows and storage. `start` waits for a window the app shows to
 have content and says `electron: {version, main_process}`; an app that is
 still starting may need `wait --text <word>` before `ax`. On a Linux server,
 run the whole session inside one `xvfb-run` (one per command kills the app).
+An app already running with `--remote-debugging-port=9222`: `start --attach
+9222` drives its windows the same way; `quit` leaves it running.
 
 ## Reading a page: `ax`
 
