@@ -94,10 +94,11 @@ know:
   times slower on the small allocations a snapshot makes), the snapshot is
   no longer copied while the tree is built and printed, and the tree built
   from the DOM snapshot is made of typed nodes instead of a JSON map per
-  node. 13,000 nested divs: 525 to 196 ms; a header over a 2,000-row
-  table: 549 to 233 ms (static Linux build, median of 9, warm, same
-  machine). Building and printing that tree now takes about 35 ms of it;
-  the rest is Chrome's capture. macOS and Windows gain all but the
+  node, built while the clickable elements are read from the same
+  snapshot. 13,000 nested divs: 545 to 191 ms (Playwright's ariaSnapshot:
+  159 ms on that machine); a header over a 2,000-row table: 563 to 193 ms
+  (static Linux build, median of 32, interleaved, warm). Most of what
+  remains is Chrome's capture. macOS and Windows gain all but the
   allocator.
 
 ### Fixed

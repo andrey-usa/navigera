@@ -4874,13 +4874,21 @@ impl Page {
         let snap = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
         crate::timing::record("ax_dom_snapshot", started);
         let started = std::time::Instant::now();
-        let clicks = clickables_from(&snap);
-        let built = match root_backend_id {
-            Some(backend) => domax::build_scoped(&snap, backend),
-            None => domax::build(&snap),
-        }
-        .ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
-        drop(snap);
+        // The clickable elements and the tree read the same snapshot, side
+        // by side.
+        let (clicks, built) = std::thread::scope(|s| {
+            let clicks = s.spawn(|| clickables_from(&snap));
+            let built = match root_backend_id {
+                Some(backend) => domax::build_scoped(&snap, backend),
+                None => domax::build(&snap),
+            };
+            (clicks.join(), built)
+        });
+        let clicks = clicks.map_err(|_| anyhow::anyhow!("reading the snapshot's clickable elements failed"))?;
+        let built = built.ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
+        // Freeing a large snapshot takes milliseconds: not on the way to
+        // the answer.
+        std::thread::spawn(move || drop(snap));
         crate::timing::record("ax_dom_build", started);
         if let Some(backend) = root_backend_id {
             let has = |nodes: &[ax::Node]| nodes.iter().any(|n| n.backend == Some(backend));
@@ -4909,6 +4917,7 @@ impl Page {
             },
         );
         crate::timing::record("ax_render", started);
+        std::thread::spawn(move || drop(built));
         self.remember_refs(&rendered.refs, &url, root_backend_id);
         Ok(Value::String(rendered.text))
     }
