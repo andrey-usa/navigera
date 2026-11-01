@@ -277,17 +277,50 @@ pub fn chrome_major(exe: &str) -> Option<u32> {
 }
 
 /// The window a user would look at: the largest that isn't hidden. None
-/// when every window is hidden (or there are none).
-fn best_window(pages: &[crate::cdp::Page], timeout: Duration) -> Option<usize> {
-    pages
-        .iter()
-        .enumerate()
-        // A window that can't say yet (its page has no context) is not
-        // taken for a shown one.
-        .filter_map(|(i, page)| page.window_shown(timeout).map(|shown| (i, shown)))
-        .filter(|(_, (hidden, _))| !hidden)
-        .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
-        .map(|(i, _)| i)
+/// when every window is hidden (or there are none), or, with `all_known`,
+/// while any window can't say yet (its page has no context).
+fn best_window(pages: &[crate::cdp::Page], browser: &Browser, timeout: Duration, all_known: bool) -> Option<usize> {
+    // A window made with `show: false` says it is visible on its first
+    // load (Electron's paintWhenInitiallyHidden): the main process knows.
+    let windows = window_visibility(browser, timeout);
+    let mut best: Option<(usize, f64)> = None;
+    for (i, page) in pages.iter().enumerate() {
+        let Some((hidden, area, url)) = page.window_shown(timeout) else {
+            if all_known {
+                return None;
+            }
+            continue;
+        };
+        let hidden = hidden_by_main(&url, windows.as_deref()).unwrap_or(hidden);
+        if !hidden && best.is_none_or(|(_, a)| area > a) {
+            best = Some((i, area));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Each window of an Electron app as its main process sees it: (URL,
+/// `isVisible()`), when its inspector answers.
+fn window_visibility(browser: &Browser, timeout: Duration) -> Option<Vec<(String, bool)>> {
+    if !browser.has_main_process() {
+        return None;
+    }
+    let windows = browser
+        .eval_main(
+            "({ BrowserWindow }) => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed()).map((w) => [w.webContents.getURL(), w.isVisible()])",
+            timeout,
+        )
+        .ok()?;
+    Some(windows.as_array()?.iter().filter_map(|w| Some((w[0].as_str()?.to_string(), w[1].as_bool()?))).collect())
+}
+
+/// Whether the main process says the window at `url` is hidden: only when
+/// it knows a window there and none of them is visible (a window still
+/// loading has another URL on each side, and its own word counts).
+fn hidden_by_main(url: &str, windows: Option<&[(String, bool)]>) -> Option<bool> {
+    let mut at = windows?.iter().filter(|(u, _)| u == url).peekable();
+    at.peek()?;
+    Some(at.all(|(_, visible)| !visible))
 }
 
 /// What `start --electron <app>` runs: an executable as it is, or for an
@@ -934,7 +967,7 @@ impl BrowserSession {
             if pages.is_empty() {
                 bail!("the Electron app at {ws_url} has no window open to work in");
             }
-            let active = best_window(&pages, Duration::from_millis(2000)).unwrap_or(0);
+            let active = best_window(&pages, &browser, Duration::from_millis(2000), false).unwrap_or(0);
             browser.shared().take_opened();
             (pages, active)
         } else {
@@ -1012,18 +1045,31 @@ impl BrowserSession {
         let check = Duration::from_millis(2000);
         let mut pages: Vec<crate::cdp::Page> = Vec::new();
         let mut tried = std::collections::HashSet::new();
+        // An app opens its windows one after another: the choice waits until
+        // no new one has come for a moment and each can say what it shows.
+        let mut last_new = std::time::Instant::now();
         let active = loop {
             for (id, url) in browser.tab_targets().unwrap_or_default() {
                 if url.starts_with("devtools://") || !tried.insert(id.clone()) {
                     continue;
                 }
+                last_new = std::time::Instant::now();
                 match browser.attach_page(&id, "") {
                     Ok(page) => pages.push(page),
                     Err(e) => eprintln!("[browser] could not adopt window {id}: {e:#}"),
                 }
             }
-            if let Some(i) = best_window(&pages, check) {
-                break i;
+            let settled = last_new.elapsed() >= Duration::from_millis(250);
+            if settled {
+                if let Some(i) = best_window(&pages, &browser, check, true) {
+                    break i;
+                }
+            }
+            // Past the deadline, any shown window will do.
+            if std::time::Instant::now() >= deadline {
+                if let Some(i) = best_window(&pages, &browser, check, false) {
+                    break i;
+                }
             }
             if browser.is_closed() || std::time::Instant::now() >= deadline {
                 if !pages.is_empty() {
@@ -1368,8 +1414,12 @@ impl BrowserSession {
                     self.apply_init_scripts(&page);
                     // An app's hidden window (a dropdown, a helper) is a tab,
                     // but not the one the session goes on in.
-                    let hidden = self.is_electron()
-                        && page.window_shown(Duration::from_millis(1000)).is_some_and(|(hidden, _)| hidden);
+                    let hidden = self.is_electron() && {
+                        let timeout = Duration::from_millis(1000);
+                        page.window_shown(timeout).is_some_and(|(hidden, _, url)| {
+                            hidden_by_main(&url, window_visibility(&self.browser, timeout).as_deref()).unwrap_or(hidden)
+                        })
+                    };
                     self.pages.push(page);
                     if !hidden {
                         self.active = self.pages.len() - 1;
@@ -1401,7 +1451,7 @@ impl BrowserSession {
             // An app's window closed under the session: it goes on in the
             // window the app shows, not a hidden helper.
             if was_active && self.is_electron() {
-                if let Some(i) = best_window(&self.pages, Duration::from_millis(1000)) {
+                if let Some(i) = best_window(&self.pages, &self.browser, Duration::from_millis(1000), false) {
                     self.active = i;
                 }
             }
@@ -2823,6 +2873,24 @@ fn is_syntax_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_main_process_says_which_window_is_hidden_only_when_it_knows_it() {
+        let windows = vec![
+            ("file:///app/helper.html".to_string(), false),
+            ("file:///app/index.html".to_string(), true),
+            ("file:///app/same.html".to_string(), false),
+            ("file:///app/same.html".to_string(), true),
+        ];
+        assert_eq!(hidden_by_main("file:///app/helper.html", Some(&windows)), Some(true));
+        assert_eq!(hidden_by_main("file:///app/index.html", Some(&windows)), Some(false));
+        // One of two windows there is visible: not hidden.
+        assert_eq!(hidden_by_main("file:///app/same.html", Some(&windows)), Some(false));
+        // A window still loading (another URL on each side), or no main
+        // process: the page's own word counts.
+        assert_eq!(hidden_by_main("about:blank", Some(&windows)), None);
+        assert_eq!(hidden_by_main("file:///app/index.html", None), None);
+    }
 
     #[test]
     fn the_sandbox_stays_on_unless_chrome_cannot_have_one() {
