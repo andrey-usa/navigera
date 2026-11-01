@@ -131,7 +131,10 @@ jobs:
         working-directory: tests/fixtures/electron-app
         run: |
           npm install --no-audit --no-fund --no-package-lock
-          node -e "console.log('electron', require('electron/package.json').version)"
+          # The binary comes from the package's install script, which npm
+          # no longer runs for dependencies by default.
+          node node_modules/electron/install.js
+          node -e "console.log('electron', require('electron/package.json').version, require('electron'))"
       - name: Tests (Electron e2e)
         env:
           NAVIGERA_REQUIRE_ELECTRON: "1"
