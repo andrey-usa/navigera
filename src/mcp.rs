@@ -600,7 +600,7 @@ impl<'a> Server<'a> {
         let command = match command {
             // MCP returns the image itself; the file is only a hand-off.
             Command::Screenshot { full_page, no_wait, .. } => {
-                Command::Screenshot { path: Some(screenshot_path()), full_page, no_wait }
+                Command::Screenshot { path: Some(screenshot_path()), full_page, no_wait, quality: None }
             }
             other => other,
         };

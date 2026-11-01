@@ -756,6 +756,9 @@ pub enum Command {
         /// Skip the network-quiet wait before reading (`--no-wait`).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_wait: bool,
+        /// `--quality <1-100>`: a JPEG at that quality instead of a PNG.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<u8>,
     },
     /// List open tabs: index, target id, and whether it is the active tab.
     #[serde(rename = "tab-list")]
@@ -1090,7 +1093,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
-    ("screenshot", "[--path <f.png>] [--full-page] [--no-wait]", "PNG of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
+    ("screenshot", "[--path <f.png>] [--full-page] [--quality <1-100>] [--no-wait]", "PNG (a JPEG with --quality) of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
     ("reset", "[--all]", "a clean slate in the same browser: a new browser context (no cookies, storage or cache from before) with one blank tab; the old tabs close (`set`, routes, credentials, init scripts, the dialog answer and `downloads --dir` stay; --all drops them too)"),
     ("tab-new", "[<url>]", "open a tab and make it active"),
     ("tab-list", "", "list tabs"),
@@ -2279,6 +2282,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             },
             full_page: extract_present(&mut args, "--full-page").then_some(true),
             no_wait: extract_present(&mut args, "--no-wait"),
+            quality: match str_flag(&mut args, "--quality")? {
+                Some(q) => match q.parse::<u8>() {
+                    Ok(n) if (1..=100).contains(&n) => Some(n),
+                    _ => return invalid(format!("screenshot --quality takes 1 to 100, not {q:?}")),
+                },
+                None => None,
+            },
         },
         unknown => {
             let hint = suggest(unknown).map(|s| format!(" — did you mean `{s}`?")).unwrap_or_default();
@@ -3764,18 +3774,20 @@ impl Driver {
                 self.session.close_page(index).map_err(|e| anyhow::anyhow!("tab-close {index}: {e:#}"))?;
                 Ok(self.state_json())
             }
-            Command::Screenshot { path, full_page, .. } => {
+            Command::Screenshot { path, full_page, quality, .. } => {
                 let path = path.clone().unwrap_or_else(|| {
                     format!(
-                        "shot-{}.png",
+                        "shot-{}.{}",
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_millis())
-                            .unwrap_or(0)
+                            .unwrap_or(0),
+                        if quality.is_some() { "jpg" } else { "png" }
                     )
                 });
-                let bytes =
-                    s.screenshot_png(full_page.unwrap_or(false)).map_err(|e| anyhow::anyhow!("screenshot: {e:#}"))?;
+                let bytes = s
+                    .screenshot_as(full_page.unwrap_or(false), *quality)
+                    .map_err(|e| anyhow::anyhow!("screenshot: {e:#}"))?;
                 write_own(&path, &bytes).map_err(|e| anyhow::anyhow!("screenshot: writing {path}: {e:#}"))?;
                 // Report where it really went (a relative path is relative
                 // to this process, which may not be the caller's directory).

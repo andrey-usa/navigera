@@ -2606,7 +2606,12 @@ impl BrowserSession {
 
     /// Viewport PNG screenshot bytes (`full_page` captures beyond viewport).
     pub fn screenshot_png(&self, full_page: bool) -> Result<Vec<u8>> {
-        self.active_tab().screenshot_png(self.timeout(None), full_page)
+        self.screenshot_as(full_page, None)
+    }
+
+    /// A JPEG at `quality` (1-100) when given, else a PNG.
+    pub fn screenshot_as(&self, full_page: bool, quality: Option<u8>) -> Result<Vec<u8>> {
+        self.active_tab().screenshot_as(self.timeout(None), full_page, quality)
     }
 
     /// True when this session drives Lightpanda rather than Chromium.

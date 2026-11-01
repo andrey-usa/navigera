@@ -4040,7 +4040,15 @@ impl Page {
 
     /// PNG screenshot bytes; `full_page` captures beyond the viewport.
     pub fn screenshot_png(&self, timeout: Duration, full_page: bool) -> Result<Vec<u8>> {
-        let mut params = json!({ "format": "png" });
+        self.screenshot_as(timeout, full_page, None)
+    }
+
+    /// Screenshot bytes: a JPEG at `quality` (1-100) when given, else a PNG.
+    pub fn screenshot_as(&self, timeout: Duration, full_page: bool, quality: Option<u8>) -> Result<Vec<u8>> {
+        let mut params = match quality {
+            Some(q) => json!({ "format": "jpeg", "quality": q }),
+            None => json!({ "format": "png" }),
+        };
         if full_page {
             params["captureBeyondViewport"] = Value::Bool(true);
         }

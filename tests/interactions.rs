@@ -1711,3 +1711,30 @@ fn the_dom_snapshot_tree_prints_what_chromes_tree_does() {
     }
     assert_eq!(checked, pages.len() + 1);
 }
+
+/// `screenshot --quality` writes a JPEG; a value out of range is an error.
+#[test]
+fn a_screenshot_with_a_quality_is_a_jpeg() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("shot-jpeg", &[]);
+    s.ok(&["goto", &format!("{}/stale-ref", site.url)]);
+    let dir = std::env::temp_dir().join(format!("nv-jpeg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (jpg, png) = (dir.join("a.jpg"), dir.join("a.png"));
+    let r = s.ok(&["screenshot", "--quality", "60", "--path", &jpg.display().to_string()]);
+    assert!(r["bytes"].as_u64().unwrap_or(0) > 0, "{r}");
+    s.ok(&["screenshot", "--path", &png.display().to_string()]);
+    let (j, p) = (std::fs::read(&jpg).unwrap(), std::fs::read(&png).unwrap());
+    assert_eq!(&j[..3], &[0xFF, 0xD8, 0xFF], "a JPEG");
+    assert_eq!(&p[..4], b"\x89PNG", "a PNG without --quality");
+    for bad in ["0", "101", "x"] {
+        let out = Command::new(tool_exe())
+            .args(["--session", &s.name, "screenshot", "--quality", bad])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        let e = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && e.contains("--quality takes 1 to 100"), "{bad}: {e}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

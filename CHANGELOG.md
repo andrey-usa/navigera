@@ -24,6 +24,8 @@ All notable changes to this project are documented here. The format follows
 - CI runs an Electron end-to-end test on Linux, macOS and Windows: a
   fixture app that saves a form through its main process and opens a
   second window.
+- `screenshot --quality <1-100>` writes a JPEG at that quality instead of a PNG (a
+  default `shot-<time>.jpg` name), for traces and reports that keep many.
 
 ### Changed
 
