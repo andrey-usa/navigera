@@ -601,6 +601,13 @@ impl Browser {
         })
     }
 
+    /// The browser's user agent (`Browser.getVersion`): an Electron app's
+    /// says `Electron/<version>` unless the app set its own.
+    pub fn user_agent(&self) -> Result<String> {
+        let v = self.block_on(self.client.send("Browser.getVersion", json!({}), None, CMD_TIMEOUT))?;
+        Ok(v.get("userAgent").and_then(Value::as_str).unwrap_or_default().to_string())
+    }
+
     /// List open tab targets: (target_id, url).
     pub fn tab_targets(&self) -> Result<Vec<(String, String)>> {
         self.block_on(async {

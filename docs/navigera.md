@@ -637,6 +637,14 @@ that still shows nothing notes that the app may be starting. A
 single-instance app that exits at once because a copy of it is already
 running fails `start` saying so.
 
+An app that is already running with a DevTools port (started with
+`--remote-debugging-port=9222`, as for Chrome's DevTools) is driven with
+`start --attach 9222` (or its `ws://` URL): navigera sees it is Electron,
+takes its windows as the tabs (and the ones it opens later), and starts in
+the largest one it shows. `quit` leaves the app running, `quit
+--close-browser` ends it, and `eval --main` needs the launch with
+`--electron`, which starts Node's inspector too.
+
 | `<app>` | what runs |
 |---|---|
 | the app's directory, or its main script (`.js`, `.cjs`, `.mjs`) | the Electron binary of the `electron` npm package found in `node_modules` from the app upward (`dist/electron`, `dist/Electron.app/Contents/MacOS/Electron`, `dist/electron.exe`), with the app as its first argument |

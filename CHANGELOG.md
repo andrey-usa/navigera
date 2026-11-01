@@ -47,6 +47,12 @@ know:
   gets its version from its main process, or null when that is out of
   reach. A single-instance app that exits because a copy of it is already
   running fails `start` saying that may be why.
+- `start --attach <port|ws://…>` on an Electron app that is already
+  running with a DevTools port drives it as `start --electron` does: its
+  windows are the tabs (new ones too, though no page opened them) and the
+  session starts in the largest one it shows, instead of opening a blank
+  tab the app has no use for. `quit` leaves the app running; `quit
+  --close-browser` ends it.
 - `eval --main <js>` in an Electron session runs JavaScript in the app's
   main process (Node's inspector, `--inspect=0` at launch): an expression,
   or a function called with the `electron` module, awaited. MCP's

@@ -767,12 +767,14 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
             let mut response = json!({ "id": null, "ok": true, "result": result });
             // An Electron app: its Electron version, and whether `eval --main`
             // can reach its main process.
-            if config.electron.is_some() {
+            if config.electron.is_some() || config.attach.is_some() {
                 if let Probe::Ready(status) = probe(&path) {
                     if let Some(electron) = status.get("electron").filter(|e| e.is_object()) {
                         response["result"]["electron"] = electron.clone();
                         if electron["main_process"] == false {
-                            response["notes"] = json!([ELECTRON_NO_MAIN_NOTE]);
+                            let note =
+                                if config.attach.is_some() { ELECTRON_ATTACHED_NOTE } else { ELECTRON_NO_MAIN_NOTE };
+                            response["notes"] = json!([note]);
                         }
                     }
                 }
@@ -857,6 +859,9 @@ mod tests {
 const PROBE: &str = "probe";
 
 /// `start --electron` on an app whose main process can't be reached.
+const ELECTRON_ATTACHED_NOTE: &str = "an Electron app navigera attached to: its windows are the tabs, quit \
+     leaves it running (quit --close-browser ends it), and eval --main needs the launch with --electron <app>";
+
 const ELECTRON_NO_MAIN_NOTE: &str = "this app turns Node's inspector off (Electron's EnableNodeCliInspectArguments \
      fuse), so eval --main can't reach its main process; its windows work as usual";
 

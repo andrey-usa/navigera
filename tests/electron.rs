@@ -347,6 +347,92 @@ fn a_single_instance_app_already_running_is_named() {
     ok(&first, &["quit"]);
 }
 
+/// The Electron binary in the fixture's `node_modules`.
+fn electron_binary(app: &std::path::Path) -> PathBuf {
+    let dist = app.join("node_modules").join("electron").join("dist");
+    if cfg!(target_os = "macos") {
+        dist.join("Electron.app/Contents/MacOS/Electron")
+    } else if cfg!(windows) {
+        dist.join("electron.exe")
+    } else {
+        dist.join("electron")
+    }
+}
+
+#[test]
+fn an_electron_app_already_running_is_attached() {
+    use std::io::{BufRead, BufReader};
+    let Some(app) = fixture_app() else {
+        eprintln!("skipping: no Electron in tests/fixtures/electron-app (run `npm install` there)");
+        return;
+    };
+    // The app as a user starts it for debugging: with a DevTools port.
+    let mut command = Command::new(electron_binary(&app));
+    command.arg("--remote-debugging-port=0");
+    if cfg!(target_os = "linux") {
+        // The CI runner can't give Chromium its sandbox.
+        command.arg("--no-sandbox");
+    }
+    let mut child = command
+        .arg(&app)
+        .arg("--helper-window")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the fixture app");
+    let stderr = BufReader::new(child.stderr.take().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            if let Some(at) = line.find("ws://") {
+                let _ = tx.send(line[at..].trim().to_string());
+            }
+        }
+    });
+    let ws = rx.recv_timeout(Duration::from_secs(30)).expect("the app's DevTools URL");
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut app_process = Kill(child);
+    // Its windows only show once the app is ready.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let session = session_name("attached");
+    let _quit = Quit(session.clone());
+    let (started, r) = run(&session, &["start", "--attach", &ws]);
+    assert!(started && r["ok"] == true, "{r}");
+    assert!(r["result"]["electron"]["version"].as_str().is_some_and(|v| v.starts_with("45.")), "{r}");
+    assert_eq!(r["result"]["electron"]["main_process"], false, "{r}");
+    assert!(r["notes"].to_string().contains("quit leaves it running"), "{r}");
+    // The app's windows are the tabs; the session is in the one it shows.
+    assert_eq!(tab_count(&session), 2, "the main window and the hidden helper");
+    let tree = ax(&session);
+    assert!(tree.contains("heading \"Orders\""), "{tree}");
+    // A window the app opens later is adopted, though nothing opened it from
+    // a page.
+    ok(&session, &["click", "--role", "button", "--name", "Settings"]);
+    wait_for(Duration::from_secs(10), "the Settings window as a third tab", || {
+        (tab_count(&session) == 3).then_some(())
+    });
+    wait_for(Duration::from_secs(5), "the Settings window's content", || {
+        ax(&session).contains("heading \"Settings\"").then_some(())
+    });
+    // quit leaves the app running...
+    ok(&session, &["quit"]);
+    assert!(app_process.0.try_wait().unwrap().is_none(), "the app still runs after quit");
+    // ...and --close-browser ends it.
+    let again = session_name("attached-again");
+    let _quit_again = Quit(again.clone());
+    ok(&again, &["start", "--attach", &ws]);
+    ok(&again, &["quit", "--close-browser"]);
+    wait_for(Duration::from_secs(15), "the app to exit", || app_process.0.try_wait().unwrap().map(|_| ()));
+}
+
 #[test]
 fn a_missing_app_is_named() {
     let session = session_name("missing");

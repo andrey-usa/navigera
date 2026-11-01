@@ -913,9 +913,36 @@ impl BrowserSession {
         let browser = Browser::connect(&handle, &ws_url, Duration::from_secs(120))?;
         crate::timing::log(&format!("[browser] {what}: connected to {ws_url}"));
         crate::timing::record("browser_up", started);
-        let page = match &adopt {
-            Some((_, id)) => browser.attach_page(id, "").with_context(|| format!("no tab {id} in that browser"))?,
-            None => browser.new_page_in(Some("about:blank"), true)?,
+        // An Electron app started with a DevTools port: it has no browser
+        // tabs to open, its windows are the tabs (those it opens later too),
+        // and the session goes on in the one it shows.
+        let electron = matches!(target, AttachTarget::Running(_))
+            && adopt.is_none()
+            && browser.user_agent().is_ok_and(|agent| agent.contains("Electron/"));
+        let (pages, active) = if electron {
+            browser.shared().adopt_windows.store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut pages = Vec::new();
+            for (id, url) in browser.tab_targets()? {
+                if url.starts_with("devtools://") {
+                    continue;
+                }
+                match browser.attach_page(&id, "") {
+                    Ok(page) => pages.push(page),
+                    Err(e) => eprintln!("[browser] could not adopt window {id}: {e:#}"),
+                }
+            }
+            if pages.is_empty() {
+                bail!("the Electron app at {ws_url} has no window open to work in");
+            }
+            let active = best_window(&pages, Duration::from_millis(2000)).unwrap_or(0);
+            browser.shared().take_opened();
+            (pages, active)
+        } else {
+            let page = match &adopt {
+                Some((_, id)) => browser.attach_page(id, "").with_context(|| format!("no tab {id} in that browser"))?,
+                None => browser.new_page_in(Some("about:blank"), true)?,
+            };
+            (vec![page], 0)
         };
         // A `--profile` browser is navigera's: its downloads go where ours
         // do. The user's own browser (`--attach`) keeps its own setting;
@@ -925,8 +952,8 @@ impl BrowserSession {
         crate::timing::record("launch_total", started);
         Ok(Self {
             browser: std::sync::Arc::new(browser),
-            pages: vec![page],
-            active: 0,
+            pages,
+            active,
             exe: what,
             lightpanda: false,
             timeout_ms: nav_timeout_ms,
@@ -1332,7 +1359,7 @@ impl BrowserSession {
             }
             // In someone else's browser, only tabs our own tabs opened are
             // ours; the user's popups stay theirs.
-            if self.attached && !self.pages.iter().any(|p| p.target_id() == opener) {
+            if self.attached && !self.is_electron() && !self.pages.iter().any(|p| p.target_id() == opener) {
                 continue;
             }
             match self.browser.attach_page(&target_id, &self.scope()) {
