@@ -4077,6 +4077,35 @@ impl Page {
     }
 
     /// First matching element's textContent, if present.
+    /// An app window as the app shows it: whether it is hidden (an Electron
+    /// app's helper or dropdown window, made with `show: false`), and its
+    /// area, to pick the window a user would look at.
+    pub fn window_shown(&self, timeout: Duration) -> (bool, f64) {
+        let v = self
+            .evaluate_raw("[document.visibilityState === 'hidden', window.innerWidth * window.innerHeight]", timeout)
+            .unwrap_or(Value::Null);
+        (v[0].as_bool().unwrap_or(false), v[1].as_f64().unwrap_or(0.0))
+    }
+
+    /// The document has loaded and shows something to read or use (text,
+    /// or a control): an app that boots its UI after the window opens is
+    /// past its empty shell.
+    pub fn shows_content(&self, timeout: Duration) -> bool {
+        self.evaluate_raw(
+            "document.readyState === 'complete' && !!document.body && (document.body.innerText.trim().length > 0 \
+             || !!document.querySelector('input:not([type=hidden]),button,a[href],select,textarea,[role=button],[role=link],[contenteditable]'))",
+            timeout,
+        )
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    }
+
+    /// The page's `navigator.userAgent`.
+    pub fn user_agent(&self, timeout: Duration) -> Result<String> {
+        Ok(self.evaluate_raw("navigator.userAgent", timeout)?.as_str().unwrap_or_default().to_string())
+    }
+
     /// The page's whole text as it reads (`innerText` of the body).
     pub fn page_text(&self, timeout: Duration) -> Result<String> {
         let value = self.evaluate_raw("(document.body || document.documentElement || {}).innerText ?? ''", timeout)?;

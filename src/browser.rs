@@ -276,6 +276,18 @@ pub fn chrome_major(exe: &str) -> Option<u32> {
     Some(major)
 }
 
+/// The window a user would look at: the largest that isn't hidden. None
+/// when every window is hidden (or there are none).
+fn best_window(pages: &[crate::cdp::Page], timeout: Duration) -> Option<usize> {
+    pages
+        .iter()
+        .enumerate()
+        .map(|(i, page)| (i, page.window_shown(timeout)))
+        .filter(|(_, (hidden, _))| !hidden)
+        .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
+        .map(|(i, _)| i)
+}
+
 /// What `start --electron <app>` runs: an executable as it is, or for an
 /// app's directory or main script, the Electron binary its `node_modules`
 /// holds (the `electron` npm package's `dist/`, looked for from the app
@@ -965,17 +977,29 @@ impl BrowserSession {
         // The app opens its first window when it is ready, not at launch.
         let wait = Duration::from_millis(nav_timeout_ms.max(1000.0) as u64);
         let deadline = std::time::Instant::now() + wait;
-        let windows = loop {
-            let windows: Vec<(String, String)> = browser
-                .tab_targets()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|(_, url)| !url.starts_with("devtools://"))
-                .collect();
-            if !windows.is_empty() {
-                break windows;
+        // Its windows, as they open: the session starts on one the app shows
+        // (an app can open hidden helper windows, a dropdown or a tray menu,
+        // first), waiting for one while only hidden ones are open.
+        let check = Duration::from_millis(2000);
+        let mut pages: Vec<crate::cdp::Page> = Vec::new();
+        let mut tried = std::collections::HashSet::new();
+        let active = loop {
+            for (id, url) in browser.tab_targets().unwrap_or_default() {
+                if url.starts_with("devtools://") || !tried.insert(id.clone()) {
+                    continue;
+                }
+                match browser.attach_page(&id, "") {
+                    Ok(page) => pages.push(page),
+                    Err(e) => eprintln!("[browser] could not adopt window {id}: {e:#}"),
+                }
+            }
+            if let Some(i) = best_window(&pages, check) {
+                break i;
             }
             if browser.is_closed() || std::time::Instant::now() >= deadline {
+                if !pages.is_empty() {
+                    break 0;
+                }
                 bail!(
                     "the Electron app opened no window within {} ms{}",
                     wait.as_millis(),
@@ -984,23 +1008,20 @@ impl BrowserSession {
             }
             std::thread::sleep(Duration::from_millis(50));
         };
-        let mut pages = Vec::new();
-        for (id, _) in &windows {
-            match browser.attach_page(id, "") {
-                Ok(page) => pages.push(page),
-                Err(e) => eprintln!("[browser] could not adopt window {id}: {e:#}"),
-            }
-        }
-        if pages.is_empty() {
-            bail!("could not attach to any of the app's {} window(s)", windows.len());
-        }
         // Adopted now: the creation events of these windows are not new tabs.
         browser.shared().take_opened();
+        // Ready when that window has loaded and shows something: an app
+        // that boots its UI after the window opens is read past its empty
+        // shell (bounded by the navigation timeout; `ax` says if it isn't).
+        let ready_by = std::time::Instant::now() + wait.saturating_sub(started.elapsed());
+        while !pages[active].shows_content(check) && std::time::Instant::now() < ready_by && !browser.is_closed() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
         crate::timing::record("launch_total", started);
         Ok(Self {
             browser: std::sync::Arc::new(browser),
             pages,
-            active: 0,
+            active,
             exe,
             lightpanda: false,
             timeout_ms: nav_timeout_ms,
@@ -1314,9 +1335,14 @@ impl BrowserSession {
                 Ok(page) => {
                     self.apply_overrides(&page);
                     self.apply_init_scripts(&page);
+                    // An app's hidden window (a dropdown, a helper) is a tab,
+                    // but not the one the session goes on in.
+                    let hidden = self.is_electron() && page.window_shown(Duration::from_millis(1000)).0;
                     self.pages.push(page);
-                    self.active = self.pages.len() - 1;
-                    adopted.push(self.active);
+                    if !hidden {
+                        self.active = self.pages.len() - 1;
+                        adopted.push(self.active);
+                    }
                 }
                 Err(e) => eprintln!("[browser] could not adopt new tab {target_id}: {e:#}"),
             }
@@ -1333,11 +1359,19 @@ impl BrowserSession {
                 continue;
             }
             shared.unregister(self.pages[index].session_id());
+            let was_active = index == self.active;
             self.pages.remove(index);
             if self.active >= self.pages.len() {
                 self.active = self.pages.len() - 1;
             } else if index < self.active {
                 self.active -= 1;
+            }
+            // An app's window closed under the session: it goes on in the
+            // window the app shows, not a hidden helper.
+            if was_active && self.is_electron() {
+                if let Some(i) = best_window(&self.pages, Duration::from_millis(1000)) {
+                    self.active = i;
+                }
             }
         }
         adopted
@@ -2012,7 +2046,7 @@ impl BrowserSession {
     }
 
     /// The element a stale ref stood for, found again after a re-render
-    /// (see [`crate::cdp::page::Page::refind`]): the new ref and how it reads.
+    /// (see [`crate::cdp::Page::refind`]): the new ref and how it reads.
     pub fn refind(&self, node: u64) -> Option<(u64, String)> {
         self.active_tab().refind(node, self.timeout(None))
     }
@@ -2633,6 +2667,18 @@ impl BrowserSession {
     /// An Electron app (`start --electron`): its windows are the app's own.
     pub fn is_electron(&self) -> bool {
         self.browser.shared().adopt_windows.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// What `status` (and `start`) say about an Electron app: its Electron
+    /// version (from the window's user agent) and whether `eval --main` can
+    /// reach its main process (an app may turn Node's inspector off).
+    pub fn electron_info(&self) -> Option<serde_json::Value> {
+        if !self.is_electron() {
+            return None;
+        }
+        let agent = self.active_tab().user_agent(self.timeout(None)).unwrap_or_default();
+        let version = agent.split("Electron/").nth(1).and_then(|v| v.split_whitespace().next()).unwrap_or("");
+        Some(serde_json::json!({ "version": version, "main_process": self.browser.has_main_process() }))
     }
 
     /// `eval --main`: JavaScript in an Electron app's main process (see

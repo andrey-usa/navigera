@@ -19,6 +19,13 @@ All notable changes to this project are documented here. The format follows
   `--electron-arg <arg>` passes arguments to the app. `quit` ends the app.
   `tab-new`, `reset`, `show` and `hide` say why they don't apply. `navigera
   mcp --electron <app>` gives an IDE agent the same.
+- `start --electron` waits for a window the app shows to have something to
+  read or use, starts on the largest window that isn't hidden (an app's
+  hidden helper windows are tabs, not the active one, also after a window
+  closes), and reports `electron: {version, main_process}`. An `ax` of a
+  window that still shows nothing says the app may be starting. Found on
+  real apps: one with six windows started on a hidden dropdown; others
+  read an empty shell for up to 20 s.
 - `eval --main <js>` in an Electron session runs JavaScript in the app's
   main process (Node's inspector, `--inspect=0` at launch): an expression,
   or a function called with the `electron` module, awaited. MCP's

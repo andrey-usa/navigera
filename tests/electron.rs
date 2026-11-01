@@ -130,31 +130,45 @@ fn an_electron_app_is_driven_through_its_windows() {
     let session = session_name("app");
     let _quit = Quit(session.clone());
     // The app's directory: navigera runs the Electron in its node_modules,
-    // and --electron-arg reaches the app's command line.
-    ok(
+    // and --electron-arg reaches the app's command line. The app first opens
+    // a hidden helper window, and mounts its form a second after load.
+    let (started, r) = run(
         &session,
         &[
             "start",
             "--electron",
             app.to_str().unwrap(),
             &format!("--electron-arg=--pid-file={}", pid_file.display()),
+            "--electron-arg=--helper-window",
+            "--electron-arg=--late-ui",
             "--idle-timeout-s",
             "300",
         ],
     );
+    assert!(started && r["ok"] == true, "{r}");
+    // `start` says which Electron, and that its main process answers.
+    let electron = &r["result"]["electron"];
+    assert!(electron["version"].as_str().is_some_and(|v| v.starts_with("45.")), "{r}");
+    assert_eq!(electron["main_process"], true, "{r}");
     let pid: u32 = wait_for(Duration::from_secs(10), "the app's pid file", || {
         std::fs::read_to_string(&pid_file).ok()?.trim().parse().ok()
     });
     assert!(alive(pid), "the app runs");
 
-    // The app's first window is the session's tab, read like a page.
+    // The session starts on the window the app shows (not the hidden helper),
+    // once it shows something: the late form is there without a wait.
     let tree = ax(&session);
     assert!(tree.contains("heading \"Orders\""), "{tree}");
+    let tabs = ok(&session, &["tab-list"]);
+    assert_eq!(tabs["tabs"].as_array().map(Vec::len), Some(2), "the helper is a tab too: {tabs}");
+    assert!(tabs["url"].as_str().is_some_and(|u| u.contains("index.html")), "{tabs}");
+    let active = tabs["active"].as_u64().unwrap() as usize;
+    let orders_tab = tabs["tabs"][active]["target"].as_str().unwrap().to_string();
     assert!(tree.contains("textbox \"Customer\""), "{tree}");
     assert!(tree.contains("button \"Save order\""), "{tree}");
     assert!(tree.contains("Electron "), "the preload's bridge reached the page:\n{tree}");
     let href = eval(&session, "location.href");
-    assert!(href.as_str().is_some_and(|u| u.starts_with("file://") && u.ends_with("index.html")), "{href}");
+    assert!(href.as_str().is_some_and(|u| u.starts_with("file://") && u.contains("index.html")), "{href}");
     let agent = eval(&session, "navigator.userAgent");
     assert!(agent.as_str().is_some_and(|ua| ua.contains("Electron/")), "{agent}");
 
@@ -164,7 +178,7 @@ fn an_electron_app_is_driven_through_its_windows() {
     let version = eval_main(&session, "process.versions.electron");
     assert!(version.as_str().is_some_and(|v| v.starts_with("45.")), "{version}");
     assert_eq!(eval_main(&session, "async ({ app }) => { await app.whenReady(); return app.isReady(); }"), true);
-    assert_eq!(eval_main(&session, "({ BrowserWindow }) => BrowserWindow.getAllWindows().length"), 1);
+    assert_eq!(eval_main(&session, "({ BrowserWindow }) => BrowserWindow.getAllWindows().length"), 2);
     let (thrown, r) = run(&session, &["eval", "--main", "() => { throw new Error('nope') }"]);
     assert!(!thrown && r.to_string().contains("nope"), "{r}");
 
@@ -186,25 +200,29 @@ fn an_electron_app_is_driven_through_its_windows() {
     // A window the app opens itself (no opener, unlike a popup) becomes a
     // tab, and the active one.
     ok(&session, &["click", "--role", "button", "--name", "Settings"]);
-    wait_for(Duration::from_secs(10), "the Settings window as a second tab", || {
-        (tab_count(&session) == 2).then_some(())
+    wait_for(Duration::from_secs(10), "the Settings window as a third tab", || {
+        (tab_count(&session) == 3).then_some(())
     });
     let tabs = ok(&session, &["tab-list"]);
-    assert_eq!(tabs["active"], 1, "{tabs}");
-    assert_eq!(eval_main(&session, "({ BrowserWindow }) => BrowserWindow.getAllWindows().length"), 2);
+    assert!(tabs["url"].as_str().is_some_and(|u| u.ends_with("settings.html")), "the new window is active: {tabs}");
+    let settings_tab = tabs["tabs"][tabs["active"].as_u64().unwrap() as usize]["target"].as_str().unwrap().to_string();
+    assert_eq!(eval_main(&session, "({ BrowserWindow }) => BrowserWindow.getAllWindows().length"), 3);
     wait_for(Duration::from_secs(5), "the Settings window's content", || {
         ax(&session).contains("heading \"Settings\"").then_some(())
     });
     ok(&session, &["click", "--label", "Compact rows"]);
     assert_eq!(eval(&session, "document.getElementById('compact').checked"), true);
-    ok(&session, &["tab-select", "0"]);
+    ok(&session, &["tab-select", &orders_tab]);
     assert!(ax(&session).contains("heading \"Orders\""));
-    ok(&session, &["tab-select", "1"]);
+    ok(&session, &["tab-select", &settings_tab]);
 
-    // The window closes itself: the session goes on in the other one.
+    // The window closes itself: the session goes on in the window the app
+    // shows, not in the hidden helper.
     ok(&session, &["click", "--role", "button", "--name", "Close"]);
-    wait_for(Duration::from_secs(10), "the Settings window to go", || (tab_count(&session) == 1).then_some(()));
+    wait_for(Duration::from_secs(10), "the Settings window to go", || (tab_count(&session) == 2).then_some(()));
     assert!(ax(&session).contains("heading \"Orders\""));
+    let tabs = ok(&session, &["tab-list"]);
+    assert!(tabs["url"].as_str().is_some_and(|u| u.contains("index.html")), "{tabs}");
 
     // An app is not a browser: it opens its own windows.
     let (success, r) = run(&session, &["tab-new"]);

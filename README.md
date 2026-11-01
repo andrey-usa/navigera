@@ -155,8 +155,12 @@ closes itself is dropped, and the session goes on in the one before.
 function gets the `electron` module: read the app's state, call its IPC
 handlers' logic, check what a menu or dialog would do. The app
 runs as it would for a person (a visible window, its own profile and
-storage), so `show`, `hide`, `reset` and `tab-new` don't apply. On Linux it
-needs a display (`xvfb-run` on a server).
+storage), so `show`, `hide`, `reset` and `tab-new` don't apply. `start`
+waits for a window the app shows to have something in it, starts on that
+window (hidden helper windows are tabs, not the active one), and says the
+app's Electron version and whether its main process can be reached. On
+Linux it needs a display: on a server, one `xvfb-run` around the whole
+session.
 
 **Natural mode.** `--natural` makes a headless browser look like the browser
 it is: no `HeadlessChrome` in the user agent (page, workers, request

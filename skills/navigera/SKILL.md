@@ -106,7 +106,10 @@ navigera -s app quit                        # ends the app
 
 `--electron-arg <arg>` (repeatable) passes arguments to the app. Every other
 command works as on a page. `tab-new`, `reset`, `show` and `hide` don't: the
-app owns its windows and storage. On a Linux server, run under `xvfb-run`.
+app owns its windows and storage. `start` waits for a window the app shows to
+have content and says `electron: {version, main_process}`; an app that is
+still starting may need `wait --text <word>` before `ax`. On a Linux server,
+run the whole session inside one `xvfb-run` (one per command kills the app).
 
 ## Reading a page: `ax`
 

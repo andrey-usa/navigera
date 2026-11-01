@@ -623,9 +623,16 @@ version.
 launches the app with a DevTools port of the app's choosing
 (`--remote-debugging-port=0`, read back from its stderr) and nothing else
 of Chrome's launch flags: an app is not a browser, and a throwaway profile
-or headless mode would change how it starts. `start` returns once the app's
-first window is open (up to the navigation timeout); that window is the
-first tab.
+or headless mode would change how it starts. `start` returns once a window
+the app shows is open and has loaded something to read or use (text or a
+control), up to the navigation timeout: an app that boots its UI after the
+window opens is past its empty shell. The session starts on the largest
+window that isn't hidden (an app's helper windows, a dropdown or a tray
+menu, made with `show: false`, are tabs but not the one the session works
+in, now or after a window closes). `start`'s result says
+`electron: {version, main_process}`: the app's Electron version and
+whether `eval --main` can reach its main process. An `ax` of a window that
+still shows nothing notes that the app may be starting.
 
 | `<app>` | what runs |
 |---|---|
@@ -657,7 +664,9 @@ quit and start again), `show` and `hide` (it is a visible app) are refused
 with that reason. `--electron` is an alternative to `--attach`,
 `--profile` and `--engine lightpanda`, and always gets a process of its own
 (never the shared browser). On Linux the app needs a display: on a server,
-run the session under `xvfb-run`. An app that removes
+run the whole session inside one `xvfb-run` (or start one Xvfb and export
+`DISPLAY`); an `xvfb-run` per command ends the display, and the app with
+it, when that command does. An app that removes
 `--remote-debugging-port` from its command line can't be driven; `start`
 says so with the app's last stderr lines. CI runs `tests/electron.rs`
 against `tests/fixtures/electron-app` on Linux, macOS and Windows.

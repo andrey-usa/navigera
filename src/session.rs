@@ -765,6 +765,18 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
             // know `find`/`check` work without reading a key variable (and
             // printing the key into its own context).
             let mut response = json!({ "id": null, "ok": true, "result": result });
+            // An Electron app: its Electron version, and whether `eval --main`
+            // can reach its main process.
+            if config.electron.is_some() {
+                if let Probe::Ready(status) = probe(&path) {
+                    if let Some(electron) = status.get("electron").filter(|e| e.is_object()) {
+                        response["result"]["electron"] = electron.clone();
+                        if electron["main_process"] == false {
+                            response["notes"] = json!([ELECTRON_NO_MAIN_NOTE]);
+                        }
+                    }
+                }
+            }
             if let Some(decider) = crate::decide::Decider::from_env() {
                 response["result"]["decider"] = json!(decider.model());
                 // The contract, where the agent decides how to proceed: a
@@ -843,6 +855,10 @@ mod tests {
 /// Marks a `status` from `sessions`: it does not count as using the
 /// session (an idle one stays idle).
 const PROBE: &str = "probe";
+
+/// `start --electron` on an app whose main process can't be reached.
+const ELECTRON_NO_MAIN_NOTE: &str = "this app turns Node's inspector off (Electron's EnableNodeCliInspectArguments \
+     fuse), so eval --main can't reach its main process; its windows work as usual";
 
 /// The request field naming who sent a command (see [`caller_id`]).
 const CALLER: &str = "caller";

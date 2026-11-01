@@ -176,6 +176,12 @@ impl Browser {
         Ok(browser)
     }
 
+    /// Whether an Electron app's main process can be reached (`eval --main`):
+    /// its Node inspector answered at launch.
+    pub fn has_main_process(&self) -> bool {
+        self.node_ws.is_some()
+    }
+
     /// Run JavaScript in an Electron app's main process (`eval --main`):
     /// an expression, or a function called with the `electron` module
     /// (`({ app }) => app.getName()`). Awaited; the result comes back as

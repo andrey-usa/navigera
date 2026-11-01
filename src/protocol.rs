@@ -3026,6 +3026,17 @@ impl Driver {
         }
         // Last: what this snapshot itself waited for, if anything. It goes
         // after the tree notes so their order does not change.
+        // An app window with nothing in it yet: an Electron app that is still
+        // starting (its UI boots after the window opens).
+        if let (Command::Ax { .. }, Value::String(tree)) = (command, &result) {
+            if self.session.is_electron() && tree.lines().filter(|l| l.trim_start().starts_with("- ")).count() == 0 {
+                notes.push(
+                    "the app's window shows nothing yet (an app that is still starting): wait for something it shows \
+                     when ready (`wait --text <word>`), then `ax` again"
+                        .into(),
+                );
+            }
+        }
         if quiet_waited_ms > 0 {
             notes.push(format!("waited {quiet_waited_ms} ms for network quiet"));
         }
@@ -3760,6 +3771,9 @@ impl Driver {
                     None => "own".to_string(),
                 });
                 state["version"] = json!(env!("CARGO_PKG_VERSION"));
+                if let Some(electron) = self.session.electron_info() {
+                    state["electron"] = electron;
+                }
                 Ok(state)
             }
             Command::TabList {} => Ok(self.tabs_json()),
