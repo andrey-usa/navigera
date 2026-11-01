@@ -60,7 +60,7 @@ jobs:
 
       - name: Harness syntax check
         run: |
-          python3 -m py_compile bench/ladder/*.py bench/ladder/contenders/*.py \
+          python3 -m py_compile bench/ladder/*.py bench/ladder/contenders/*.py bench/gate/*.py \
             bench/site/server.py tests/fixtures/*.py tools/*.py bench/agent-eval/*.py bench/ide-eval/*.py bench/decide/*.py packaging/*.py
           node --check bench/ladder/contenders/contender_playwright.mjs
           node --check bench/ladder/contenders/contender_puppeteer.mjs

@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Behaviour changes
+
+What a script or an agent relying on the 0.7.0 output or timing should
+know:
+
+- `ax` may add a line under the page line when it cut text
+  (`… N texts cut short here …`), and prints long texts in full when the
+  whole snapshot stays under 32,000 characters.
+- A snapshot right after an action whose requests have started waits for
+  them and 100 ms, not 500 ms of network quiet.
+- An op on a ref whose element was redrawn now acts on the redrawn element
+  (with a note) instead of failing, when that element is certain.
+- More notes: another process using the session, a redrawn ref, an
+  Electron window still starting.
+- An icon-only control that printed as a bare `button [ref=N]` may now
+  carry `icon="svg"`, `img="inline"` or an image's file name.
+- `text` with no selector is the page's whole text (it was an error).
+
 ### Added
 
 - `screenshot --timeout-ms <n>` bounds the capture (default: the session
