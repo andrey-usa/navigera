@@ -539,7 +539,14 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   process that uses it: two agents on one name drive one browser (wrong
   pages, missing refs, one's `quit` ends the other's session). A command
   that came in while another client's command was running on the session
-  gets a `note` saying so. Give each agent its own `-s <name>`.
+  gets a `note` saying so. So does a command from a different process than
+  the session's last one (within 10 minutes), and that last one's next
+  command is told whether its tab was moved and from where to where. The
+  process is the first one up the tree that isn't a shell, a wrapper or
+  navigera's npm/Python launcher (Linux), so an agent that runs each
+  command in a fresh shell counts as one; `NAVIGERA_CALLER=<name>` names
+  it explicitly (and turns it on elsewhere). Give each agent its own
+  `-s <name>`.
 - **Shared browser.** Named sessions (and `navigera mcp`) share one
   browser, each in a browser context of its own: tabs, popups, cookies,
   local storage, cache, downloads (each session's own directory),

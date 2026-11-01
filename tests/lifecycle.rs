@@ -203,6 +203,37 @@ fn a_second_caller_on_one_name_is_told() {
     assert!(third.get("notes").is_none(), "{third}");
 }
 
+/// Two processes on one session name, one after the other: the one that
+/// comes in is told another used the session; the first one's next command
+/// is told its tab was moved, and from where to where; then nothing more.
+#[test]
+fn a_caller_whose_tab_another_one_moved_is_told() {
+    if !chrome() {
+        return;
+    }
+    let dir = Dir::new();
+    let as_caller = |who: &str, args: &[&str]| -> Value {
+        let out = dir.command().env("NAVIGERA_CALLER", who).args(args).output().expect("run navigera");
+        serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("{args:?}: {}", String::from_utf8_lossy(&out.stdout)))
+    };
+    let notes = |r: &Value| -> String { r["notes"].as_array().map(|n| format!("{n:?}")).unwrap_or_default() };
+    dir.ok(&["-s", "two", "start"]);
+    let a = as_caller("agent-a", &["-s", "two", "goto", "data:text/html,<title>one</title>"]);
+    assert!(a.get("notes").is_none(), "{a}");
+    let b = as_caller("agent-b", &["-s", "two", "goto", "data:text/html,<title>two</title>"]);
+    assert!(notes(&b).contains("another process used this session"), "{b}");
+    let a = as_caller("agent-a", &["-s", "two", "get", "title"]);
+    assert_eq!(a["result"], "two");
+    let said = notes(&a);
+    assert!(
+        said.contains("moved its tab") && said.contains("<title>one</title> -> data:text/html,<title>two</title>"),
+        "{a}"
+    );
+    let a = as_caller("agent-a", &["-s", "two", "get", "title"]);
+    assert!(a.get("notes").is_none(), "{a}");
+}
+
 /// `quit --close-browser` on a shared session: the browser stays while
 /// another session uses it, and closes at once, not after its grace
 /// period, with the last one.

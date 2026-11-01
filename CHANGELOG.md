@@ -29,6 +29,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Two processes on one session name are told: a command from another
+  process than the session's last one notes it, and the first process's
+  next command says its tab was moved, from where to where (before, only a
+  command that arrived while another ran got a note, and the process whose
+  page was replaced learned nothing). On Linux the process is the agent,
+  not the shell it runs each command in; `NAVIGERA_CALLER` names it
+  anywhere.
 - A ref outlives a re-render of its element: an op whose element the page
   drew again (a list redrawn, a button replaced after a state change) is
   done on the same element, found by the role, name and place the snapshot

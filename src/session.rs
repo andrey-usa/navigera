@@ -345,9 +345,10 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     // When the last connection that ran a command was done: one that only
     // connected (`start` checking the socket is up) kept no one waiting.
     let mut free_since = Instant::now();
+    let mut callers = Callers::default();
     for (stream, arrived) in incoming {
         let waited = arrived < free_since;
-        let (quit, ran) = serve_connection(&mut driver, stream, &last_activity, &server, waited);
+        let (quit, ran) = serve_connection(&mut driver, stream, &last_activity, &server, waited, &mut callers);
         if ran {
             free_since = Instant::now();
         }
@@ -390,6 +391,7 @@ fn serve_connection(
     last: &AtomicU64,
     server: &ServerInfo,
     waited: bool,
+    callers: &mut Callers,
 ) -> (bool, bool) {
     let reader = match stream.try_clone() {
         Ok(read_half) => BufReader::new(read_half),
@@ -401,10 +403,15 @@ fn serve_connection(
     for line in reader.lines() {
         let Ok(raw) = line else { return (false, ran) };
         // `sessions` asks for status without making the session busy.
-        let (is_status, probe) = match serde_json::from_str::<Value>(&raw) {
-            Ok(v) => (v["op"] == "status", v["op"] == "status" && v[PROBE] == true),
-            Err(_) => (false, false),
+        let (is_status, probe, caller) = match serde_json::from_str::<Value>(&raw) {
+            Ok(v) => (
+                v["op"] == "status",
+                v["op"] == "status" && v[PROBE] == true,
+                v[CALLER].as_str().filter(|_| v["op"] != "status" && v["op"] != "quit").map(str::to_string),
+            ),
+            Err(_) => (false, false, None),
         };
+        let caller_note = caller.as_deref().and_then(|c| callers.before(c, driver));
         let idle_s = now_s().saturating_sub(last.load(Ordering::Relaxed));
         if !probe {
             last.store(now_s(), Ordering::Relaxed);
@@ -414,10 +421,16 @@ fn serve_connection(
         };
         // A `sessions` probe is no one's command either.
         ran |= !probe;
+        if let Some(c) = caller.as_deref() {
+            let url = responses.first().and_then(|r| r.result.as_ref()).and_then(|r| r["url"].as_str());
+            callers.after(c, url);
+        }
         if let Some(first) = responses.first_mut() {
             if waited {
                 first.notes.get_or_insert_with(Vec::new).push(SHARED_NAME_NOTE.into());
                 waited = false;
+            } else if let Some(note) = caller_note {
+                first.notes.get_or_insert_with(Vec::new).push(note);
             }
             if let (true, Some(result)) = (is_status, first.result.as_mut()) {
                 result["server"] = json!({
@@ -516,6 +529,9 @@ pub fn client(config: &SessionConfig, name: &str, command: &Command, output: &mu
         }
     };
     request["id"] = json!(1);
+    if let Some(caller) = caller_id() {
+        request[CALLER] = json!(caller);
+    }
     localize_request(&mut request, config);
     let mut writer = &stream;
     // One write: on Windows (TCP) a split line would wait out Nagle.
@@ -827,6 +843,115 @@ mod tests {
 /// Marks a `status` from `sessions`: it does not count as using the
 /// session (an idle one stays idle).
 const PROBE: &str = "probe";
+
+/// The request field naming who sent a command (see [`caller_id`]).
+const CALLER: &str = "caller";
+
+/// Who is calling: `$NAVIGERA_CALLER`, else (Linux) the first process up
+/// the tree that is not a shell, a wrapper (`timeout`, `env`, ...) or
+/// navigera's own launcher (the npm or Python shim): the agent that runs
+/// its commands through a fresh shell each time stays one caller. Its pid
+/// and start time, so a reused pid is someone else. None elsewhere.
+fn caller_id() -> Option<String> {
+    if let Some(v) = std::env::var("NAVIGERA_CALLER").ok().filter(|v| !v.trim().is_empty()) {
+        return Some(v);
+    }
+    linux_caller()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_caller() -> Option<String> {
+    const PASS: &[&str] = &[
+        "sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "tcsh", "csh", "busybox", "env", "timeout", "nice",
+        "nohup", "stdbuf", "setsid", "xargs", "time", "sudo", "su", "doas", "script", "flock", "ionice", "taskset",
+        "chrt",
+    ];
+    let mut pid = std::os::unix::process::parent_id();
+    for _ in 0..12 {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // `pid (comm) state ppid ...`: comm may hold spaces and parens.
+        let (head, rest) = stat.rsplit_once(')')?;
+        let comm = head.split_once('(')?.1;
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let ppid: u32 = fields.get(1)?.parse().ok()?;
+        let started = fields.get(19).copied().unwrap_or("0");
+        let launcher = matches!(comm, "node" | "python" | "python3" | "deno" | "bun")
+            && std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|c| String::from_utf8_lossy(&c).contains("navigera"))
+                .unwrap_or(false);
+        if !PASS.contains(&comm) && !launcher {
+            return Some(format!("{comm} {pid}/{started}"));
+        }
+        if ppid <= 1 {
+            return None;
+        }
+        pid = ppid;
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_caller() -> Option<String> {
+    None
+}
+
+/// Who used the session, for telling a caller that another one has been
+/// at it: each caller's tab URL after its last command, and the callers
+/// another one has run commands after since.
+#[derive(Default)]
+struct Callers {
+    last: Option<(String, Instant)>,
+    url_after: std::collections::HashMap<String, String>,
+    overtaken: std::collections::HashSet<String>,
+}
+
+impl Callers {
+    /// The note for `caller`'s command, if another caller has used the
+    /// session since its last one (or recently, for a caller new here).
+    fn before(&mut self, caller: &str, driver: &Driver) -> Option<String> {
+        if self.overtaken.remove(caller) {
+            let before = self.url_after.get(caller).cloned().unwrap_or_default();
+            let now = driver.session().url();
+            return Some(if !before.is_empty() && !now.is_empty() && before != now {
+                format!(
+                    "another process used this session since your last command and moved its tab: {before} -> {now} \
+                     (a session name is shared by every process that uses it: give each agent its own -s name)"
+                )
+            } else {
+                "another process used this session since your last command (a session name is shared by every \
+                 process that uses it: give each agent its own -s name)"
+                    .to_string()
+            });
+        }
+        match &self.last {
+            Some((other, at))
+                if other != caller
+                    && !self.url_after.contains_key(caller)
+                    && at.elapsed() < Duration::from_secs(600) =>
+            {
+                Some(format!(
+                    "another process used this session {} s ago (a session name is shared by every process that uses \
+                     it: give each agent its own -s name)",
+                    at.elapsed().as_secs()
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// `caller`'s command ran, leaving its tab at `url`.
+    fn after(&mut self, caller: &str, url: Option<&str>) {
+        for other in self.url_after.keys() {
+            if other != caller {
+                self.overtaken.insert(other.clone());
+            }
+        }
+        if let Some(url) = url {
+            self.url_after.insert(caller.to_string(), url.to_string());
+        }
+        self.last = Some((caller.to_string(), Instant::now()));
+    }
+}
 
 /// What a session server answers `status` with, or why it doesn't.
 enum Probe {
