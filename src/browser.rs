@@ -2003,18 +2003,26 @@ impl BrowserSession {
         let shared = self.browser.shared();
         let scope = self.scope();
         let auth = shared.credentials.lock().unwrap().contains_key(&scope);
-        let patterns: Vec<serde_json::Value> = if auth {
-            vec![serde_json::json!({ "urlPattern": "*" })]
-        } else {
-            shared
-                .routes
-                .lock()
-                .unwrap()
-                .get(&scope)
-                .into_iter()
-                .flatten()
-                .map(|r| serde_json::json!({ "urlPattern": r.pattern }))
-                .collect()
+        // Modify rules pause at the response stage; the rest (and auth,
+        // which needs every request) at the request stage.
+        let patterns: Vec<serde_json::Value> = {
+            let routes = shared.routes.lock().unwrap();
+            let rules = routes.get(&scope).into_iter().flatten();
+            let mut patterns: Vec<serde_json::Value> = if auth {
+                vec![serde_json::json!({ "urlPattern": "*" })]
+            } else {
+                rules
+                    .clone()
+                    .filter(|r| !r.action.at_response())
+                    .map(|r| serde_json::json!({ "urlPattern": r.pattern }))
+                    .collect()
+            };
+            patterns.extend(
+                rules
+                    .filter(|r| r.action.at_response())
+                    .map(|r| serde_json::json!({ "urlPattern": r.pattern, "requestStage": "Response" })),
+            );
+            patterns
         };
         if patterns.is_empty() {
             return self.set_override("fetch", vec![], vec![("Fetch.disable", serde_json::json!({}))]);

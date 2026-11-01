@@ -352,7 +352,12 @@ pub const EXAMPLES: &[Help] = &[
     ),
     (
         "route",
-        &[("navigera -s s route", ""), ("navigera -s s route \"*://*.example.com/*\" --abort", "")],
+        &[
+            ("navigera -s s route", ""),
+            ("navigera -s s route \"*://*.example.com/*\" --abort", ""),
+            ("navigera -s s route \"*/api/*\" --har api.har --not-found continue", ""),
+            ("navigera -s s route \"*/api/me\" --modify --replace free pro", ""),
+        ],
         &[
             ("<url glob>", "requests to match, with * and ? wildcards"),
             ("--abort", "fail matching requests (the default with no flag)"),
@@ -361,6 +366,11 @@ pub const EXAMPLES: &[Help] = &[
             ("--body-file <f>", "read the --status body from this file"),
             ("--content-type <t>", "the Content-Type for --status answers"),
             ("--header 'Name: value'", "an extra header for --status answers"),
+            ("--har <f>", "answer from a HAR file (record one with network --har): same method and URL, entries in order, then the last"),
+            ("--not-found abort|continue", "--har: what requests the HAR has no entry for do (default abort)"),
+            ("--modify", "let matching requests reach the server and change their responses"),
+            ("--set-header 'Name: value'", "--modify: set a response header ('Name:' removes it)"),
+            ("--replace <from> <to>", "--modify: replace text in the response body (repeatable)"),
         ],
     ),
     (

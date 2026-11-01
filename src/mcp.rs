@@ -676,7 +676,7 @@ pub fn files_allowed() -> bool {
 /// (`cookies`' `path` is a URL path, not one of them).
 const FILE_FIELDS: &[(&str, &[&str])] = &[
     ("upload", &["files", "file"]),
-    ("route", &["body_file"]),
+    ("route", &["body_file", "har"]),
     ("state", &["path"]),
     ("network", &["har", "body_file"]),
     ("pdf", &["path"]),

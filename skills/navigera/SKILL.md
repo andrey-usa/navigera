@@ -204,6 +204,7 @@ only there.
 | `state save auth.json` … `state load auth.json` | sign in once, reuse it later (cookies and localStorage in one file) |
 | `set device "iPhone 15"`, `set viewport 1280 720`, also `media dark`, `geo <lat> <lon>`, `offline on`, `credentials <user> <pass>` | emulate (`off` resets) |
 | `route "*/api/*" --body '{…}'`, `route "*.png"` (fail), `unroute` | mock or block requests |
+| `network --har api.har` … `route "*/api/*" --har api.har`; `route "*/api/me" --modify --replace free pro` | record and replay the API; change a real response |
 | `pdf [file.pdf]`, `init-script "<js>"`, `wait --idle` | print, run code before the page's, wait for the network |
 
 ## What the tool handles for you

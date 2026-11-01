@@ -626,6 +626,22 @@ pub enum Command {
         content_type: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         headers: Vec<String>,
+        /// Answer from this HAR file's entries (method + URL).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        har: Option<String>,
+        /// `--har`: what requests with no entry do: `abort` (default) or
+        /// `continue`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_found: Option<String>,
+        /// Change the real response instead of answering in its place.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        modify: bool,
+        /// `--modify`: 'Name: value' headers to set ('Name:' removes one).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        set_headers: Vec<String>,
+        /// `--modify`: [from, to] replacements in the body, in order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replace: Vec<(String, String)>,
     },
     /// Remove the rule for `pattern`, or all rules.
     #[serde(rename = "unroute")]
@@ -1083,7 +1099,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
     ("state", "save|load <file.json>", "every cookie and the open tabs' localStorage to a file, or back (`{cookies, origins}`, the common storage-state format): sign in once, reuse it in later sessions"),
     ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password>  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
-    ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value']]]", "fail or answer requests whose URL matches (* and ? globs); no flags = fail; no pattern = list the rules"),
+    ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value'] | --modify [--set-header 'Name: value'] [--replace <from> <to>]]] [--har <f> [--not-found abort|continue]]", "fail, answer, or change the responses of requests whose URL matches (* and ? globs); --har answers from a recorded HAR; no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
     ("get", "text|value|html|outer|box|checked|attr <name>|style <prop> <target> | count <css> | title | url", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --near <text>, --nth; --frame <css> to look only inside that frame)"),
@@ -2217,6 +2233,24 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             Command::Set { what, values, scale, mobile, accuracy }
         }
         "route" => Command::Route {
+            replace: {
+                // `--replace <from> <to>`: two values, any number of times.
+                let mut pairs = Vec::new();
+                while let Some(i) = args.iter().position(|a| a == "--replace") {
+                    if i + 2 >= args.len() {
+                        return invalid("route --replace takes two values: <from> <to>");
+                    }
+                    args.remove(i);
+                    let from = args.remove(i).unwrap_or_default();
+                    let to = args.remove(i).unwrap_or_default();
+                    pairs.push((from, to));
+                }
+                pairs
+            },
+            har: str_flag(&mut args, "--har")?,
+            not_found: str_flag(&mut args, "--not-found")?,
+            modify: extract_present(&mut args, "--modify"),
+            set_headers: extract_values(&mut args, "--set-header").map_err(ArgsError::Invalid)?,
             abort: extract_present(&mut args, "--abort"),
             status: num_flag(&mut args, "--status")?.map(|v| v as u16),
             body: str_flag(&mut args, "--body")?,
@@ -2343,6 +2377,55 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
     let file = path.join("SKILL.md");
     write_own(&file, SKILL_MD.as_bytes())?;
     Ok(file.display().to_string())
+}
+
+/// The entries of a HAR file a `route --har` rule answers from. A
+/// response body is the entry's `content.text` (base64 when `encoding`
+/// says so); its old length and transfer encoding go, since the body is
+/// handed back whole and decoded.
+pub fn har_entries(text: &[u8]) -> anyhow::Result<Vec<crate::cdp::HarEntry>> {
+    use base64::Engine as _;
+    let har: Value = serde_json::from_slice(text).map_err(|e| anyhow::anyhow!("not a HAR file: {e}"))?;
+    let entries = har
+        .pointer("/log/entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("not a HAR file: no log.entries"))?;
+    let mut out = Vec::new();
+    for e in entries {
+        let (Some(method), Some(url)) =
+            (e.pointer("/request/method").and_then(Value::as_str), e.pointer("/request/url").and_then(Value::as_str))
+        else {
+            continue;
+        };
+        let status = e.pointer("/response/status").and_then(Value::as_u64).unwrap_or(0).min(999) as u16;
+        let headers = e
+            .pointer("/response/headers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|h| Some((h.get("name")?.as_str()?.to_string(), h.get("value")?.as_str()?.to_string())))
+            .filter(|(k, _)| {
+                !["content-length", "content-encoding", "transfer-encoding"].iter().any(|d| k.eq_ignore_ascii_case(d))
+                    // HTTP/2 pseudo-headers aren't headers to send.
+                    && !k.starts_with(':')
+            })
+            .collect();
+        let text = e.pointer("/response/content/text").and_then(Value::as_str).unwrap_or("");
+        let body_base64 = if e.pointer("/response/content/encoding").and_then(Value::as_str) == Some("base64") {
+            text.to_string()
+        } else {
+            base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
+        };
+        out.push(crate::cdp::HarEntry {
+            method: method.to_string(),
+            url: url.to_string(),
+            status,
+            headers,
+            body_base64,
+            used: false,
+        });
+    }
+    Ok(out)
 }
 
 /// Write `bytes` to `path` as a file of its own. A link already at `path`
@@ -2618,7 +2701,24 @@ impl Driver {
             .filter(|r| since.is_none_or(|n| r.n > n))
             .collect();
         if let Some(path) = har {
-            let har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
+            let mut har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
+            // Response bodies, so `route --har` can replay the file. A body
+            // the browser no longer holds (an evicted or other-tab request)
+            // is left out.
+            if let Some(entries) = har.pointer_mut("/log/entries").and_then(Value::as_array_mut) {
+                for (entry, r) in entries.iter_mut().zip(&picked) {
+                    if r.status.is_none() || r.failed.is_some() {
+                        continue;
+                    }
+                    if let Ok((body, base64)) = self.session.response_body(&r.id) {
+                        let content = &mut entry["response"]["content"];
+                        content["text"] = json!(body);
+                        if base64 {
+                            content["encoding"] = json!("base64");
+                        }
+                    }
+                }
+            }
             write_own(path, &serde_json::to_vec_pretty(&har)?)
                 .map_err(|e| anyhow::anyhow!("network --har {path}: {e}"))?;
             return Ok(json!({ "har": path, "entries": picked.len() }));
@@ -3566,29 +3666,74 @@ impl Driver {
                 };
                 s.evaluate_with_timeout::<Value>(&js, None).map_err(|e| anyhow::anyhow!("storage: {e:#}"))
             }
-            Command::Route { pattern: None, .. } => {
+            Command::Route { pattern: None, har: None, .. } => {
                 let routes = self.session.routes();
                 if routes.is_empty() {
                     return Ok(json!("(no routes)"));
                 }
                 Ok(json!(routes
                     .iter()
-                    .map(|r| {
-                        let what = match &r.action {
-                            crate::cdp::RouteAction::Abort => "abort".to_string(),
-                            crate::cdp::RouteAction::Fulfill { status, .. } => format!("fulfill {status}"),
-                        };
-                        format!("{} -> {what} ({} hits)", r.pattern, r.hits)
-                    })
+                    .map(|r| format!("{} -> {} ({} hits)", r.pattern, r.action.describe(), r.hits))
                     .collect::<Vec<_>>()
                     .join("\n")))
             }
-            Command::Route { pattern: Some(pattern), abort, status, body, body_file, content_type, headers } => {
+            Command::Route {
+                pattern,
+                abort,
+                status,
+                body,
+                body_file,
+                content_type,
+                headers,
+                har,
+                not_found,
+                modify,
+                set_headers,
+                replace,
+            } => {
                 let fulfill = status.is_some() || body.is_some() || body_file.is_some();
-                if *abort && fulfill {
-                    anyhow::bail!("route: --abort or a response (--status/--body), not both");
+                let kinds = [*abort, fulfill, har.is_some(), *modify].iter().filter(|k| **k).count();
+                if kinds > 1 {
+                    anyhow::bail!("route: one of --abort, a response (--status/--body), --har or --modify");
                 }
-                let action = if fulfill {
+                if not_found.is_some() && har.is_none() {
+                    anyhow::bail!("route: --not-found goes with --har");
+                }
+                if (!set_headers.is_empty() || !replace.is_empty()) && !*modify {
+                    anyhow::bail!("route: --set-header and --replace go with --modify");
+                }
+                let parse_header = |h: &String, flag: &str| {
+                    h.split_once(':')
+                        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                        .filter(|(k, _)| !k.is_empty())
+                        .ok_or_else(|| anyhow::anyhow!("route {flag} {h:?}: use 'Name: value'"))
+                };
+                let action = if let Some(path) = har {
+                    let not_found_continue = match not_found.as_deref() {
+                        None | Some("abort") => false,
+                        Some("continue") => true,
+                        Some(other) => anyhow::bail!("route --not-found {other:?}: abort or continue"),
+                    };
+                    let text = std::fs::read(path).map_err(|e| anyhow::anyhow!("route --har {path}: {e}"))?;
+                    let entries = har_entries(&text).map_err(|e| anyhow::anyhow!("route --har {path}: {e}"))?;
+                    if entries.is_empty() {
+                        anyhow::bail!("route --har {path}: no entries");
+                    }
+                    crate::cdp::RouteAction::Har { entries, not_found_continue }
+                } else if *modify {
+                    if set_headers.is_empty() && replace.is_empty() {
+                        anyhow::bail!(
+                            "route --modify: say what changes (--set-header 'Name: value', --replace <from> <to>)"
+                        );
+                    }
+                    crate::cdp::RouteAction::Modify {
+                        set_headers: set_headers
+                            .iter()
+                            .map(|h| parse_header(h, "--set-header"))
+                            .collect::<anyhow::Result<_>>()?,
+                        replace: replace.clone(),
+                    }
+                } else if fulfill {
                     use base64::Engine as _;
                     let bytes = match (body, body_file) {
                         (Some(_), Some(_)) => anyhow::bail!("route: --body or --body-file, not both"),
@@ -3598,14 +3743,8 @@ impl Driver {
                         }
                         (None, None) => Vec::new(),
                     };
-                    let mut hs: Vec<(String, String)> = headers
-                        .iter()
-                        .map(|h| {
-                            h.split_once(':')
-                                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-                                .ok_or_else(|| anyhow::anyhow!("route --header {h:?}: use 'Name: value'"))
-                        })
-                        .collect::<anyhow::Result<_>>()?;
+                    let mut hs: Vec<(String, String)> =
+                        headers.iter().map(|h| parse_header(h, "--header")).collect::<anyhow::Result<_>>()?;
                     let ctype = content_type.clone().unwrap_or_else(|| {
                         let t = String::from_utf8_lossy(&bytes);
                         let t = t.trim_start();
@@ -3629,10 +3768,13 @@ impl Driver {
                 } else {
                     crate::cdp::RouteAction::Abort
                 };
-                let what = match &action {
-                    crate::cdp::RouteAction::Abort => "abort".to_string(),
-                    crate::cdp::RouteAction::Fulfill { status, .. } => format!("fulfill {status}"),
+                // `route --har f` with no glob: the HAR answers everything.
+                let pattern = match (pattern, har) {
+                    (Some(p), _) => p.clone(),
+                    (None, Some(_)) => "*".to_string(),
+                    (None, None) => anyhow::bail!("route: which requests? Give a URL glob first"),
                 };
+                let what = action.describe();
                 self.session
                     .add_route(crate::cdp::Route { pattern: pattern.clone(), action, hits: 0 })
                     .map_err(|e| anyhow::anyhow!("route: {e:#}"))?;

@@ -243,7 +243,61 @@ pub struct Shared {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RouteAction {
     Abort,
-    Fulfill { status: u16, headers: Vec<(String, String)>, body_base64: String },
+    Fulfill {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body_base64: String,
+    },
+    /// Answer from recorded HAR entries: the first unused entry with the
+    /// request's method and URL, then the last one (a page that polls keeps
+    /// getting the final answer). Requests with no entry abort or continue.
+    Har {
+        entries: Vec<HarEntry>,
+        not_found_continue: bool,
+    },
+    /// Let the request reach the server, then change its response:
+    /// `set_headers` (an empty value removes the header) and byte
+    /// replacements in the body, in order.
+    Modify {
+        set_headers: Vec<(String, String)>,
+        replace: Vec<(String, String)>,
+    },
+}
+
+/// One recorded response a `route --har` rule can answer with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HarEntry {
+    pub method: String,
+    pub url: String,
+    /// 0: the recorded request failed; replayed as a failure.
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body_base64: String,
+    pub used: bool,
+}
+
+impl RouteAction {
+    /// Modify rules act on responses; every other rule on requests.
+    pub fn at_response(&self) -> bool {
+        matches!(self, RouteAction::Modify { .. })
+    }
+
+    /// How `route` lists the rule.
+    pub fn describe(&self) -> String {
+        match self {
+            RouteAction::Abort => "abort".into(),
+            RouteAction::Fulfill { status, .. } => format!("fulfill {status}"),
+            RouteAction::Har { entries, not_found_continue } => format!(
+                "har ({} entries, {} replayed; others {})",
+                entries.len(),
+                entries.iter().filter(|e| e.used).count(),
+                if *not_found_continue { "continue" } else { "abort" }
+            ),
+            RouteAction::Modify { set_headers, replace } => {
+                format!("modify ({} headers, {} replacements)", set_headers.len(), replace.len())
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -280,28 +334,152 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     pi == p.len()
 }
 
-/// The answer to a paused request: (method, params) for the CDP call.
-fn route_answer(shared: &Shared, session: &str, request_id: &str, url: &str) -> (&'static str, Value) {
+/// What to do with a paused request.
+#[derive(Debug, PartialEq)]
+enum Answer {
+    /// One CDP call: (method, params).
+    Send(&'static str, Value),
+    /// Fetch the real response's body, change it, fulfill with the result.
+    Modify { set_headers: Vec<(String, String)>, replace: Vec<(String, String)> },
+}
+
+fn fulfill(request_id: &str, status: u16, headers: &[(String, String)], body_base64: &str) -> Answer {
+    Answer::Send(
+        "Fetch.fulfillRequest",
+        json!({
+            "requestId": request_id,
+            "responseCode": status,
+            "responseHeaders": headers.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
+            "body": body_base64,
+        }),
+    )
+}
+
+/// The answer to a paused request. `at_response`: paused at the response
+/// stage (only `Modify` rules ask for that).
+fn route_answer(
+    shared: &Shared,
+    session: &str,
+    request_id: &str,
+    method: &str,
+    url: &str,
+    at_response: bool,
+) -> Answer {
+    let go_on = || Answer::Send("Fetch.continueRequest", json!({ "requestId": request_id }));
+    let fail =
+        || Answer::Send("Fetch.failRequest", json!({ "requestId": request_id, "errorReason": "BlockedByClient" }));
     let scope = shared.scope_of(session);
     let mut routes = shared.routes.lock().unwrap();
-    let Some(route) = routes.get_mut(&scope).and_then(|rs| rs.iter_mut().find(|r| glob_match(&r.pattern, url))) else {
-        return ("Fetch.continueRequest", json!({ "requestId": request_id }));
+    let Some(route) = routes
+        .get_mut(&scope)
+        .and_then(|rs| rs.iter_mut().find(|r| r.action.at_response() == at_response && glob_match(&r.pattern, url)))
+    else {
+        return go_on();
     };
     route.hits += 1;
-    match &route.action {
-        RouteAction::Abort => {
-            ("Fetch.failRequest", json!({ "requestId": request_id, "errorReason": "BlockedByClient" }))
+    match &mut route.action {
+        RouteAction::Abort => fail(),
+        RouteAction::Fulfill { status, headers, body_base64 } => fulfill(request_id, *status, headers, body_base64),
+        RouteAction::Har { entries, not_found_continue } => {
+            let same = |e: &HarEntry| e.method.eq_ignore_ascii_case(method) && e.url == url;
+            let pick = entries.iter().position(|e| !e.used && same(e)).or_else(|| entries.iter().rposition(same));
+            match pick {
+                Some(i) => {
+                    let e = &mut entries[i];
+                    e.used = true;
+                    if e.status == 0 {
+                        fail()
+                    } else {
+                        fulfill(request_id, e.status, &e.headers, &e.body_base64)
+                    }
+                }
+                None if *not_found_continue => go_on(),
+                None => fail(),
+            }
         }
-        RouteAction::Fulfill { status, headers, body_base64 } => (
-            "Fetch.fulfillRequest",
-            json!({
-                "requestId": request_id,
-                "responseCode": status,
-                "responseHeaders": headers.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
-                "body": body_base64,
-            }),
-        ),
+        RouteAction::Modify { set_headers, replace } => {
+            Answer::Modify { set_headers: set_headers.clone(), replace: replace.clone() }
+        }
     }
+}
+
+/// Every occurrence of `from` in `body` replaced by `to`.
+fn replace_bytes(body: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    if from.is_empty() {
+        return body.to_vec();
+    }
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        if body[i..].starts_with(from) {
+            out.extend_from_slice(to);
+            i += from.len();
+        } else {
+            out.push(body[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The response headers a modified response is fulfilled with. The body
+/// navigera hands back is decoded and may have changed length, so the
+/// original encoding and length go.
+fn modified_headers(original: &Value, set_headers: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = original
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|h| Some((h.get("name")?.as_str()?.to_string(), h.get("value")?.as_str()?.to_string())))
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("content-length") && !k.eq_ignore_ascii_case("content-encoding"))
+        .collect();
+    for (k, v) in set_headers {
+        out.retain(|(name, _)| !name.eq_ignore_ascii_case(k));
+        if !v.is_empty() {
+            out.push((k.clone(), v.clone()));
+        }
+    }
+    out
+}
+
+/// Fulfill a response-stage request with its real response, changed.
+async fn modify_response(
+    client: &CdpClient,
+    session: Option<&str>,
+    params: &Value,
+    set_headers: &[(String, String)],
+    replace: &[(String, String)],
+) -> anyhow::Result<()> {
+    use base64::Engine as _;
+    let id = params.get("requestId").and_then(Value::as_str).unwrap_or("");
+    let status = params.get("responseStatusCode").and_then(Value::as_u64).unwrap_or(200);
+    let headers = modified_headers(params.get("responseHeaders").unwrap_or(&Value::Null), set_headers);
+    let mut body = Vec::new();
+    // A redirect has no body to change; its headers still can.
+    if !(300..400).contains(&status) {
+        let r =
+            client.send("Fetch.getResponseBody", json!({ "requestId": id }), session, Duration::from_secs(10)).await?;
+        let raw = r.get("body").and_then(Value::as_str).unwrap_or("");
+        body = if r.get("base64Encoded").and_then(Value::as_bool).unwrap_or(false) {
+            base64::engine::general_purpose::STANDARD.decode(raw)?
+        } else {
+            raw.as_bytes().to_vec()
+        };
+        for (from, to) in replace {
+            body = replace_bytes(&body, from.as_bytes(), to.as_bytes());
+        }
+    }
+    let mut answer = json!({
+        "requestId": id,
+        "responseCode": status,
+        "responseHeaders": headers.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect::<Vec<_>>(),
+        "body": base64::engine::general_purpose::STANDARD.encode(&body),
+    });
+    if let Some(phrase) = params.get("responseStatusText").and_then(Value::as_str).filter(|p| !p.is_empty()) {
+        answer["responsePhrase"] = json!(phrase);
+    }
+    client.send("Fetch.fulfillRequest", answer, session, Duration::from_secs(10)).await?;
+    Ok(())
 }
 
 impl Shared {
@@ -826,14 +1004,29 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
         "Fetch.requestPaused" => {
             let id = params.get("requestId").and_then(Value::as_str).unwrap_or("").to_string();
             let url = params.pointer("/request/url").and_then(Value::as_str).unwrap_or("");
-            let (method, answer) = route_answer(shared, session, &id, url);
+            let http_method = params.pointer("/request/method").and_then(Value::as_str).unwrap_or("GET");
+            let at_response = params.get("responseStatusCode").is_some() || params.get("responseErrorReason").is_some();
+            let answer = if params.get("responseErrorReason").is_some() {
+                // Nothing came back to change: the failure goes on as it is.
+                Answer::Send("Fetch.continueRequest", json!({ "requestId": id }))
+            } else {
+                route_answer(shared, session, &id, http_method, url, at_response)
+            };
             let client = client.clone();
             let session = session.to_string();
+            let params = params.clone();
             tokio::spawn(async move {
                 let s = Some(session.as_str()).filter(|s| !s.is_empty());
-                if client.send(method, answer, s, Duration::from_secs(10)).await.is_err()
-                    && method != "Fetch.continueRequest"
-                {
+                let (sent, method) = match answer {
+                    Answer::Send(method, answer) => {
+                        (client.send(method, answer, s, Duration::from_secs(10)).await.is_ok(), method)
+                    }
+                    Answer::Modify { set_headers, replace } => (
+                        modify_response(&client, s, &params, &set_headers, &replace).await.is_ok(),
+                        "Fetch.fulfillRequest",
+                    ),
+                };
+                if !sent && method != "Fetch.continueRequest" {
                     // A rule the engine can't apply must not hang the request.
                     let _ = client
                         .send("Fetch.continueRequest", json!({ "requestId": id }), s, Duration::from_secs(10))
@@ -1033,6 +1226,88 @@ mod tests {
         assert!(glob_match("*doubleclick*", "https://ad.doubleclick.net/x"));
     }
 
+    fn method_of(a: Answer) -> &'static str {
+        match a {
+            Answer::Send(m, _) => m,
+            Answer::Modify { .. } => "modify",
+        }
+    }
+
+    fn entry(method: &str, url: &str, status: u16, body: &str) -> HarEntry {
+        HarEntry {
+            method: method.into(),
+            url: url.into(),
+            status,
+            headers: vec![],
+            body_base64: body.into(),
+            used: false,
+        }
+    }
+
+    #[test]
+    fn har_replays_in_order_then_repeats_the_last() {
+        let shared = Shared::default();
+        shared.register("s", "t", "");
+        let entries = vec![
+            entry("GET", "http://h/n", 200, "MQ=="),
+            entry("POST", "http://h/n", 201, ""),
+            entry("GET", "http://h/n", 200, "Mg=="),
+            entry("GET", "http://h/gone", 0, ""),
+        ];
+        shared.routes.lock().unwrap().entry(String::new()).or_default().push(Route {
+            pattern: "*".into(),
+            action: RouteAction::Har { entries, not_found_continue: false },
+            hits: 0,
+        });
+        let body = |a: Answer| match a {
+            Answer::Send(_, p) => p["body"].as_str().unwrap_or("").to_string(),
+            _ => panic!(),
+        };
+        assert_eq!(body(route_answer(&shared, "s", "1", "GET", "http://h/n", false)), "MQ==");
+        assert_eq!(body(route_answer(&shared, "s", "2", "GET", "http://h/n", false)), "Mg==");
+        assert_eq!(body(route_answer(&shared, "s", "3", "GET", "http://h/n", false)), "Mg==");
+        let Answer::Send(_, p) = route_answer(&shared, "s", "4", "POST", "http://h/n", false) else { panic!() };
+        assert_eq!(p["responseCode"], 201);
+        assert_eq!(method_of(route_answer(&shared, "s", "5", "GET", "http://h/gone", false)), "Fetch.failRequest");
+        assert_eq!(method_of(route_answer(&shared, "s", "6", "GET", "http://h/other", false)), "Fetch.failRequest");
+        if let RouteAction::Har { not_found_continue, .. } =
+            &mut shared.routes.lock().unwrap().get_mut("").unwrap()[0].action
+        {
+            *not_found_continue = true;
+        }
+        assert_eq!(method_of(route_answer(&shared, "s", "7", "GET", "http://h/other", false)), "Fetch.continueRequest");
+    }
+
+    #[test]
+    fn modify_rules_act_at_the_response_stage_only() {
+        let shared = Shared::default();
+        shared.register("s", "t", "");
+        shared.routes.lock().unwrap().entry(String::new()).or_default().push(Route {
+            pattern: "*/api/*".into(),
+            action: RouteAction::Modify { set_headers: vec![("x-a".into(), "1".into())], replace: vec![] },
+            hits: 0,
+        });
+        assert_eq!(method_of(route_answer(&shared, "s", "1", "GET", "http://h/api/x", false)), "Fetch.continueRequest");
+        assert_eq!(method_of(route_answer(&shared, "s", "1", "GET", "http://h/api/x", true)), "modify");
+    }
+
+    #[test]
+    fn modified_responses_lose_length_and_encoding() {
+        assert_eq!(replace_bytes(b"a-b-a", b"a", b"xy"), b"xy-b-xy");
+        assert_eq!(replace_bytes(b"abc", b"", b"z"), b"abc");
+        let original = json!([
+            { "name": "Content-Type", "value": "text/html" },
+            { "name": "Content-Length", "value": "5" },
+            { "name": "content-encoding", "value": "gzip" },
+            { "name": "X-Drop", "value": "1" },
+        ]);
+        let set = vec![("x-drop".to_string(), String::new()), ("X-New".to_string(), "2".to_string())];
+        assert_eq!(
+            modified_headers(&original, &set),
+            vec![("Content-Type".to_string(), "text/html".to_string()), ("X-New".to_string(), "2".to_string())]
+        );
+    }
+
     #[test]
     fn first_matching_route_answers() {
         let shared = Shared::default();
@@ -1049,10 +1324,10 @@ mod tests {
                 hits: 0,
             },
         ]);
-        assert_eq!(route_answer(&shared, "s1", "1", "http://h/a.png").0, "Fetch.failRequest");
-        let (m, p) = route_answer(&shared, "s1", "2", "http://h/api/x");
+        assert_eq!(method_of(route_answer(&shared, "s1", "1", "GET", "http://h/a.png", false)), "Fetch.failRequest");
+        let Answer::Send(m, p) = route_answer(&shared, "s1", "2", "GET", "http://h/api/x", false) else { panic!() };
         assert_eq!((m, p["responseCode"].as_u64()), ("Fetch.fulfillRequest", Some(200)));
-        assert_eq!(route_answer(&shared, "s1", "3", "http://h/").0, "Fetch.continueRequest");
+        assert_eq!(method_of(route_answer(&shared, "s1", "3", "GET", "http://h/", false)), "Fetch.continueRequest");
         assert_eq!(shared.routes.lock().unwrap()[""][0].hits, 1);
     }
 
@@ -1066,8 +1341,8 @@ mod tests {
             .lock()
             .unwrap()
             .insert("ctx-a".into(), vec![Route { pattern: "*".into(), action: RouteAction::Abort, hits: 0 }]);
-        assert_eq!(route_answer(&shared, "a", "1", "http://h/").0, "Fetch.failRequest");
-        assert_eq!(route_answer(&shared, "b", "2", "http://h/").0, "Fetch.continueRequest");
+        assert_eq!(method_of(route_answer(&shared, "a", "1", "GET", "http://h/", false)), "Fetch.failRequest");
+        assert_eq!(method_of(route_answer(&shared, "b", "2", "GET", "http://h/", false)), "Fetch.continueRequest");
         shared.policy.lock().unwrap().insert("ctx-b".into(), DialogPolicy { accept: false, prompt_text: None });
         assert!(shared.policy_for("ctx-a").accept);
         assert!(!shared.policy_for("ctx-b").accept);

@@ -363,3 +363,51 @@ fn locators_reads_states_and_keys() {
         a.ok(&["wait", "--idle"]);
     }
 }
+
+/// `route --modify` changes a real response; `network --har` records the
+/// bodies and `route --har` replays them with the site gone. Chrome only:
+/// Lightpanda has no response-stage interception.
+#[test]
+fn har_replay_and_modified_responses() {
+    let Some(site) = edge_site() else { return };
+    let base = site.base.clone();
+    let Some((engine, bin)) = engines().into_iter().find(|(e, _)| *e == "chrome") else { return };
+    {
+        let a = Agent::new("har", engine, bin);
+        a.ok(&["route", "*/api/echo*", "--modify", "--replace", "widget", "gadget", "--set-header", "X-Seen: 1"]);
+        a.ok(&["goto", &format!("{base}/console")]);
+        a.ok(&["wait", "--js", "document.title.includes('gadget')"]);
+        assert!(
+            a.text(&["route"]).contains("*/api/echo* -> modify (1 headers, 1 replacements) (1 hits)"),
+            "[{engine}]"
+        );
+        a.ok(&["unroute"]);
+        assert!(a.err(&["route", "*/x", "--set-header", "A: b"]).contains("go with --modify"), "[{engine}]");
+
+        a.ok(&["network", "--clear"]);
+        a.ok(&["goto", &format!("{base}/console")]);
+        a.ok(&["wait", "--js", "document.title.includes('widget')"]);
+        let har = std::env::temp_dir().join(format!("nv-replay-{engine}-{}.har", std::process::id()));
+        a.ok(&["network", "--har", har.to_str().unwrap()]);
+        let recorded: Value = serde_json::from_slice(&std::fs::read(&har).unwrap()).unwrap();
+        let echo = recorded["log"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["request"]["url"].as_str().unwrap_or("").contains("/api/echo"))
+            .unwrap_or_else(|| panic!("[{engine}] {recorded}"));
+        assert!(echo["response"]["content"]["text"].as_str().unwrap_or("").contains("widget"), "[{engine}] {echo}");
+
+        drop(site);
+        a.ok(&["route", "--har", har.to_str().unwrap()]);
+        a.ok(&["goto", &format!("{base}/console")]);
+        a.ok(&["wait", "--js", "document.title.includes('widget')"]);
+        let routes = a.text(&["route"]);
+        assert!(routes.starts_with("* -> har (") && !routes.contains(" 0 replayed"), "[{engine}] {routes}");
+        a.ok(&["unroute"]);
+        // Not in the HAR: aborted by default.
+        a.ok(&["route", "--har", har.to_str().unwrap()]);
+        let r = a.run(&["goto", &format!("{base}/nowhere")]);
+        assert!(r.to_string().contains("BLOCKED_BY_CLIENT") || r["ok"] == false, "[{engine}] {r}");
+    }
+}

@@ -23,9 +23,19 @@ know:
 - An icon-only control that printed as a bare `button [ref=N]` may now
   carry `icon="svg"`, `img="inline"` or an image's file name.
 - `text` with no selector is the page's whole text (it was an error).
+- `network --har` includes the response bodies the browser still holds,
+  so the file is larger.
 
 ### Added
 
+- `route --har <file>` answers requests from a recorded HAR: the first
+  unused entry with the request's method and URL, then the last one again
+  (a page that polls keeps getting the final answer). Requests the HAR has
+  no entry for fail, or reach the network with `--not-found continue`. A
+  glob before `--har` limits it to those URLs.
+- `route <glob> --modify` lets the request reach the server and changes
+  its response: `--set-header 'Name: value'` (`'Name:'` removes one) and
+  `--replace <from> <to>` in the body, repeatable.
 - `screenshot --timeout-ms <n>` bounds the capture (default: the session
   timeout).
 - `start --electron <app>` drives an Electron desktop app: navigera
