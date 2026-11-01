@@ -32,6 +32,8 @@ getting wrong, one page each, built the way those sites behave:
 /beacons        analytics POSTs at irregular 100-900 ms intervals, answered 204
 /one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
 /click-fetch    a button that starts a 200 ms fetch, then brings a list
+/legal          a 1,500-clause agreement (~130 KB of text), every 10th
+                clause long enough to be cut in a snapshot
 /two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
 /stale-ref      a button and a bare draggable=true handle (no handlers)
@@ -87,6 +89,20 @@ PAGES["/div-cells"] = ("cells", "", "".join(
 
 LONG = "Lorem ipsum dolor sit amet. " * 40
 PAGES["/long-text"] = ("long", "", f"<div>{LONG}</div><p>{LONG}</p>")
+
+
+def clause(n):
+    text = f"{n // 50 + 1}.{n % 50 + 1} The Supplier shall keep obligation {n} in force for the term of this Agreement."
+    if n % 10 == 0:
+        text += " It survives termination, applies to every affiliate and subcontractor, and is not limited by any" \
+            " other clause: notice of a breach is given in writing within five business days, and the cure period" \
+            f" is thirty days from that notice. Penalty schedule {n} applies to any breach not cured in time."
+    return f"<p>{text}</p>"
+
+
+PAGES["/legal"] = ("agreement", "", "<main><h1>Master Services Agreement</h1>" + "".join(
+    (f"<h2>Section {n // 50 + 1}</h2>" if n % 50 == 0 else "") + clause(n) for n in range(1500)
+) + "</main>")
 
 PAGES["/cookie-banner"] = ("cookie banner", "", """
 <p id=status>waiting</p>

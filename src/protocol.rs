@@ -405,6 +405,8 @@ pub enum Command {
     /// First element's textContent for the selector.
     #[serde(rename = "text")]
     Text {
+        /// Empty: the whole page, as it reads (`innerText`).
+        #[serde(default)]
         selector: String,
         #[serde(default)]
         timeout_ms: Option<f64>,
@@ -461,6 +463,9 @@ pub enum Command {
         /// Only the subtree of this element.
         #[serde(flatten)]
         scope: TargetArgs,
+        /// Texts, names and values uncut (`--full-text`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        full_text: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<f64>,
     },
@@ -1054,7 +1059,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
     ("eval", "<js> | --file <path.js> | - [--main]", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin; --main (Electron) runs it in the app's main process, a function getting the electron module"),
-    ("text", "--selector <css>", "textContent of the first match"),
+    ("text", "[--selector <css>]", "textContent of the first match; with no selector, the whole page's text as it reads (innerText)"),
     ("find", "<description>", "the element a description means, chosen by a decision model (set NAVIGERA_DECIDER_KEY; README: Decisions by a fast model); element ops also take --find <description>"),
     ("title", "", "page title"),
     ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
@@ -1924,7 +1929,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         "text" => Command::Text {
             selector: match str_flag(&mut args, "--selector")? {
                 Some(s) => s,
-                None => positional(&mut args).ok_or_else(|| need("text", "--selector <css>"))?,
+                None => positional(&mut args).unwrap_or_default(),
             },
             timeout_ms,
         },
@@ -2076,6 +2081,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             format: Some(str_flag(&mut args, "--format")?.unwrap_or_else(|| "text".into())),
             limit: num_flag(&mut args, "--limit")?.map(|v| v as usize),
             refs: str_flag(&mut args, "--refs")?,
+            full_text: extract_present(&mut args, "--full-text"),
             scope: target_args(&mut args, true)?,
             timeout_ms,
         },
@@ -2984,7 +2990,7 @@ impl Driver {
 
     /// The page as `find` and `check` see it: the whole text tree.
     fn page_tree(&self, timeout_ms: Option<f64>) -> anyhow::Result<String> {
-        let opts = AxOptions { max_depth: None, json: false, all: false, all_refs: false, limit: 20_000, scope: None };
+        let opts = AxOptions { limit: 20_000, ..AxOptions::default() };
         match self.session.ax(&opts, timeout_ms).map_err(|e| anyhow::anyhow!("ax: {e:#}"))? {
             Value::String(tree) => Ok(tree),
             other => Ok(other.to_string()),
@@ -3301,6 +3307,10 @@ impl Driver {
                 s.set_dialog_policy(accept, prompt_text.clone());
                 Ok(json!({ "dialogs": if accept { "accept" } else { "dismiss" } }))
             }
+            Command::Text { selector, timeout_ms } if selector.is_empty() => {
+                let text = s.page_text(*timeout_ms).map_err(|e| anyhow::anyhow!("text: {e:#}"))?;
+                Ok(json!(text))
+            }
             Command::Text { selector, timeout_ms } => {
                 let text = s
                     .text_with_timeout(selector, *timeout_ms)
@@ -3318,7 +3328,7 @@ impl Driver {
                 let title = s.title().map_err(|e| anyhow::anyhow!("title: {e:#}"))?;
                 Ok(json!(title))
             }
-            Command::Ax { max_depth, all, format, limit, refs, scope, timeout_ms } => {
+            Command::Ax { max_depth, all, format, limit, refs, scope, timeout_ms, full_text } => {
                 let json_format = match format.as_deref() {
                     // Serve-protocol clients that predate the text tree get
                     // the JSON list they always got.
@@ -3336,6 +3346,7 @@ impl Driver {
                     all_refs: refs.as_deref() == Some("all"),
                     limit: limit.unwrap_or(DEFAULT_AX_LIMIT),
                     scope: scope.optional("ax")?,
+                    full_text: *full_text,
                 };
                 let mut tree = s.ax(&opts, *timeout_ms).map_err(|e| anyhow::anyhow!("ax: {e:#}"))?;
                 if let (Value::Array(nodes), Some(n)) = (&mut tree, limit) {
@@ -4854,6 +4865,7 @@ mod tests {
                 limit: Some(10),
                 refs: None,
                 scope: TargetArgs { selector: Some("main".into()), ..Default::default() },
+                full_text: true,
                 timeout_ms: None,
             },
             Command::Select {

@@ -2584,6 +2584,11 @@ impl BrowserSession {
         self.active_tab().text_content(selector, self.timeout(timeout_ms))
     }
 
+    /// The active tab's whole text as it reads (`text` with no selector).
+    pub fn page_text(&self, timeout_ms: Option<f64>) -> Result<String> {
+        self.active_tab().page_text(self.timeout(timeout_ms))
+    }
+
     /// Page title of the active tab.
     pub fn title(&self) -> Result<String> {
         self.active_tab().title(self.timeout(None))

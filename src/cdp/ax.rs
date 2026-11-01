@@ -113,6 +113,9 @@ pub struct Options {
     /// call instead) once it projects more child fetches than this to reach
     /// the limit. `None`: no budget.
     pub lazy_budget: Option<usize>,
+    /// Texts, names and values in full (`ax --full-text`), not cut at
+    /// [`TEXT_MAX`] / [`NAME_MAX`].
+    pub full_text: bool,
 }
 
 /// Fetched nodes the lazy walk reaches before it projects its total from
@@ -146,6 +149,9 @@ pub struct Rendered {
     pub lines: usize,
     /// Lines dropped by `limit`.
     pub truncated: usize,
+    /// Texts, names and values cut short, and the characters they left out.
+    pub cuts: usize,
+    pub cut_chars: usize,
 }
 
 fn field<'a>(node: &'a Value, key: &str) -> &'a Value {
@@ -275,9 +281,38 @@ struct Tree<'a> {
     /// Line indices whose node's children were cut off by the limit (the
     /// trailing ':' the full walk would have added is fixed up at the end).
     boundary: Vec<(usize, usize)>,
+    /// Texts cut short so far, and the characters they left out.
+    cuts: std::cell::Cell<usize>,
+    cut_chars: std::cell::Cell<usize>,
 }
 
 impl<'a> Tree<'a> {
+    /// [`clip`], counting the cut (or the text in full with `full_text`).
+    fn clip(&self, s: &str, max: usize, read_by: Option<u64>) -> String {
+        if self.opts.full_text {
+            return s.to_string();
+        }
+        self.count_cut(s, max);
+        clip(s, max, read_by)
+    }
+
+    /// [`quote_clip`], counting the cut (or quoted in full with `full_text`).
+    fn quote_clip(&self, s: &str, max: usize) -> String {
+        if self.opts.full_text {
+            return quote(s);
+        }
+        self.count_cut(s, max);
+        quote_clip(s, max)
+    }
+
+    fn count_cut(&self, s: &str, max: usize) {
+        let n = s.chars().count();
+        if n > max {
+            self.cuts.set(self.cuts.get() + 1);
+            self.cut_chars.set(self.cut_chars.get() + n - max);
+        }
+    }
+
     fn insert(&mut self, node: Value) -> usize {
         let id = ax_id(&node).to_string();
         if let Some(&i) = self.by_id.get(&id) {
@@ -569,7 +604,7 @@ impl<'a> Tree<'a> {
                 return;
             }
             let read_by = backend_id(&self.nodes[idx]);
-            self.push_line(format!("{indent}- text: {}", clip(&name, TEXT_MAX, read_by)));
+            self.push_line(format!("{indent}- text: {}", self.clip(&name, TEXT_MAX, read_by)));
             return;
         }
 
@@ -595,7 +630,7 @@ impl<'a> Tree<'a> {
         let mut line = format!("{indent}- {shown_role}");
         if !name.is_empty() {
             line.push(' ');
-            line.push_str(&quote_clip(&name, NAME_MAX));
+            line.push_str(&self.quote_clip(&name, NAME_MAX));
         } else if let Some(text) = backend_id(&self.nodes[idx])
             .filter(|_| clickable)
             .and_then(|id| self.opts.clicks.texts.get(&id))
@@ -606,7 +641,7 @@ impl<'a> Tree<'a> {
             })
         {
             line.push(' ');
-            line.push_str(&quote_clip(text, NAME_MAX));
+            line.push_str(&self.quote_clip(text, NAME_MAX));
         }
         let mut tags = Self::states(&self.nodes[idx], &role);
         if let Some(id) = backend_id(&self.nodes[idx]) {
@@ -638,7 +673,7 @@ impl<'a> Tree<'a> {
         // ("on" unless set, which Lightpanda reports) reads like a state.
         let value = if CHECKABLE.contains(&role.as_str()) { String::new() } else { text_of(&self.nodes[idx], "value") };
         if !value.is_empty() && value != name {
-            line.push_str(&format!(" value={}", quote_clip(&value, NAME_MAX)));
+            line.push_str(&format!(" value={}", self.quote_clip(&value, NAME_MAX)));
         }
         if role == "link" {
             if let Some(Value::String(url)) = prop(&self.nodes[idx], "url") {
@@ -671,7 +706,7 @@ impl<'a> Tree<'a> {
                 .filter(|t| !t.is_empty() && !child_cover.contains(t.as_str()) && *t != value)
                 .collect();
             if !text.is_empty() {
-                line.push_str(&format!(": {}", clip(&text.join(" "), TEXT_MAX, backend_id(&self.nodes[idx]))));
+                line.push_str(&format!(": {}", self.clip(&text.join(" "), TEXT_MAX, backend_id(&self.nodes[idx]))));
             }
             self.push_line(line);
             return;
@@ -715,7 +750,7 @@ impl<'a> Tree<'a> {
                 let only_name = self.name(only);
                 let mut inner = self.describe(only, &only_role);
                 if !only_name.is_empty() {
-                    inner.insert_str(only_role.len(), &format!(" {}", quote_clip(&only_name, NAME_MAX)));
+                    inner.insert_str(only_role.len(), &format!(" {}", self.quote_clip(&only_name, NAME_MAX)));
                 }
                 line.push_str(&format!(": {inner}"));
                 self.push_line(line);
@@ -809,7 +844,7 @@ impl<'a> Tree<'a> {
                 }
             }
             if n > TEXT_MAX {
-                self.push_line(format!("{indent}- text: {}", clip(text, TEXT_MAX, read_by)));
+                self.push_line(format!("{indent}- text: {}", self.clip(text, TEXT_MAX, read_by)));
                 continue;
             }
             if !line.is_empty() {
@@ -878,8 +913,18 @@ fn collect_options(tree: &mut Tree<'_>, idx: usize, out: &mut Vec<String>) {
 
 /// Render the main-frame `nodes` (plus child `frames`) as the text tree.
 pub fn render(header: &str, nodes: &[Value], frames: &[Frame], opts: &Options) -> Rendered {
-    render_inner(header, nodes, frames, opts, None).0
+    let rendered = render_inner(header, nodes, frames, opts, None).0;
+    // What the cuts saved is small: the whole text costs less than the
+    // agent's next call to read it.
+    if !opts.full_text && rendered.cuts > 0 && rendered.text.len() + rendered.cut_chars <= FULL_TEXT_BUDGET {
+        return render_inner(header, nodes, frames, &Options { full_text: true, ..opts.clone() }, None).0;
+    }
+    rendered
 }
+
+/// A snapshot that would be at most this many bytes with every text in
+/// full prints them in full (see [`render`]).
+pub const FULL_TEXT_BUDGET: usize = 32_000;
 
 /// Render from a lazily fetched seed: `seed` holds the root (or, for a
 /// scope, the partial tree around it) and `fetch` supplies children on
@@ -915,6 +960,8 @@ fn render_inner(
         used: std::collections::HashSet::new(),
         stopped: false,
         boundary: Vec::new(),
+        cuts: std::cell::Cell::new(0),
+        cut_chars: std::cell::Cell::new(0),
     };
     for n in nodes.iter().chain(frames.iter().flat_map(|f| f.nodes.iter())) {
         tree.insert(n.clone());
@@ -958,6 +1005,7 @@ fn render_inner(
     let fetch_failed = tree.fetch_failed;
     let lazy = tree.fetch.is_some();
     let tree_stopped = tree.stopped;
+    let (cuts, cut_chars) = (tree.cuts.get(), tree.cut_chars.get());
     let total = tree.lines.len();
     let mut lines = tree.lines;
     let mut truncated = 0;
@@ -970,7 +1018,37 @@ fn render_inner(
         let more = if lazy || tree_stopped { "more lines".to_string() } else { format!("{truncated} more lines") };
         lines.push(format!("… {more} (scope with `ax --selector <css>`, or raise `--limit`)"));
     }
-    (Rendered { lines: lines.len(), text: lines.join("\n"), truncated }, fetch_failed)
+    // Cut text said once, at the top, with how to read it all: an agent
+    // that reads on without following the cut marks misses what they hide.
+    if cuts > 0 {
+        let at = usize::from(!header.is_empty()).min(lines.len());
+        lines.insert(at, cut_summary(cuts, cut_chars));
+    }
+    (Rendered { lines: lines.len(), text: lines.join("\n"), truncated, cuts, cut_chars }, fetch_failed)
+}
+
+/// The line that says a snapshot cut text, and how to read it in full.
+fn cut_summary(cuts: usize, chars: usize) -> String {
+    let (what, them) = if cuts == 1 { ("text", "it") } else { ("texts", "one") };
+    format!(
+        "… {} {what} cut short here ({} chars left out): `get text <ref>` reads {them} in full, \
+         `text` the whole page (`--selector <css>` a part), `ax --full-text` the tree uncut",
+        thousands(cuts),
+        thousands(chars)
+    )
+}
+
+/// `75987` -> `75,987`.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Lines for what [`crate::cdp::page`]'s `SHADOW_AX` found inside shadow
@@ -1123,7 +1201,9 @@ mod tests {
     /// cut is said outside its quotes.
     #[test]
     fn a_cut_says_what_it_left_out() {
-        let long = "x".repeat(1000);
+        // Over the full-text budget: the texts are cut, each says what it
+        // left out, and a line at the top says it once for the snapshot.
+        let long = "x".repeat(20_000);
         let name = "n".repeat(200);
         let nodes = vec![
             node("1", None, "RootWebArea", "", &["2", "3", "5"], 1),
@@ -1132,11 +1212,42 @@ mod tests {
             node("4", Some("3"), "StaticText", &long, &[], 4),
             node("5", Some("1"), "link", &name, &[], 5),
         ];
-        let out = render("", &nodes, &[], &Options::default());
+        let out = render("page \"Terms\" http://x.test/", &nodes, &[], &Options::default());
         let lines: Vec<&str> = out.text.lines().collect();
-        assert_eq!(lines[0], format!("- text: {}… (+700 chars: get text 2)", "x".repeat(300)));
-        assert_eq!(lines[1], format!("- paragraph: {}… (+700 chars: get text 3)", "x".repeat(300)));
-        assert_eq!(lines[2], format!("- link \"{}\"… (+50 chars) [ref=5]", "n".repeat(150)));
+        assert_eq!(lines[0], "page \"Terms\" http://x.test/");
+        assert_eq!(
+            lines[1],
+            "… 3 texts cut short here (39,450 chars left out): `get text <ref>` reads one in full, \
+             `text` the whole page (`--selector <css>` a part), `ax --full-text` the tree uncut"
+        );
+        assert_eq!(lines[2], format!("- text: {}… (+19700 chars: get text 2)", "x".repeat(300)));
+        assert_eq!(lines[3], format!("- paragraph: {}… (+19700 chars: get text 3)", "x".repeat(300)));
+        assert_eq!(lines[4], format!("- link \"{}\"… (+50 chars) [ref=5]", "n".repeat(150)));
+        assert_eq!((out.cuts, out.cut_chars), (3, 39_450));
+
+        // --full-text: nothing cut, no summary line.
+        let full = render("", &nodes, &[], &Options { full_text: true, ..Options::default() });
+        assert_eq!(full.cuts, 0);
+        assert!(full.text.starts_with(&format!("- text: {long}\n")), "{}", &full.text[..80]);
+        assert!(full.text.contains(&format!("- link \"{name}\" [ref=5]")));
+    }
+
+    /// A page whose texts in full fit the budget prints them in full: the
+    /// cuts would save less than the agent's next call costs.
+    #[test]
+    fn texts_in_full_when_they_fit_the_budget() {
+        let long = "y".repeat(1000);
+        let nodes = vec![
+            node("1", None, "RootWebArea", "", &["2"], 1),
+            node("2", Some("1"), "paragraph", "", &["3"], 2),
+            node("3", Some("2"), "StaticText", &long, &[], 3),
+        ];
+        let out = render("", &nodes, &[], &Options::default());
+        assert_eq!(out.text, format!("- paragraph: {long}"));
+        assert_eq!(out.cuts, 0);
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 
     #[test]

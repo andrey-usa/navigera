@@ -1544,17 +1544,34 @@ fn text_shares_lines_and_a_cut_says_how_to_read_the_rest() {
         }
     }
 
+    // Two long texts on a small page: printed in full (the cuts would save
+    // less than the call to read them).
     let long = "Lorem ipsum dolor sit amet. ".repeat(40);
     s.ok(&["goto", &format!("{}/long-text", site.url)]);
     let tree = s.text(&["ax"]);
+    assert_eq!(tree.matches(long.trim()).count(), 2, "{tree}");
+    assert!(!tree.contains("chars: get text") && !tree.contains("cut short"), "{tree}");
+
+    // A 1,500-clause agreement: every clause is there; the long ones are
+    // cut, each says how to read the rest, and a line at the top says it
+    // once. `--full-text` prints every word.
+    s.ok(&["goto", &format!("{}/legal", site.url)]);
+    let tree = s.text(&["ax"]);
+    let second = tree.lines().nth(1).unwrap_or("");
+    assert!(second.starts_with("… 150 texts cut short here (") && second.contains("ax --full-text"), "{second}");
+    assert_eq!(tree.matches("The Supplier shall keep obligation").count(), 1500);
     let refs: Vec<&str> = tree.match_indices("chars: get text ").map(|(at, m)| &tree[at + m.len()..]).collect();
-    assert_eq!(refs.len(), 2, "both cuts say how to read the rest:\n{tree}");
-    let omitted = format!("(+{} chars", long.trim().chars().count() - 300);
-    assert_eq!(tree.matches(&omitted).count(), 2, "{tree}");
-    for r in refs {
-        let id: String = r.chars().take_while(char::is_ascii_digit).collect();
-        assert_eq!(s.text(&["get", "text", &id]), long.trim(), "get text {id}");
-    }
+    assert_eq!(refs.len(), 150, "every cut says how to read the rest");
+    let id: String = refs[0].chars().take_while(char::is_ascii_digit).collect();
+    assert!(s.text(&["get", "text", &id]).ends_with("Penalty schedule 0 applies to any breach not cured in time."));
+    let full = s.text(&["ax", "--full-text"]);
+    assert_eq!(full.matches("Penalty schedule").count(), 150);
+    assert!(!full.contains("cut short") && !full.contains("chars: get text"));
+    // `text` with no selector: the whole page as it reads.
+    let page = s.text(&["text"]);
+    assert!(page.starts_with("Master Services Agreement"), "{}", &page[..80]);
+    assert_eq!(page.matches("Penalty schedule").count(), 150);
+    assert_eq!(page.matches("The Supplier shall keep obligation").count(), 1500);
 }
 
 /// A banner with controls of its own that stays over the button is said

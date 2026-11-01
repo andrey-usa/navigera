@@ -1892,6 +1892,8 @@ pub struct AxOptions {
     pub all_refs: bool,
     pub limit: usize,
     pub scope: Option<Target>,
+    /// Texts, names and values uncut (`ax --full-text`).
+    pub full_text: bool,
 }
 
 /// Where the mouse is and which buttons it holds (bits: 1 left, 2 right,
@@ -3975,6 +3977,12 @@ impl Page {
     }
 
     /// First matching element's textContent, if present.
+    /// The page's whole text as it reads (`innerText` of the body).
+    pub fn page_text(&self, timeout: Duration) -> Result<String> {
+        let value = self.evaluate_raw("(document.body || document.documentElement || {}).innerText ?? ''", timeout)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
         let value = self.evaluate_raw(&format!("({DEEP}.first({sel}) || {{}}).textContent ?? null"), timeout)?;
@@ -4705,6 +4713,7 @@ impl Page {
             &built.nodes,
             &built.frames,
             &ax::Options {
+                full_text: opts.full_text,
                 all_refs: opts.all_refs,
                 limit: opts.limit,
                 root_backend_id,
@@ -4806,6 +4815,7 @@ impl Page {
             &seed,
             &frames,
             &ax::Options {
+                full_text: opts.full_text,
                 all_refs: opts.all_refs,
                 limit: opts.limit,
                 root_backend_id: scoped_backend,
@@ -4883,6 +4893,7 @@ impl Page {
             &nodes,
             &frames,
             &ax::Options {
+                full_text: opts.full_text,
                 all_refs: opts.all_refs,
                 limit: opts.limit,
                 root_backend_id,

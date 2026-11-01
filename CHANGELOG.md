@@ -27,6 +27,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Long text in snapshots: a snapshot that cut anything says so under its
+  first line, with how many texts and characters and how to read them
+  (`… 150 texts cut short here (11,553 chars left out): …`). When the
+  whole snapshot, every text in full, stays under 32,000 characters,
+  nothing is cut. `ax --full-text` (MCP `browser_snapshot` `full_text`)
+  prints every word, and `text` with no selector prints the page's whole
+  text as it reads. A 1,500-clause agreement: every clause in the default
+  snapshot, the 150 long ones cut and counted on the second line; all
+  172,000 characters with `--full-text` or `text`, in about 45 ms.
 - A snapshot right after an action whose own requests have started (a
   click that fetches) waits for those requests and 100 ms more, not the
   whole 500 ms quiet window: a click that loads data for 200 ms is read

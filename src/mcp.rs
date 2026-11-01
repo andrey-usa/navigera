@@ -102,8 +102,16 @@ pub fn tools() -> Vec<Value> {
         tool(
             "browser_snapshot",
             "The page as an indented accessibility tree; actionable elements carry [ref=N]. Waits briefly for data \
-             the page is still fetching. Scope it with ref or selector on big pages.",
-            object(props(&[target_props(), json!({"limit": {"type": "integer", "description": "Max lines (default 2000)"}})]), &[]),
+             the page is still fetching. Scope it with ref or selector on big pages. Long texts are cut (a line at the \
+             top says how much); full_text prints every word.",
+            object(
+                props(&[
+                    target_props(),
+                    json!({"limit": {"type": "integer", "description": "Max lines (default 2000)"}}),
+                    json!({"full_text": {"type": "boolean", "description": "Texts, names and values uncut"}}),
+                ]),
+                &[],
+            ),
             true,
         ),
         tool(

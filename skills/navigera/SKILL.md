@@ -136,6 +136,9 @@ page "Checkout — Acme" http://shop.test/checkout
   what the page marks it with (`icon="fa-trash"`, `data-tooltip="Archive"`,
   `img="home.png"`).
 - A cut text ends `… (+N chars: get text <ref>)`: that command reads it all.
+  A snapshot that cut anything says so on its second line. Before a reading
+  or compliance judgment (terms, policies, contracts), read in full: `text`
+  (the whole page as it reads), `text --selector main`, or `ax --full-text`.
 - Nesting shows what belongs together (which "Add to cart" sits in which
   product). Iframes and open shadow DOM are included; links show their `url=`.
 - Collapsed or hidden content (closed `<details>`, hover menus, inactive

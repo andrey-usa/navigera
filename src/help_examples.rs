@@ -220,8 +220,8 @@ pub const EXAMPLES: &[Help] = &[
     ),
     (
         "text",
-        &[("navigera -s s text --selector \"h3\"", "")],
-        &[("--selector <css>", "the element whose textContent to print")],
+        &[("navigera -s s text --selector \"h3\"", ""), ("navigera -s s text", "the whole page, as it reads")],
+        &[("--selector <css>", "the element whose textContent to print (none: the page's innerText)")],
     ),
     (
         "find",

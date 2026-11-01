@@ -182,7 +182,13 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   texts starts a new line.
 - A text cut at 300 characters, or a name or value cut at 150, says how much
   is left out, and a cut text names the ref that reads all of it:
-  `- text: Lorem ipsum dolor sit amet… (+1979 chars: get text 8)`.
+  `- text: Lorem ipsum dolor sit amet… (+1979 chars: get text 8)`. A
+  snapshot that cut anything says so once, under its first line, with the
+  totals (`… 150 texts cut short here (11,553 chars left out): …`). Nothing
+  is cut when the whole snapshot, every text in full, stays under 32,000
+  characters: then the cuts save less than reading them back would cost.
+  `ax --full-text` (MCP: `full_text`) prints every word; `text` with no
+  selector prints the page's whole text as it reads (`innerText`).
 - A named node with one same-named actionable child is printed on one line,
   for example `heading "X": link [ref=7]`.
 - `[ref=N]` (a backend DOM node id) appears on actionable nodes: interactive
