@@ -276,24 +276,31 @@ pub fn chrome_major(exe: &str) -> Option<u32> {
     Some(major)
 }
 
-/// The window a user would look at: the largest that isn't hidden. None
-/// when every window is hidden (or there are none), or, with `all_known`,
-/// while any window can't say yet (its page has no context).
+/// The window a user would look at: the largest the app shows. Which ones
+/// it shows, its main process says (`BrowserWindow.isVisible()`); without
+/// it, the largest window, since a page's own `visibilityState` is wrong
+/// both ways (a `show: false` window says visible on its first load, a
+/// shown one under Xvfb says hidden) and only breaks a tie. None when
+/// every window is hidden (or there are none), or, with `all_known`, while
+/// any window can't say yet (its page has no context).
 fn best_window(pages: &[crate::cdp::Page], browser: &Browser, timeout: Duration, all_known: bool) -> Option<usize> {
     // A window made with `show: false` says it is visible on its first
     // load (Electron's paintWhenInitiallyHidden): the main process knows.
     let windows = window_visibility(browser, timeout);
-    let mut best: Option<(usize, f64)> = None;
+    let mut best: Option<(usize, (f64, bool))> = None;
     for (i, page) in pages.iter().enumerate() {
-        let Some((hidden, area, url)) = page.window_shown(timeout) else {
+        let Some((says_hidden, area, url)) = page.window_shown(timeout) else {
             if all_known {
                 return None;
             }
             continue;
         };
-        let hidden = hidden_by_main(&url, windows.as_deref()).unwrap_or(hidden);
-        if !hidden && best.is_none_or(|(_, a)| area > a) {
-            best = Some((i, area));
+        if hidden_by_main(&url, windows.as_deref()) == Some(true) {
+            continue;
+        }
+        let rank = (area, !says_hidden);
+        if best.is_none_or(|(_, r)| rank.0 > r.0 || (rank.0 == r.0 && rank.1 && !r.1)) {
+            best = Some((i, rank));
         }
     }
     best.map(|(i, _)| i)
@@ -1424,11 +1431,13 @@ impl BrowserSession {
                     self.apply_overrides(&page);
                     self.apply_init_scripts(&page);
                     // An app's hidden window (a dropdown, a helper) is a tab,
-                    // but not the one the session goes on in.
+                    // but not the one the session goes on in, when its main
+                    // process says so (a page's own visibility can't be
+                    // trusted, see `best_window`).
                     let hidden = self.is_electron() && {
                         let timeout = Duration::from_millis(1000);
-                        page.window_shown(timeout).is_some_and(|(hidden, _, url)| {
-                            hidden_by_main(&url, window_visibility(&self.browser, timeout).as_deref()).unwrap_or(hidden)
+                        page.window_shown(timeout).is_some_and(|(_, _, url)| {
+                            hidden_by_main(&url, window_visibility(&self.browser, timeout).as_deref()) == Some(true)
                         })
                     };
                     self.pages.push(page);

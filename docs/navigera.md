@@ -627,9 +627,13 @@ or headless mode would change how it starts. `start` returns once a window
 the app shows is open and has loaded something to read or use (text or a
 control), up to the navigation timeout: an app that boots its UI after the
 window opens is past its empty shell. The session starts on the largest
-window that isn't hidden (an app's helper windows, a dropdown or a tray
-menu, made with `show: false`, are tabs but not the one the session works
-in, now or after a window closes). `start`'s result says
+window the app shows: an app's helper windows, a dropdown or a tray menu
+made with `show: false`, are tabs but not the one the session works in, now
+or after a window closes, as its main process says
+(`BrowserWindow.isVisible()`). Where the main process can't be reached (an
+app attached to, or one that turns Node's inspector off), the largest window
+is taken: a page's own visibility is wrong both ways (a hidden window says
+visible on its first load, a shown one under Xvfb says hidden). `start`'s result says
 `electron: {version, main_process}`: the app's Electron version (null
 when the app set its own user agent and its main process is out of reach)
 and whether `eval --main` can reach its main process. An `ax` of a window

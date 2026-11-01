@@ -116,10 +116,11 @@ know:
 
 - `start --electron` could start on an app's hidden helper window: a
   window made with `show: false` says it is visible on its first load
-  (Electron's paintWhenInitiallyHidden), and one whose page could not
-  answer yet counted as shown. The main process now says which windows
-  are visible, a window that can't answer yet counts as unknown, and the
-  choice waits until the app has stopped opening windows for a moment.
+  (Electron's paintWhenInitiallyHidden), a shown one under Xvfb says it is
+  hidden, and one whose page could not answer yet counted as shown. The
+  main process now says which windows are visible (without it, the largest
+  window is taken), a window that can't answer yet counts as unknown, and
+  the choice waits until the app has stopped opening windows for a moment.
 
 - `screenshot --no-wait` right after a click that confirm()s, posts and
   reloads the page could go unanswered for the whole 35 s timeout: Chrome
