@@ -203,6 +203,9 @@ pub struct Shared {
     /// one of its windows, adopted as a tab (an app's new window has no
     /// opener); its DevTools windows are not.
     pub adopt_windows: std::sync::atomic::AtomicBool,
+    /// Of those, the `<webview>`s inside an app's windows: tabs a session
+    /// can select, never the one it goes on in by itself.
+    pub embedded: Mutex<std::collections::HashSet<String>>,
     /// Page targets that went away (e.g. `window.close()`).
     pub destroyed: Mutex<Vec<String>>,
     /// session id -> target id, registered when a tab is attached. A page
@@ -866,13 +869,19 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
         }
         "Target.targetCreated" => {
             let info = params.get("targetInfo").cloned().unwrap_or(Value::Null);
-            let is_page = info.get("type").and_then(Value::as_str) == Some("page");
+            let kind = info.get("type").and_then(Value::as_str);
+            let is_page = kind == Some("page");
             let opener = info.get("openerId").and_then(Value::as_str).unwrap_or("");
             let url = info.get("url").and_then(Value::as_str).unwrap_or("");
-            let window =
-                shared.adopt_windows.load(std::sync::atomic::Ordering::Relaxed) && !url.starts_with("devtools://");
-            if is_page && (!opener.is_empty() || window) {
+            let app = shared.adopt_windows.load(std::sync::atomic::Ordering::Relaxed);
+            let window = app && !url.starts_with("devtools://");
+            // An app's `<webview>`: a tab too, marked as embedded.
+            let webview = app && kind == Some("webview");
+            if (is_page && (!opener.is_empty() || window)) || webview {
                 if let Some(id) = info.get("targetId").and_then(Value::as_str) {
+                    if webview {
+                        shared.embedded.lock().unwrap().insert(id.to_string());
+                    }
                     shared.opened.lock().unwrap().push((id.to_string(), opener.to_string()));
                 }
             }

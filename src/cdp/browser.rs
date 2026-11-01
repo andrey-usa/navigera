@@ -608,18 +608,25 @@ impl Browser {
         Ok(v.get("userAgent").and_then(Value::as_str).unwrap_or_default().to_string())
     }
 
-    /// List open tab targets: (target_id, url).
+    /// List open tab targets: (target_id, url). In an Electron app, its
+    /// `<webview>`s too (marked in [`Shared::embedded`]).
     pub fn tab_targets(&self) -> Result<Vec<(String, String)>> {
+        let app = self.shared.adopt_windows.load(std::sync::atomic::Ordering::Relaxed);
         self.block_on(async {
             let targets = self.client.send("Target.getTargets", json!({}), None, CMD_TIMEOUT).await?;
             let mut out = Vec::new();
             if let Some(list) = targets.get("targetInfos").and_then(Value::as_array) {
                 for t in list {
-                    if t.get("type").and_then(Value::as_str) != Some("page") {
+                    let kind = t.get("type").and_then(Value::as_str);
+                    let webview = app && kind == Some("webview");
+                    if kind != Some("page") && !webview {
                         continue;
                     }
                     let id = t.get("targetId").and_then(Value::as_str).unwrap_or("");
                     let url = t.get("url").and_then(Value::as_str).unwrap_or("");
+                    if webview {
+                        self.shared.embedded.lock().unwrap().insert(id.to_string());
+                    }
                     out.push((id.to_string(), url.to_string()));
                 }
             }

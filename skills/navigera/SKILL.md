@@ -99,7 +99,7 @@ to do, `wait --url /dashboard --timeout-ms 300000`, then `hide` and carry on.
 ```bash
 navigera -s app start --electron ./my-app   # app directory or main script (Electron from its node_modules), a packaged app's executable, or a .app bundle
 navigera -s app --raw ax                    # the window it opened first, read like a page
-navigera -s app tab-list                    # each window is a tab; one the app opens becomes the active tab
+navigera -s app tab-list                    # each window is a tab (a <webview> too, "webview": true); one the app opens becomes the active tab
 navigera -s app eval --main "({ app }) => app.getName()"   # the app's main process (a function gets the electron module)
 navigera -s app quit                        # ends the app
 ```

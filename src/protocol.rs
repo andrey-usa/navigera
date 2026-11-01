@@ -2729,6 +2729,9 @@ impl Driver {
                 if closed == Some(target.as_str()) {
                     tab["closed"] = json!(true);
                 }
+                if self.session.is_embedded(&target) {
+                    tab["webview"] = json!(true);
+                }
                 tab
             })
             .collect();

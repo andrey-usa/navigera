@@ -287,8 +287,13 @@ fn best_window(pages: &[crate::cdp::Page], browser: &Browser, timeout: Duration,
     // A window made with `show: false` says it is visible on its first
     // load (Electron's paintWhenInitiallyHidden): the main process knows.
     let windows = window_visibility(browser, timeout);
+    let embedded = browser.shared().embedded.lock().unwrap().clone();
     let mut best: Option<(usize, (f64, bool))> = None;
     for (i, page) in pages.iter().enumerate() {
+        // A `<webview>` is part of a window, not one.
+        if embedded.contains(page.target_id()) {
+            continue;
+        }
         let Some((says_hidden, area, url)) = page.window_shown(timeout) else {
             if all_known {
                 return None;
@@ -1251,6 +1256,12 @@ impl BrowserSession {
         self.pages.iter().map(|p| p.target_id().to_string()).collect()
     }
 
+    /// Whether the tab is an Electron app's `<webview>` (inside one of its
+    /// windows), not a window.
+    pub fn is_embedded(&self, target_id: &str) -> bool {
+        self.browser.shared().embedded.lock().unwrap().contains(target_id)
+    }
+
     /// Open a new tab and make it active; returns its index.
     pub fn new_page(&mut self) -> Result<usize> {
         if self.lightpanda {
@@ -1434,6 +1445,7 @@ impl BrowserSession {
                     // but not the one the session goes on in, when its main
                     // process says so (a page's own visibility can't be
                     // trusted, see `best_window`).
+                    let embedded = self.browser.shared().embedded.lock().unwrap().contains(&target_id);
                     let hidden = self.is_electron() && {
                         let timeout = Duration::from_millis(1000);
                         page.window_shown(timeout).is_some_and(|(_, _, url)| {
@@ -1441,7 +1453,7 @@ impl BrowserSession {
                         })
                     };
                     self.pages.push(page);
-                    if !hidden {
+                    if !hidden && !embedded {
                         self.active = self.pages.len() - 1;
                         adopted.push(self.active);
                     }

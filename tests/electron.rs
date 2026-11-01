@@ -451,6 +451,36 @@ fn an_electron_app_already_running_is_attached() {
 }
 
 #[test]
+fn a_webview_in_an_app_window_is_a_tab_of_its_own() {
+    let Some(app) = fixture_app() else {
+        eprintln!("skipping: no Electron in tests/fixtures/electron-app (run `npm install` there)");
+        return;
+    };
+    let session = session_name("webview");
+    let _quit = Quit(session.clone());
+    // The app also opens a Notes window holding a <webview>.
+    let (started, r) = run(&session, &["start", "--electron", app.to_str().unwrap(), "--electron-arg=--webview"]);
+    assert!(started && r["ok"] == true, "{r}");
+    let tree = ax(&session);
+    assert!(tree.contains("heading \"Orders\""), "{tree}\n{}", windows_report(&session));
+    // The webview is a tab, said to be one, and not the one the session is in.
+    let webview = wait_for(Duration::from_secs(10), "the webview as a tab", || {
+        let tabs = ok(&session, &["tab-list"]);
+        let found = tabs["tabs"].as_array()?.iter().find(|t| t["webview"] == true)?;
+        assert_eq!(found["active"], false, "{tabs}");
+        found["target"].as_str().map(str::to_string)
+    });
+    ok(&session, &["tab-select", &webview]);
+    let tree = ax(&session);
+    assert!(tree.contains("heading \"Embedded\""), "{tree}");
+    ok(&session, &["click", "--role", "button", "--name", "Embedded action"]);
+    wait_for(Duration::from_secs(5), "the click inside the webview", || {
+        ax(&session).contains("Clicked inside the webview").then_some(())
+    });
+    ok(&session, &["quit"]);
+}
+
+#[test]
 fn a_missing_app_is_named() {
     let session = session_name("missing");
     let _quit = Quit(session.clone());

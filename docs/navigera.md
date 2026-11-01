@@ -633,7 +633,10 @@ or after a window closes, as its main process says
 (`BrowserWindow.isVisible()`). Where the main process can't be reached (an
 app attached to, or one that turns Node's inspector off), the largest window
 is taken: a page's own visibility is wrong both ways (a hidden window says
-visible on its first load, a shown one under Xvfb says hidden). `start`'s result says
+visible on its first load, a shown one under Xvfb says hidden). A
+`<webview>` inside a window is a tab too, marked `"webview": true` in
+`tab-list`: `tab-select` it to read and act inside it; the session never
+moves into one by itself. `start`'s result says
 `electron: {version, main_process}`: the app's Electron version (null
 when the app set its own user agent and its main process is out of reach)
 and whether `eval --main` can reach its main process. An `ax` of a window
