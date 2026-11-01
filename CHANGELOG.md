@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-01
+
 ### Changed
 
 - `ax` on a large page (over 3,000 DOM nodes) builds the tree from the DOM
@@ -19,7 +21,6 @@ All notable changes to this project are documented here. The format follows
   1,789 / 4,671 ms before, 155 / 325 / 681 ms now (Playwright's
   `ariaSnapshot`: 238 / 476 / 975 ms); with the default limit 149 / 317 /
   604 ms. `NAVIGERA_AX_SOURCE=chrome|dom` picks the source.
-
 - Adjacent text in a snapshot shares lines of up to 300 characters instead
   of taking a line per element: a page of 3,000 `<div>` cells went from
   3,001 lines (39 KB) to 51 lines (15 KB). A control or any other element
@@ -53,7 +54,6 @@ All notable changes to this project are documented here. The format follows
   `$XDG_RUNTIME_DIR` or `$TMPDIR`) failed to start: the shared browser's
   socket path did not fit a socket address. Such a session now takes a
   browser of its own, and its log says why.
-
 - A long poll (a chat or notification request held open, reconnected when
   it ends) no longer holds snapshots for up to 3 s each cycle: a fetch/XHR
   open past 1 s stops holding a snapshot, and its URL's later requests
@@ -65,7 +65,6 @@ All notable changes to this project are documented here. The format follows
   out included, don't count, in whatever order their events arrive (first
   snapshot on such a page: 505 to 8 ms). The end of a long poll no longer
   restarts the quiet window either.
-
 - `ax` on a large page through the shared browser lost up to a quarter of
   its speed in 0.6.5: each of the snapshot's thousands of tree reads crossed
   four threads of the browser's host. The host now routes a message on the
@@ -824,6 +823,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.7.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.0
 [0.6.5]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.5
 [0.6.4]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.4
 [0.6.3]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.3
