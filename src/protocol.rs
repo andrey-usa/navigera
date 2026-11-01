@@ -854,6 +854,11 @@ pub struct SessionConfig {
     /// `--profile <name|dir>`: a persistent, visible navigera browser on
     /// its own profile, started when needed and kept open between sessions.
     pub profile: Option<String>,
+    /// `--electron <app>`: launch an Electron app and drive its windows
+    /// (see `BrowserSession::launch_electron`).
+    pub electron: Option<String>,
+    /// `--electron-arg <arg>` (repeatable): arguments for the app.
+    pub electron_args: Vec<String>,
     /// `--headless` for a `--profile` browser (visible by default).
     pub headless: bool,
     /// `--from <browser|user-data-dir>`: seed the `--profile` browser's
@@ -903,6 +908,8 @@ impl Default for SessionConfig {
             idle_timeout_s: DEFAULT_IDLE_TIMEOUT_S,
             attach: None,
             profile: None,
+            electron: None,
+            electron_args: Vec::new(),
             headless: false,
             from: None,
             from_profile: None,
@@ -1152,6 +1159,10 @@ pub fn usage(program: &str) -> String {
         ),
         ("--profile <name>", "with `start`: a persistent visible navigera browser, kept open between sessions (--headless to hide it)".into()),
         (
+            "--electron <app>",
+            "with `start`: launch an Electron app and drive its windows as tabs; <app> is its directory or main script (with Electron in its node_modules) or an executable (Electron, or a packaged app); --electron-arg <arg> passes arguments; quit ends the app".into(),
+        ),
+        (
             "--from <browser|dir>",
             "with --profile: first copy your own browser's sign-ins into it (cookies, site storage, saved logins); --from-profile <dir|name|email> picks the profile".into(),
         ),
@@ -1302,6 +1313,31 @@ pub enum ArgsError {
     Invalid(String),
 }
 
+/// `--electron`: an app's path from the caller's directory (the session
+/// server may run from another), or a command name as given (found on PATH).
+fn electron_path(app: String) -> String {
+    if std::path::Path::new(&app).exists() {
+        caller_path(app)
+    } else {
+        app
+    }
+}
+
+/// `--electron` is a browser source of its own, like `--attach` and
+/// `--profile`, and its arguments mean nothing without it.
+fn check_electron_flags(config: &SessionConfig) -> Result<(), String> {
+    if !config.electron_args.is_empty() && config.electron.is_none() {
+        return Err("--electron-arg passes an argument to an Electron app: add --electron <app>".into());
+    }
+    if config.electron.is_some() && (config.attach.is_some() || config.profile.is_some()) {
+        return Err("--electron, --attach and --profile are alternatives: pick one".into());
+    }
+    if config.electron.is_some() && crate::browser::is_lightpanda(&config.engine) {
+        return Err("--electron runs an Electron app; --engine lightpanda is a browser of its own".into());
+    }
+    Ok(())
+}
+
 /// A path the caller gave, made absolute against the caller's directory
 /// (a session server runs elsewhere).
 fn caller_path(dir: String) -> String {
@@ -1391,6 +1427,10 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
     if let Some(name) = extract_value(args, "--profile")? {
         config.profile = Some(name);
     }
+    if let Some(app) = extract_value(args, "--electron")? {
+        config.electron = Some(electron_path(app));
+    }
+    config.electron_args.extend(extract_values(args, "--electron-arg")?);
     if extract_present(args, "--headless") {
         config.headless = true;
     }
@@ -1416,6 +1456,7 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
         config.natural = true;
     }
     check_profile_flags(config)?;
+    check_electron_flags(config)?;
     if config.attach.is_some() && config.profile.is_some() {
         return Err("--attach and --profile are alternatives: pick one".into());
     }
@@ -1559,6 +1600,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 })
             }
             "--profile" => config.profile = Some(value("--profile")?),
+            "--electron" => config.electron = Some(electron_path(value("--electron")?)),
+            "--electron-arg" => config.electron_args.push(value("--electron-arg")?),
             "--headless" => config.headless = true,
             "--from" => config.from = Some(value("--from")?),
             "--from-profile" => config.from_profile = Some(value("--from-profile")?),
@@ -2362,6 +2405,11 @@ impl Driver {
     /// Launch the engine described by `config` (Chrome by default).
     pub fn launch(config: &SessionConfig) -> anyhow::Result<Self> {
         Self::apply_settings(config);
+        if let Some(app) = &config.electron {
+            let session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
+                .map_err(|e| anyhow::anyhow!("could not launch the Electron app: {e:#}"))?;
+            return Ok(Self { session, history: Vec::new() });
+        }
         if let Some(target) = config.attach_target() {
             let session = BrowserSession::attach(&target, config.timeout_ms)
                 .map_err(|e| anyhow::anyhow!("could not connect to the browser: {e:#}"))?;
@@ -2558,6 +2606,9 @@ impl Driver {
         let what = if visible { "show" } else { "hide" };
         if self.session.is_lightpanda() {
             anyhow::bail!("{what}: Lightpanda has no window; use the chrome engine");
+        }
+        if self.session.is_electron() {
+            anyhow::bail!("{what}: an Electron app shows its own windows");
         }
         if self.session.is_attached() && self.session.profile_dir().is_none() {
             anyhow::bail!("{what}: this is your own browser (--attach); it is already where you see it");
@@ -3637,6 +3688,12 @@ impl Driver {
             Command::TabList {} => Ok(self.tabs_json()),
             Command::Show {} => self.relaunch(true),
             Command::Hide {} => self.relaunch(false),
+            Command::Reset { .. } if self.session.is_electron() => {
+                anyhow::bail!("reset: an Electron app keeps its own windows and storage; quit and start it again")
+            }
+            Command::TabNew { .. } if self.session.is_electron() => {
+                anyhow::bail!("tab-new: an Electron app opens its own windows; tab-list shows them")
+            }
             Command::Reset { all } => {
                 self.session.reset(*all).map_err(|e| anyhow::anyhow!("reset: {e:#}"))?;
                 Ok(self.tabs_json())
@@ -4802,6 +4859,29 @@ mod tests {
         let attach = |args: &[&str]| parse_args(argv(args)).map(|p| (p.config.attach, p.start));
         // Bare --attach means the user's Chrome, wherever it sits.
         assert_eq!(attach(&["navigera", "-s", "me", "start", "--attach"]).unwrap(), (Some("chrome".into()), true));
+        // --electron with repeated arguments, before or after `start`; an
+        // argument may start with a dash.
+        let parsed = parse_args(argv(&[
+            "navigera",
+            "-s",
+            "app",
+            "start",
+            "--electron",
+            "my-app-bin",
+            "--electron-arg",
+            "--enable-logging",
+            "--electron-arg=x",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.config.electron.as_deref(), Some("my-app-bin"));
+        assert_eq!(parsed.config.electron_args, ["--enable-logging", "x"]);
+        let parsed = parse_args(argv(&["navigera", "--electron", "my-app-bin", "-s", "app", "start"])).unwrap();
+        assert_eq!(parsed.config.electron.as_deref(), Some("my-app-bin"));
+        let err =
+            parse_args(argv(&["navigera", "-s", "app", "start", "--electron", "a", "--attach", "9222"])).unwrap_err();
+        assert!(matches!(&err, ArgsError::Invalid(m) if m.contains("alternatives")), "{err:?}");
+        let err = parse_args(argv(&["navigera", "-s", "app", "start", "--electron-arg", "x"])).unwrap_err();
+        assert!(matches!(&err, ArgsError::Invalid(m) if m.contains("add --electron")), "{err:?}");
         assert_eq!(attach(&["navigera", "-s", "me", "--attach", "start"]).unwrap(), (Some("chrome".into()), true));
         assert_eq!(
             attach(&["navigera", "-s", "me", "start", "--attach", "--headless"]).unwrap().0.as_deref(),

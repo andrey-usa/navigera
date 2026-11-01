@@ -1,0 +1,10 @@
+{
+  "name": "navigera-electron-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small Electron app for navigera's end-to-end tests: a form saved through the main process, and a second window.",
+  "main": "main.js",
+  "devDependencies": {
+    "electron": "45.2.1"
+  }
+}

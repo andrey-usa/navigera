@@ -70,6 +70,7 @@ pub fn wanted(config: &SessionConfig) -> bool {
         || crate::browser::is_lightpanda(&config.engine)
         || config.attach.is_some()
         || config.profile.is_some()
+        || config.electron.is_some()
     {
         return false;
     }

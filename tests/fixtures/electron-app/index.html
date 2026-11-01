@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'">
+  <title>Orders</title>
+</head>
+<body>
+  <h1>Orders</h1>
+  <form id="order">
+    <p><label for="customer">Customer</label> <input id="customer" name="customer"></p>
+    <p><label for="quantity">Quantity</label> <input id="quantity" name="quantity" type="number" min="1" value="1"></p>
+    <p><button type="submit">Save order</button> <button type="button" id="open-settings">Settings</button></p>
+  </form>
+  <p role="status" id="status"></p>
+  <footer id="runtime"></footer>
+  <script src="renderer.js"></script>
+</body>
+</html>

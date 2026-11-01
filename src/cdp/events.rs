@@ -195,6 +195,10 @@ pub struct Shared {
     /// Page targets opened by a page (they carry an `openerId`), in order:
     /// (target, opener).
     pub opened: Mutex<Vec<(String, String)>>,
+    /// An Electron app (`start --electron`): every page target it opens is
+    /// one of its windows, adopted as a tab (an app's new window has no
+    /// opener); its DevTools windows are not.
+    pub adopt_windows: std::sync::atomic::AtomicBool,
     /// Page targets that went away (e.g. `window.close()`).
     pub destroyed: Mutex<Vec<String>>,
     /// session id -> target id, registered when a tab is attached. A page
@@ -841,7 +845,10 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
             let info = params.get("targetInfo").cloned().unwrap_or(Value::Null);
             let is_page = info.get("type").and_then(Value::as_str) == Some("page");
             let opener = info.get("openerId").and_then(Value::as_str).unwrap_or("");
-            if is_page && !opener.is_empty() {
+            let url = info.get("url").and_then(Value::as_str).unwrap_or("");
+            let window =
+                shared.adopt_windows.load(std::sync::atomic::Ordering::Relaxed) && !url.starts_with("devtools://");
+            if is_page && (!opener.is_empty() || window) {
                 if let Some(id) = info.get("targetId").and_then(Value::as_str) {
                     shared.opened.lock().unwrap().push((id.to_string(), opener.to_string()));
                 }

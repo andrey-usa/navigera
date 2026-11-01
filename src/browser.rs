@@ -276,6 +276,74 @@ pub fn chrome_major(exe: &str) -> Option<u32> {
     Some(major)
 }
 
+/// What `start --electron <app>` runs: an executable as it is, or for an
+/// app's directory or main script, the Electron binary its `node_modules`
+/// holds (the `electron` npm package's `dist/`, looked for from the app
+/// upward), with the app as its first argument.
+pub fn resolve_electron(app: &str, args: &[String]) -> Result<(String, Vec<String>)> {
+    let path = std::path::Path::new(app);
+    let script = path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e, "js" | "cjs" | "mjs"));
+    if path.is_file() && !script {
+        return Ok((app.to_string(), args.to_vec()));
+    }
+    if !path.exists() {
+        // A packaged app's command, found on PATH.
+        let bare = path.components().count() == 1;
+        let on_path = bare.then(|| std::env::var_os("PATH")).flatten().and_then(|paths| {
+            std::env::split_paths(&paths)
+                .flat_map(|dir| [dir.join(app), dir.join(format!("{app}.exe"))])
+                .find(|candidate| candidate.is_file())
+        });
+        if let Some(exe) = on_path {
+            return Ok((exe.display().to_string(), args.to_vec()));
+        }
+        bail!(
+            "--electron {app}: no such file or directory (give the app's directory, its main script, or an executable)"
+        );
+    }
+    // A packaged macOS app (`Foo.app`) runs its bundle's executable.
+    if path.is_dir() && path.extension().is_some_and(|e| e == "app") {
+        let macos = path.join("Contents").join("MacOS");
+        let named = path.file_stem().map(|stem| macos.join(stem)).filter(|exe| exe.is_file());
+        let only = || {
+            let files: Vec<_> =
+                std::fs::read_dir(&macos).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+            if files.len() == 1 {
+                files.into_iter().next()
+            } else {
+                None
+            }
+        };
+        if let Some(exe) = named.or_else(only) {
+            return Ok((exe.display().to_string(), args.to_vec()));
+        }
+        bail!("--electron {app}: no executable found in {}; pass it to --electron", macos.display());
+    }
+    let start =
+        if path.is_dir() { path.to_path_buf() } else { path.parent().map(|p| p.to_path_buf()).unwrap_or_default() };
+    let start = std::fs::canonicalize(&start).unwrap_or(start);
+    let binary = if cfg!(target_os = "macos") {
+        "Electron.app/Contents/MacOS/Electron"
+    } else if cfg!(windows) {
+        "electron.exe"
+    } else {
+        "electron"
+    };
+    let found = start
+        .ancestors()
+        .map(|dir| dir.join("node_modules").join("electron").join("dist").join(binary))
+        .find(|candidate| candidate.is_file());
+    let Some(exe) = found else {
+        bail!(
+            "--electron {app}: no Electron found in node_modules from {} upward; run `npm install electron` in the app, or pass the Electron binary (or a packaged app) to --electron and the app with --electron-arg",
+            start.display()
+        );
+    };
+    let mut all = vec![app.to_string()];
+    all.extend(args.iter().cloned());
+    Ok((exe.display().to_string(), all))
+}
+
 /// Chrome refuses to start its sandbox as root (containers, CI images);
 /// `NAVIGERA_NO_SANDBOX=1` turns it off explicitly.
 pub(crate) fn no_sandbox_wanted(root: bool, env: Option<&str>) -> bool {
@@ -857,6 +925,94 @@ impl BrowserSession {
             closed: None,
             profile_dir,
             profile_exe,
+            downloads_dir: None,
+            overrides: Default::default(),
+            no_rule_call: Default::default(),
+            init_scripts: Vec::new(),
+            init_ids: Default::default(),
+            held: Default::default(),
+            _runtime: std::sync::Arc::new(runtime),
+        })
+    }
+
+    /// An Electron app (`start --electron <app>`): navigera launches it
+    /// with a DevTools port, waits for its first window and adopts its
+    /// windows as tabs (new ones too); closing the session ends the app.
+    /// `app` is an app's directory or main script (run with the Electron in
+    /// its `node_modules`) or an executable: Electron itself, or a packaged
+    /// app. `args` follow on the app's command line.
+    pub fn launch_electron(app: &str, args: &[String], nav_timeout_ms: f64) -> Result<Self> {
+        let started = std::time::Instant::now();
+        let runtime = engine_runtime()?;
+        let handle = runtime.handle().clone();
+        let (exe, args) = resolve_electron(app, args)?;
+        let no_sandbox =
+            no_sandbox_wanted(crate::proc::running_as_root(), std::env::var("NAVIGERA_NO_SANDBOX").ok().as_deref());
+        let browser = match Browser::launch_electron(&handle, &exe, &args, no_sandbox) {
+            Ok(browser) => browser,
+            // As for Chrome: where this machine can't give the app a
+            // sandbox (Ubuntu 24.04's AppArmor policy, a setuid helper
+            // that isn't set up), run it without one and say so.
+            Err(e) if !no_sandbox && sandbox_unavailable(&format!("{e:#}")) => {
+                eprintln!("{NO_SANDBOX_WARNING}");
+                Browser::launch_electron(&handle, &exe, &args, true)?
+            }
+            Err(e) => return Err(e),
+        };
+        crate::timing::log(&format!("[browser] electron {exe} {args:?}"));
+        eprintln!("navigera: Electron app {exe} {}", args.join(" "));
+        crate::timing::record("browser_up", started);
+        // The app opens its first window when it is ready, not at launch.
+        let wait = Duration::from_millis(nav_timeout_ms.max(1000.0) as u64);
+        let deadline = std::time::Instant::now() + wait;
+        let windows = loop {
+            let windows: Vec<(String, String)> = browser
+                .tab_targets()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, url)| !url.starts_with("devtools://"))
+                .collect();
+            if !windows.is_empty() {
+                break windows;
+            }
+            if browser.is_closed() || std::time::Instant::now() >= deadline {
+                bail!(
+                    "the Electron app opened no window within {} ms{}",
+                    wait.as_millis(),
+                    if browser.is_closed() { " (it exited)" } else { "" }
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let mut pages = Vec::new();
+        for (id, _) in &windows {
+            match browser.attach_page(id, "") {
+                Ok(page) => pages.push(page),
+                Err(e) => eprintln!("[browser] could not adopt window {id}: {e:#}"),
+            }
+        }
+        if pages.is_empty() {
+            bail!("could not attach to any of the app's {} window(s)", windows.len());
+        }
+        // Adopted now: the creation events of these windows are not new tabs.
+        browser.shared().take_opened();
+        crate::timing::record("launch_total", started);
+        Ok(Self {
+            browser: std::sync::Arc::new(browser),
+            pages,
+            active: 0,
+            exe,
+            lightpanda: false,
+            timeout_ms: nav_timeout_ms,
+            abandoned: std::sync::Mutex::new(None),
+            network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
+            context: None,
+            owner: true,
+            shared: false,
+            attached: false,
+            closed: None,
+            profile_dir: None,
+            profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
             no_rule_call: Default::default(),
@@ -2436,6 +2592,11 @@ impl BrowserSession {
         self.lightpanda
     }
 
+    /// An Electron app (`start --electron`): its windows are the app's own.
+    pub fn is_electron(&self) -> bool {
+        self.browser.shared().adopt_windows.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// The CDP WebSocket endpoint this session is attached to.
     pub fn endpoint(&self) -> String {
         self.browser.ws_url().to_string()
@@ -2534,5 +2695,44 @@ mod tests {
         assert!(sandbox_unavailable("[FATAL:zygote_host_impl_linux.cc(132)] No usable sandbox! If you are running"));
         assert!(sandbox_unavailable("distro that has disabled unprivileged user namespaces with AppArmor"));
         assert!(!sandbox_unavailable("net::ERR_NAME_NOT_RESOLVED"));
+    }
+
+    /// `--electron <dir>` finds the Electron in the app's node_modules (or a
+    /// parent's) and passes the app; an executable runs as it is.
+    #[test]
+    fn electron_resolves_an_app_directory_to_its_electron() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("packages").join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("main.js"), "").unwrap();
+        let binary = if cfg!(target_os = "macos") {
+            "Electron.app/Contents/MacOS/Electron"
+        } else if cfg!(windows) {
+            "electron.exe"
+        } else {
+            "electron"
+        };
+        let err = resolve_electron(app.to_str().unwrap(), &[]).unwrap_err().to_string();
+        assert!(err.contains("npm install electron"), "{err}");
+        let exe = root.path().join("node_modules").join("electron").join("dist").join(binary);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        let (found, args) = resolve_electron(app.to_str().unwrap(), &["--x".into()]).unwrap();
+        assert_eq!(std::fs::canonicalize(&found).unwrap(), std::fs::canonicalize(&exe).unwrap());
+        assert_eq!(args, [app.to_str().unwrap().to_string(), "--x".into()]);
+        let script = app.join("main.js");
+        let (_, args) = resolve_electron(script.to_str().unwrap(), &[]).unwrap();
+        assert_eq!(args, [script.to_str().unwrap().to_string()]);
+        // An executable (here the binary itself) is run as it is.
+        let (found, args) = resolve_electron(exe.to_str().unwrap(), &[".".into()]).unwrap();
+        assert_eq!((found.as_str(), args), (exe.to_str().unwrap(), vec![".".to_string()]));
+        assert!(resolve_electron("/no/such/app", &[]).is_err());
+        // A macOS app bundle runs the executable named after it.
+        let bundle = root.path().join("Foo.app");
+        let inner = bundle.join("Contents").join("MacOS").join("Foo");
+        std::fs::create_dir_all(inner.parent().unwrap()).unwrap();
+        std::fs::write(&inner, "").unwrap();
+        let (found, args) = resolve_electron(bundle.to_str().unwrap(), &[]).unwrap();
+        assert_eq!((found.as_str(), args.len()), (inner.to_str().unwrap(), 0));
     }
 }

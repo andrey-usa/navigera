@@ -146,6 +146,29 @@ impl Browser {
         Ok(browser)
     }
 
+    /// Launch an Electron app (`start --electron`) and connect to it. The
+    /// app's windows are its pages: every page target it opens is adopted
+    /// as a tab (an app's new windows have no opener, unlike a popup), and
+    /// closing the session ends the app.
+    pub fn launch_electron(
+        handle: &tokio::runtime::Handle,
+        exe: &str,
+        args: &[String],
+        no_sandbox: bool,
+    ) -> Result<Self> {
+        let started = std::time::Instant::now();
+        let launched = transport::launch_electron(exe, args, no_sandbox)?;
+        crate::timing::record("devtools_url", started);
+        let client = handle
+            .block_on(CdpClient::connect(&launched.ws_url))
+            .with_context(|| format!("connect to the Electron app at {}", launched.ws_url))?;
+        let mut browser = Self::finish(handle, client, Some(launched.child), None, launched.ws_url);
+        browser.stderr = Some(launched.stderr);
+        browser.job = launched.job;
+        browser.shared.adopt_windows.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(browser)
+    }
+
     /// Connect to a browser someone else runs (`--attach`, `--profile`).
     /// navigera owns no process here: `close` only disconnects, and the
     /// browser, its windows and tabs stay as they are.

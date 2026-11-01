@@ -694,6 +694,12 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     if let Some(name) = &config.profile {
         cmd.arg("--profile").arg(name);
     }
+    if let Some(app) = &config.electron {
+        cmd.arg("--electron").arg(app);
+    }
+    for arg in &config.electron_args {
+        cmd.arg(format!("--electron-arg={arg}"));
+    }
     if config.headless {
         cmd.arg("--headless");
     }

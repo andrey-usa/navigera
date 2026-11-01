@@ -183,6 +183,63 @@ pub fn launch_chrome(
     Ok(LaunchedChrome { child: kill.disarm(), profile_dir, ws_url, job })
 }
 
+/// An Electron app navigera launched (`start --electron`): the app's own
+/// process, its DevTools URL and its stderr tail.
+pub struct LaunchedElectron {
+    pub child: Child,
+    pub ws_url: String,
+    pub stderr: StderrTail,
+    /// Windows: the kill-on-close job holding the app (see `procjob`).
+    pub job: Option<super::procjob::ProcJob>,
+}
+
+/// Launch an Electron app with a DevTools port of its own choosing and read
+/// the port back from its stderr. Only the debugging switch is added: an
+/// app is not a browser, and Chrome's launch flags (a temporary profile,
+/// headless mode, no first-run pages) would change how it starts. `exe` is
+/// the Electron binary (with the app's directory or main script among
+/// `args`) or a packaged app's own executable. Where the sandbox cannot
+/// start (root), `--no-sandbox` is added, as for Chrome.
+pub fn launch_electron(exe: &str, args: &[String], no_sandbox: bool) -> Result<LaunchedElectron> {
+    let mut cmd = Command::new(exe);
+    cmd.arg("--remote-debugging-port=0");
+    if no_sandbox {
+        cmd.arg("--no-sandbox");
+    }
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    own_process_group(&mut cmd);
+    let mut child = cmd.spawn().with_context(|| format!("spawn the Electron app {exe}"))?;
+    let job = super::procjob::ProcJob::contain(&child);
+    let stderr = child.stderr.take().context("the app was spawned without a stderr pipe")?;
+    let mut kill = KillOnDrop(Some(child));
+    let capture = Capture::start(stderr);
+    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+    let ws_url = loop {
+        if let Some(url) = capture.wait_url(Duration::from_millis(20)) {
+            break url;
+        }
+        if let Ok(Some(status)) = kill.as_mut().try_wait() {
+            thread::sleep(Duration::from_millis(20));
+            let _ = kill.disarm().wait();
+            return Err(anyhow!(
+                "the Electron app exited during launch (status {status}) before it opened a DevTools port; its stderr:\n{}",
+                capture.tail()
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "the Electron app printed no DevTools URL within {} s (an app that removes --remote-debugging-port from its command line can't be driven); its stderr:\n{}",
+                DISCOVERY_TIMEOUT.as_secs(),
+                capture.tail()
+            ));
+        }
+    };
+    // Kept capturing for the app's lifetime: a crash later is explained by
+    // its last lines.
+    let stderr = capture.tail_handle();
+    Ok(LaunchedElectron { child: kill.disarm(), ws_url, stderr, job })
+}
+
 /// A browser launched with `--remote-debugging-pipe`: CDP runs over two
 /// anonymous pipes (Chrome reads commands on fd 3, writes replies on fd 4;
 /// messages are NUL-terminated JSON).
