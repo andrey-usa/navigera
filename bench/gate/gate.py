@@ -11,8 +11,8 @@ fail on noise).
         [--runs 5] [--threshold 0.25] [--summary out.md]
 
 The pages come from tests/fixtures/interactions_site.py plus a few written
-here (a header over a 2,000-row table, 13,000 nested divs, a 2,000-option
-select). Exit 0: no regression; 1: a regression (the table says which);
+here (a header over a 2,000-row table, 13,000 nested divs, a 200-row table
+of about 1,400 elements, a 2,000-option select). Exit 0: no regression; 1: a regression (the table says which);
 2: a probe failed to run.
 """
 import argparse
@@ -48,6 +48,15 @@ def write_pages(dir_: Path) -> None:
         for i in range(1000)
     )
     (dir_ / "divs.html").write_text(f"<!doctype html><title>divs</title><div id=app>{cards}</div>")
+    mid = "".join(
+        f'<tr><td>Item {i}</td><td>{i * 3} units</td><td><button>Edit {i}</button></td>'
+        f'<td><a href="#r{i}">View {i}</a></td></tr>'
+        for i in range(200)
+    )
+    (dir_ / "mid-table.html").write_text(
+        "<!doctype html><title>mid</title><h1>Invoices</h1><form><label>Search <input name=q></label> "
+        f"<button>Go</button></form><table><tbody>{mid}</tbody></table>"
+    )
     options = "".join(f'<option value="c{i}">Country {i}</option>' for i in range(2000))
     (dir_ / "select.html").write_text(
         f"<!doctype html><title>sel</title><label>Country <select id=c>{options}</select></label>"
@@ -99,6 +108,7 @@ def probes(site: str, pages: str, runs: int) -> list[tuple[str, list[dict], set[
         repeat("ax scoped to a header (2,000 rows)", [{"op": "goto", "url": f"{pages}/header-table.html"}],
                {**ax, "selector": "header"}, False),
         repeat("ax 13,000 divs", [{"op": "goto", "url": f"{pages}/divs.html"}], ax, False),
+        repeat("ax a 1,400-element page", [{"op": "goto", "url": f"{pages}/mid-table.html"}], ax, False),
         repeat("first ax on a long-poll page", [{"op": "goto", "url": f"{site}/long-poll"}], ax, True),
         repeat("first ax on a beacon page", [{"op": "goto", "url": f"{site}/beacons"}], ax, True),
         repeat("ax after a click that fetches 200 ms",
