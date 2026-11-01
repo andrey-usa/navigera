@@ -25,6 +25,10 @@ know:
 - `text` with no selector is the page's whole text (it was an error).
 - `network --har` includes the response bodies the browser still holds,
   so the file is larger.
+- A session on the shared browser no longer ends when that browser dies: its
+  next command relaunches or joins one, reopens its tabs and carries a note
+  (and a `recovered` field) naming what was lost. A command running at the
+  crash still fails, and is not retried.
 
 ### Added
 
@@ -80,6 +84,17 @@ know:
   default `shot-<time>.jpg` name), for traces and reports that keep many.
 
 ### Changed
+
+- If the shared browser crashes or is killed, each session's next command
+  relaunches it (one relaunch when several recover at once, under the host's
+  lock) instead of ending the session. The session's tabs reopen at their last
+  URLs (a tab whose last load was a form POST reopens with GET, and the note
+  says so), the cookies and localStorage come back from a snapshot kept in
+  memory (at most 500 ms behind, retaken when the session is idle), `set`
+  emulation, init scripts and the download directory are re-applied, and the
+  note and the `recovered` field list what could not come back (history,
+  scroll, typed text, sessionStorage, refs, logs). A second crash within 10 s
+  of a recovery ends the session, as before.
 
 - Two processes on one session name are told: a command from another
   process than the session's last one notes it, and the first process's

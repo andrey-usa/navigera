@@ -568,7 +568,13 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   `--natural`, `NAVIGERA_EXTRA_FLAGS`/`NAVIGERA_DROP_FLAGS`/
   `NAVIGERA_NO_SANDBOX`); `show`/`hide` move a session to the visible or
   headless one. If the shared browser dies, each session's next command
-  says so and the session ends; `start` relaunches it. A browser of its
+  relaunches it (or joins the relaunch another session made), reopens the
+  session's tabs at their last URLs, restores its cookies and localStorage
+  from an in-memory snapshot (at most 500 ms old, taken when the session is
+  idle), and says what was lost in a note and a `recovered` field (history,
+  scroll, typed text, sessionStorage, refs, logs; a tab last loaded by a form
+  POST reopens with GET). A command running at the crash fails and is not
+  retried; a second crash within 10 s of a recovery ends the session. A browser of its
   own instead: `start --own-browser` (or `NAVIGERA_SHARED_BROWSER=0`);
   `--attach`, `--profile`, `--electron`, Lightpanda and `--transport ws` on Linux/macOS
   always get one.

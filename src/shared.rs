@@ -27,7 +27,8 @@
 //! - The host closes the browser and exits once no client has been
 //!   connected for the grace period (`NAVIGERA_SHARED_GRACE_S`, default
 //!   30 s: the next agent's start is warm), or when the browser dies: every
-//!   client's connection then ends, and their next op says so.
+//!   client's connection then ends, and each session's next command makes
+//!   (or joins) a new one and carries on (see `Driver::recover`).
 //! - Which browser: one per launch key (navigera's version, the executable,
 //!   headless or not, natural mode, the launch flags including
 //!   `NAVIGERA_EXTRA_FLAGS`, `NAVIGERA_DROP_FLAGS` and

@@ -1835,6 +1835,12 @@ impl BrowserSession {
     /// `{cookies, origins}`: the storage-state shape browser tools commonly
     /// read and write, so a file saved elsewhere loads here and back.
     pub fn storage_state(&self) -> Result<serde_json::Value> {
+        self.storage_state_within(self.timeout(None))
+    }
+
+    /// [`BrowserSession::storage_state`] with `eval` as the longest it waits
+    /// on any one tab (a tab stuck in a dialog or a loop is skipped).
+    pub fn storage_state_within(&self, eval: Duration) -> Result<serde_json::Value> {
         let cookies = self.cookies(true, None)?;
         let cookies: Vec<serde_json::Value> = cookies
             .as_array()
@@ -1859,7 +1865,7 @@ impl BrowserSession {
                 "() => { try { return { origin: location.origin, \
                  localStorage: Object.entries(localStorage).map(([name, value]) => ({ name, value })) }; } \
                  catch (e) { return null; } }",
-                self.timeout(None),
+                eval,
             ) else {
                 continue;
             };
@@ -2894,6 +2900,47 @@ impl BrowserSession {
     /// The navigation timeout this session was given, in ms.
     pub fn timeout_ms(&self) -> f64 {
         self.timeout_ms
+    }
+
+    /// Every tab's URL and whether its last document request was not a GET
+    /// (a form POST), in tab order, from one `Target.getTargets` and the
+    /// request log: what a crashed browser's tabs are reopened from. `None`
+    /// when the browser can't list its targets.
+    pub fn tab_snapshot(&self) -> Option<Vec<(String, bool)>> {
+        let infos = self.browser.target_infos().ok()?;
+        self.browser.caught_up();
+        let logs = self.browser.shared().logs.lock().unwrap();
+        Some(
+            self.pages
+                .iter()
+                .map(|p| {
+                    let url = infos.get(p.target_id()).map(|(u, _)| u.clone()).unwrap_or_default();
+                    let post = logs
+                        .tabs
+                        .get(p.session_id())
+                        .and_then(|t| t.requests.iter().rev().find(|r| r.kind == "Document"))
+                        .is_some_and(|r| !r.method.eq_ignore_ascii_case("GET"));
+                    (url, post)
+                })
+                .collect(),
+        )
+    }
+
+    /// Take over what `old` (a session whose browser died) had set: `set …`
+    /// emulation, `init-script`s and the downloads directory, applied to this
+    /// session's tab and to the tabs it opens later.
+    pub fn inherit_settings(&mut self, old: &BrowserSession) {
+        self.overrides = old.overrides.clone();
+        self.init_scripts = old.init_scripts.clone();
+        if let Some(dir) = old.downloads_dir.clone() {
+            let _ = self.set_downloads_dir(&dir);
+        }
+        let pages = std::mem::take(&mut self.pages);
+        for page in &pages {
+            self.apply_overrides(page);
+            self.apply_init_scripts(page);
+        }
+        self.pages = pages;
     }
 
     /// Every tab's current URL, in tab order.

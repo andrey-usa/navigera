@@ -346,7 +346,17 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     // connected (`start` checking the socket is up) kept no one waiting.
     let mut free_since = Instant::now();
     let mut callers = Callers::default();
-    for (stream, arrived) in incoming {
+    loop {
+        // Between commands: a storage snapshot an op skipped for being too
+        // soon after the last one is taken once the session is idle.
+        let (stream, arrived) = match incoming.recv_timeout(Duration::from_millis(250)) {
+            Ok(next) => next,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                driver.snapshot_if_idle();
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let waited = arrived < free_since;
         let (quit, ran) = serve_connection(&mut driver, stream, &last_activity, &server, waited, &mut callers);
         if ran {

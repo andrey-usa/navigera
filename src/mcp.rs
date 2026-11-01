@@ -595,6 +595,7 @@ impl<'a> Server<'a> {
                 dialogs: Vec::new(),
                 new_tabs: Vec::new(),
                 notes: Vec::new(),
+                recovered: None,
             });
         }
         let command = match command {

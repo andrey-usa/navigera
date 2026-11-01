@@ -21,7 +21,7 @@
 
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
@@ -852,6 +852,10 @@ pub struct Response {
     /// Things the engine did differently from what the agent asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<Vec<String>>,
+    /// After a shared browser crashed and was relaunched: what came back
+    /// and what was lost (the same facts as the note, as fields).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovered: Option<Value>,
     /// Server-side time for the op, in milliseconds with µs resolution.
     pub elapsed_ms: f64,
 }
@@ -2496,6 +2500,53 @@ pub struct Driver {
     session: BrowserSession,
     /// What `history` returns (the newest [`HISTORY_MAX`]).
     history: Vec<Value>,
+    /// What a shared browser's crash is recovered from.
+    crash: Crash,
+}
+
+/// How often the storage snapshot is retaken (the tab list is kept on every op).
+const STORAGE_EVERY: Duration = Duration::from_millis(500);
+/// A tab stuck in a dialog or a loop costs a snapshot no more than this.
+const STORAGE_EVAL: Duration = Duration::from_millis(300);
+/// A second crash this soon after a recovery ends the session.
+const CRASH_LOOP: Duration = Duration::from_secs(10);
+
+/// What a session on the shared browser keeps in memory to carry on after
+/// the browser dies: its tabs (URL, whether the last document load was a
+/// form POST), which one is active, and the cookies and localStorage as of
+/// the last snapshot. Nothing is written to disk.
+struct Crash {
+    headless: bool,
+    tabs: Vec<(String, bool)>,
+    active: usize,
+    storage: Option<Value>,
+    storage_at: Option<Instant>,
+    recovered_at: Option<Instant>,
+    /// An op skipped the storage snapshot (too soon after the last one).
+    storage_dirty: bool,
+    /// Recovery failed or looped: the session ends.
+    given_up: bool,
+}
+
+impl Default for Crash {
+    fn default() -> Self {
+        Crash {
+            headless: true,
+            tabs: Vec::new(),
+            active: 0,
+            storage: None,
+            storage_at: None,
+            recovered_at: None,
+            storage_dirty: false,
+            given_up: false,
+        }
+    }
+}
+
+/// What the first command after a crash is told.
+struct Recovered {
+    note: String,
+    info: Value,
 }
 
 /// Actions `history` keeps.
@@ -2518,6 +2569,9 @@ pub struct Outcome {
     pub dialogs: Vec<Value>,
     pub new_tabs: Vec<usize>,
     pub notes: Vec<String>,
+    /// Set on the first command after a shared browser crashed and was
+    /// relaunched: what came back and what was lost.
+    pub recovered: Option<Value>,
 }
 
 impl Driver {
@@ -2527,12 +2581,12 @@ impl Driver {
         if let Some(app) = &config.electron {
             let session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
                 .map_err(|e| anyhow::anyhow!("could not launch the Electron app: {e:#}"))?;
-            return Ok(Self { session, history: Vec::new() });
+            return Ok(Self { session, history: Vec::new(), crash: Crash::default() });
         }
         if let Some(target) = config.attach_target() {
             let session = BrowserSession::attach(&target, config.timeout_ms)
                 .map_err(|e| anyhow::anyhow!("could not connect to the browser: {e:#}"))?;
-            return Ok(Self { session, history: Vec::new() });
+            return Ok(Self { session, history: Vec::new(), crash: Crash::default() });
         }
         let session = BrowserSession::launch_with(
             &config.engine,
@@ -2544,7 +2598,7 @@ impl Driver {
         .map_err(|e| {
             anyhow::anyhow!("browser launch failed (engine={}, headed={}): {e:#}", config.engine, config.headed)
         })?;
-        Ok(Self { session, history: Vec::new() })
+        Ok(Self { session, history: Vec::new(), crash: Crash::default() })
     }
 
     /// A named session's or an MCP server's browser: a context of its own
@@ -2557,7 +2611,8 @@ impl Driver {
         Self::apply_settings(config);
         let session = BrowserSession::launch_shared(!config.headed, config.chromium.as_deref(), config.timeout_ms)
             .map_err(|e| anyhow::anyhow!("browser launch failed (shared browser, headed={}): {e:#}", config.headed))?;
-        Ok(Self { session, history: Vec::new() })
+        let crash = Crash { headless: !config.headed, ..Crash::default() };
+        Ok(Self { session, history: Vec::new(), crash })
     }
 
     /// The process-wide settings `config` names: natural mode, the element
@@ -2571,7 +2626,7 @@ impl Driver {
     /// Has the connection to a shared browser ended (it crashed or was
     /// killed)? The session can do nothing more then.
     pub fn shared_browser_gone(&self) -> bool {
-        self.session.is_shared() && self.session.browser_gone()
+        self.session.is_shared() && self.session.browser_gone() && self.crash.given_up
     }
 
     /// The active page (tab) this driver's ops target.
@@ -2583,7 +2638,8 @@ impl Driver {
     /// (see [`BrowserSession::fork`]): one browser for several sessions at
     /// once.
     pub fn fork(&self) -> anyhow::Result<Self> {
-        Ok(Self { session: self.session.fork()?, history: Vec::new() })
+        let crash = Crash { headless: self.crash.headless, ..Crash::default() };
+        Ok(Self { session: self.session.fork()?, history: Vec::new(), crash })
     }
 
     /// Active tab state the model needs after every op.
@@ -2843,13 +2899,180 @@ impl Driver {
         json!({ "tabs": tabs, "active": active, "url": self.session.url() })
     }
 
+    /// Run one op, after relaunching the shared browser if it died since the
+    /// last one; its outcome says so, and what was lost.
+    pub fn run_op(&mut self, command: &Command) -> anyhow::Result<Outcome> {
+        let recovered = if self.session.is_shared()
+            && self.session.browser_gone()
+            && !self.crash.given_up
+            && !matches!(command, Command::Quit { .. } | Command::Status {})
+        {
+            Some(self.recover()?)
+        } else {
+            None
+        };
+        let mut result = self.run_op_inner(command);
+        self.remember();
+        match (&mut result, recovered) {
+            (Ok(outcome), Some(r)) => {
+                outcome.notes.insert(0, r.note);
+                outcome.recovered = Some(r.info);
+            }
+            (Err(e), Some(r)) => *e = anyhow::anyhow!("{e:#} (before it ran, {})", r.note),
+            _ => {}
+        }
+        result
+    }
+
+    /// Keep what a crash is recovered from: the tabs on every op, the
+    /// cookies and localStorage at most every [`STORAGE_EVERY`].
+    fn remember(&mut self) {
+        if !self.session.is_shared() || self.session.browser_gone() {
+            return;
+        }
+        if let Some(tabs) = self.session.tab_snapshot() {
+            if !tabs.is_empty() {
+                self.crash.tabs = tabs;
+                self.crash.active = self.session.active_page();
+            }
+        }
+        self.crash.storage_dirty = true;
+        self.snapshot_if_idle();
+    }
+
+    /// Retake the cookies and localStorage if an op skipped it and
+    /// [`STORAGE_EVERY`] has passed since the last one.
+    pub fn snapshot_if_idle(&mut self) {
+        if !self.crash.storage_dirty
+            || !self.session.is_shared()
+            || self.session.browser_gone()
+            || self.crash.storage_at.is_some_and(|t| t.elapsed() < STORAGE_EVERY)
+        {
+            return;
+        }
+        self.crash.storage_dirty = false;
+        if let Ok(state) = self.session.storage_state_within(STORAGE_EVAL) {
+            self.crash.storage = Some(state);
+            self.crash.storage_at = Some(Instant::now());
+        }
+    }
+
+    /// The shared browser died: join the relaunched one (or launch it, under
+    /// the host's lock, so sessions recovering together make one), restore
+    /// the cookies and localStorage of the last snapshot, reopen each tab at
+    /// its last URL, and say what could not come back.
+    fn recover(&mut self) -> anyhow::Result<Recovered> {
+        let started = Instant::now();
+        if self.crash.recovered_at.is_some_and(|t| t.elapsed() < CRASH_LOOP) {
+            self.crash.given_up = true;
+            anyhow::bail!(
+                "the shared browser crashed again within {} s of being relaunched; this session has ended: run `start` again",
+                CRASH_LOOP.as_secs()
+            );
+        }
+        let exe = self.session.executable().to_string();
+        // A host that was closing when the browser died can still answer for a
+        // moment: try again before giving up.
+        let mut launched = BrowserSession::launch_shared(self.crash.headless, Some(&exe), self.session.timeout_ms());
+        for _ in 0..2 {
+            if launched.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            launched = BrowserSession::launch_shared(self.crash.headless, Some(&exe), self.session.timeout_ms());
+        }
+        let mut new = match launched {
+            Ok(new) => new,
+            Err(e) => {
+                self.crash.given_up = true;
+                anyhow::bail!("the shared browser is gone and could not be relaunched ({e:#}); this session has ended: run `start` again");
+            }
+        };
+        new.inherit_settings(&self.session);
+        let (mut cookies, mut origins) = (0, 0);
+        let mut stale_ms = None;
+        if let Some(state) = &self.crash.storage {
+            if let Ok((c, o)) = new.load_storage_state(state) {
+                (cookies, origins) = (c, o);
+            }
+            stale_ms = self.crash.storage_at.map(|t| t.elapsed().as_millis() as u64);
+        }
+        let old = std::mem::replace(&mut self.session, new);
+        old.close();
+        let tabs = self.crash.tabs.clone();
+        let (mut reopened, mut as_get, mut missed) = (0usize, Vec::new(), Vec::new());
+        for (i, (url, post)) in tabs.iter().enumerate() {
+            if i > 0 {
+                if let Err(e) = self.session.new_page() {
+                    missed.push(json!({ "tab": i, "url": url, "error": format!("{e:#}") }));
+                    continue;
+                }
+            }
+            if url.is_empty() || url == "about:blank" {
+                continue;
+            }
+            match self.session.goto(url).or_else(|_| self.session.goto(url)) {
+                Ok(()) => {
+                    reopened += 1;
+                    if *post {
+                        as_get.push(i);
+                    }
+                }
+                Err(e) => missed.push(json!({ "tab": i, "url": url, "error": format!("{e:#}") })),
+            }
+        }
+        if self.crash.active < self.session.page_count() {
+            let _ = self.session.select_page(self.crash.active);
+        }
+        self.crash.recovered_at = Some(Instant::now());
+        let lost = [
+            "back/forward history",
+            "scroll positions",
+            "text typed into forms",
+            "sessionStorage",
+            "open dialogs and downloads in progress",
+            "refs from earlier snapshots (take a new `ax`)",
+            "console and network logs from before the crash",
+            "localStorage written after the last snapshot",
+        ];
+        let info = json!({
+            "browser": "relaunched",
+            "ms": started.elapsed().as_millis() as u64,
+            "tabs": tabs.len(),
+            "reopened": reopened,
+            "reopened_as_get": as_get,
+            "not_reopened": missed,
+            "cookies": cookies,
+            "storage_origins": origins,
+            "storage_age_ms": stale_ms,
+            "lost": lost,
+        });
+        let mut note = format!(
+            "the shared browser crashed or was killed and was relaunched ({} ms): {reopened} of {} tab(s) reopened at their last URLs, {cookies} cookie(s) and the localStorage of {origins} origin(s) restored from a snapshot {} ms old; lost: {}",
+            started.elapsed().as_millis(),
+            tabs.len(),
+            stale_ms.map_or("none was taken".to_string(), |m| m.to_string()),
+            lost.join(", ")
+        );
+        if !as_get.is_empty() {
+            note.push_str(&format!(
+                "; tab(s) {} had last loaded with a form POST and were reopened with GET, so check them",
+                as_get.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !missed.is_empty() {
+            note.push_str(&format!("; {} tab(s) did not load (see `recovered.not_reopened`)", missed.len()));
+        }
+        Ok(Recovered { note, info })
+    }
+
     /// Run one op; returns the JSON `result` value.
     pub fn run(&mut self, command: &Command) -> anyhow::Result<Value> {
         self.run_op(command).map(|o| o.result)
     }
 
     /// Run one op, reporting dialogs answered and tabs opened along the way.
-    pub fn run_op(&mut self, command: &Command) -> anyhow::Result<Outcome> {
+    fn run_op_inner(&mut self, command: &Command) -> anyhow::Result<Outcome> {
         let mut new_tabs = self.session.sync_tabs();
         // The session's only tab is gone: say so, rather than let the op
         // fail on a CDP session Chrome has forgotten. What doesn't need the
@@ -2992,7 +3215,7 @@ impl Driver {
             let msg = format!("{e:#}");
             if msg.contains(crate::cdp::CONNECTION_CLOSED) && self.session.is_shared() {
                 anyhow::anyhow!(
-                    "{msg} — the shared browser is gone (it crashed or was killed); this session has ended: run `start` again to relaunch it"
+                    "{msg} — the shared browser is gone (it crashed or was killed); this command did not complete and was not retried; the next command relaunches the browser and reopens this session's tabs"
                 )
             } else if msg.contains(crate::cdp::CONNECTION_CLOSED) {
                 let how = self.session.browser_exit().unwrap_or_else(|| "connection lost".into());
@@ -3148,7 +3371,7 @@ impl Driver {
         if quiet_waited_ms > 0 {
             notes.push(format!("waited {quiet_waited_ms} ms for network quiet"));
         }
-        Ok(Outcome { result, dialogs, new_tabs, notes })
+        Ok(Outcome { result, dialogs, new_tabs, notes, recovered: None })
     }
 
     /// The page as `find` and `check` see it: the whole text tree.
@@ -4379,6 +4602,7 @@ fn outcome_response(id: Value, outcome: Outcome, started: Instant) -> Response {
     if !outcome.notes.is_empty() {
         r.notes = Some(outcome.notes);
     }
+    r.recovered = outcome.recovered;
     r
 }
 
@@ -4391,6 +4615,7 @@ fn ok_response(id: Value, result: Value, started: Instant) -> Response {
         dialogs: None,
         new_tabs: None,
         notes: None,
+        recovered: None,
         elapsed_ms: elapsed_ms(started),
     }
 }
@@ -4438,6 +4663,7 @@ fn err_response(id: Value, error: String, started: Instant) -> Response {
         dialogs: None,
         new_tabs: None,
         notes: None,
+        recovered: None,
         elapsed_ms: elapsed_ms(started),
     }
 }
