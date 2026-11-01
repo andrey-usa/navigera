@@ -233,6 +233,82 @@ fn an_electron_app_is_driven_through_its_windows() {
     wait_for(Duration::from_secs(10), "the app to exit after quit", || (!alive(pid)).then_some(()));
 }
 
+/// An IDE agent's way in: `navigera mcp --electron <app>`. The first tool
+/// call starts the app; snapshot, fill, click and the main process work as
+/// in a session; closing the client ends the app.
+#[test]
+fn an_mcp_client_drives_an_electron_app() {
+    use std::io::{BufRead, BufReader, Write};
+    let Some(app) = fixture_app() else {
+        eprintln!("skipping: no Electron in tests/fixtures/electron-app (run `npm install` there)");
+        return;
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let pid_file = scratch.path().join("app.pid");
+    let mut child = Command::new(tool_exe())
+        .args(["mcp", "--electron", app.to_str().unwrap(), "--electron-arg=--late-ui"])
+        .arg(format!("--electron-arg=--pid-file={}", pid_file.display()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn navigera mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut id = 0;
+    let mut call = |method: &str, params: Value| -> Value {
+        id += 1;
+        writeln!(stdin, "{}", serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+            .unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        serde_json::from_str(line.trim()).unwrap_or_else(|e| panic!("not JSON ({e}): {line}"))
+    };
+    let text = |reply: &Value| -> String {
+        reply["result"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    call(
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t"}}),
+    );
+    let tool = |name: &str, args: Value| serde_json::json!({"name": name, "arguments": args});
+
+    let snapshot = call("tools/call", tool("browser_snapshot", serde_json::json!({})));
+    assert!(text(&snapshot).contains("heading \"Orders\""), "{snapshot}");
+    let name = call(
+        "tools/call",
+        tool("browser_evaluate", serde_json::json!({"expression": "({ app }) => app.getName()", "main": true})),
+    );
+    assert!(text(&name).contains("navigera-electron-fixture"), "{name}");
+    call("tools/call", tool("browser_fill", serde_json::json!({"selector": "#customer", "value": "Grace"})));
+    call("tools/call", tool("browser_click", serde_json::json!({"text": "Save order"})));
+    let saved = wait_for(Duration::from_secs(5), "the saved order", || {
+        let r = call(
+            "tools/call",
+            tool(
+                "browser_evaluate",
+                serde_json::json!({"expression": "document.getElementById('status').textContent"}),
+            ),
+        );
+        text(&r).contains("Saved A-1001 for Grace").then_some(r)
+    });
+    assert!(saved["result"]["isError"] != true, "{saved}");
+    let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+    assert!(alive(pid));
+
+    // The client goes away: so do the server and the app.
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    wait_for(Duration::from_secs(10), "the app to exit with the MCP server", || (!alive(pid)).then_some(()));
+}
+
 #[test]
 fn a_missing_app_is_named() {
     let session = session_name("missing");
