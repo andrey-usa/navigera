@@ -131,7 +131,7 @@ impl Drop for Browser {
 /// The user's own browser, with one tab of theirs open. A CI Windows
 /// runner sometimes starts Chrome without it ever writing its
 /// DevToolsActivePort: a second launch, on a fresh profile, gets one.
-fn users_browser(exe: &str) -> (Browser, tempfile::TempDir, u16) {
+fn users_browser(exe: &str) -> (Browser, tempfile::TempDir, u16, String) {
     let launch = || {
         let profile = tempfile::tempdir().unwrap();
         let mut user = Browser(
@@ -148,14 +148,25 @@ fn users_browser(exe: &str) -> (Browser, tempfile::TempDir, u16) {
         match active_port(profile.path(), Duration::from_secs(20)) {
             Some((port, _)) => {
                 // The port can be up before the start-up tab is listed (a
-                // loaded runner: the tests then found no "Mine").
+                // loaded runner: the tests then found no "Mine"), and right
+                // after the first listing Chrome can report the tab's url as
+                // "" for a moment. Capture the tab's target id while it is
+                // listed with "Mine"; the tests use the id, not a fresh
+                // lookup that can race that blank listing.
                 let end = std::time::Instant::now() + Duration::from_secs(10);
-                while std::time::Instant::now() < end
-                    && !page_urls(port).is_some_and(|u| u.iter().any(|u| u.contains("Mine")))
-                {
-                    std::thread::sleep(Duration::from_millis(100));
+                let mut mine = None;
+                while mine.is_none() && std::time::Instant::now() < end {
+                    mine = page_targets(port)
+                        .and_then(|t| t.into_iter().find(|(_, url)| url.contains("Mine")))
+                        .map(|(id, _)| id);
+                    if mine.is_none() {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
                 }
-                Some((user, profile, port))
+                if mine.is_none() {
+                    eprintln!("the start-up tab was never listed; launching again");
+                }
+                mine.map(|id| (user, profile, port, id))
             }
             None => {
                 eprintln!("no DevToolsActivePort after 20 s (exited: {:?}); launching again", user.0.try_wait());
@@ -169,7 +180,7 @@ fn users_browser(exe: &str) -> (Browser, tempfile::TempDir, u16) {
 #[test]
 fn attach_never_closes_the_users_browser() {
     let Some(exe) = chrome() else { return };
-    let (mut user, profile, port) = users_browser(&exe);
+    let (mut user, profile, port, _mine) = users_browser(&exe);
     let dir = profile.path().display().to_string();
     let s = session_name("user");
 
@@ -197,11 +208,7 @@ fn attach_never_closes_the_users_browser() {
 #[test]
 fn a_tab_closed_under_an_attached_session_is_named_and_replaced() {
     let Some(exe) = chrome() else { return };
-    let (_user, _profile, port) = users_browser(&exe);
-    let id = page_targets(port)
-        .and_then(|t| t.into_iter().find(|(_, url)| url.contains("Mine")))
-        .map(|(id, _)| id)
-        .expect("the user's tab");
+    let (_user, _profile, port, id) = users_browser(&exe);
     let s = session_name("closed");
     ok(&s, &["start", "--attach", &format!("ws://127.0.0.1:{port}/devtools/page/{id}")]);
     assert_eq!(ok(&s, &["eval", "document.title"]), "Mine");
@@ -312,11 +319,7 @@ fn attach_needs_a_session() {
 #[test]
 fn a_tab_closed_while_an_op_waits_on_it_ends_the_op() {
     let Some(exe) = chrome() else { return };
-    let (_user, _profile, port) = users_browser(&exe);
-    let id = page_targets(port)
-        .and_then(|t| t.into_iter().find(|(_, url)| url.contains("Mine")))
-        .map(|(id, _)| id)
-        .expect("the user's tab");
+    let (_user, _profile, port, id) = users_browser(&exe);
     let s = session_name("midop");
     ok(&s, &["start", "--attach", &format!("ws://127.0.0.1:{port}/devtools/page/{id}")]);
     let tabs = ok(&s, &["tab-new", "data:text/html,<title>Second</title>"]);
