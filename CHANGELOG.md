@@ -103,6 +103,11 @@ know:
 
 ### Fixed
 
+- `start --electron` could start on an app's hidden helper window on a
+  busy machine: a window whose page could not answer yet counted as shown.
+  It now counts as unknown, and the session waits for a window that says
+  it is shown.
+
 - `screenshot --no-wait` right after a click that confirm()s, posts and
   reloads the page could go unanswered for the whole 35 s timeout: Chrome
   loses a capture asked for while the document is being replaced, and the
