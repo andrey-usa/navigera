@@ -4291,9 +4291,9 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
             .collect();
         let text =
             |i: Option<&Value>| i.and_then(Value::as_u64).and_then(|i| strings.get(i as usize).copied()).unwrap_or("");
-        let documents = snap.get("documents").and_then(Value::as_array).cloned().unwrap_or_default();
+        let documents: &[Value] = snap.get("documents").and_then(Value::as_array).map_or(&[], Vec::as_slice);
         let page_origin = documents.first().and_then(|d| http_origin(text(d.get("documentURL"))));
-        for doc in &documents {
+        for doc in documents {
             let nodes = &doc["nodes"];
             let foreign = match (&page_origin, http_origin(text(doc.get("documentURL")))) {
                 (Some(page), Some(own)) => *page != own,

@@ -25,6 +25,10 @@ serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 anyhow = "1"
 miniz_oxide = "0.9"
 
+# musl's allocator is slow on the many small allocations a large snapshot makes.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 [profile.release]
 lto = true
 codegen-units = 1

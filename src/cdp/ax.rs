@@ -260,8 +260,9 @@ fn backend_id(node: &Value) -> Option<u64> {
 struct Tree<'a> {
     /// Node objects by AX id, in first-seen order. Nodes are addressed by
     /// index (not reference) so fetching more children mid-walk cannot
-    /// invalidate a node the walk already holds.
-    nodes: Vec<Value>,
+    /// invalidate a node the walk already holds. The caller's nodes are
+    /// borrowed; only fetched ones are owned.
+    nodes: Vec<std::borrow::Cow<'a, Value>>,
     by_id: HashMap<String, usize>,
     by_backend: HashMap<u64, usize>,
     frame_roots: HashMap<u64, Vec<usize>>,
@@ -289,6 +290,9 @@ struct Tree<'a> {
     cut_chars: std::cell::Cell<usize>,
     /// Refs printed so far, with the role and name they were printed under.
     refs: Vec<(u64, String, String)>,
+    /// Each node's children, once looked up, while nothing is fetched (the
+    /// walk asks for the same node's children many times).
+    kids: Vec<Option<std::rc::Rc<[usize]>>>,
 }
 
 impl<'a> Tree<'a> {
@@ -318,7 +322,7 @@ impl<'a> Tree<'a> {
         }
     }
 
-    fn insert(&mut self, node: Value) -> usize {
+    fn insert(&mut self, node: std::borrow::Cow<'a, Value>) -> usize {
         let id = ax_id(&node).to_string();
         if let Some(&i) = self.by_id.get(&id) {
             return i;
@@ -332,7 +336,23 @@ impl<'a> Tree<'a> {
         i
     }
 
-    fn children(&mut self, idx: usize) -> Vec<usize> {
+    fn children(&mut self, idx: usize) -> std::rc::Rc<[usize]> {
+        if self.fetch.is_none() {
+            if let Some(Some(kids)) = self.kids.get(idx) {
+                return kids.clone();
+            }
+        }
+        let kids: std::rc::Rc<[usize]> = self.children_uncached(idx).into();
+        if self.fetch.is_none() {
+            if self.kids.len() < self.nodes.len() {
+                self.kids.resize(self.nodes.len(), None);
+            }
+            self.kids[idx] = Some(kids.clone());
+        }
+        kids
+    }
+
+    fn children_uncached(&mut self, idx: usize) -> Vec<usize> {
         let ids = child_ids(&self.nodes[idx]);
         if self.fetch.is_some() && ids.iter().any(|id| !self.by_id.contains_key(id)) {
             // This node plus the siblings the walk visits next, in one
@@ -376,7 +396,7 @@ impl<'a> Tree<'a> {
                         self.fetched.insert(i);
                     }
                     for n in got {
-                        self.insert(n);
+                        self.insert(std::borrow::Cow::Owned(n));
                     }
                 }
             }
@@ -449,7 +469,7 @@ impl<'a> Tree<'a> {
         if depth > 64 {
             return;
         }
-        for child in self.children(idx) {
+        for &child in self.children(idx).iter() {
             if Self::role(&self.nodes[child]) == "StaticText" {
                 let t = text_of(&self.nodes[child], "name");
                 if !t.is_empty() {
@@ -487,7 +507,7 @@ impl<'a> Tree<'a> {
 
     fn holds_actionable(&mut self, idx: usize, depth: usize) -> bool {
         depth < 64
-            && self.children(idx).into_iter().any(|child| {
+            && self.children(idx).iter().any(|&child| {
                 let role = Self::role(&self.nodes[child]).to_string();
                 INTERACTIVE.contains(&role.as_str())
                     || backend_id(&self.nodes[child]).is_some_and(|id| self.opts.clicks.nodes.contains(&id))
@@ -516,7 +536,7 @@ impl<'a> Tree<'a> {
 
     /// Children with transparent wrappers expanded in place.
     fn effective_children(&mut self, idx: usize, out: &mut Vec<usize>) {
-        for child in self.children(idx) {
+        for &child in self.children(idx).iter() {
             if SILENT.contains(&Self::role(&self.nodes[child])) {
                 continue;
             }
@@ -593,7 +613,7 @@ impl<'a> Tree<'a> {
             return;
         }
         if self.is_transparent(idx) {
-            for child in self.children(idx) {
+            for &child in self.children(idx).iter() {
                 if self.stopped {
                     break;
                 }
@@ -910,7 +930,7 @@ fn without_options(name: String, options: &[String]) -> String {
 const CHECKABLE: &[&str] = &["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"];
 
 fn collect_options(tree: &mut Tree<'_>, idx: usize, out: &mut Vec<String>) {
-    for child in tree.children(idx) {
+    for &child in tree.children(idx).iter() {
         if Tree::role(&tree.nodes[child]) == "option" {
             let mut label = text_of(&tree.nodes[child], "name");
             if truthy(prop(&tree.nodes[child], "selected")) {
@@ -975,9 +995,10 @@ fn render_inner(
         cuts: std::cell::Cell::new(0),
         cut_chars: std::cell::Cell::new(0),
         refs: Vec::new(),
+        kids: Vec::new(),
     };
     for n in nodes.iter().chain(frames.iter().flat_map(|f| f.nodes.iter())) {
-        tree.insert(n.clone());
+        tree.insert(std::borrow::Cow::Borrowed(n));
     }
     for f in frames {
         if let Some(root) = f.nodes.iter().find(|n| n.get("parentId").is_none()) {

@@ -86,6 +86,12 @@ know:
   that hasn't started yet (a page's data after it loads) still gets the
   whole window, and a window set with `set network-quiet` holds after
   actions too.
+- Snapshots of large pages cost about half as much on Linux: the static
+  Linux build allocates with mimalloc (musl's allocator was several times
+  slower on the small allocations a snapshot makes), and the snapshot is
+  no longer copied while the tree is built and printed. 13,000 nested
+  divs: 520 to 277 ms; a header over a 2,000-row table: 558 to 264 ms
+  (median, warm, same machine). macOS and Windows gain the copies.
 
 ### Fixed
 
