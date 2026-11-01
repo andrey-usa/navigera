@@ -2676,9 +2676,24 @@ impl BrowserSession {
         if !self.is_electron() {
             return None;
         }
-        let agent = self.active_tab().user_agent(self.timeout(None)).unwrap_or_default();
-        let version = agent.split("Electron/").nth(1).and_then(|v| v.split_whitespace().next()).unwrap_or("");
-        Some(serde_json::json!({ "version": version, "main_process": self.browser.has_main_process() }))
+        let timeout = self.timeout(None);
+        let agent = self.active_tab().user_agent(timeout).unwrap_or_default();
+        let main_process = self.browser.has_main_process();
+        // The user agent says it unless the app set its own; then the main
+        // process does, when it can be reached. Unknown is null.
+        let version = agent
+            .split("Electron/")
+            .nth(1)
+            .and_then(|v| v.split_whitespace().next())
+            .map(|v| serde_json::Value::String(v.to_string()))
+            .or_else(|| {
+                main_process
+                    .then(|| self.browser.eval_main("process.versions.electron", timeout).ok())
+                    .flatten()
+                    .filter(serde_json::Value::is_string)
+            })
+            .unwrap_or(serde_json::Value::Null);
+        Some(serde_json::json!({ "version": version, "main_process": main_process }))
     }
 
     /// `eval --main`: JavaScript in an Electron app's main process (see

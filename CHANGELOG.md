@@ -43,7 +43,10 @@ know:
   closes), and reports `electron: {version, main_process}`. An `ax` of a
   window that still shows nothing says the app may be starting. Found on
   real apps: one with six windows started on a hidden dropdown; others
-  read an empty shell for up to 20 s.
+  read an empty shell for up to 20 s. An app that sets its own user agent
+  gets its version from its main process, or null when that is out of
+  reach. A single-instance app that exits because a copy of it is already
+  running fails `start` saying that may be why.
 - `eval --main <js>` in an Electron session runs JavaScript in the app's
   main process (Node's inspector, `--inspect=0` at launch): an expression,
   or a function called with the `electron` module, awaited. MCP's

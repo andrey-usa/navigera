@@ -227,8 +227,17 @@ pub fn launch_electron(exe: &str, args: &[String], no_sandbox: bool) -> Result<L
         if let Ok(Some(status)) = kill.as_mut().try_wait() {
             thread::sleep(Duration::from_millis(20));
             let _ = kill.disarm().wait();
+            // A clean exit at once is what a single-instance app does when
+            // another copy holds its lock: it hands its arguments over and
+            // quits.
+            let hint = if status.success() {
+                " (a single-instance app exits like this when a copy of it is already running: close that copy, \
+                 or quit the session that started it)"
+            } else {
+                ""
+            };
             return Err(anyhow!(
-                "the Electron app exited during launch (status {status}) before it opened a DevTools port; its stderr:\n{}",
+                "the Electron app exited during launch (status {status}) before it opened a DevTools port{hint}; its stderr:\n{}",
                 capture.tail()
             ));
         }

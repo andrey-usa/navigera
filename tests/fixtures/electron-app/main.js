@@ -3,7 +3,10 @@
 // process's id, so a test can check the app is gone after `quit`.
 // `--helper-window` first opens a hidden window (as apps do for a dropdown
 // or a tray menu); `--late-ui` mounts the form a second after the page
-// loads (as an app does that boots its UI).
+// loads (as an app does that boots its UI). `--single-instance` takes the
+// single-instance lock and quits when another copy holds it;
+// `--custom-user-agent=<ua>` replaces the user agent (no Electron/ in
+// it).
 const { app, BrowserWindow, ipcMain } = require("electron");
 const fs = require("fs");
 const path = require("path");
@@ -11,6 +14,16 @@ const path = require("path");
 const pidFile = process.argv.find((arg) => arg.startsWith("--pid-file="));
 if (pidFile) {
   fs.writeFileSync(pidFile.slice("--pid-file=".length), String(process.pid));
+}
+
+const userAgent = process.argv.find((arg) => arg.startsWith("--custom-user-agent="));
+if (userAgent) {
+  app.userAgentFallback = userAgent.slice("--custom-user-agent=".length);
+}
+
+const singleInstance = process.argv.includes("--single-instance");
+if (singleInstance && !app.requestSingleInstanceLock()) {
+  app.quit();
 }
 
 const preload = path.join(__dirname, "preload.js");
@@ -49,5 +62,9 @@ ipcMain.handle("open-settings", () => {
   settings.loadFile(path.join(__dirname, "settings.html"));
 });
 
-app.whenReady().then(openOrders);
+app.whenReady().then(() => {
+  if (!singleInstance || app.hasSingleInstanceLock()) {
+    openOrders();
+  }
+});
 app.on("window-all-closed", () => app.quit());

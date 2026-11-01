@@ -310,6 +310,42 @@ fn an_mcp_client_drives_an_electron_app() {
 }
 
 #[test]
+fn a_single_instance_app_already_running_is_named() {
+    let Some(app) = fixture_app() else {
+        eprintln!("skipping: no Electron in tests/fixtures/electron-app (run `npm install` there)");
+        return;
+    };
+    let app = app.to_str().unwrap();
+    let first = session_name("single-first");
+    let _quit_first = Quit(first.clone());
+    // An app with its own user agent: the version comes from its main process.
+    let (started, r) = run(
+        &first,
+        &[
+            "start",
+            "--electron",
+            app,
+            "--electron-arg=--single-instance",
+            "--electron-arg=--custom-user-agent=OrdersApp/2.0",
+        ],
+    );
+    assert!(started && r["ok"] == true, "{r}");
+    assert_eq!(eval(&first, "navigator.userAgent"), "OrdersApp/2.0");
+    let version = r["result"]["electron"]["version"].as_str().unwrap_or_default();
+    assert!(version.starts_with("45."), "{r}");
+    // A second copy hands over to the first and exits: `start` says why.
+    let second = session_name("single-second");
+    let _quit_second = Quit(second.clone());
+    let (started, r) = run(&second, &["start", "--electron", app, "--electron-arg=--single-instance"]);
+    assert!(!started, "{r}");
+    let text = r.to_string();
+    assert!(text.contains("exited during launch") && text.contains("single-instance"), "{r}");
+    // The first copy is unharmed.
+    assert!(ax(&first).contains("Orders"));
+    ok(&first, &["quit"]);
+}
+
+#[test]
 fn a_missing_app_is_named() {
     let session = session_name("missing");
     let _quit = Quit(session.clone());

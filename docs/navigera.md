@@ -630,9 +630,12 @@ window opens is past its empty shell. The session starts on the largest
 window that isn't hidden (an app's helper windows, a dropdown or a tray
 menu, made with `show: false`, are tabs but not the one the session works
 in, now or after a window closes). `start`'s result says
-`electron: {version, main_process}`: the app's Electron version and
-whether `eval --main` can reach its main process. An `ax` of a window that
-still shows nothing notes that the app may be starting.
+`electron: {version, main_process}`: the app's Electron version (null
+when the app set its own user agent and its main process is out of reach)
+and whether `eval --main` can reach its main process. An `ax` of a window
+that still shows nothing notes that the app may be starting. A
+single-instance app that exits at once because a copy of it is already
+running fails `start` saying so.
 
 | `<app>` | what runs |
 |---|---|
