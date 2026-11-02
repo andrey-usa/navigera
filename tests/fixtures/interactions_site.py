@@ -768,9 +768,22 @@ setTimeout(() => {{
 </script>""")
 
 
+BUMPS = 0
+BUMPS_LOCK = __import__("threading").Lock()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    def bump(self):
+        # An effect outside the browser: no relaunch or storage snapshot
+        # can mask it, so a replayed command shows here.
+        with BUMPS_LOCK:
+            global BUMPS
+            BUMPS += 1
+            n = BUMPS
+        self.send(str(n), ctype="text/plain")
 
     def send(self, body, ctype="text/html; charset=utf-8", extra=()):
         data = body.encode()
@@ -785,6 +798,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(length)
+        if urlparse(self.path).path == "/bump":
+            self.bump()
+            return
         if urlparse(self.path).path == "/collect":
             self.send_response(204)
             self.end_headers()
@@ -803,6 +819,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if urlparse(self.path).path == "/bumps":
+            with BUMPS_LOCK:
+                n = BUMPS
+            self.send(str(n), ctype="text/plain")
+            return
         u = urlparse(self.path)
         q = parse_qs(u.query, keep_blank_values=True)
         if u.path == "/frameset":

@@ -29,6 +29,13 @@ know:
   them (Chrome keeps only the last of each flag).
 - `network --har` includes the response bodies the browser still holds,
   so the file is larger.
+- A command sent just after the shared browser died is run on a relaunched
+  browser instead of failing as in flight: the host watches the browser's
+  process (its pipe can outlive it while the browser's children hold it
+  open) and refuses later requests as never reached, and the session runs
+  those again. A command that may have reached the browser is still never
+  repeated. Killed browser, command 30 ms later: 20 of 20 recovered (was 0
+  of 10); 100 ms later: 10 of 10 (was 6 of 10).
 - A session on the shared browser no longer ends when that browser dies: its
   next command relaunches or joins one, reopens its tabs and carries a note
   (and a `recovered` field) naming what was lost. A command running at the

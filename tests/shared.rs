@@ -427,6 +427,47 @@ fn a_command_running_when_the_browser_dies_is_not_retried() {
     assert_eq!(r["recovered"]["browser"], "relaunched", "{r}");
 }
 
+/// A command that never reached the crashed browser runs after the
+/// relaunch - exactly once: recovery is not a replay. The effect is a
+/// POST to the test site, OUTSIDE the browser: no relaunch, storage
+/// snapshot or reopen can mask an extra run.
+#[test]
+fn a_never_reached_command_runs_once_after_the_relaunch() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let browser = Browser::new("once", 5);
+    let a = browser.start("a", &[]);
+    a.ok(&["goto", &format!("{}/download", site.url)]);
+    let pids = browser.wait_browsers(1, Duration::from_secs(5));
+    kill(pids[0]);
+    std::thread::sleep(Duration::from_millis(300));
+    let bump = &["eval", "fetch('/bump', {method: 'POST'}).then(r => r.text())"];
+    let bumps = &["eval", "fetch('/bumps').then(r => r.text())"];
+    let read_bumps = |a: &Session| -> u64 {
+        let (success, n) = a.run(bumps);
+        assert!(success, "{n}");
+        n["result"].as_str().unwrap_or_default().parse().unwrap_or(u64::MAX)
+    };
+    let (success, r) = a.run(bump);
+    if !success {
+        // Answered in flight: CLOSED is unknown - the request may have
+        // run before its answer was lost, so 0 and 1 are both
+        // legitimate. What must never happen is an automatic replay of
+        // the uncertain op (that could make it 2).
+        assert!(r.to_string().contains("was not retried"), "{r}");
+        let b = read_bumps(&a);
+        assert!(b <= 1, "an uncertain failure is never replayed automatically: {b}");
+        let (success, r2) = a.run(bump);
+        assert!(success && r2["ok"] == true, "{r2}");
+        let after = read_bumps(&a);
+        assert_eq!(after, b + 1, "one explicit run adds exactly one effect: {b} -> {after}");
+    } else {
+        // Recovered through the typed never-reached retry (or pre-op
+        // recovery): the first attempt ran nothing and the op ran once -
+        // a replayed first attempt would read 2.
+        assert_eq!(read_bumps(&a), 1, "ran exactly once, never replayed");
+    }
+}
+
 /// A browser that dies again right after a recovery ends the session, with
 /// a plain error: no crash loop. `start` makes a new one.
 #[test]

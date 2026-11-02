@@ -2453,7 +2453,7 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
 /// handed back whole and decoded.
 pub fn har_entries(text: &[u8]) -> anyhow::Result<Vec<crate::cdp::HarEntry>> {
     use base64::Engine as _;
-    let har: Value = serde_json::from_slice(text).map_err(|e| anyhow::anyhow!("not a HAR file: {e}"))?;
+    let har: Value = serde_json::from_slice(text).map_err(|e| anyhow::Error::from(e).context("not a HAR file"))?;
     let entries = har
         .pointer("/log/entries")
         .and_then(Value::as_array)
@@ -2582,6 +2582,183 @@ const STORAGE_EVAL: Duration = Duration::from_millis(300);
 /// A second crash this soon after a recovery ends the session.
 const CRASH_LOOP: Duration = Duration::from_secs(10);
 
+/// May an op whose run failed be run again? Only when not one of its
+/// requests left an unproven effect on the browser (the connection's
+/// count of them is unchanged) AND the failure is the typed
+/// never-reached one - a request positively not run. Anything else may
+/// have had an effect and is never replayed.
+fn zero_effect_retry(unproven_before: u64, unproven_now: u64, err: Option<&anyhow::Error>) -> bool {
+    unproven_before == unproven_now
+        && err.is_some_and(|e| e.chain().any(|c| c.downcast_ref::<crate::cdp::NeverReached>().is_some()))
+}
+
+/// The commands a crash retry may rerun at all: every effect of theirs
+/// goes over the browser connection (audited: any local file a command
+/// writes - screenshot, pdf - is written strictly after the browser's
+/// answer, so a never-reached failure left nothing behind). Commands
+/// with their own side effects outside the connection - a process spawn
+/// (open), local files written mid-op (network --body-file, state save),
+/// a credential store (set) - are never retried automatically.
+fn retry_eligible(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Quit { .. }
+            | Command::Status {}
+            | Command::Open { .. }
+            | Command::Network { .. }
+            | Command::State { .. }
+            | Command::Set { .. }
+            | Command::Reset { .. }
+    )
+}
+
+#[cfg(test)]
+mod zero_effect_retry_tests {
+    use super::zero_effect_retry;
+
+    #[test]
+    fn retries_only_a_zero_effect_typed_never_reached() {
+        let typed = anyhow::Error::new(crate::cdp::NeverReached("Runtime.evaluate".to_string()));
+        assert!(zero_effect_retry(3, 3, Some(&typed)), "no unproven effect + typed never-reached");
+        assert!(!zero_effect_retry(2, 3, Some(&typed)), "an unproven effect: the op may have run partly");
+        assert!(!zero_effect_retry(3, 3, None), "no error, nothing to retry");
+        // The same words as plain text must NOT classify: a browser- or
+        // page-controlled message can carry them.
+        let text = anyhow::anyhow!("the browser refused Runtime.evaluate: {}", crate::cdp::NEVER_REACHED);
+        assert!(!zero_effect_retry(3, 3, Some(&text)), "text impersonation does not trigger a retry");
+        let wrapped = anyhow::anyhow!("context").context("outer");
+        assert!(!zero_effect_retry(3, 3, Some(&wrapped)), "no typed cause in the chain");
+        let chained = typed.context("the op failed");
+        assert!(zero_effect_retry(3, 3, Some(&chained)), "typed cause found through context");
+        let closed = anyhow::anyhow!("{} (Runtime.evaluate)", crate::cdp::CONNECTION_CLOSED);
+        assert!(!zero_effect_retry(3, 3, Some(&closed)), "in-flight is never retried");
+    }
+}
+
+/// The guard `run_op` consults, fed by real transport outcomes - no
+/// browser and no kill timing: the peer end of a framed pair scripts
+/// exactly what the connection sees.
+#[cfg(all(test, unix))]
+mod crash_retry_transport_tests {
+    use super::zero_effect_retry;
+    use crate::cdp::{CdpClient, NeverReached};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    const T: Duration = Duration::from_secs(5);
+
+    fn framed_pair() -> (CdpClient, UnixStream) {
+        let (a, b) = UnixStream::pair().unwrap();
+        let (r, w) = a.into_split();
+        (CdpClient::connect_framed(r, w), b)
+    }
+
+    /// One NUL-terminated frame off the peer; None at EOF.
+    async fn read_frame(peer: &mut UnixStream) -> Option<String> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = peer.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(at) = buf.iter().position(|b| *b == 0) {
+                return Some(String::from_utf8_lossy(&buf[..at]).into_owned());
+            }
+        }
+    }
+
+    /// Wait until the connection reports closed (its reader saw EOF).
+    async fn until_closed(client: &CdpClient) {
+        for _ in 0..200 {
+            if client.is_closed() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the connection never saw the peer go");
+    }
+
+    /// An op whose mutation was answered and only whose follow-up never
+    /// reached the browser: the mutation's effect is unproven, so the
+    /// guard refuses the retry and the mutation is never replayed.
+    #[tokio::test]
+    async fn a_mutation_then_a_never_reached_followup_is_not_retried() {
+        let (client, mut peer) = framed_pair();
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let d = Arc::clone(&dispatches);
+        tokio::spawn(async move {
+            let frame = read_frame(&mut peer).await.expect("the mutation frame");
+            assert!(frame.contains("X.mutate"), "{frame}");
+            d.fetch_add(1, Ordering::SeqCst);
+            let id = serde_json::from_str::<serde_json::Value>(&frame).unwrap()["id"].clone();
+            peer.write_all(format!("{{\"id\":{id},\"result\":{{\"done\":true}}}}\0").as_bytes()).await.unwrap();
+            // The browser dies here: EOF before the follow-up is written.
+        });
+        let before = client.effects_uncertain();
+        client.send("X.mutate", json!({}), None, T).await.unwrap();
+        assert_eq!(client.effects_uncertain(), before + 1, "an answered request's effect stays unproven");
+        until_closed(&client).await;
+        let err = client.send("X.observe", json!({}), None, T).await.unwrap_err();
+        assert!(err.chain().any(|c| c.downcast_ref::<NeverReached>().is_some()), "{err:#}");
+        assert_eq!(client.effects_uncertain(), before + 1, "a never-reached request adds nothing");
+        assert!(
+            !zero_effect_retry(before, client.effects_uncertain(), Some(&err)),
+            "an op with an unproven effect is never replayed"
+        );
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1, "the mutation ran once and stays once");
+    }
+
+    /// A command that positively never reached the browser: nothing was
+    /// written before the retry (the dead peer counts zero frames), the
+    /// recovered connection runs it exactly once.
+    #[tokio::test]
+    async fn a_never_reached_command_is_retried_onto_a_fresh_connection_once() {
+        let (dead, mut dead_peer) = framed_pair();
+        // The peer's write half goes: the client's reader sees EOF and the
+        // connection is known-closed. Its read half stays open to count
+        // anything the client would still write (it must write nothing).
+        dead_peer.shutdown().await.unwrap();
+        let dead_seen = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&dead_seen);
+        let counter = tokio::spawn(async move {
+            while read_frame(&mut dead_peer).await.is_some() {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        until_closed(&dead).await;
+        let before = dead.effects_uncertain();
+        let err = dead.send("X.mutate", json!({}), None, T).await.unwrap_err();
+        assert!(err.chain().any(|c| c.downcast_ref::<NeverReached>().is_some()), "{err:#}");
+        assert_eq!(dead.effects_uncertain(), before, "a never-reached request adds nothing");
+        assert!(
+            zero_effect_retry(before, dead.effects_uncertain(), Some(&err)),
+            "a zero-effect typed never-reached may be retried"
+        );
+        // The retry runs on the recovered connection, as after a relaunch.
+        let (fresh, mut fresh_peer) = framed_pair();
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let d = Arc::clone(&dispatches);
+        tokio::spawn(async move {
+            let frame = read_frame(&mut fresh_peer).await.expect("the retried frame");
+            assert!(frame.contains("X.mutate"), "{frame}");
+            d.fetch_add(1, Ordering::SeqCst);
+            let id = serde_json::from_str::<serde_json::Value>(&frame).unwrap()["id"].clone();
+            fresh_peer.write_all(format!("{{\"id\":{id},\"result\":{{\"done\":true}}}}\0").as_bytes()).await.unwrap();
+        });
+        fresh.send("X.mutate", json!({}), None, T).await.unwrap();
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1, "the retry ran the command once");
+        drop(dead);
+        counter.await.unwrap();
+        assert_eq!(dead_seen.load(Ordering::SeqCst), 0, "nothing reached the browser before the retry");
+    }
+}
+
 /// What a session on the shared browser keeps in memory to carry on after
 /// the browser dies: its tabs (URL, whether the last document load was a
 /// form POST), which one is active, and the cookies and localStorage as of
@@ -2654,12 +2831,12 @@ impl Driver {
         Self::apply_settings(config);
         if let Some(app) = &config.electron {
             let session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
-                .map_err(|e| anyhow::anyhow!("could not launch the Electron app: {e:#}"))?;
+                .map_err(|e| e.context("could not launch the Electron app"))?;
             return Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None });
         }
         if let Some(target) = config.attach_target() {
             let session = BrowserSession::attach(&target, config.timeout_ms)
-                .map_err(|e| anyhow::anyhow!("could not connect to the browser: {e:#}"))?;
+                .map_err(|e| e.context("could not connect to the browser"))?;
             return Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None });
         }
         let session = BrowserSession::launch_with(
@@ -2670,7 +2847,7 @@ impl Driver {
             config.transport.as_deref(),
         )
         .map_err(|e| {
-            anyhow::anyhow!("browser launch failed (engine={}, headed={}): {e:#}", config.engine, config.headed)
+            e.context(format!("browser launch failed (engine={}, headed={})", config.engine, config.headed))
         })?;
         Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None })
     }
@@ -2684,7 +2861,7 @@ impl Driver {
         }
         Self::apply_settings(config);
         let session = BrowserSession::launch_shared(!config.headed, config.chromium.as_deref(), config.timeout_ms)
-            .map_err(|e| anyhow::anyhow!("browser launch failed (shared browser, headed={}): {e:#}", config.headed))?;
+            .map_err(|e| e.context(format!("browser launch failed (shared browser, headed={})", config.headed)))?;
         let crash = Crash { headless: !config.headed, ..Crash::default() };
         Ok(Self { session, history: Vec::new(), crash, reported: None })
     }
@@ -2722,7 +2899,7 @@ impl Driver {
         if self.session.is_lightpanda() {
             anyhow::bail!("{op}: the lightpanda engine has no WebMCP");
         }
-        match self.session.webmcp_tools().map_err(|e| anyhow::anyhow!("{op}: {e:#}"))? {
+        match self.session.webmcp_tools().map_err(|e| e.context(op.to_string()))? {
             None => anyhow::bail!(
                 "{op}: this browser has no WebMCP ({}); Chrome 153 and later have it",
                 self.session.user_agent()
@@ -2822,7 +2999,8 @@ impl Driver {
                         body.clone().into_bytes()
                     };
                     if let Some(path) = body_file {
-                        write_own(path, &bytes).map_err(|e| anyhow::anyhow!("network --body-file {path}: {e}"))?;
+                        write_own(path, &bytes)
+                            .map_err(|e| anyhow::Error::from(e).context(format!("network --body-file {path}")))?;
                         out["body_file"] = json!(path);
                         out["body_bytes"] = json!(bytes.len());
                     } else if base64 {
@@ -2876,7 +3054,7 @@ impl Driver {
                 }
             }
             write_own(path, &serde_json::to_vec_pretty(&har)?)
-                .map_err(|e| anyhow::anyhow!("network --har {path}: {e}"))?;
+                .map_err(|e| anyhow::Error::from(e).context(format!("network --har {path}")))?;
             return Ok(json!({ "har": path, "entries": picked.len() }));
         }
         let limit = limit.unwrap_or(100);
@@ -2953,7 +3131,7 @@ impl Driver {
         let mut missed = Vec::new();
         for (i, url) in urls.iter().enumerate() {
             if i > 0 {
-                self.session.new_page().map_err(|e| anyhow::anyhow!("{what}: reopen tab {i}: {e:#}"))?;
+                self.session.new_page().map_err(|e| e.context(format!("{what}: reopen tab {i}")))?;
             }
             if !url.is_empty() && url != "about:blank" {
                 if let Err(e) = self.session.goto(url).or_else(|_| self.session.goto(url)) {
@@ -3015,7 +3193,7 @@ impl Driver {
     /// Run one op, after relaunching the shared browser if it died since the
     /// last one; its outcome says so, and what was lost.
     pub fn run_op(&mut self, command: &Command) -> anyhow::Result<Outcome> {
-        let recovered = if self.session.is_shared()
+        let mut recovered = if self.session.is_shared()
             && self.session.browser_gone()
             && !self.crash.given_up
             && !matches!(command, Command::Quit { .. } | Command::Status {})
@@ -3024,7 +3202,34 @@ impl Driver {
         } else {
             None
         };
+        // A retried op must have had no effect at all: not one of its
+        // requests may have an unproven effect on the browser (answered,
+        // maybe written, or timed out - anything but a typed
+        // never-reached). An op that mutated through an earlier call and
+        // only saw a later call fail never-reached is NOT run again.
+        let unproven = self.session.effects_uncertain();
         let mut result = self.run_op_inner(command);
+        // The op never reached the browser (its host found the writer to
+        // the browser already gone and said so): it positively did not
+        // run, so relaunch and run it - that is not a replay. Any other
+        // closed-connection failure may have been in flight when the
+        // browser died and is never retried. The classification is a
+        // typed error, never text: page- or browser-controlled messages
+        // cannot impersonate it.
+        if recovered.is_none()
+            && self.session.is_shared()
+            && !self.crash.given_up
+            && retry_eligible(command)
+            && zero_effect_retry(unproven, self.session.effects_uncertain(), result.as_ref().err())
+        {
+            match self.recover() {
+                Ok(r) => {
+                    recovered = Some(r);
+                    result = self.run_op_inner(command);
+                }
+                Err(e) => result = Err(e),
+            }
+        }
         self.remember();
         match (&mut result, recovered) {
             (Ok(outcome), Some(r)) => {
@@ -3088,9 +3293,11 @@ impl Driver {
         }
         let exe = self.session.executable().to_string();
         // A host that was closing when the browser died can still answer for a
-        // moment: try again before giving up.
+        // moment (joining it gets never-reached refusals), and a fresh
+        // browser takes its time on a loaded box: try for ~3 s before
+        // giving up.
         let mut launched = BrowserSession::launch_shared(self.crash.headless, Some(&exe), self.session.timeout_ms());
-        for _ in 0..2 {
+        for _ in 0..9 {
             if launched.is_ok() {
                 break;
             }
@@ -3493,7 +3700,7 @@ impl Driver {
     /// The page as `find` and `check` see it: the whole text tree.
     fn page_tree(&self, timeout_ms: Option<f64>) -> anyhow::Result<String> {
         let opts = AxOptions { limit: 20_000, ..AxOptions::default() };
-        match self.session.ax(&opts, timeout_ms).map_err(|e| anyhow::anyhow!("ax: {e:#}"))? {
+        match self.session.ax(&opts, timeout_ms).map_err(|e| e.context("ax"))? {
             Value::String(tree) => Ok(tree),
             other => Ok(other.to_string()),
         }
@@ -3504,7 +3711,7 @@ impl Driver {
         let tree = self.page_tree(timeout_ms)?;
         let page = tree.lines().next().unwrap_or("").to_string();
         crate::decide::find(&decider, what, &page, &crate::decide::candidates(&tree))
-            .map_err(|e| anyhow::anyhow!("find {what:?}: {e:#}"))
+            .map_err(|e| e.context(format!("find {what:?}")))
     }
 
     fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
@@ -3521,7 +3728,7 @@ impl Driver {
                     crate::decide::Decider::from_env().ok_or_else(|| crate::decide::Decider::missing("check"))?;
                 let tree = self.page_tree(*timeout_ms)?;
                 let yes = crate::decide::check(&decider, question, &tree)
-                    .map_err(|e| anyhow::anyhow!("check {question:?}: {e:#}"))?;
+                    .map_err(|e| e.context(format!("check {question:?}")))?;
                 Ok(json!({ "question": question, "yes": (yes * 1000.0).round() / 1000.0, "answer": yes >= 0.5 }))
             }
             Command::Open { url } => {
@@ -3542,15 +3749,15 @@ impl Driver {
                 Ok(state)
             }
             Command::Back {} => {
-                s.back().map_err(|e| anyhow::anyhow!("back: {e:#}"))?;
+                s.back().map_err(|e| e.context("back"))?;
                 Ok(self.state_json())
             }
             Command::Forward {} => {
-                s.forward().map_err(|e| anyhow::anyhow!("forward: {e:#}"))?;
+                s.forward().map_err(|e| e.context("forward"))?;
                 Ok(self.state_json())
             }
             Command::Reload {} => {
-                s.reload().map_err(|e| anyhow::anyhow!("reload: {e:#}"))?;
+                s.reload().map_err(|e| e.context("reload"))?;
                 Ok(self.state_json())
             }
             Command::Click { target, timeout_ms, button, force } => {
@@ -3642,7 +3849,7 @@ impl Driver {
                         delta,
                         *timeout_ms,
                     )
-                    .map_err(|e| anyhow::anyhow!("mouse {action}: {e:#}"))?;
+                    .map_err(|e| e.context(format!("mouse {action}")))?;
                 let mut state = self.state_json();
                 state["mouse"] = r;
                 Ok(state)
@@ -3676,17 +3883,17 @@ impl Driver {
             }
             Command::Press { key, target, timeout_ms } => {
                 let t = target.optional("press")?;
-                s.press(t.as_ref(), key, *timeout_ms).map_err(|e| anyhow::anyhow!("press {key}: {e:#}"))?;
+                s.press(t.as_ref(), key, *timeout_ms).map_err(|e| e.context(format!("press {key}")))?;
                 Ok(self.state_json())
             }
             Command::Type { value, target, timeout_ms } => {
                 let t = target.optional("type")?;
-                s.type_text(t.as_ref(), value, *timeout_ms).map_err(|e| anyhow::anyhow!("type: {e:#}"))?;
+                s.type_text(t.as_ref(), value, *timeout_ms).map_err(|e| e.context("type"))?;
                 Ok(self.state_json())
             }
             Command::Scroll { target, by, to, timeout_ms } => {
                 let t = target.optional("scroll")?;
-                s.scroll(t.as_ref(), *by, to.as_deref(), *timeout_ms).map_err(|e| anyhow::anyhow!("scroll: {e:#}"))
+                s.scroll(t.as_ref(), *by, to.as_deref(), *timeout_ms).map_err(|e| e.context("scroll"))
             }
             Command::Upload { target, files, timeout_ms } => {
                 let t = target.target("upload")?;
@@ -3699,7 +3906,7 @@ impl Driver {
                 }
                 if let Some(glob) = download {
                     let started = std::time::Instant::now();
-                    let d = s.wait_download(glob, *timeout_ms).map_err(|e| anyhow::anyhow!("wait: {e:#}"))?;
+                    let d = s.wait_download(glob, *timeout_ms).map_err(|e| e.context("wait"))?;
                     if [selector, text, url, gone, js].iter().all(|c| c.is_none()) && !*idle {
                         let mut state = self.state_json();
                         state["download"] = d.to_json();
@@ -3777,7 +3984,7 @@ impl Driver {
                 let dir = self
                     .session
                     .set_downloads_dir(std::path::Path::new(dir))
-                    .map_err(|e| anyhow::anyhow!("downloads --dir: {e:#}"))?;
+                    .map_err(|e| e.context("downloads --dir"))?;
                 Ok(json!({ "dir": dir.display().to_string() }))
             }
             Command::Downloads { clear, format, dir: None } => {
@@ -3810,24 +4017,23 @@ impl Driver {
                 Ok(json!({ "dialogs": if accept { "accept" } else { "dismiss" } }))
             }
             Command::Text { selector, timeout_ms } if selector.is_empty() => {
-                let text = s.page_text(*timeout_ms).map_err(|e| anyhow::anyhow!("text: {e:#}"))?;
+                let text = s.page_text(*timeout_ms).map_err(|e| e.context("text"))?;
                 Ok(json!(text))
             }
             Command::Text { selector, timeout_ms } => {
-                let text = s
-                    .text_with_timeout(selector, *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("text {selector:?}: {e:#}"))?;
+                let text =
+                    s.text_with_timeout(selector, *timeout_ms).map_err(|e| e.context(format!("text {selector:?}")))?;
                 Ok(json!(text))
             }
             Command::Eval { expression, timeout_ms, main: true } => {
-                s.eval_main(expression, *timeout_ms).map_err(|e| anyhow::anyhow!("eval --main: {e:#}"))
+                s.eval_main(expression, *timeout_ms).map_err(|e| e.context("eval --main"))
             }
             Command::Eval { expression, timeout_ms, main: false } => {
-                let value = s.evaluate_user(expression, *timeout_ms).map_err(|e| anyhow::anyhow!("eval: {e:#}"))?;
+                let value = s.evaluate_user(expression, *timeout_ms).map_err(|e| e.context("eval"))?;
                 Ok(value)
             }
             Command::Title {} => {
-                let title = s.title().map_err(|e| anyhow::anyhow!("title: {e:#}"))?;
+                let title = s.title().map_err(|e| e.context("title"))?;
                 Ok(json!(title))
             }
             Command::Ax { max_depth, all, format, limit, refs, scope, timeout_ms, full_text } => {
@@ -3850,7 +4056,7 @@ impl Driver {
                     scope: scope.optional("ax")?,
                     full_text: *full_text,
                 };
-                let mut tree = s.ax(&opts, *timeout_ms).map_err(|e| anyhow::anyhow!("ax: {e:#}"))?;
+                let mut tree = s.ax(&opts, *timeout_ms).map_err(|e| e.context("ax"))?;
                 if let (Value::Array(nodes), Some(n)) = (&mut tree, limit) {
                     nodes.truncate(*n);
                 }
@@ -3964,11 +4170,12 @@ impl Driver {
                 let (cookies, origins) =
                     (state["cookies"].as_array().map_or(0, Vec::len), state["origins"].as_array().map_or(0, Vec::len));
                 write_own(path, (serde_json::to_string_pretty(&state)? + "\n").as_bytes())
-                    .map_err(|e| anyhow::anyhow!("state save {path}: {e}"))?;
+                    .map_err(|e| anyhow::Error::from(e).context(format!("state save {path}")))?;
                 Ok(json!({ "saved": path, "cookies": cookies, "origins": origins }))
             }
             Command::State { path, .. } => {
-                let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("state load {path}: {e}"))?;
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| anyhow::Error::from(e).context(format!("state load {path}")))?;
                 let state: Value =
                     serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("state load {path}: not JSON ({e})"))?;
                 let (cookies, origins) = self.session.load_storage_state(&state)?;
@@ -3984,8 +4191,8 @@ impl Driver {
                             .unwrap_or(0)
                     )
                 });
-                let bytes = s.pdf(*landscape, *background).map_err(|e| anyhow::anyhow!("pdf: {e:#}"))?;
-                write_own(&path, &bytes).map_err(|e| anyhow::anyhow!("pdf: writing {path}: {e:#}"))?;
+                let bytes = s.pdf(*landscape, *background).map_err(|e| e.context("pdf"))?;
+                write_own(&path, &bytes).map_err(|e| anyhow::Error::from(e).context(format!("pdf: writing {path}")))?;
                 let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
                 Ok(json!({ "path": path, "bytes": bytes.len() }))
             }
@@ -4003,7 +4210,7 @@ impl Driver {
                     ("clear", _, _) => format!("({area}.clear(), true)"),
                     (other, ..) => anyhow::bail!("storage: {other} needs a key (set: and a value)"),
                 };
-                s.evaluate_with_timeout::<Value>(&js, None).map_err(|e| anyhow::anyhow!("storage: {e:#}"))
+                s.evaluate_with_timeout::<Value>(&js, None).map_err(|e| e.context("storage"))
             }
             Command::Route { pattern: None, har: None, .. } => {
                 let routes = self.session.routes();
@@ -4053,8 +4260,9 @@ impl Driver {
                         Some("continue") => true,
                         Some(other) => anyhow::bail!("route --not-found {other:?}: abort or continue"),
                     };
-                    let text = std::fs::read(path).map_err(|e| anyhow::anyhow!("route --har {path}: {e}"))?;
-                    let entries = har_entries(&text).map_err(|e| anyhow::anyhow!("route --har {path}: {e}"))?;
+                    let text = std::fs::read(path)
+                        .map_err(|e| anyhow::Error::from(e).context(format!("route --har {path}")))?;
+                    let entries = har_entries(&text).map_err(|e| e.context(format!("route --har {path}")))?;
                     if entries.is_empty() {
                         anyhow::bail!("route --har {path}: no entries");
                     }
@@ -4077,9 +4285,8 @@ impl Driver {
                     let bytes = match (body, body_file) {
                         (Some(_), Some(_)) => anyhow::bail!("route: --body or --body-file, not both"),
                         (Some(b), None) => b.clone().into_bytes(),
-                        (None, Some(f)) => {
-                            std::fs::read(f).map_err(|e| anyhow::anyhow!("route --body-file {f}: {e}"))?
-                        }
+                        (None, Some(f)) => std::fs::read(f)
+                            .map_err(|e| anyhow::Error::from(e).context(format!("route --body-file {f}")))?,
                         (None, None) => Vec::new(),
                     };
                     let mut hs: Vec<(String, String)> =
@@ -4116,11 +4323,11 @@ impl Driver {
                 let what = action.describe();
                 self.session
                     .add_route(crate::cdp::Route { pattern: pattern.clone(), action, hits: 0 })
-                    .map_err(|e| anyhow::anyhow!("route: {e:#}"))?;
+                    .map_err(|e| e.context("route"))?;
                 Ok(json!({ "route": pattern, "action": what }))
             }
             Command::InitScript { source: Some(source), .. } => {
-                let n = self.session.add_init_script(source).map_err(|e| anyhow::anyhow!("init-script: {e:#}"))?;
+                let n = self.session.add_init_script(source).map_err(|e| e.context("init-script"))?;
                 Ok(json!({ "init_scripts": n }))
             }
             Command::InitScript { source: None, clear: true } => {
@@ -4143,8 +4350,7 @@ impl Driver {
                     .join("\n")))
             }
             Command::Unroute { pattern } => {
-                let removed =
-                    self.session.remove_routes(pattern.as_deref()).map_err(|e| anyhow::anyhow!("unroute: {e:#}"))?;
+                let removed = self.session.remove_routes(pattern.as_deref()).map_err(|e| e.context("unroute"))?;
                 Ok(json!({ "removed": removed }))
             }
             Command::Set { what, values, .. } if what == "credentials" || what == "auth" => {
@@ -4154,7 +4360,7 @@ impl Driver {
                     _ => anyhow::bail!("set credentials <user> <password> (or `off`)"),
                 };
                 let on = creds.is_some();
-                self.session.set_credentials(creds).map_err(|e| anyhow::anyhow!("set credentials: {e:#}"))?;
+                self.session.set_credentials(creds).map_err(|e| e.context("set credentials"))?;
                 Ok(json!({ "credentials": if on { "set" } else { "off" } }))
             }
             Command::Set { what, values, .. } if what == "permissions" || what == "permission" => {
@@ -4179,9 +4385,7 @@ impl Driver {
                 if self.session.is_lightpanda() {
                     anyhow::bail!("set permissions: the lightpanda engine has no permissions to set");
                 }
-                self.session
-                    .set_permissions(setting, &browser_names)
-                    .map_err(|e| anyhow::anyhow!("set permissions: {e:#}"))?;
+                self.session.set_permissions(setting, &browser_names).map_err(|e| e.context("set permissions"))?;
                 Ok(json!({ "permissions": label, "for": values[1..] }))
             }
             Command::Set { what, values, .. } if what == "network-quiet" => {
@@ -4202,13 +4406,13 @@ impl Driver {
                 }
                 self.session
                     .set_override(plan.kind, plan.calls, plan.reset)
-                    .map_err(|e| anyhow::anyhow!("set {what}: {e:#}"))?;
+                    .map_err(|e| e.context(format!("set {what}")))?;
                 Ok(plan.result)
             }
             Command::Get { what, name_of, target, timeout_ms } => {
                 if what == "count" {
                     let sel = target.selector.as_deref().unwrap_or("*");
-                    return Ok(json!(s.count(sel).map_err(|e| anyhow::anyhow!("get count {sel:?}: {e:#}"))?));
+                    return Ok(json!(s.count(sel).map_err(|e| e.context(format!("get count {sel:?}")))?));
                 }
                 if !matches!(what.as_str(), "text" | "value" | "attr" | "html" | "outer" | "box" | "style" | "checked")
                 {
@@ -4226,42 +4430,42 @@ impl Driver {
                 let (f, t) = (from.target("drag")?, to.target("drag")?);
                 let r = s
                     .drag(&f, &t, from_at.as_deref().copied(), to_at.as_deref().copied(), *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("drag {} to {}: {e:#}", f.label(), t.label()))?;
+                    .map_err(|e| e.context(format!("drag {} to {}", f.label(), t.label())))?;
                 let mut out = self.state_json();
                 out["drag"] = r;
                 Ok(out)
             }
             Command::Dblclick { target, timeout_ms } => {
                 let t = target.target("dblclick")?;
-                s.dblclick(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("dblclick {}: {e:#}", t.label()))?;
+                s.dblclick(&t, *timeout_ms).map_err(|e| e.context(format!("dblclick {}", t.label())))?;
                 Ok(self.state_json())
             }
             Command::Focus { target, timeout_ms } => {
                 let t = target.target("focus")?;
-                let focused = s.focus(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("focus {}: {e:#}", t.label()))?;
+                let focused = s.focus(&t, *timeout_ms).map_err(|e| e.context(format!("focus {}", t.label())))?;
                 Ok(json!({ "focused": focused }))
             }
             Command::SetChecked { checked, target, timeout_ms } => {
                 let t = target.target(if *checked { "check" } else { "uncheck" })?;
-                let changed = s.set_checked(&t, *checked, *timeout_ms).map_err(|e| {
-                    anyhow::anyhow!("{} {}: {e:#}", if *checked { "check" } else { "uncheck" }, t.label())
-                })?;
+                let changed = s
+                    .set_checked(&t, *checked, *timeout_ms)
+                    .map_err(|e| e.context(format!("{} {}", if *checked { "check" } else { "uncheck" }, t.label())))?;
                 let mut state = self.state_json();
                 state["checked"] = json!(checked);
                 state["changed"] = json!(changed);
                 Ok(state)
             }
             Command::KeyDown { key } => {
-                s.key_event(key, true).map_err(|e| anyhow::anyhow!("keydown: {e:#}"))?;
+                s.key_event(key, true).map_err(|e| e.context("keydown"))?;
                 Ok(json!({ "down": key }))
             }
             Command::KeyUp { key } => {
-                s.key_event(key, false).map_err(|e| anyhow::anyhow!("keyup: {e:#}"))?;
+                s.key_event(key, false).map_err(|e| e.context("keyup"))?;
                 Ok(json!({ "up": key }))
             }
             Command::InsertText { value, target, timeout_ms } => {
                 let t = target.optional("insert-text")?;
-                s.insert_text(t.as_ref(), value, *timeout_ms).map_err(|e| anyhow::anyhow!("insert-text: {e:#}"))?;
+                s.insert_text(t.as_ref(), value, *timeout_ms).map_err(|e| e.context("insert-text"))?;
                 Ok(self.state_json())
             }
             Command::Url {} => Ok(self.state_json()),
@@ -4296,7 +4500,7 @@ impl Driver {
                 let output = self
                     .session
                     .webmcp_invoke(tool, params.clone().unwrap_or_else(|| json!({})), timeout)
-                    .map_err(|e| anyhow::anyhow!("webmcp-call {name}: {e:#}"))?;
+                    .map_err(|e| e.context(format!("webmcp-call {name}")))?;
                 let mut out = self.state_json();
                 out["tool"] = json!(name);
                 out["output"] = output;
@@ -4305,7 +4509,7 @@ impl Driver {
             }
             Command::Locate { target, timeout_ms } => {
                 let t = target.target("locate")?;
-                s.locate(&t, *timeout_ms).map_err(|e| anyhow::anyhow!("locate {}: {e:#}", t.label()))
+                s.locate(&t, *timeout_ms).map_err(|e| e.context(format!("locate {}", t.label())))
             }
             Command::History { clear } => {
                 let all = Value::Array(if *clear { std::mem::take(&mut self.history) } else { self.history.clone() });
@@ -4340,11 +4544,11 @@ impl Driver {
                 anyhow::bail!("tab-new: an Electron app opens its own windows; tab-list shows them")
             }
             Command::Reset { all } => {
-                self.session.reset(*all).map_err(|e| anyhow::anyhow!("reset: {e:#}"))?;
+                self.session.reset(*all).map_err(|e| e.context("reset"))?;
                 Ok(self.tabs_json())
             }
             Command::TabNew { url } => {
-                self.session.new_page().map_err(|e| anyhow::anyhow!("tab-new: {e:#}"))?;
+                self.session.new_page().map_err(|e| e.context("tab-new"))?;
                 if let Some(url) = url {
                     self.goto(url, None, None)?;
                 }
@@ -4368,12 +4572,12 @@ impl Driver {
                     }
                     None => *index,
                 };
-                self.session.select_page(index).map_err(|e| anyhow::anyhow!("tab-select {index}: {e:#}"))?;
+                self.session.select_page(index).map_err(|e| e.context(format!("tab-select {index}")))?;
                 Ok(self.state_json())
             }
             Command::TabClose { index } | Command::ClosePage { index } => {
                 let index = index.unwrap_or_else(|| self.session.active_page());
-                self.session.close_page(index).map_err(|e| anyhow::anyhow!("tab-close {index}: {e:#}"))?;
+                self.session.close_page(index).map_err(|e| e.context(format!("tab-close {index}")))?;
                 Ok(self.state_json())
             }
             Command::Screenshot { path, full_page, quality, timeout_ms, .. } => {
@@ -4389,8 +4593,9 @@ impl Driver {
                 });
                 let bytes = s
                     .screenshot_in(full_page.unwrap_or(false), *quality, *timeout_ms)
-                    .map_err(|e| anyhow::anyhow!("screenshot: {e:#}"))?;
-                write_own(&path, &bytes).map_err(|e| anyhow::anyhow!("screenshot: writing {path}: {e:#}"))?;
+                    .map_err(|e| e.context("screenshot"))?;
+                write_own(&path, &bytes)
+                    .map_err(|e| anyhow::Error::from(e).context(format!("screenshot: writing {path}")))?;
                 // Report where it really went (a relative path is relative
                 // to this process, which may not be the caller's directory).
                 let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
@@ -4406,7 +4611,7 @@ impl Driver {
             // Its context closes; the browser closes with it unless other
             // sessions use it.
             Command::Quit { close_browser: true } if s.is_shared() => {
-                let others = s.close_shared_if_unused().map_err(|e| anyhow::anyhow!("quit --close-browser: {e:#}"))?;
+                let others = s.close_shared_if_unused().map_err(|e| e.context("quit --close-browser"))?;
                 let browser = match others {
                     0 => "closed: no other session used it".to_string(),
                     1 => "left open: 1 other session uses it; it closes on its own once none does".to_string(),
@@ -4426,7 +4631,7 @@ impl Driver {
         let download = self
             .session
             .goto_or_download(&url, wait.unwrap_or("load"), timeout_ms)
-            .map_err(|e| anyhow::anyhow!("goto {url}: {e:#}"))?;
+            .map_err(|e| e.context(format!("goto {url}")))?;
         Ok(download
             .then(|| self.session.downloads(false).into_iter().filter(|d| d.n > before).map(|d| d.suggested).next())
             .flatten())

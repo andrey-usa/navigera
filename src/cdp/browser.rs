@@ -280,6 +280,18 @@ impl Browser {
         self.client.is_closed()
     }
 
+    /// Requests whose effect on the browser cannot be certified absent:
+    /// an op with none new across it could not have changed the browser.
+    pub fn effects_uncertain(&self) -> u64 {
+        self.client.effects_uncertain()
+    }
+
+    /// A cheap handle that says when the connection has ended, for a
+    /// watcher that must react as soon as it does.
+    pub fn closed_watch(&self) -> super::client::CdpClient {
+        self.client.clone()
+    }
+
     /// How the browser's own process (one navigera launched) ended, waiting
     /// up to `wait` for it to.
     pub fn exit_status_within(&self, wait: Duration) -> Option<std::process::ExitStatus> {

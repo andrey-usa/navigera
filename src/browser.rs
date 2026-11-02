@@ -834,7 +834,9 @@ impl BrowserSession {
         } else {
             // The first command is where a browser that died at startup
             // (missing libraries, bad flag) shows up: say why.
-            browser.new_page(Some("about:blank")).map_err(|e| anyhow::anyhow!("{e:#} ({})", browser.death_report()))?
+            browser
+                .new_page(Some("about:blank"))
+                .map_err(|e| e.context(format!("death: {}", browser.death_report())))?
         };
         crate::timing::record("first_page", page_started);
         if !lightpanda {
@@ -948,6 +950,12 @@ impl BrowserSession {
     /// Has the connection to the browser ended?
     pub fn browser_gone(&self) -> bool {
         self.browser.is_closed()
+    }
+
+    /// Requests this session issued whose effect on the browser cannot be
+    /// certified absent: an op with none new across it changed nothing.
+    pub fn effects_uncertain(&self) -> u64 {
+        self.browser.effects_uncertain()
     }
 
     /// Work in a browser that is already running (`--attach`) or in the
@@ -1781,16 +1789,16 @@ impl BrowserSession {
             let old = || crate::emulate::without_rule(params);
             if self.no_rule_call.load(Relaxed) {
                 let (m, p) = old();
-                return page.send_cdp(m, p, timeout).map(drop).map_err(|e| anyhow::anyhow!("{m}: {e:#}"));
+                return page.send_cdp(m, p, timeout).map(drop).map_err(|e| e.context(m.to_string()));
             }
             return match page.send_cdp(method, params.clone(), timeout) {
                 Ok(_) => Ok(()),
                 Err(e) if crate::emulate::method_missing(&format!("{e:#}")) => {
                     self.no_rule_call.store(true, Relaxed);
                     let (m, p) = old();
-                    page.send_cdp(m, p, timeout).map(drop).map_err(|e| anyhow::anyhow!("{m}: {e:#}"))
+                    page.send_cdp(m, p, timeout).map(drop).map_err(|e| e.context(m.to_string()))
                 }
-                Err(e) => Err(anyhow::anyhow!("{method}: {e:#}")),
+                Err(e) => Err(e.context(method.to_string())),
             };
         }
         match page.send_cdp(method, params.clone(), timeout) {
@@ -1800,7 +1808,7 @@ impl BrowserSession {
             Err(e) if method == "Network.overrideNetworkState" && crate::emulate::method_missing(&format!("{e:#}")) => {
                 Ok(())
             }
-            Err(e) => Err(anyhow::anyhow!("{method}: {e:#}")),
+            Err(e) => Err(e.context(method.to_string())),
         }
     }
 
@@ -1944,7 +1952,7 @@ impl BrowserSession {
                     serde_json::json!({ "source": source, "runImmediately": true }),
                     timeout,
                 )
-                .map_err(|e| anyhow::anyhow!("Page.addScriptToEvaluateOnNewDocument: {e:#}"))?;
+                .map_err(|e| e.context("Page.addScriptToEvaluateOnNewDocument"))?;
             if let Some(id) =
                 r.get("identifier").map(|i| i.as_str().map(str::to_string).unwrap_or_else(|| i.to_string()))
             {
@@ -2715,7 +2723,7 @@ impl BrowserSession {
                 &cdp::ClickOptions::default(),
                 timeout_ms,
             )
-            .map_err(|e| anyhow::anyhow!("clicking option {value:?}: {e:#}"))?;
+            .map_err(|e| e.context(format!("clicking option {value:?}")))?;
             let _ = page.evaluate(
                 &format!(
                     "() => {{ for (const e of {}.all('[data-nv-pick=\"{token}\"]')) e.removeAttribute('data-nv-pick'); return true; }}",
