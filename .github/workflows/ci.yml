@@ -71,17 +71,58 @@ jobs:
           node --check bench/ladder/contenders/contender_puppeteer.mjs
           for f in tests/fixtures/electron-app/*.js; do node --check "$f"; done
 
-  # The Lightpanda engine: its end-to-end tests on the pinned release and
-  # on the nightly (a nightly regression is reported, not merged-blocking).
+  # The Lightpanda engine: its end-to-end tests on the pinned release, on
+  # every push and pull request. The nightly runs apart (below).
   lightpanda:
     name: lightpanda (${{ matrix.release }})
     strategy:
       fail-fast: false
       matrix:
-        release: ["1.0.1", nightly]
+        release: ["1.0.1"]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: ${{ matrix.release == 'nightly' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+        with:
+          toolchain: stable
+      - name: Lightpanda ${{ matrix.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/lp"
+          gh release download "${{ matrix.release }}" --repo lightpanda-io/browser \
+            --pattern lightpanda-x86_64-linux --dir "$RUNNER_TEMP/lp"
+          chmod +x "$RUNNER_TEMP/lp/lightpanda-x86_64-linux"
+          echo "LIGHTPANDA_BIN=$RUNNER_TEMP/lp/lightpanda-x86_64-linux" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/lp/lightpanda-x86_64-linux" version
+      - name: Tests (Lightpanda e2e; no X server)
+        env:
+          NAVIGERA_REQUIRE_LIGHTPANDA: "1"
+          LIGHTPANDA_DISABLE_TELEMETRY: "1"
+        run: |
+          set -o pipefail
+          unset DISPLAY
+          if ! cargo test --locked --test lightpanda --test commands 2>&1 | tee /tmp/test.log; then
+            sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
+            python3 bench/ladder/annotate.py /tmp/test-tail.log "lightpanda ${{ matrix.release }} test failure"
+            exit 1
+          fi
+
+  # The same tests on Lightpanda's nightly, weekly and on demand only: a
+  # regression there is reported, it doesn't gate a push or a pull request.
+  lightpanda-nightly:
+    name: lightpanda (${{ matrix.release }})
+    strategy:
+      fail-fast: false
+      matrix:
+        release: [nightly]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
