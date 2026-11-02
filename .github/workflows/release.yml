@@ -318,6 +318,29 @@ jobs:
             "https://github.com/modelcontextprotocol/registry/releases/download/$PUBLISHER/mcp-publisher_linux_amd64.tar.gz"
           echo "$PUBLISHER_SHA256  mcp-publisher.tar.gz" | sha256sum -c -
           tar xzf mcp-publisher.tar.gz mcp-publisher
+      - name: Wait for npm to serve this version
+        env:
+          VERSION: ${{ needs.packages.outputs.version }}
+        run: |
+          # npm's public read API lags npm publish, and the MCP registry
+          # validates against that read API (it GETs exactly this document).
+          # Poll until npm serves the version with matching metadata; fail
+          # explicitly if it never appears instead of publishing blind.
+          # 20 attempts, 5s request timeout, 10s between attempts
+          # (about 5 minutes plus processing).
+          url="https://registry.npmjs.org/navigera/$VERSION"
+          for attempt in $(seq 1 20); do
+            body=""
+            if body=$(curl -sf --max-time 5 "$url"); then
+              if [ "$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null)" = "$VERSION" ]; then
+                echo "npm serves navigera@$VERSION (attempt $attempt)"
+                exit 0
+              fi
+            fi
+            sleep 10
+          done
+          echo "::error title=mcp-registry::npm does not serve navigera@$VERSION after 20 attempts; skipping MCP registry publish - rerun this job later"
+          exit 1
       - name: Publish this version
         env:
           VERSION: ${{ needs.packages.outputs.version }}

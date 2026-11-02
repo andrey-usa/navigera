@@ -4,7 +4,7 @@ use std::process::Child;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use std::sync::Arc;
@@ -48,6 +48,10 @@ pub struct Browser {
     /// Windows: kill-on-close job holding the browser tree, so Chrome dies
     /// with this process even when it is killed (see `procjob`).
     job: Option<super::procjob::ProcJob>,
+    /// An Electron app's main process (Node's inspector), and a client on
+    /// it once `eval --main` has connected.
+    node_ws: Option<String>,
+    node_client: Mutex<Option<CdpClient>>,
 }
 
 impl Browser {
@@ -113,6 +117,8 @@ impl Browser {
             stderr: None,
             shared,
             job: None,
+            node_ws: None,
+            node_client: Mutex::new(None),
         })
     }
 
@@ -144,6 +150,99 @@ impl Browser {
         let mut browser = Self::finish(handle, client, Some(child), Some(profile_dir), ws_url);
         browser.job = job;
         Ok(browser)
+    }
+
+    /// Launch an Electron app (`start --electron`) and connect to it. The
+    /// app's windows are its pages: every page target it opens is adopted
+    /// as a tab (an app's new windows have no opener, unlike a popup), and
+    /// closing the session ends the app.
+    pub fn launch_electron(
+        handle: &tokio::runtime::Handle,
+        exe: &str,
+        args: &[String],
+        no_sandbox: bool,
+    ) -> Result<Self> {
+        let started = std::time::Instant::now();
+        let launched = transport::launch_electron(exe, args, no_sandbox)?;
+        crate::timing::record("devtools_url", started);
+        let client = match handle.block_on(CdpClient::connect(&launched.ws_url)) {
+            Ok(client) => client,
+            Err(e) => {
+                // The app may have quit right after opening its port (a
+                // single-instance app whose other copy is running).
+                let mut child = launched.child;
+                let status = wait_exit(&mut child, Duration::from_secs(1));
+                if status.is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(e.context(format!(
+                    "connect to the Electron app at {}{}",
+                    launched.ws_url,
+                    transport::electron_exit_note(status)
+                )));
+            }
+        };
+        let mut browser = Self::finish(handle, client, Some(launched.child), None, launched.ws_url);
+        browser.stderr = Some(launched.stderr);
+        browser.job = launched.job;
+        browser.node_ws = launched.node_ws;
+        browser.shared.adopt_windows.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(browser)
+    }
+
+    /// Whether an Electron app's main process can be reached (`eval --main`):
+    /// its Node inspector answered at launch.
+    pub fn has_main_process(&self) -> bool {
+        self.node_ws.is_some()
+    }
+
+    /// Run JavaScript in an Electron app's main process (`eval --main`):
+    /// an expression, or a function called with the `electron` module
+    /// (`({ app }) => app.getName()`). Awaited; the result comes back as
+    /// JSON.
+    pub fn eval_main(&self, expression: &str, timeout: Duration) -> Result<Value> {
+        let Some(ws) = self.node_ws.as_deref() else {
+            bail!(
+                "the app's main process has no inspector: it was not started with --electron, or the app turns \
+                 Node's --inspect switch off (Electron's EnableNodeCliInspectArguments fuse)"
+            );
+        };
+        let client = {
+            let mut slot = self.node_client.lock().unwrap();
+            if slot.is_none() {
+                let connected = self
+                    .block_on(CdpClient::connect(ws))
+                    .with_context(|| format!("connect to the app's main process at {ws}"))?;
+                *slot = Some(connected);
+            }
+            slot.clone().expect("connected above")
+        };
+        let script = format!(
+            "(async () => {{\n\
+             const load = globalThis.process && process.mainModule\n\
+               ? (m) => process.mainModule.require(m)\n\
+               : process.getBuiltinModule('module').createRequire(process.execPath);\n\
+             const electron = load('electron');\n\
+             const value = ({expression}\n);\n\
+             return typeof value === 'function' ? await value(electron) : await value;\n\
+             }})()"
+        );
+        let res = self.block_on(client.send(
+            "Runtime.evaluate",
+            json!({ "expression": script, "awaitPromise": true, "returnByValue": true }),
+            None,
+            timeout,
+        ))?;
+        if let Some(details) = res.get("exceptionDetails") {
+            let text = details
+                .pointer("/exception/description")
+                .and_then(Value::as_str)
+                .or_else(|| details.get("text").and_then(Value::as_str))
+                .unwrap_or("the script threw");
+            bail!("{}", text.lines().next().unwrap_or(text));
+        }
+        Ok(res.pointer("/result/value").cloned().unwrap_or(Value::Null))
     }
 
     /// Connect to a browser someone else runs (`--attach`, `--profile`).
@@ -179,6 +278,25 @@ impl Browser {
     /// Has the connection to the browser ended?
     pub fn is_closed(&self) -> bool {
         self.client.is_closed()
+    }
+
+    /// Requests whose effect on the browser cannot be certified absent:
+    /// an op with none new across it could not have changed the browser.
+    pub fn effects_uncertain(&self) -> u64 {
+        self.client.effects_uncertain()
+    }
+
+    /// A cheap handle that says when the connection has ended, for a
+    /// watcher that must react as soon as it does.
+    pub fn closed_watch(&self) -> super::client::CdpClient {
+        self.client.clone()
+    }
+
+    /// How the browser's own process (one navigera launched) ended, waiting
+    /// up to `wait` for it to.
+    pub fn exit_status_within(&self, wait: Duration) -> Option<std::process::ExitStatus> {
+        let mut slot = self.child.lock().ok()?;
+        wait_exit(slot.as_mut()?, wait)
     }
 
     /// How many browser contexts other than the default one are open.
@@ -219,6 +337,8 @@ impl Browser {
             shared,
             stderr: None,
             job: None,
+            node_ws: None,
+            node_client: Mutex::new(None),
         }
     }
 
@@ -329,7 +449,12 @@ impl Browser {
     /// Grant a permission (e.g. `geolocation`) to every origin, in one
     /// browser context (the default one without `context`).
     pub fn grant_permission(&self, permission: &str, context: Option<&str>) -> Result<()> {
-        let mut params = json!({ "permission": { "name": permission }, "setting": "granted" });
+        self.set_permission(permission, "granted", context)
+    }
+
+    /// `Browser.setPermission`: `setting` is `granted`, `denied` or `prompt`.
+    pub fn set_permission(&self, permission: &str, setting: &str, context: Option<&str>) -> Result<()> {
+        let mut params = json!({ "permission": { "name": permission }, "setting": setting });
         if let Some(context) = context {
             params["browserContextId"] = json!(context);
         }
@@ -493,18 +618,58 @@ impl Browser {
         })
     }
 
-    /// List open tab targets: (target_id, url).
+    /// The browser's user agent (`Browser.getVersion`): an Electron app's
+    /// says `Electron/<version>` unless the app set its own.
+    pub fn user_agent(&self) -> Result<String> {
+        let v = self.block_on(self.client.send("Browser.getVersion", json!({}), None, CMD_TIMEOUT))?;
+        Ok(v.get("userAgent").and_then(Value::as_str).unwrap_or_default().to_string())
+    }
+
+    /// A target's type now (`page`, `webview`, …): it can change after the
+    /// target is created.
+    pub fn target_type(&self, target_id: &str) -> Option<String> {
+        self.block_on(self.client.send("Target.getTargetInfo", json!({ "targetId": target_id }), None, CMD_TIMEOUT))
+            .ok()?
+            .pointer("/targetInfo/type")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// Each page (and `<webview>`) target's URL and title, by target id.
+    pub fn target_infos(&self) -> Result<std::collections::HashMap<String, (String, String)>> {
+        self.block_on(async {
+            let targets = self.client.send("Target.getTargets", json!({}), None, CMD_TIMEOUT).await?;
+            let text = |t: &Value, key: &str| t.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+            Ok(targets
+                .get("targetInfos")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|t| matches!(t.get("type").and_then(Value::as_str), Some("page" | "webview")))
+                .map(|t| (text(t, "targetId"), (text(t, "url"), text(t, "title"))))
+                .collect())
+        })
+    }
+
+    /// List open tab targets: (target_id, url). In an Electron app, its
+    /// `<webview>`s too (marked in [`Shared::embedded`]).
     pub fn tab_targets(&self) -> Result<Vec<(String, String)>> {
+        let app = self.shared.adopt_windows.load(std::sync::atomic::Ordering::Relaxed);
         self.block_on(async {
             let targets = self.client.send("Target.getTargets", json!({}), None, CMD_TIMEOUT).await?;
             let mut out = Vec::new();
             if let Some(list) = targets.get("targetInfos").and_then(Value::as_array) {
                 for t in list {
-                    if t.get("type").and_then(Value::as_str) != Some("page") {
+                    let kind = t.get("type").and_then(Value::as_str);
+                    let webview = app && kind == Some("webview");
+                    if kind != Some("page") && !webview {
                         continue;
                     }
                     let id = t.get("targetId").and_then(Value::as_str).unwrap_or("");
                     let url = t.get("url").and_then(Value::as_str).unwrap_or("");
+                    if webview {
+                        self.shared.embedded.lock().unwrap().insert(id.to_string());
+                    }
                     out.push((id.to_string(), url.to_string()));
                 }
             }
@@ -616,6 +781,9 @@ impl Browser {
     pub fn close(&self) {
         let started = std::time::Instant::now();
         self.client.shutdown();
+        if let Some(node) = self.node_client.lock().ok().and_then(|mut slot| slot.take()) {
+            node.shutdown();
+        }
         let profile = self.profile_dir.lock().ok().and_then(|mut slot| slot.take());
         let Some(mut child) = self.child.lock().ok().and_then(|mut slot| slot.take()) else {
             drop(profile);
@@ -671,6 +839,20 @@ fn lightpanda_serve_args(port: u16) -> Vec<String> {
 fn free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind 127.0.0.1:0 for a free port")?;
     Ok(listener.local_addr()?.port())
+}
+
+/// The child's exit status once it has exited, polling for up to `wait`.
+fn wait_exit(child: &mut std::process::Child, wait: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[cfg(test)]

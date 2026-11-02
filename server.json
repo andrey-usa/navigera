@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.andrey-usa/navigera",
   "title": "navigera",
-  "description": "Fast headless Chrome for agents: a compact accessibility tree with refs, one call per step.",
+  "description": "Fast Chrome and Electron automation for agents: an accessibility tree with refs, one call per step.",
   "repository": {
     "url": "https://github.com/andrey-usa/navigera",
     "source": "github"

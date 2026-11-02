@@ -15,6 +15,7 @@ pub const EXAMPLES: &[Help] = &[
             ("navigera -s s start", ""),
             ("navigera -s s start --natural", "browser that looks less headless"),
             ("navigera -s s start --parent 4242", "the session ends when process 4242 (the agent) exits"),
+            ("navigera -s app start --electron ./my-app", "an Electron app; its windows are the tabs"),
         ],
         &[
             ("--own-browser", "a browser for this session alone (default: one shared browser, a context each)"),
@@ -25,6 +26,8 @@ pub const EXAMPLES: &[Help] = &[
             ("--from <browser>", "seed the profile with a copy of a browser's sign-ins"),
             ("--from-profile <p>", "which profile --from copies (dir, name or email)"),
             ("--headless", "hide a --profile browser (default: visible)"),
+            ("--electron <app>", "launch an Electron app (its directory, main script or executable); quit ends it"),
+            ("--electron-arg <arg>", "an argument for the app (repeatable)"),
             ("--natural", "no HeadlessChrome user agent, a real screen size"),
             ("--download-dir <dir>", "where this session saves downloads"),
         ],
@@ -206,17 +209,19 @@ pub const EXAMPLES: &[Help] = &[
         &[
             ("navigera -s s eval \"() => document.title\"", ""),
             ("navigera -s s eval \"() => document.links.length\"", ""),
+            ("navigera -s app eval --main \"({ app }) => app.getName()\"", "Electron: the main process"),
         ],
         &[
             ("<js>", "the JavaScript to run; arrow functions are called"),
             ("--file <path.js>", "read the script from this file"),
             ("-", "read the script from stdin"),
+            ("--main", "Electron: run in the app's main process; a function gets the electron module"),
         ],
     ),
     (
         "text",
-        &[("navigera -s s text --selector \"h3\"", "")],
-        &[("--selector <css>", "the element whose textContent to print")],
+        &[("navigera -s s text --selector \"h3\"", ""), ("navigera -s s text", "the whole page, as it reads")],
+        &[("--selector <css>", "the element whose textContent to print (none: the page's innerText)")],
     ),
     (
         "find",
@@ -337,6 +342,7 @@ pub const EXAMPLES: &[Help] = &[
             ("media dark|light|print|reduced-motion", "the emulated media feature"),
             ("geo <lat> <lon>", "the emulated geolocation"),
             ("offline on|off", "cut or restore the network"),
+            ("permissions grant|deny|reset <name>…", "geolocation, notifications, camera, microphone, clipboard (and midi, sensors, background-sync)"),
             ("headers <Name: value>…", "extra HTTP headers on every request"),
             ("ua <string>", "the user agent string"),
             ("locale <tag>", "the emulated locale, e.g. en-US"),
@@ -347,7 +353,12 @@ pub const EXAMPLES: &[Help] = &[
     ),
     (
         "route",
-        &[("navigera -s s route", ""), ("navigera -s s route \"*://*.example.com/*\" --abort", "")],
+        &[
+            ("navigera -s s route", ""),
+            ("navigera -s s route \"*://*.example.com/*\" --abort", ""),
+            ("navigera -s s route \"*/api/*\" --har api.har --not-found continue", ""),
+            ("navigera -s s route \"*/api/me\" --modify --replace free pro", ""),
+        ],
         &[
             ("<url glob>", "requests to match, with * and ? wildcards"),
             ("--abort", "fail matching requests (the default with no flag)"),
@@ -356,6 +367,11 @@ pub const EXAMPLES: &[Help] = &[
             ("--body-file <f>", "read the --status body from this file"),
             ("--content-type <t>", "the Content-Type for --status answers"),
             ("--header 'Name: value'", "an extra header for --status answers"),
+            ("--har <f>", "answer from a HAR file (record one with network --har): same method and URL, entries in order, then the last"),
+            ("--not-found abort|continue", "--har: what requests the HAR has no entry for do (default abort)"),
+            ("--modify", "let matching requests reach the server and change their responses"),
+            ("--set-header 'Name: value'", "--modify: set a response header ('Name:' removes it)"),
+            ("--replace <from> <to>", "--modify: replace text in the response body (repeatable)"),
         ],
     ),
     (
@@ -466,6 +482,19 @@ pub const EXAMPLES: &[Help] = &[
         ],
     ),
     ("url", &[("navigera -s s url", "")], &[]),
+    ("webmcp-list", &[("navigera -s s webmcp-list", "the tools the page offers an agent")], &[]),
+    (
+        "webmcp-call",
+        &[
+            ("navigera -s s webmcp-call search_flights --params '{\"to\":\"LIS\"}'", "a read-only tool"),
+            ("navigera -s s webmcp-call add_to_cart --params '{\"sku\":\"A1\"}' --confirm", "one that changes things"),
+        ],
+        &[
+            ("<name>", "the tool, as webmcp-list names it"),
+            ("--params '{json}'", "its input, a JSON object (default {})"),
+            ("--confirm", "needed for a tool the page doesn't mark read-only"),
+        ],
+    ),
     ("status", &[("navigera -s s status", "")], &[]),
     (
         "locate",
@@ -550,6 +579,18 @@ pub const EXAMPLES: &[Help] = &[
         ],
     ),
     ("profiles", &[("navigera profiles", "")], &[]),
+    (
+        "batch",
+        &[
+            ("navigera -s s batch steps.txt", "goto, fill, click … in one call"),
+            ("navigera -s s --raw batch -", "steps on stdin; print only what they read"),
+            ("navigera -s s batch flow.txt --keep-going", "run every step even after a failure"),
+        ],
+        &[
+            ("<file> | -", "the steps: one command per line, or JSON ops; - (or nothing) reads stdin"),
+            ("--keep-going", "run the remaining steps after a failure"),
+        ],
+    ),
     (
         "sessions",
         &[

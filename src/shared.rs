@@ -27,7 +27,8 @@
 //! - The host closes the browser and exits once no client has been
 //!   connected for the grace period (`NAVIGERA_SHARED_GRACE_S`, default
 //!   30 s: the next agent's start is warm), or when the browser dies: every
-//!   client's connection then ends, and their next op says so.
+//!   client's connection then ends, and each session's next command makes
+//!   (or joins) a new one and carries on (see `Driver::recover`).
 //! - Which browser: one per launch key (navigera's version, the executable,
 //!   headless or not, natural mode, the launch flags including
 //!   `NAVIGERA_EXTRA_FLAGS`, `NAVIGERA_DROP_FLAGS` and
@@ -41,6 +42,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -70,6 +72,7 @@ pub fn wanted(config: &SessionConfig) -> bool {
         || crate::browser::is_lightpanda(&config.engine)
         || config.attach.is_some()
         || config.profile.is_some()
+        || config.electron.is_some()
     {
         return false;
     }
@@ -406,8 +409,15 @@ fn answer(id: u64, result: Option<&RawValue>, error: Option<&RawValue>, session:
     text
 }
 
+/// The `"id"` of a frame routed to the browser (the router's global id).
+fn routed_id(text: &str) -> Option<u64> {
+    let at = text.find("\"id\":")? + 5;
+    text[at..].trim_start().chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()
+}
+
 fn refusal(id: u64, message: &str) -> String {
-    format!("{{\"id\":{id},\"error\":{{\"code\":-32000,\"message\":{}}}}}", quoted(message))
+    let code = if message == crate::cdp::NEVER_REACHED { crate::cdp::NEVER_REACHED_CODE } else { -32000 };
+    format!("{{\"id\":{id},\"error\":{{\"code\":{code},\"message\":{}}}}}", quoted(message))
 }
 
 fn event(method: &str, params: Option<&RawValue>, session: Option<&str>) -> String {
@@ -440,6 +450,9 @@ pub const NOT_CLOSED: &str = "this browser is shared with other sessions: it clo
 
 struct Router {
     to_chrome: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Says as soon as the connection to the browser has ended: a request
+    /// refused then never left the host, so it positively did not run.
+    chrome_dead: Arc<AtomicBool>,
     /// Ids the host sends with: above what the launch used, and within
     /// the int32 Chrome takes.
     next_id: u64,
@@ -458,8 +471,19 @@ impl Router {
     fn send_chrome(&mut self, pending: Pending, method: &str, params: &str, session: Option<&str>) {
         let id = self.next_id;
         self.next_id += 1;
+        if self.chrome_dead.load(Ordering::SeqCst) || self.to_chrome.send(command(id, method, params, session)).is_err()
+        {
+            // The writer to the browser is gone: a client's request never
+            // left the host, so it positively did not run. Say so - the
+            // session relaunches the browser and runs it.
+            if let Pending::Client { client, id, .. } = pending {
+                if let Some(c) = self.clients.get(&client) {
+                    c.send(refusal(id, crate::cdp::NEVER_REACHED));
+                }
+            }
+            return;
+        }
         self.pending.insert(id, pending);
-        let _ = self.to_chrome.send(command(id, method, params, session));
     }
 
     fn new_client(&mut self, id: u64, out: Out) {
@@ -467,6 +491,18 @@ impl Router {
         self.idle_since = None;
         self.close_now = false;
         self.send_chrome(Pending::Root(id), "Target.attachToBrowserTarget", "{}", None);
+    }
+
+    /// A request whose frame to the browser positively never completed
+    /// (failed or never-attempted write): it never ran, so say so - the
+    /// session relaunches the browser and runs it. Anything answered or
+    /// possibly written stays merely unanswered.
+    fn never_reached(&mut self, global: u64) {
+        if let Some(Pending::Client { client, id, .. }) = self.pending.remove(&global) {
+            if let Some(c) = self.clients.get(&client) {
+                c.send(refusal(id, crate::cdp::NEVER_REACHED));
+            }
+        }
     }
 
     fn on_client(&mut self, cid: u64, text: String) {
@@ -501,7 +537,6 @@ impl Router {
                 }
                 let global = self.next_id;
                 self.next_id += 1;
-                self.pending.insert(global, Pending::Client { client: cid, id, kind: Kind::Plain });
                 let mut out = with_id(&text, end, global);
                 if sh.session.is_none() {
                     out.pop();
@@ -509,7 +544,16 @@ impl Router {
                     out.push_str(&quoted(&root));
                     out.push('}');
                 }
-                let _ = self.to_chrome.send(out);
+                if self.chrome_dead.load(Ordering::SeqCst) || self.to_chrome.send(out).is_err() {
+                    // The writer to the browser is gone: the request never
+                    // left the host, so it positively did not run. Say so -
+                    // the session relaunches the browser and runs it.
+                    if let Some(client) = self.clients.get(&cid) {
+                        client.send(refusal(id, crate::cdp::NEVER_REACHED));
+                    }
+                } else {
+                    self.pending.insert(global, Pending::Client { client: cid, id, kind: Kind::Plain });
+                }
                 return;
             }
         }
@@ -689,6 +733,7 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let browser = Arc::new(browser);
     let to_chrome = match browser.raw_writer() {
         Ok(writer) => writer,
         Err(e) => {
@@ -715,8 +760,43 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
     let pid_file = socket.with_extension("pid");
     let _ = std::fs::write(&pid_file, format!("{}\n", std::process::id()));
 
+    // Death shows on the process long before the pipe reads end (the
+    // browser's children hold its write end open), so watch both: a
+    // command refused before its write positively never ran.
+    let chrome_dead = Arc::new(AtomicBool::new(false));
+    // At the death, this host's socket and pid files go at once: a session
+    // that relaunches (or starts) then finds no host here and starts a new
+    // one, instead of joining this one, which refuses everything until it
+    // exits at its next look.
+    let on_death: Arc<dyn Fn() + Send + Sync> = {
+        let chrome_dead = Arc::clone(&chrome_dead);
+        let files = [socket.clone(), pid_file.clone()];
+        Arc::new(move || {
+            if !chrome_dead.swap(true, Ordering::SeqCst) {
+                for file in &files {
+                    let _ = std::fs::remove_file(file);
+                }
+            }
+        })
+    };
+    browser.closed_watch().on_close({
+        let on_death = Arc::clone(&on_death);
+        move || on_death()
+    });
+    {
+        let on_death = Arc::clone(&on_death);
+        let browser = Arc::clone(&browser);
+        std::thread::spawn(move || loop {
+            if browser.is_closed() || browser.exit_status().is_some() {
+                on_death();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        });
+    }
     let router = Arc::new(Mutex::new(Router {
         to_chrome,
+        chrome_dead: Arc::clone(&chrome_dead),
         // Chrome takes ids that fit an int32; the launch used a few low ones.
         next_id: 1 << 30,
         clients: HashMap::new(),
@@ -735,6 +815,22 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
             }
         }));
     }
+    // A frame whose write to the browser failed never completed (NUL
+    // framing), and what was still queued behind it was never written:
+    // refuse those requests as never-reached, so the session relaunches
+    // and runs them instead of reporting them in flight.
+    browser.closed_watch().on_write_failed({
+        let router = Arc::clone(&router);
+        move |failed, unsent| {
+            if let Ok(mut router) = router.lock() {
+                for text in std::iter::once(failed).chain(unsent) {
+                    if let Some(global) = routed_id(&text) {
+                        router.never_reached(global);
+                    }
+                }
+            }
+        }
+    });
     // The browser-level session the launch opened watches every target;
     // nothing reads that here.
     if let Ok(mut r) = router.lock() {
@@ -754,7 +850,13 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
     let lock_path = socket.with_extension("lock");
     let why = loop {
         std::thread::sleep(Duration::from_millis(250));
-        if browser.is_closed() {
+        // chrome_dead, not only is_closed: the browser's children hold the
+        // pipe's write end open, so the reads can outlive the process
+        // indefinitely. Staying up would keep refusing every session's
+        // request as never-reached and rejoining sessions to a dead
+        // browser; with the host gone, the session's recovery launches a
+        // fresh one.
+        if browser.is_closed() || chrome_dead.load(Ordering::SeqCst) {
             break format!("the browser exited ({})", browser.death_report());
         }
         let Ok(r) = router.lock() else { break "the router failed".to_string() };
@@ -776,8 +878,17 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
             break format!("no session for {} s", grace.as_secs());
         }
     };
-    let _ = std::fs::remove_file(&socket);
-    let _ = std::fs::remove_file(&pid_file);
+    if browser.is_closed() || chrome_dead.load(Ordering::SeqCst) {
+        // Removed at the death (now, if its hooks haven't run yet): a new
+        // host may own these paths by now.
+        on_death();
+    } else {
+        let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(&pid_file);
+    }
+    // Closing the browser is ours from here: its death hooks must not
+    // remove files a new host may have made since.
+    chrome_dead.store(true, Ordering::SeqCst);
     // Every client's connection ends with its socket.
     if let Ok(mut r) = router.lock() {
         for client in r.clients.values() {
@@ -911,6 +1022,7 @@ mod tests {
         let (to_chrome, from_router) = tokio::sync::mpsc::unbounded_channel();
         let router = Router {
             to_chrome,
+            chrome_dead: Arc::new(AtomicBool::new(false)),
             next_id: 100,
             clients: HashMap::new(),
             pending: HashMap::new(),

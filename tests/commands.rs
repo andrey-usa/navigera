@@ -321,6 +321,39 @@ fn emulation() {
 }
 
 #[test]
+fn permissions_are_granted_denied_and_reset_and_more_devices_are_known() {
+    let Some(site) = edge_site() else { return };
+    for (engine, bin) in engines() {
+        if engine != "chrome" {
+            continue;
+        }
+        let a = Agent::new("perm", engine, bin);
+        a.ok(&["goto", &format!("{}/form", site.base)]);
+        let state = |name: &str| {
+            a.text(&["eval", &format!("() => navigator.permissions.query({{ name: '{name}' }}).then(p => p.state)")])
+        };
+        assert_eq!(state("notifications"), "prompt");
+        a.ok(&["set", "permissions", "grant", "notifications", "geolocation"]);
+        assert_eq!(state("notifications"), "granted");
+        assert_eq!(state("geolocation"), "granted");
+        a.ok(&["set", "permissions", "deny", "notifications"]);
+        assert_eq!(state("notifications"), "denied");
+        assert_eq!(state("geolocation"), "granted", "the other permission is untouched");
+        a.ok(&["set", "permissions", "reset", "notifications", "geolocation"]);
+        assert_eq!(state("notifications"), "prompt");
+        a.ok(&["set", "permissions", "grant", "camera", "microphone", "clipboard"]);
+        assert_eq!(state("camera"), "granted");
+        assert_eq!(state("microphone"), "granted");
+        assert!(a.err(&["set", "permissions", "grant", "teleport"]).contains("unknown permission"));
+        assert!(a.err(&["set", "permissions", "grant"]).contains("set permissions"));
+        a.ok(&["set", "device", "iPhone", "16", "Pro"]);
+        assert_eq!(a.ok(&["eval", "[screen.width, devicePixelRatio]"]), serde_json::json!([402, 3]));
+        a.ok(&["set", "device", "Pixel", "9"]);
+        assert_eq!(a.ok(&["eval", "[screen.width, devicePixelRatio]"]), serde_json::json!([360, 3]));
+    }
+}
+
+#[test]
 fn locators_reads_states_and_keys() {
     let Some(site) = edge_site() else { return };
     for (engine, bin) in engines() {
@@ -362,4 +395,169 @@ fn locators_reads_states_and_keys() {
         assert_eq!(a.ok(&["get", "value", "#em"]), "a@b.cA!", "[{engine}]");
         a.ok(&["wait", "--idle"]);
     }
+}
+
+/// `route --modify` changes a real response; `network --har` records the
+/// bodies and `route --har` replays them with the site gone. Chrome only:
+/// Lightpanda has no response-stage interception.
+#[test]
+fn har_replay_and_modified_responses() {
+    let Some(site) = edge_site() else { return };
+    let base = site.base.clone();
+    let Some((engine, bin)) = engines().into_iter().find(|(e, _)| *e == "chrome") else { return };
+    {
+        let a = Agent::new("har", engine, bin);
+        a.ok(&["route", "*/api/echo*", "--modify", "--replace", "widget", "gadget", "--set-header", "X-Seen: 1"]);
+        a.ok(&["goto", &format!("{base}/console")]);
+        a.ok(&["wait", "--js", "document.title.includes('gadget')"]);
+        assert!(
+            a.text(&["route"]).contains("*/api/echo* -> modify (1 headers, 1 replacements) (1 hits)"),
+            "[{engine}]"
+        );
+        a.ok(&["unroute"]);
+        assert!(a.err(&["route", "*/x", "--set-header", "A: b"]).contains("go with --modify"), "[{engine}]");
+
+        a.ok(&["network", "--clear"]);
+        a.ok(&["goto", &format!("{base}/console")]);
+        a.ok(&["wait", "--js", "document.title.includes('widget')"]);
+        let har = std::env::temp_dir().join(format!("nv-replay-{engine}-{}.har", std::process::id()));
+        a.ok(&["network", "--har", har.to_str().unwrap()]);
+        let recorded: Value = serde_json::from_slice(&std::fs::read(&har).unwrap()).unwrap();
+        let echo = recorded["log"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["request"]["url"].as_str().unwrap_or("").contains("/api/echo"))
+            .unwrap_or_else(|| panic!("[{engine}] {recorded}"));
+        assert!(echo["response"]["content"]["text"].as_str().unwrap_or("").contains("widget"), "[{engine}] {echo}");
+
+        drop(site);
+        a.ok(&["route", "--har", har.to_str().unwrap()]);
+        a.ok(&["goto", &format!("{base}/console")]);
+        a.ok(&["wait", "--js", "document.title.includes('widget')"]);
+        let routes = a.text(&["route"]);
+        assert!(routes.starts_with("* -> har (") && !routes.contains(" 0 replayed"), "[{engine}] {routes}");
+        a.ok(&["unroute"]);
+        // Not in the HAR: aborted by default.
+        a.ok(&["route", "--har", har.to_str().unwrap()]);
+        let r = a.run(&["goto", &format!("{base}/nowhere")]);
+        assert!(r.to_string().contains("BLOCKED_BY_CLIENT") || r["ok"] == false, "[{engine}] {r}");
+    }
+}
+
+/// `batch`: a form flow in one call; a failing step stops the rest (or not,
+/// with --keep-going); a bad line runs nothing.
+#[test]
+fn a_batch_runs_steps_in_one_call() {
+    let Some(site) = edge_site() else { return };
+    let base = &site.base;
+    for (engine, bin) in engines() {
+        let a = Agent::new("batch", engine, bin);
+        let dir = std::env::temp_dir();
+        let file = |name: &str, text: String| {
+            let path = dir.join(format!("nv-batch-{name}-{engine}-{}.txt", std::process::id()));
+            std::fs::write(&path, text).unwrap();
+            path.display().to_string()
+        };
+        let flow = file(
+            "flow",
+            format!(
+                "# the form, start to end\ngoto {base}/form\nfill --label 'Email address' a@b.c\n\
+                 check --label 'I accept the terms'\nclick --testid save-btn\ntext --selector '#out'\n"
+            ),
+        );
+        let r = a.response(&["batch", &flow]);
+        assert_eq!((r["result"]["steps"].as_u64(), r["result"]["ran"].as_u64()), (Some(5), Some(5)), "[{engine}] {r}");
+        let results = r["result"]["results"].as_array().unwrap();
+        assert_eq!(results.last().unwrap()["result"], "saved", "[{engine}] {r}");
+        assert!(r["result"]["state"]["url"].as_str().unwrap().ends_with("/form"), "[{engine}] {r}");
+        assert_eq!(a.ok(&["eval", "document.querySelector('[placeholder]').value"]), "a@b.c", "[{engine}]");
+
+        let bad = file("bad", format!("goto {base}/form\nclick --text Nowhere --timeout-ms 300\neval '1 + 1'\n"));
+        let r = a.run(&["batch", &bad]);
+        assert_eq!((r["ok"].as_bool(), r["result"]["ran"].as_u64()), (Some(false), Some(2)), "[{engine}] {r}");
+        assert!(r["error"].as_str().unwrap().starts_with("step 2 (line 2: click --text Nowhere"), "[{engine}] {r}");
+        let r = a.run(&["batch", &bad, "--keep-going"]);
+        assert_eq!(r["result"]["ran"], 3, "[{engine}] {r}");
+        assert_eq!(r["result"]["results"][0]["result"], 2, "[{engine}] {r}");
+
+        let typo = file("typo", format!("goto {base}/console\nclik --text Save\n"));
+        let r = a.run(&["batch", &typo]);
+        assert!(r["ok"] == false && r["error"].as_str().unwrap().contains("nothing ran"), "[{engine}] {r}");
+        assert!(
+            a.ok(&["url"])["url"].as_str().unwrap_or_default().ends_with("/form"),
+            "[{engine}] the bad file ran nothing"
+        );
+    }
+}
+
+/// `--compact`: an action that left the page as it was prints `ok`, one that
+/// moved it only what changed; reads print their value; errors as `--raw`.
+#[test]
+fn compact_output_says_only_what_changed() {
+    let Some(site) = edge_site() else { return };
+    let base = &site.base;
+    for (engine, bin) in engines() {
+        let a = Agent::new("compact", engine, bin.clone());
+        let compact = |args: &[&str]| {
+            let mut cmd = Command::new(tool_exe());
+            cmd.args(["--session", &a.session, "--engine", engine, "--compact"]);
+            if let Some(bin) = &bin {
+                cmd.arg("--chromium").arg(bin);
+            }
+            let out = cmd.args(args).stdin(Stdio::null()).output().expect("run navigera");
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            )
+        };
+        let (ok, out, _) = compact(&["goto", &format!("{base}/form")]);
+        assert!(ok && out.contains("\"title\":\"form\"") && out.contains("/form"), "[{engine}] {out}");
+        assert_eq!(compact(&["fill", "--label", "Email address", "a@b.c"]).1, "ok", "[{engine}]");
+        assert_eq!(
+            compact(&["check", "--label", "I accept the terms"]).1,
+            r#"{"changed":true,"checked":true}"#,
+            "[{engine}]"
+        );
+        assert_eq!(compact(&["click", "--testid", "save-btn"]).1, "ok", "[{engine}]");
+        assert_eq!(compact(&["text", "--selector", "#out"]).1, "saved", "[{engine}]");
+        let (ok, out, err) = compact(&["click", "--text", "Nowhere", "--timeout-ms", "300"]);
+        assert!(!ok && out.is_empty() && err.contains("error: click"), "[{engine}] {out} {err}");
+        // The full envelope is still there without the flag.
+        assert_eq!(a.ok(&["fill", "--label", "Email address", "x"])["title"], "form", "[{engine}]");
+    }
+}
+
+/// WebMCP: the browser navigera starts has it on; a page's tools are listed
+/// and called, a tool not marked read-only needs --confirm, and everything
+/// says it is the page's. Chrome only (153 and later have WebMCP).
+#[test]
+fn webmcp_tools_are_listed_and_called() {
+    let Some(site) = edge_site() else { return };
+    let Some((engine, bin)) = engines().into_iter().find(|(e, _)| *e == "chrome") else { return };
+    let a = Agent::new("webmcp", engine, bin);
+    a.ok(&["goto", &format!("{}/webmcp", site.base)]);
+    let r = a.run(&["webmcp-list"]);
+    if r["ok"] == false && r["error"].as_str().unwrap_or_default().contains("has no WebMCP") {
+        eprintln!("skipping: {}", r["error"]);
+        return;
+    }
+    let list = a.ok(&["webmcp-list"]);
+    assert!(list["untrusted"].as_str().unwrap().starts_with("page-provided"), "{list}");
+    let tools = list["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(names, ["add", "read_count"], "{list}");
+    assert_eq!((tools[0]["read_only"].as_bool(), tools[1]["read_only"].as_bool()), (Some(false), Some(true)), "{list}");
+    assert_eq!(tools[0]["input_schema"]["required"][0], "n", "{list}");
+
+    let r = a.ok(&["webmcp-call", "read_count"]);
+    assert_eq!(r["output"]["content"][0]["text"], "0", "{r}");
+    let e = a.err(&["webmcp-call", "add", "--params", r#"{"n":5}"#]);
+    assert!(e.contains("--confirm"), "{e}");
+    assert_eq!(a.ok(&["text", "--selector", "#count"]), "0", "refused means not run");
+    let r = a.ok(&["webmcp-call", "add", "--params", r#"{"n":5}"#, "--confirm"]);
+    assert_eq!(r["output"]["content"][0]["text"], "5", "{r}");
+    assert_eq!(a.ok(&["text", "--selector", "#count"]), "5");
+    assert!(a.err(&["webmcp-call", "nope"]).contains("it has: "));
 }

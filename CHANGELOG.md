@@ -6,6 +6,206 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Behaviour changes
+
+What a script or an agent relying on the 0.7.0 output or timing should
+know:
+
+- `ax` may add a line under the page line when it cut text
+  (`… N texts cut short here …`), and prints long texts in full when the
+  whole snapshot stays under 32,000 characters.
+- A snapshot right after an action whose requests have started waits for
+  them and 100 ms, not 500 ms of network quiet.
+- An op on a ref whose element was redrawn now acts on the redrawn element
+  (with a note) instead of failing, when that element is certain.
+- More notes: another process using the session, a redrawn ref, an
+  Electron window still starting.
+- An icon-only control that printed as a bare `button [ref=N]` may now
+  carry `icon="svg"`, `img="inline"` or an image's file name.
+- `text` with no selector is the page's whole text (it was an error).
+- The browsers navigera starts have WebMCP on (`--enable-features=WebMCP`),
+  and the `--enable-features` / `--disable-features` lists from
+  `NAVIGERA_EXTRA_FLAGS` are merged into navigera's own instead of replacing
+  them (Chrome keeps only the last of each flag).
+- `network --har` includes the response bodies the browser still holds,
+  so the file is larger.
+- A command sent just after the shared browser died is run on a relaunched
+  browser instead of failing as in flight: the host watches the browser's
+  process (its pipe can outlive it while the browser's children hold it
+  open) and refuses later requests as never reached, and the session runs
+  those again. A command that may have reached the browser is still never
+  repeated. Killed browser, command 30 ms later: 20 of 20 recovered (was 0
+  of 10); 100 ms later: 10 of 10 (was 6 of 10).
+- A session on the shared browser no longer ends when that browser dies: its
+  next command relaunches or joins one, reopens its tabs and carries a note
+  (and a `recovered` field) naming what was lost. A command running at the
+  crash still fails, and is not retried.
+
+### Added
+
+- `webmcp-list` and `webmcp-call <name> [--params '{json}'] [--confirm]`:
+  the tools a page registers with WebMCP (`document.modelContext`), listed
+  and run through Chrome's WebMCP DevTools domain in the frame that
+  registered them. Every answer says the tools are the page's and
+  untrusted; a tool not marked read-only needs `--confirm`. MCP clients
+  run them as `browser_run` steps. Chrome 153 and later, https or
+  localhost pages.
+- `set device` knows 55 devices (recent iPhones, Pixels, Galaxy phones and
+  tablets, iPads, two desktop sizes).
+- `set permissions grant|deny|reset <name>…` sets geolocation,
+  notifications, camera, microphone, clipboard, midi, sensors and
+  background-sync for the session, so a page sees them as granted, denied
+  or still to be asked.
+- `--compact` (and `NAVIGERA_OUTPUT=compact` for a whole shell): `--raw`,
+  and an action that left the page as it was prints `ok`, one that moved it
+  only its own fields and what changed. Ten steps of a form, a table read
+  and a heading: 827 characters of output instead of 3,246 (JSON) or 2,756
+  (`--raw`), no slower (fill median 8.9 vs 10.0 ms, interleaved).
+- `batch [<file> | -] [--keep-going]` runs several steps in one call over
+  one connection: one command per line, written as on the command line, or
+  JSON ops. Every line is parsed before anything runs; the first failure
+  stops the rest. It prints one response: what the steps read, the page
+  state once, notes tagged with their step. A six-step form flow is one
+  call instead of six (590 characters of output instead of 1,764; 62 with
+  `--raw`).
+- `route --har <file>` answers requests from a recorded HAR: the first
+  unused entry with the request's method and URL, then the last one again
+  (a page that polls keeps getting the final answer). Requests the HAR has
+  no entry for fail, or reach the network with `--not-found continue`. A
+  glob before `--har` limits it to those URLs.
+- `route <glob> --modify` lets the request reach the server and changes
+  its response: `--set-header 'Name: value'` (`'Name:'` removes one) and
+  `--replace <from> <to>` in the body, repeatable.
+- `screenshot --timeout-ms <n>` bounds the capture (default: the session
+  timeout).
+- `start --electron <app>` drives an Electron desktop app: navigera
+  launches it with a DevTools port, waits for its first window and adopts
+  its windows as tabs, the ones it opens later included (they have no
+  opener, unlike a popup). `<app>` is the app's directory or main script
+  (run with the Electron in its `node_modules`), a packaged app's
+  executable, a macOS `.app` bundle or a command on `PATH`;
+  `--electron-arg <arg>` passes arguments to the app. `quit` ends the app.
+  `tab-new`, `reset`, `show` and `hide` say why they don't apply. `navigera
+  mcp --electron <app>` gives an IDE agent the same.
+- `start --electron` waits for a window the app shows to have something to
+  read or use, starts on the largest window that isn't hidden (an app's
+  hidden helper windows are tabs, not the active one, also after a window
+  closes), and reports `electron: {version, main_process}`. An `ax` of a
+  window that still shows nothing says the app may be starting. Found on
+  real apps: one with six windows started on a hidden dropdown; others
+  read an empty shell for up to 20 s. An app that sets its own user agent
+  gets its version from its main process, or null when that is out of
+  reach. A single-instance app that exits because a copy of it is already
+  running fails `start` saying that may be why.
+- `start --attach <port|ws://…>` on an Electron app that is already
+  running with a DevTools port drives it as `start --electron` does: its
+  windows are the tabs (new ones too, though no page opened them) and the
+  session starts in the largest one it shows, instead of opening a blank
+  tab the app has no use for. `quit` leaves the app running; `quit
+  --close-browser` ends it.
+- `tab-list` (and `tab-new`, `reset`) give each tab's `url` and `title`,
+  so a tab can be chosen without selecting each one to look: an Electron
+  app's windows, a popup, the tabs of an attached browser.
+- An Electron app's `<webview>`s are tabs: `tab-list` marks them
+  `"webview": true`, `tab-select` goes into one to read and act in it, and
+  the session never moves into one by itself (it is part of a window).
+- `eval --main <js>` in an Electron session runs JavaScript in the app's
+  main process (Node's inspector, `--inspect=0` at launch): an expression,
+  or a function called with the `electron` module, awaited. MCP's
+  `browser_evaluate` takes `main: true`.
+- CI runs an Electron end-to-end test on Linux, macOS and Windows: a
+  fixture app that saves a form through its main process and opens a
+  second window.
+- `screenshot --quality <1-100>` writes a JPEG at that quality instead of a PNG (a
+  default `shot-<time>.jpg` name), for traces and reports that keep many.
+
+### Changed
+
+- If the shared browser crashes or is killed, each session's next command
+  relaunches it (one relaunch when several recover at once, under the host's
+  lock) instead of ending the session. The session's tabs reopen at their last
+  URLs (a tab whose last load was a form POST reopens with GET, and the note
+  says so), the cookies and localStorage come back from a snapshot kept in
+  memory (at most 500 ms behind, retaken when the session is idle), `set`
+  emulation, init scripts and the download directory are re-applied, and the
+  note and the `recovered` field list what could not come back (history,
+  scroll, typed text, sessionStorage, refs, logs). A second crash within 10 s
+  of a recovery ends the session, as before.
+
+- Two processes on one session name are told: a command from another
+  process than the session's last one notes it, and the first process's
+  next command says its tab was moved, from where to where (before, only a
+  command that arrived while another ran got a note, and the process whose
+  page was replaced learned nothing). On Linux the process is the agent,
+  not the shell it runs each command in; `NAVIGERA_CALLER` names it
+  anywhere.
+- A ref outlives a re-render of its element: an op whose element the page
+  drew again (a list redrawn, a button replaced after a state change) is
+  done on the same element, found by the role, name and place the snapshot
+  printed, and the note says so (`ref 17 was re-rendered: this acted on
+  button "Save", now ref 48`). When that is not certain (another element of
+  that role and name, another URL, a navigation) the op fails as before.
+  Remembering what the refs were costs about 5 ms on a 2,000-row snapshot.
+- Long text in snapshots: a snapshot that cut anything says so under its
+  first line, with how many texts and characters and how to read them
+  (`… 150 texts cut short here (11,553 chars left out): …`). When the
+  whole snapshot, every text in full, stays under 32,000 characters,
+  nothing is cut. `ax --full-text` (MCP `browser_snapshot` `full_text`)
+  prints every word, and `text` with no selector prints the page's whole
+  text as it reads. A 1,500-clause agreement: every clause in the default
+  snapshot, the 150 long ones cut and counted on the second line; all
+  172,000 characters with `--full-text` or `text`, in about 45 ms.
+- A snapshot right after an action whose own requests have started (a
+  click that fetches) waits for those requests and 100 ms more, not the
+  whole 500 ms quiet window: a click that loads data for 200 ms is read
+  about 300 ms later instead of about 750, with the data in it. Traffic
+  that hasn't started yet (a page's data after it loads) still gets the
+  whole window, and a window set with `set network-quiet` holds after
+  actions too.
+- Snapshots of large pages cost well under half as much on Linux: the
+  static Linux build allocates with mimalloc (musl's allocator was several
+  times slower on the small allocations a snapshot makes), the snapshot is
+  no longer copied while the tree is built and printed, and the tree built
+  from the DOM snapshot is made of typed nodes instead of a JSON map per
+  node, built while the clickable elements are read from the same
+  snapshot. 13,000 nested divs: 545 to 191 ms (Playwright's ariaSnapshot:
+  159 ms on that machine); a header over a 2,000-row table: 563 to 193 ms
+  (static Linux build, median of 32, interleaved, warm). Most of what
+  remains is Chrome's capture. macOS and Windows gain all but the
+  allocator.
+- Pages of 800 to 3,000 DOM nodes are read from the DOM snapshot too, not
+  Chrome's accessibility tree: about five times faster (a 1,500-element
+  page: 166-201 ms to 29-40 ms), the same text on 54 of 56 fixture and
+  benchmark pages. Smaller pages keep Chrome's tree. A `<canvas>` has
+  Chrome's `Canvas` role in the snapshot tree too.
+
+### Fixed
+
+- `start --electron` could start on an app's hidden helper window: a
+  window made with `show: false` says it is visible on its first load
+  (Electron's paintWhenInitiallyHidden), a shown one under Xvfb says it is
+  hidden, and one whose page could not answer yet counted as shown. The
+  main process now says which windows are visible (without it, the largest
+  window is taken), a window that can't answer yet counts as unknown, and
+  the choice waits until the app has stopped opening windows for a moment.
+
+- `screenshot --no-wait` right after a click that confirm()s, posts and
+  reloads the page could go unanswered for the whole 35 s timeout: Chrome
+  loses a capture asked for while the document is being replaced, and the
+  next one works at once. With no answer after 400 ms the capture is asked
+  for again and the first answer is taken: about 0.43 s there, and a
+  capture that is only slow still answers in its own time.
+- An icon-only button with nothing to name it by now says what kind of icon
+  it is: an inline style's background image (`img="bell.svg"`), an icon
+  component's test id (`icon="DeleteIcon"`), and, failing all,
+  `icon="svg"` or `img="inline"` (a `data:` image), so it no longer reads
+  as a bare `button [ref=N]`.
+- A scoped `ax` (`--selector`, a ref) on a large page builds only the
+  scope's tree again, instead of the whole page's and then cutting it:
+  a header on a 2,000-row page 336 -> 166 ms, on 4,000 rows 605 -> 360 ms
+  (0.6.5: about 214 ms on 2,000 rows). A large scope stays on the fast
+  path (the 2,000-row table itself: 299 ms; Chrome's tree takes 1.4 s).
+
 ## [0.7.0] - 2026-11-01
 
 ### Changed

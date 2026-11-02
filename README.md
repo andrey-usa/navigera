@@ -6,8 +6,8 @@
 [![PyPI](https://img.shields.io/pypi/v/navigera.svg)](https://pypi.org/project/navigera/)
 [![npm](https://img.shields.io/npm/v/navigera.svg)](https://www.npmjs.com/package/navigera)
 
-**`navigera`** — extremely fast browser automation for AI agents, from the
-shell, one command per step.
+**`navigera`** — extremely fast browser and Electron app automation for AI
+agents, from the shell, one command per step.
 It is a single native binary (Rust, no Node) that speaks the Chrome DevTools
 Protocol directly:
 
@@ -16,6 +16,9 @@ Protocol directly:
 - A warm browser behind a named session survives between shell calls.
 - New tabs, iframes, shadow DOM and `alert`/`confirm` dialogs are handled
   for you.
+- Electron desktop apps (editors, chat clients, internal tools) are driven
+  the same way: `start --electron <app>`, and each of the app's windows is a
+  tab.
 
 > Faster software for a better planet — less energy, less compute, more time for life.
 
@@ -71,10 +74,26 @@ none). Set `$CHROME_BIN` to choose explicitly.
 navigera -s work start                      # warm headless browser behind a local socket
 navigera -s work goto example.com
 navigera -s work --raw ax                   # page as an indented tree, [ref=N] on actionable nodes
+# NAVIGERA_OUTPUT=compact: actions print ok (or only what changed), reads only their value
 navigera -s work click 12                   # act on a ref
 navigera -s work fill 31 "hello" && navigera -s work press Enter
 navigera -s work wait --text "Saved"
 navigera -s work quit
+```
+
+Steps you are sure of go in one call, one model turn: `batch` reads one
+command per line (or JSON ops) and prints what the steps read and the page
+state once, stopping at the first failure:
+
+```sh
+navigera -s work --raw batch <<'EOF'
+goto https://example.com/signup
+fill --label Email ada@example.com
+select --label Plan Pro
+check --label "I accept the terms"
+click --role button --name "Create account"
+text --selector .welcome
+EOF
 ```
 
 ```text
@@ -96,7 +115,10 @@ The commands are `goto`, `ax`, `click`, `fill`, `type`, `press`, `select`,
 and `is` for one value, `console` and `network` for what the page logged and
 fetched, `cookies`, `storage` and `state save|load` (cookies and localStorage as one
 JSON file) for sign-ins, `set` for viewport, device, media, geo
-and the like, and `route` to fail or answer requests.
+and the like, `route` to fail, answer or change requests, or replay a
+recorded HAR, and `webmcp-list` / `webmcp-call` for the tools a page offers
+agents through WebMCP (on in the browsers navigera starts; a tool that may
+change things needs `--confirm`).
 
 - **Targets:** elements can be named by ref, `--selector <css>`,
   `--text "<visible text>"`, `--role/--name`, `--label`, `--placeholder` or
@@ -129,6 +151,37 @@ profiles (name, signed-in email), whether `--attach` reaches it right now,
 and navigera's own `--profile` browsers. `--profile work` without `--from` is
 a persistent browser you sign in to yourself. Either way navigera works in windows of its own, `quit` only
 disconnects, and `quit --close-browser` waits until the profile is free.
+
+**Electron apps.** `start --electron <app>` launches a desktop app built
+on Electron and drives its windows like tabs: the same tree, refs, clicks,
+waits and `eval`. `<app>` is the app's directory or main script (navigera
+runs the Electron in its `node_modules`), a packaged app's executable, a
+macOS `.app` bundle or a command on `PATH`; `--electron-arg <arg>` passes
+arguments to the app.
+
+```sh
+navigera -s app start --electron ./my-app       # the window the app opens first
+navigera -s app --raw ax
+navigera -s app click --role button --name "Settings"
+navigera -s app tab-list                        # the app's new window is a tab, and the active one
+navigera -s app eval --main "({ app }) => app.getPath('userData')"   # the app's main process
+navigera -s app quit                            # ends the app
+```
+
+Windows the app opens later are adopted as they appear; a window that
+closes itself is dropped, and the session goes on in the one before.
+`eval --main` runs JavaScript in the app's main process (Node), where a
+function gets the `electron` module: read the app's state, call its IPC
+handlers' logic, check what a menu or dialog would do. The app
+runs as it would for a person (a visible window, its own profile and
+storage), so `show`, `hide`, `reset` and `tab-new` don't apply. `start`
+waits for a window the app shows to have something in it, starts on that
+window (hidden helper windows are tabs, not the active one), and says the
+app's Electron version and whether its main process can be reached. On
+Linux it needs a display: on a server, one `xvfb-run` around the whole
+session. An app that is already running with a DevTools port
+(`--remote-debugging-port=9222`) is driven with `start --attach 9222`: its
+windows are the tabs, and `quit` leaves it running.
 
 **Natural mode.** `--natural` makes a headless browser look like the browser
 it is: no `HeadlessChrome` in the user agent (page, workers, request
@@ -238,6 +291,12 @@ so navigera fills in what its CDP leaves out: shadow roots and password
 fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
 The differences that remain are listed in
 [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md#browsers-and-engines).
+
+**Electron** (`start --electron`) has its own end-to-end test on Linux,
+macOS and Windows: a fixture app whose form is saved through the main
+process over IPC and which opens a second window of its own. The test
+reads and fills the form, follows the new window, closes it from the page
+and checks that `quit` ends the app.
 
 ## Benchmarks
 

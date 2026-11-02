@@ -50,6 +50,7 @@ cargo test --offline
 | `agent-eval.yml` | manual, weekly | Gemini CLI doing the Acme tasks with navigera, playwright-cli and agent-browser |
 | `bench.yml` | manual | the driver ladder: navigera against Playwright, Puppeteer, go-rod, chromedp, chromiumoxide |
 | `chrome-bisect.yml` | `.github/bisect.env` on a branch | one Chrome milestone under several flag/transport variants |
+| `gate.yml` | manual | timing gate: the candidate against the last release, fixed probes |
 | `release.yml` | manual, `v*` tags | binaries, GitHub release, registries |
 
 Every workflow reports what you need to act on as check annotations (failing
@@ -98,8 +99,16 @@ in `src/protocol.rs` together.
 
 ## Releasing
 
-1. Bump `version` in `Cargo.toml` and add a `CHANGELOG.md` entry on `master`.
-2. Actions → release → Run workflow with that version. The run checks the
+1. Actions → gate → Run workflow on the candidate branch: the same probes
+   (snapshots of large and div-heavy pages, scoped snapshots, waits around
+   long polls, beacons and clicks that fetch, a covered click, a big select)
+   on the last release and the candidate, one runner; it fails when the
+   candidate is more than 25% (and 20 ms) slower on any of them. Locally:
+   `python3 bench/gate/gate.py --base <old navigera> --candidate target/release/navigera`.
+2. Bump `version` in `Cargo.toml` and add a `CHANGELOG.md` entry on `master`,
+   with a "Behaviour changes" section for what a script or an agent relying
+   on the old output or timing should know.
+3. Actions → release → Run workflow with that version. The run checks the
    version, builds every target, tags `v<version>`, creates the GitHub release
    and publishes to each registry that is switched on (see below).
 

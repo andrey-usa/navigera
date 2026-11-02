@@ -1414,6 +1414,37 @@ fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
     assert!(r["result"].as_str().unwrap_or("").contains("Alpha"));
 }
 
+/// After a click whose fetch has started, the snapshot waits for that fetch
+/// and a short settle, not the whole quiet window: the list is there, well
+/// before the 200 ms fetch plus 500 ms of quiet it used to take. A window
+/// the session set holds after actions too.
+#[test]
+fn a_snapshot_after_a_click_that_fetches_waits_for_the_fetch_not_the_window() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("after-click", &[]);
+    let mut times = Vec::new();
+    for _ in 0..3 {
+        s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
+        s.ok(&["click", "--role", "button", "--name", "Go"]);
+        let (ms, r) = timed(&s, &["ax"]);
+        let tree = r.as_str().unwrap_or("");
+        assert!(tree.contains("Alpha") && !tree.contains("Loading"), "{tree}");
+        times.push(ms);
+    }
+    assert!(median(times.clone()) < 650.0, "ax after a click that fetches took {times:?} ms");
+
+    s.ok(&["set", "network-quiet", "800"]);
+    s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
+    s.ok(&["click", "--role", "button", "--name", "Go"]);
+    let (ms, r) = timed(&s, &["ax"]);
+    assert!(r.as_str().unwrap_or("").contains("Alpha"), "{r}");
+    assert!(ms >= 800.0, "a chosen window holds after a click: {ms} ms");
+
+    // `eval --main` is for an Electron app's main process.
+    let (ok, r) = s.run(&["eval", "--main", "1"]);
+    assert!(!ok && r.to_string().contains("--electron"), "{r}");
+}
+
 /// The default quiet window reads a list that arrives in two fetches with
 /// a 400 ms gap between them; a 250 ms window ends in the gap and reads
 /// only the first half. That is why the default stays 500 ms and 250 ms
@@ -1513,17 +1544,82 @@ fn text_shares_lines_and_a_cut_says_how_to_read_the_rest() {
         }
     }
 
+    // Two long texts on a small page: printed in full (the cuts would save
+    // less than the call to read them).
     let long = "Lorem ipsum dolor sit amet. ".repeat(40);
     s.ok(&["goto", &format!("{}/long-text", site.url)]);
     let tree = s.text(&["ax"]);
+    assert_eq!(tree.matches(long.trim()).count(), 2, "{tree}");
+    assert!(!tree.contains("chars: get text") && !tree.contains("cut short"), "{tree}");
+
+    // A 1,500-clause agreement: every clause is there; the long ones are
+    // cut, each says how to read the rest, and a line at the top says it
+    // once. `--full-text` prints every word.
+    s.ok(&["goto", &format!("{}/legal", site.url)]);
+    let tree = s.text(&["ax"]);
+    let second = tree.lines().nth(1).unwrap_or("");
+    assert!(second.starts_with("… 150 texts cut short here (") && second.contains("ax --full-text"), "{second}");
+    assert_eq!(tree.matches("The Supplier shall keep obligation").count(), 1500);
     let refs: Vec<&str> = tree.match_indices("chars: get text ").map(|(at, m)| &tree[at + m.len()..]).collect();
-    assert_eq!(refs.len(), 2, "both cuts say how to read the rest:\n{tree}");
-    let omitted = format!("(+{} chars", long.trim().chars().count() - 300);
-    assert_eq!(tree.matches(&omitted).count(), 2, "{tree}");
-    for r in refs {
-        let id: String = r.chars().take_while(char::is_ascii_digit).collect();
-        assert_eq!(s.text(&["get", "text", &id]), long.trim(), "get text {id}");
-    }
+    assert_eq!(refs.len(), 150, "every cut says how to read the rest");
+    let id: String = refs[0].chars().take_while(char::is_ascii_digit).collect();
+    assert!(s.text(&["get", "text", &id]).ends_with("Penalty schedule 0 applies to any breach not cured in time."));
+    let full = s.text(&["ax", "--full-text"]);
+    assert_eq!(full.matches("Penalty schedule").count(), 150);
+    assert!(!full.contains("cut short") && !full.contains("chars: get text"));
+    // `text` with no selector: the whole page as it reads.
+    let page = s.text(&["text"]);
+    assert!(page.starts_with("Master Services Agreement"), "{}", &page[..80]);
+    assert_eq!(page.matches("Penalty schedule").count(), 150);
+    assert_eq!(page.matches("The Supplier shall keep obligation").count(), 1500);
+}
+
+/// A ref whose element the page drew again (a list redrawn, a button
+/// replaced) acts on the same element, found by the role, name and place
+/// the snapshot showed, and says so; when the page changed more than that
+/// (another row of that name, a new URL) the stale ref still fails.
+#[test]
+fn a_redrawn_element_is_found_again_by_its_ref() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("rerender", &[]);
+    s.ok(&["goto", &format!("{}/rerender", site.url)]);
+    let tree = s.text(&["ax"]);
+    let refs = |tree: &str, name: &str| -> Vec<String> {
+        tree.lines()
+            .filter(|l| l.contains(&format!("button \"{name}\"")))
+            .filter_map(|l| l.split("ref=").nth(1))
+            .map(|r| r.chars().take_while(char::is_ascii_digit).collect())
+            .collect()
+    };
+    let (save, edits) = (refs(&tree, "Save")[0].clone(), refs(&tree, "Edit"));
+    assert_eq!(edits.len(), 3, "{tree}");
+
+    s.ok(&["click", "--role", "button", "--name", "Redraw"]);
+    let (ok, r) = s.run(&["click", &save]);
+    assert!(ok, "{r}");
+    let note = r["notes"][0].as_str().unwrap_or("");
+    assert!(note.starts_with(&format!("ref {save} was re-rendered: this acted on button \"Save\", now ref ")), "{r}");
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "saved");
+    // The second of three same-named buttons stays the second; twice over.
+    s.ok(&["click", "--role", "button", "--name", "Redraw"]);
+    s.ok(&["click", &edits[1]]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "edit beta");
+    s.ok(&["click", "--role", "button", "--name", "Redraw"]);
+    s.ok(&["click", &edits[1]]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "edit beta");
+
+    // A fourth Edit: which one it was is no longer certain.
+    let tree = s.text(&["ax"]);
+    let edit = refs(&tree, "Edit")[1].clone();
+    s.ok(&["click", "--role", "button", "--name", "Add row"]);
+    let (ok, r) = s.run(&["click", &edit]);
+    assert!(!ok && r.to_string().contains("that ref is stale"), "{r}");
+    // Another URL: another view, even with the same buttons.
+    let tree = s.text(&["ax"]);
+    let save = refs(&tree, "Save")[0].clone();
+    s.ok(&["click", "--role", "button", "--name", "Route"]);
+    let (ok, r) = s.run(&["click", &save]);
+    assert!(!ok && r.to_string().contains("that ref is stale"), "{r}");
 }
 
 /// A banner with controls of its own that stays over the button is said
@@ -1566,6 +1662,11 @@ fn a_nameless_control_says_what_the_page_marks_it_with() {
         "<a href='/x' class=nav><img src='/icons/home.png' width=16 height=16></a>",
         "<span class=close onclick=1 title='Close panel' style='display:inline-block;width:16px;height:16px'></span>",
         "<button class=x aria-describedby=tip><svg width=16 height=16></svg></button><div role=tooltip id=tip>Share</div>",
+        // Nothing to call the icon by: what kind of icon it is, still.
+        "<button><svg width=16 height=16><path d='M0 0'/></svg></button>",
+        "<button><svg data-testid=DeleteIcon width=16 height=16></svg></button>",
+        "<button><span style=\"display:inline-block;width:16px;height:16px;background:url('/i/bell.svg?v=2')\"></span></button>",
+        "<button><img src='data:image/gif;base64,R0lGODlhAQABAAAAACw=' width=16 height=16></button>",
     );
     s.ok(&["goto", &format!("data:text/html,{page}")]);
     let tree = s.text(&["ax"]);
@@ -1576,6 +1677,10 @@ fn a_nameless_control_says_what_the_page_marks_it_with() {
         "link .nav img=\"home.png\" [ref=",
         "clickable .close title=\"Close panel\" [ref=",
         "button .x description=\"Share\" [ref=",
+        "button icon=\"svg\" [ref=",
+        "button icon=\"DeleteIcon\" [ref=",
+        "button img=\"bell.svg\" [ref=",
+        "button img=\"inline\" [ref=",
     ] {
         assert!(tree.contains(hint), "{hint}:\n{tree}");
     }
@@ -1662,4 +1767,68 @@ fn the_dom_snapshot_tree_prints_what_chromes_tree_does() {
         checked += 1;
     }
     assert_eq!(checked, pages.len() + 1);
+}
+
+/// `screenshot --quality` writes a JPEG; a value out of range is an error.
+#[test]
+fn a_screenshot_with_a_quality_is_a_jpeg() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("shot-jpeg", &[]);
+    s.ok(&["goto", &format!("{}/stale-ref", site.url)]);
+    let dir = std::env::temp_dir().join(format!("nv-jpeg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (jpg, png) = (dir.join("a.jpg"), dir.join("a.png"));
+    let r = s.ok(&["screenshot", "--quality", "60", "--path", &jpg.display().to_string()]);
+    assert!(r["bytes"].as_u64().unwrap_or(0) > 0, "{r}");
+    s.ok(&["screenshot", "--path", &png.display().to_string()]);
+    // `--timeout-ms` bounds the capture (a page that never answers must not hold it for 35 s).
+    s.ok(&["screenshot", "--quality", "60", "--timeout-ms", "5000", "--path", &jpg.display().to_string()]);
+    let (j, p) = (std::fs::read(&jpg).unwrap(), std::fs::read(&png).unwrap());
+    assert_eq!(&j[..3], &[0xFF, 0xD8, 0xFF], "a JPEG");
+    assert_eq!(&p[..4], b"\x89PNG", "a PNG without --quality");
+    for bad in ["0", "101", "x"] {
+        let out = Command::new(tool_exe())
+            .args(["--session", &s.name, "screenshot", "--quality", bad])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        let e = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && e.contains("--quality takes 1 to 100"), "{bad}: {e}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A capture asked for right after a click that confirm()s, posts and reloads
+/// the page used to go unanswered for the session's whole 35 s timeout.
+#[test]
+fn a_screenshot_right_after_a_confirmed_reload_is_not_lost() {
+    let (true, Some(shop)) = (chrome(), bench_site()) else { return };
+    let s = Session::start("confirm-shot", &[]);
+    s.ok(&["goto", &format!("{}/shop/p/101", shop.url)]);
+    s.ok(&["click", "--selector", "#cookie-accept"]);
+    s.ok(&["click", "--selector", "#detail-add"]);
+    s.ok(&["goto", &format!("{}/cart", shop.url)]);
+    s.ok(&["dialog", "--accept"]);
+    s.ok(&["click", "--selector", "[data-remove=\"101\"]"]);
+    let dir = std::env::temp_dir().join(format!("nv-confirm-shot-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let started = std::time::Instant::now();
+    s.ok(&["screenshot", "--no-wait", "--timeout-ms", "10000", "--path", &dir.join("a.png").display().to_string()]);
+    assert!(started.elapsed().as_secs_f64() < 3.0, "the capture took {:?}", started.elapsed());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn bench_site() -> Option<Site> {
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let mut child = Command::new(python)
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/bench/site/server.py"))
+        .args(["--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .ok()?;
+    let mut line = String::new();
+    BufReader::new(child.stdout.take()?).read_line(&mut line).ok()?;
+    let url = line.trim().strip_prefix("LISTENING ")?.to_string();
+    Some(Site { child, url })
 }

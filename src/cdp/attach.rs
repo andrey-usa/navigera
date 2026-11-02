@@ -245,9 +245,11 @@ fn start_profile_browser(
     }
     // The diagnostic knob that adds flags to every launch (CI uses it for
     // Chrome for Testing builds, which ship no setuid sandbox helper).
+    let mut more = vec!["--enable-features=WebMCP".to_string()];
     if let Ok(extra) = std::env::var("NAVIGERA_EXTRA_FLAGS") {
-        cmd.args(extra.split_whitespace());
+        more.extend(extra.split_whitespace().map(str::to_string));
     }
+    cmd.args(crate::browser::merge_feature_flags(more));
     let log = dir.join("navigera-browser.log");
     let stderr = std::fs::File::create(&log).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(stderr);

@@ -61,6 +61,17 @@ fetch('/api/echo?x=1', {method: 'POST', headers: {'content-type': 'application/j
   .then(r => r.json()).then(d => { document.title = 'echo ' + d.got; });</script>
 <button id=boom onclick="cartTotal.recompute()">boom</button><img src="/missing.png" alt="">""",
     # Elements found by role, label, placeholder and test id; states.
+    # Two WebMCP tools: one read-only, one that changes the page.
+    "/webmcp": """<!doctype html><title>webmcp</title><p id=count>0</p>
+<script>
+if (document.modelContext) {
+  document.modelContext.registerTool({name: 'read_count', description: 'the counter', annotations: {readOnlyHint: true},
+    execute: () => ({content: [{type: 'text', text: count.textContent}]})});
+  document.modelContext.registerTool({name: 'add', description: 'add n to the counter',
+    inputSchema: {type: 'object', properties: {n: {type: 'number'}}, required: ['n']},
+    execute: ({n}) => { count.textContent = +count.textContent + n; return {content: [{type: 'text', text: count.textContent}]}; }});
+}
+</script>""",
     "/form": """<!doctype html><title>form</title>
 <form><label for=em>Email address</label><input id=em type=email placeholder="you@example.com">
 <label><input type=checkbox id=terms> I accept the terms</label>

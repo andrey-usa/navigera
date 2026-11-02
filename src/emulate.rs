@@ -58,12 +58,75 @@ pub const DEVICES: &[Device] = &[
     Device { name: "iPad Pro 11", width: 834, height: 1194, scale: 2.0, mobile: true, ua: IPAD_UA },
     Device { name: "Laptop", width: 1366, height: 768, scale: 1.0, mobile: false, ua: "" },
     Device { name: "Desktop", width: 1920, height: 1080, scale: 1.0, mobile: false, ua: "" },
+    Device { name: "iPhone SE (3rd gen)", width: 375, height: 667, scale: 2.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 11", width: 414, height: 896, scale: 2.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 12", width: 390, height: 844, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 12 Mini", width: 375, height: 812, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 12 Pro Max", width: 428, height: 926, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 13", width: 390, height: 844, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 13 Mini", width: 375, height: 812, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 13 Pro Max", width: 428, height: 926, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 14", width: 390, height: 844, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 14 Plus", width: 428, height: 926, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 14 Pro", width: 393, height: 852, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 14 Pro Max", width: 430, height: 932, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 15 Plus", width: 430, height: 932, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 15 Pro", width: 393, height: 852, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 16", width: 393, height: 852, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 16 Plus", width: 430, height: 932, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 16 Pro", width: 402, height: 874, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 16 Pro Max", width: 440, height: 956, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 16e", width: 390, height: 844, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 17", width: 402, height: 874, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 17 Pro", width: 402, height: 874, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone 17 Pro Max", width: 440, height: 956, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "iPhone Air", width: 420, height: 912, scale: 3.0, mobile: true, ua: IOS_UA },
+    Device { name: "Pixel 5", width: 393, height: 851, scale: 2.75, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 6", width: 412, height: 915, scale: 2.625, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 7", width: 412, height: 915, scale: 2.625, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 7 Pro", width: 412, height: 892, scale: 3.5, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 8 Pro", width: 448, height: 997, scale: 3.0, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 9", width: 360, height: 808, scale: 3.0, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 9 Pro", width: 427, height: 952, scale: 3.0, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 9 Pro XL", width: 448, height: 997, scale: 3.0, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 10", width: 360, height: 808, scale: 3.0, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 10 Pro", width: 427, height: 952, scale: 3.0, mobile: true, ua: ANDROID_UA },
+    Device { name: "Pixel 10 Pro XL", width: 448, height: 997, scale: 3.0, mobile: true, ua: ANDROID_UA },
+    Device { name: "Galaxy S8", width: 360, height: 740, scale: 3.0, mobile: true, ua: GALAXY_UA },
+    Device { name: "Galaxy S9+", width: 320, height: 658, scale: 4.5, mobile: true, ua: GALAXY_UA },
+    Device { name: "Galaxy A55", width: 480, height: 1040, scale: 2.25, mobile: true, ua: GALAXY_UA },
+    Device { name: "Galaxy Z Flip 6", width: 360, height: 880, scale: 3.0, mobile: true, ua: GALAXY_UA },
+    Device { name: "Galaxy Z Fold 6", width: 928, height: 1080, scale: 2.0, mobile: true, ua: GALAXY_UA },
+    Device { name: "Galaxy Tab S4", width: 712, height: 1138, scale: 2.25, mobile: true, ua: GALAXY_UA },
+    Device { name: "Galaxy Tab S9", width: 640, height: 1024, scale: 2.5, mobile: true, ua: GALAXY_UA },
+    Device { name: "iPad (gen 7)", width: 810, height: 1080, scale: 2.0, mobile: true, ua: IPAD_UA },
+    Device { name: "iPad (gen 11)", width: 656, height: 944, scale: 2.5, mobile: true, ua: IPAD_UA },
+    Device { name: "Desktop HD", width: 1280, height: 720, scale: 1.0, mobile: false, ua: "" },
+    Device { name: "Desktop HD HiDPI", width: 1280, height: 720, scale: 2.0, mobile: false, ua: "" },
 ];
 
 /// A device by name, ignoring case and spaces/dashes (`iphone-15`).
 pub fn device(name: &str) -> Option<&'static Device> {
     let key = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
     DEVICES.iter().find(|d| key(d.name) == key(name))
+}
+
+/// The browser's permission names behind a name an agent uses (`camera`,
+/// `microphone`, `clipboard`, …): `None` for one navigera does not know.
+pub fn permission_names(name: &str) -> Option<&'static [&'static str]> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "geolocation" | "geo" | "location" => &["geolocation"],
+        "notifications" | "notification" => &["notifications"],
+        "camera" | "video" => &["camera"],
+        "microphone" | "mic" | "audio" => &["microphone"],
+        "clipboard" => &["clipboard-read", "clipboard-write"],
+        "clipboard-read" => &["clipboard-read"],
+        "clipboard-write" => &["clipboard-write"],
+        "midi" => &["midi"],
+        "sensors" | "motion" => &["accelerometer", "gyroscope", "magnetometer"],
+        "background-sync" => &["background-sync"],
+        _ => return None,
+    })
 }
 
 /// What one `set` produces.
@@ -393,6 +456,31 @@ mod tests {
         assert_eq!(device("iphone-15").unwrap().name, "iPhone 15");
         assert_eq!(device("Pixel 8").unwrap().width, 412);
         assert!(device("nokia 3310").is_none());
+    }
+
+    #[test]
+    fn every_device_has_its_own_name_and_a_sane_size() {
+        let key = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let mut keys: Vec<String> = DEVICES.iter().map(|d| key(d.name)).collect();
+        keys.sort();
+        let total = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "two devices share a loose name");
+        assert!(total >= 50, "{total} devices");
+        for d in DEVICES {
+            assert!((300..=2000).contains(&d.width) && (500..=2000).contains(&d.height), "{}", d.name);
+            assert!((1.0..=5.0).contains(&d.scale), "{}", d.name);
+            assert_eq!(device(d.name).unwrap().name, d.name);
+        }
+        assert_eq!(device("iphone 16 pro max").unwrap().width, 440);
+        assert_eq!(device("pixel-9").unwrap().height, 808);
+    }
+
+    #[test]
+    fn permission_names_map_to_the_browsers() {
+        assert_eq!(permission_names("Camera"), Some(&["camera"][..]));
+        assert_eq!(permission_names("clipboard").map(<[_]>::len), Some(2));
+        assert!(permission_names("teleport").is_none());
     }
 
     #[test]

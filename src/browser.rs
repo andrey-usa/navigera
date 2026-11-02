@@ -5,7 +5,7 @@
 //! agent needs. The wire protocol in `navigera.rs` is unchanged.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
@@ -79,7 +79,9 @@ const CHROME_FLAGS: &[&str] = &[
     // feature here is fine there). Its hint fetches are network work that
     // `--disable-background-networking` already stops.
     "--disable-features=Translate,TranslateUI,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,site-per-process",
-    "--enable-features=NetworkService,NetworkServiceInProcess",
+    // WebMCP: the tools a page registers on `document.modelContext`
+    // (`webmcp-list`, `webmcp-call`); a Chrome without it ignores the name.
+    "--enable-features=NetworkService,NetworkServiceInProcess,WebMCP",
 ];
 
 /// [`CHROME_FLAGS`] adjusted by two diagnostic knobs, for bisecting a
@@ -101,7 +103,42 @@ pub(crate) fn chrome_flags() -> Vec<String> {
     if let Ok(extra) = std::env::var("NAVIGERA_EXTRA_FLAGS") {
         flags.extend(extra.split_whitespace().map(str::to_string));
     }
-    flags
+    merge_feature_flags(flags)
+}
+
+/// One `--enable-features` and one `--disable-features` holding every
+/// feature the flags name: Chrome keeps only the last of each, so a feature
+/// added through `NAVIGERA_EXTRA_FLAGS` would otherwise drop navigera's own.
+pub(crate) fn merge_feature_flags(flags: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(flags.len());
+    let mut lists: Vec<(&str, usize, Vec<String>)> = Vec::new();
+    for flag in flags {
+        let Some((prefix, list)) = ["--enable-features=", "--disable-features="]
+            .iter()
+            .find_map(|p| flag.strip_prefix(p).map(|rest| (*p, rest.to_string())))
+        else {
+            out.push(flag);
+            continue;
+        };
+        let names = list.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+        match lists.iter_mut().find(|(p, ..)| *p == prefix) {
+            Some((_, _, all)) => {
+                for n in names {
+                    if !all.contains(&n) {
+                        all.push(n);
+                    }
+                }
+            }
+            None => {
+                lists.push((prefix, out.len(), names.collect()));
+                out.push(String::new());
+            }
+        }
+    }
+    for (prefix, at, names) in lists {
+        out[at] = format!("{prefix}{}", names.join(","));
+    }
+    out
 }
 
 const NO_SANDBOX: &str = "--no-sandbox";
@@ -274,6 +311,133 @@ pub fn chrome_major(exe: &str) -> Option<u32> {
         let _ = std::fs::write(note, major.to_string());
     }
     Some(major)
+}
+
+/// The window a user would look at: the largest the app shows. Which ones
+/// it shows, its main process says (`BrowserWindow.isVisible()`); without
+/// it, the largest window, since a page's own `visibilityState` is wrong
+/// both ways (a `show: false` window says visible on its first load, a
+/// shown one under Xvfb says hidden) and only breaks a tie. None when
+/// every window is hidden (or there are none), or, with `all_known`, while
+/// any window can't say yet (its page has no context).
+fn best_window(pages: &[crate::cdp::Page], browser: &Browser, timeout: Duration, all_known: bool) -> Option<usize> {
+    // A window made with `show: false` says it is visible on its first
+    // load (Electron's paintWhenInitiallyHidden): the main process knows.
+    let windows = window_visibility(browser, timeout);
+    let embedded = browser.shared().embedded.lock().unwrap().clone();
+    let mut best: Option<(usize, (f64, bool))> = None;
+    for (i, page) in pages.iter().enumerate() {
+        // A `<webview>` is part of a window, not one.
+        if embedded.contains(page.target_id()) {
+            continue;
+        }
+        let Some((says_hidden, area, url)) = page.window_shown(timeout) else {
+            if all_known {
+                return None;
+            }
+            continue;
+        };
+        if hidden_by_main(&url, windows.as_deref()) == Some(true) {
+            continue;
+        }
+        let rank = (area, !says_hidden);
+        if best.is_none_or(|(_, r)| rank.0 > r.0 || (rank.0 == r.0 && rank.1 && !r.1)) {
+            best = Some((i, rank));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Each window of an Electron app as its main process sees it: (URL,
+/// `isVisible()`), when its inspector answers.
+fn window_visibility(browser: &Browser, timeout: Duration) -> Option<Vec<(String, bool)>> {
+    if !browser.has_main_process() {
+        return None;
+    }
+    let windows = browser
+        .eval_main(
+            "({ BrowserWindow }) => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed()).map((w) => [w.webContents.getURL(), w.isVisible()])",
+            timeout,
+        )
+        .ok()?;
+    Some(windows.as_array()?.iter().filter_map(|w| Some((w[0].as_str()?.to_string(), w[1].as_bool()?))).collect())
+}
+
+/// Whether the main process says the window at `url` is hidden: only when
+/// it knows a window there and none of them is visible (a window still
+/// loading has another URL on each side, and its own word counts).
+fn hidden_by_main(url: &str, windows: Option<&[(String, bool)]>) -> Option<bool> {
+    let mut at = windows?.iter().filter(|(u, _)| u == url).peekable();
+    at.peek()?;
+    Some(at.all(|(_, visible)| !visible))
+}
+
+/// What `start --electron <app>` runs: an executable as it is, or for an
+/// app's directory or main script, the Electron binary its `node_modules`
+/// holds (the `electron` npm package's `dist/`, looked for from the app
+/// upward), with the app as its first argument.
+pub fn resolve_electron(app: &str, args: &[String]) -> Result<(String, Vec<String>)> {
+    let path = std::path::Path::new(app);
+    let script = path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e, "js" | "cjs" | "mjs"));
+    if path.is_file() && !script {
+        return Ok((app.to_string(), args.to_vec()));
+    }
+    if !path.exists() {
+        // A packaged app's command, found on PATH.
+        let bare = path.components().count() == 1;
+        let on_path = bare.then(|| std::env::var_os("PATH")).flatten().and_then(|paths| {
+            std::env::split_paths(&paths)
+                .flat_map(|dir| [dir.join(app), dir.join(format!("{app}.exe"))])
+                .find(|candidate| candidate.is_file())
+        });
+        if let Some(exe) = on_path {
+            return Ok((exe.display().to_string(), args.to_vec()));
+        }
+        bail!(
+            "--electron {app}: no such file or directory (give the app's directory, its main script, or an executable)"
+        );
+    }
+    // A packaged macOS app (`Foo.app`) runs its bundle's executable.
+    if path.is_dir() && path.extension().is_some_and(|e| e == "app") {
+        let macos = path.join("Contents").join("MacOS");
+        let named = path.file_stem().map(|stem| macos.join(stem)).filter(|exe| exe.is_file());
+        let only = || {
+            let files: Vec<_> =
+                std::fs::read_dir(&macos).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+            if files.len() == 1 {
+                files.into_iter().next()
+            } else {
+                None
+            }
+        };
+        if let Some(exe) = named.or_else(only) {
+            return Ok((exe.display().to_string(), args.to_vec()));
+        }
+        bail!("--electron {app}: no executable found in {}; pass it to --electron", macos.display());
+    }
+    let start =
+        if path.is_dir() { path.to_path_buf() } else { path.parent().map(|p| p.to_path_buf()).unwrap_or_default() };
+    let start = std::fs::canonicalize(&start).unwrap_or(start);
+    let binary = if cfg!(target_os = "macos") {
+        "Electron.app/Contents/MacOS/Electron"
+    } else if cfg!(windows) {
+        "electron.exe"
+    } else {
+        "electron"
+    };
+    let found = start
+        .ancestors()
+        .map(|dir| dir.join("node_modules").join("electron").join("dist").join(binary))
+        .find(|candidate| candidate.is_file());
+    let Some(exe) = found else {
+        bail!(
+            "--electron {app}: no Electron found in node_modules from {} upward; run `npm install electron` in the app, or pass the Electron binary (or a packaged app) to --electron and the app with --electron-arg",
+            start.display()
+        );
+    };
+    let mut all = vec![app.to_string()];
+    all.extend(args.iter().cloned());
+    Ok((exe.display().to_string(), all))
 }
 
 /// Chrome refuses to start its sandbox as root (containers, CI images);
@@ -670,7 +834,9 @@ impl BrowserSession {
         } else {
             // The first command is where a browser that died at startup
             // (missing libraries, bad flag) shows up: say why.
-            browser.new_page(Some("about:blank")).map_err(|e| anyhow::anyhow!("{e:#} ({})", browser.death_report()))?
+            browser
+                .new_page(Some("about:blank"))
+                .map_err(|e| e.context(format!("death: {}", browser.death_report())))?
         };
         crate::timing::record("first_page", page_started);
         if !lightpanda {
@@ -713,6 +879,24 @@ impl BrowserSession {
     /// session's own. Closing it closes its context; the browser stays for
     /// the other sessions.
     pub fn launch_shared(headless: bool, executable: Option<&str>, nav_timeout_ms: f64) -> Result<Self> {
+        // A host whose browser has just died refuses the join (never
+        // reached) and takes its files away: the next try starts a new host.
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            match Self::launch_shared_once(headless, executable, nav_timeout_ms) {
+                Err(e)
+                    if Instant::now() < until
+                        && e.chain().any(|c| c.downcast_ref::<crate::cdp::NeverReached>().is_some()) =>
+                {
+                    crate::timing::log(&format!("[browser] the shared browser died while joining it: {e:#}; again"));
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                done => return done,
+            }
+        }
+    }
+
+    fn launch_shared_once(headless: bool, executable: Option<&str>, nav_timeout_ms: f64) -> Result<Self> {
         let started = std::time::Instant::now();
         let Some(exe) = resolve_executable_for(executable, headless && !natural()) else {
             bail!(
@@ -786,6 +970,12 @@ impl BrowserSession {
         self.browser.is_closed()
     }
 
+    /// Requests this session issued whose effect on the browser cannot be
+    /// certified absent: an op with none new across it changed nothing.
+    pub fn effects_uncertain(&self) -> u64 {
+        self.browser.effects_uncertain()
+    }
+
     /// Work in a browser that is already running (`--attach`) or in the
     /// persistent `--profile` browser (started first if needed). The agent
     /// gets a window of its own; closing the session only disconnects —
@@ -831,9 +1021,50 @@ impl BrowserSession {
         let browser = Browser::connect(&handle, &ws_url, Duration::from_secs(120))?;
         crate::timing::log(&format!("[browser] {what}: connected to {ws_url}"));
         crate::timing::record("browser_up", started);
-        let page = match &adopt {
-            Some((_, id)) => browser.attach_page(id, "").with_context(|| format!("no tab {id} in that browser"))?,
-            None => browser.new_page_in(Some("about:blank"), true)?,
+        // An Electron app started with a DevTools port: it has no browser
+        // tabs to open, its windows are the tabs (those it opens later too),
+        // and the session goes on in the one it shows.
+        let electron = matches!(target, AttachTarget::Running(_))
+            && adopt.is_none()
+            && browser.user_agent().is_ok_and(|agent| agent.contains("Electron/"));
+        let (pages, active) = if electron {
+            browser.shared().adopt_windows.store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut pages = Vec::new();
+            for (id, url) in browser.tab_targets()? {
+                if url.starts_with("devtools://") {
+                    continue;
+                }
+                match browser.attach_page(&id, "") {
+                    Ok(page) => pages.push(page),
+                    Err(e) => eprintln!("[browser] could not adopt window {id}: {e:#}"),
+                }
+            }
+            if pages.is_empty() {
+                bail!("the Electron app at {ws_url} has no window open to work in");
+            }
+            // Each window says what it shows once its page has a context.
+            let until = std::time::Instant::now() + Duration::from_secs(3);
+            let check = Duration::from_millis(1000);
+            let active = loop {
+                if let Some(i) = best_window(&pages, &browser, check, true) {
+                    break i;
+                }
+                if std::time::Instant::now() >= until {
+                    break best_window(&pages, &browser, check, false).unwrap_or(0);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            // Only these windows' creation events: one created meanwhile is
+            // still to be adopted.
+            let adopted: Vec<String> = pages.iter().map(|p| p.target_id().to_string()).collect();
+            browser.shared().opened.lock().unwrap().retain(|(id, _)| !adopted.contains(id));
+            (pages, active)
+        } else {
+            let page = match &adopt {
+                Some((_, id)) => browser.attach_page(id, "").with_context(|| format!("no tab {id} in that browser"))?,
+                None => browser.new_page_in(Some("about:blank"), true)?,
+            };
+            (vec![page], 0)
         };
         // A `--profile` browser is navigera's: its downloads go where ours
         // do. The user's own browser (`--attach`) keeps its own setting;
@@ -843,8 +1074,8 @@ impl BrowserSession {
         crate::timing::record("launch_total", started);
         Ok(Self {
             browser: std::sync::Arc::new(browser),
-            pages: vec![page],
-            active: 0,
+            pages,
+            active,
             exe: what,
             lightpanda: false,
             timeout_ms: nav_timeout_ms,
@@ -857,6 +1088,120 @@ impl BrowserSession {
             closed: None,
             profile_dir,
             profile_exe,
+            downloads_dir: None,
+            overrides: Default::default(),
+            no_rule_call: Default::default(),
+            init_scripts: Vec::new(),
+            init_ids: Default::default(),
+            held: Default::default(),
+            _runtime: std::sync::Arc::new(runtime),
+        })
+    }
+
+    /// An Electron app (`start --electron <app>`): navigera launches it
+    /// with a DevTools port, waits for its first window and adopts its
+    /// windows as tabs (new ones too); closing the session ends the app.
+    /// `app` is an app's directory or main script (run with the Electron in
+    /// its `node_modules`) or an executable: Electron itself, or a packaged
+    /// app. `args` follow on the app's command line.
+    pub fn launch_electron(app: &str, args: &[String], nav_timeout_ms: f64) -> Result<Self> {
+        let started = std::time::Instant::now();
+        let runtime = engine_runtime()?;
+        let handle = runtime.handle().clone();
+        let (exe, args) = resolve_electron(app, args)?;
+        let no_sandbox =
+            no_sandbox_wanted(crate::proc::running_as_root(), std::env::var("NAVIGERA_NO_SANDBOX").ok().as_deref());
+        let browser = match Browser::launch_electron(&handle, &exe, &args, no_sandbox) {
+            Ok(browser) => browser,
+            // As for Chrome: where this machine can't give the app a
+            // sandbox (Ubuntu 24.04's AppArmor policy, a setuid helper
+            // that isn't set up), run it without one and say so.
+            Err(e) if !no_sandbox && sandbox_unavailable(&format!("{e:#}")) => {
+                eprintln!("{NO_SANDBOX_WARNING}");
+                Browser::launch_electron(&handle, &exe, &args, true)?
+            }
+            Err(e) => return Err(e),
+        };
+        crate::timing::log(&format!("[browser] electron {exe} {args:?}"));
+        eprintln!("navigera: Electron app {exe} {}", args.join(" "));
+        crate::timing::record("browser_up", started);
+        // The app opens its first window when it is ready, not at launch.
+        let wait = Duration::from_millis(nav_timeout_ms.max(1000.0) as u64);
+        let deadline = std::time::Instant::now() + wait;
+        // Its windows, as they open: the session starts on one the app shows
+        // (an app can open hidden helper windows, a dropdown or a tray menu,
+        // first), waiting for one while only hidden ones are open.
+        let check = Duration::from_millis(2000);
+        let mut pages: Vec<crate::cdp::Page> = Vec::new();
+        let mut tried = std::collections::HashSet::new();
+        // An app opens its windows one after another: the choice waits until
+        // no new one has come for a moment and each can say what it shows.
+        let mut last_new = std::time::Instant::now();
+        let active = loop {
+            for (id, url) in browser.tab_targets().unwrap_or_default() {
+                if url.starts_with("devtools://") || !tried.insert(id.clone()) {
+                    continue;
+                }
+                last_new = std::time::Instant::now();
+                match browser.attach_page(&id, "") {
+                    Ok(page) => pages.push(page),
+                    Err(e) => eprintln!("[browser] could not adopt window {id}: {e:#}"),
+                }
+            }
+            let settled = last_new.elapsed() >= Duration::from_millis(250);
+            if settled {
+                if let Some(i) = best_window(&pages, &browser, check, true) {
+                    break i;
+                }
+            }
+            // Past the deadline, any shown window will do.
+            if std::time::Instant::now() >= deadline {
+                if let Some(i) = best_window(&pages, &browser, check, false) {
+                    break i;
+                }
+            }
+            if browser.is_closed() || std::time::Instant::now() >= deadline {
+                if !pages.is_empty() {
+                    break 0;
+                }
+                if browser.is_closed() {
+                    bail!(
+                        "the Electron app exited before it opened a window{}",
+                        crate::cdp::electron_exit_note(browser.exit_status_within(Duration::from_secs(1)))
+                    );
+                }
+                bail!("the Electron app opened no window within {} ms", wait.as_millis());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        // Adopted now: the creation events of these windows are not new tabs.
+        // Only theirs: a target created while the window was chosen (a
+        // `<webview>` loading in a second window) is still to be adopted.
+        browser.shared().opened.lock().unwrap().retain(|(id, _)| !tried.contains(id));
+        // Ready when that window has loaded and shows something: an app
+        // that boots its UI after the window opens is read past its empty
+        // shell (bounded by the navigation timeout; `ax` says if it isn't).
+        let ready_by = std::time::Instant::now() + wait.saturating_sub(started.elapsed());
+        while !pages[active].shows_content(check) && std::time::Instant::now() < ready_by && !browser.is_closed() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        crate::timing::record("launch_total", started);
+        Ok(Self {
+            browser: std::sync::Arc::new(browser),
+            pages,
+            active,
+            exe,
+            lightpanda: false,
+            timeout_ms: nav_timeout_ms,
+            abandoned: std::sync::Mutex::new(None),
+            network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
+            context: None,
+            owner: true,
+            shared: false,
+            attached: false,
+            closed: None,
+            profile_dir: None,
+            profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
             no_rule_call: Default::default(),
@@ -977,6 +1322,21 @@ impl BrowserSession {
     /// Target ids of all open tabs.
     pub fn page_targets(&self) -> Vec<String> {
         self.pages.iter().map(|p| p.target_id().to_string()).collect()
+    }
+
+    /// Each tab's URL and title, by target id (none when the browser can't
+    /// list its targets).
+    pub fn tab_infos(&self) -> std::collections::HashMap<String, (String, String)> {
+        if self.lightpanda {
+            return Default::default();
+        }
+        self.browser.target_infos().unwrap_or_default()
+    }
+
+    /// Whether the tab is an Electron app's `<webview>` (inside one of its
+    /// windows), not a window.
+    pub fn is_embedded(&self, target_id: &str) -> bool {
+        self.browser.shared().embedded.lock().unwrap().contains(target_id)
     }
 
     /// Open a new tab and make it active; returns its index.
@@ -1151,16 +1511,34 @@ impl BrowserSession {
             }
             // In someone else's browser, only tabs our own tabs opened are
             // ours; the user's popups stay theirs.
-            if self.attached && !self.pages.iter().any(|p| p.target_id() == opener) {
+            if self.attached && !self.is_electron() && !self.pages.iter().any(|p| p.target_id() == opener) {
                 continue;
             }
             match self.browser.attach_page(&target_id, &self.scope()) {
                 Ok(page) => {
                     self.apply_overrides(&page);
                     self.apply_init_scripts(&page);
+                    // An app's hidden window (a dropdown, a helper) is a tab,
+                    // but not the one the session goes on in, when its main
+                    // process says so (a page's own visibility can't be
+                    // trusted, see `best_window`).
+                    // Its type now, not at creation: Electron makes a
+                    // `<webview>`'s guest a page first.
+                    if self.is_electron() && self.browser.target_type(&target_id).as_deref() == Some("webview") {
+                        self.browser.shared().embedded.lock().unwrap().insert(target_id.clone());
+                    }
+                    let embedded = self.browser.shared().embedded.lock().unwrap().contains(&target_id);
+                    let hidden = self.is_electron() && {
+                        let timeout = Duration::from_millis(1000);
+                        page.window_shown(timeout).is_some_and(|(_, _, url)| {
+                            hidden_by_main(&url, window_visibility(&self.browser, timeout).as_deref()) == Some(true)
+                        })
+                    };
                     self.pages.push(page);
-                    self.active = self.pages.len() - 1;
-                    adopted.push(self.active);
+                    if !hidden && !embedded {
+                        self.active = self.pages.len() - 1;
+                        adopted.push(self.active);
+                    }
                 }
                 Err(e) => eprintln!("[browser] could not adopt new tab {target_id}: {e:#}"),
             }
@@ -1177,11 +1555,19 @@ impl BrowserSession {
                 continue;
             }
             shared.unregister(self.pages[index].session_id());
+            let was_active = index == self.active;
             self.pages.remove(index);
             if self.active >= self.pages.len() {
                 self.active = self.pages.len() - 1;
             } else if index < self.active {
                 self.active -= 1;
+            }
+            // An app's window closed under the session: it goes on in the
+            // window the app shows, not a hidden helper.
+            if was_active && self.is_electron() {
+                if let Some(i) = best_window(&self.pages, &self.browser, Duration::from_millis(1000), false) {
+                    self.active = i;
+                }
             }
         }
         adopted
@@ -1288,6 +1674,83 @@ impl BrowserSession {
         }
     }
 
+    /// The WebMCP tools the active tab's frames registered (`WebMCP` CDP
+    /// domain). `Ok(None)`: the browser has no WebMCP at all.
+    pub fn webmcp_tools(&self) -> Result<Option<Vec<serde_json::Value>>> {
+        let tab = self.active_tab();
+        if let Err(e) = tab.send_cdp("WebMCP.enable", serde_json::json!({}), self.timeout(None)) {
+            let text = format!("{e:#}");
+            if text.contains("wasn't found") || text.contains("not found") {
+                return Ok(None);
+            }
+            return Err(e);
+        }
+        // Tools already registered arrive as events right after `enable`.
+        let read =
+            || self.browser.shared().webmcp.lock().unwrap().tools.get(tab.session_id()).cloned().unwrap_or_default();
+        let mut tools = Vec::new();
+        for _ in 0..4 {
+            self.browser.caught_up();
+            tools = read();
+            if !tools.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(Some(tools))
+    }
+
+    /// Call a WebMCP tool in the frame that registered it and wait for its
+    /// answer (`WebMCP.toolResponded`): the output, or the tool's error.
+    pub fn webmcp_invoke(
+        &self,
+        tool: &serde_json::Value,
+        input: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value> {
+        let tab = self.active_tab();
+        let r = tab.send_cdp(
+            "WebMCP.invokeTool",
+            serde_json::json!({ "frameId": tool["frameId"], "toolName": tool["name"], "input": input }),
+            self.timeout(None),
+        )?;
+        let id = r.get("invocationId").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.browser.caught_up();
+            if let Some(answer) = self.browser.shared().webmcp.lock().unwrap().responses.remove(&id) {
+                return match answer.get("status").and_then(serde_json::Value::as_str) {
+                    Some("Completed") => Ok(answer.get("output").cloned().unwrap_or(serde_json::Value::Null)),
+                    Some("Canceled") => anyhow::bail!("the page canceled the call"),
+                    _ => {
+                        let text = answer
+                            .get("errorText")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|t| !t.is_empty())
+                            .or_else(|| answer.pointer("/exception/description").and_then(serde_json::Value::as_str))
+                            .unwrap_or("the tool failed")
+                            .to_string();
+                        anyhow::bail!("{text}")
+                    }
+                };
+            }
+            if Instant::now() >= deadline {
+                let _ = tab.send_cdp(
+                    "WebMCP.cancelInvocation",
+                    serde_json::json!({ "invocationId": id }),
+                    self.timeout(None),
+                );
+                anyhow::bail!("no answer within {} ms (the call was canceled)", timeout.as_millis());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The browser's user agent.
+    pub fn user_agent(&self) -> String {
+        self.browser.user_agent().unwrap_or_default()
+    }
+
     /// A logged request's response body: (body, base64-encoded?).
     pub fn response_body(&self, request_id: &str) -> Result<(String, bool)> {
         let r = self.active_tab().send_cdp(
@@ -1344,16 +1807,16 @@ impl BrowserSession {
             let old = || crate::emulate::without_rule(params);
             if self.no_rule_call.load(Relaxed) {
                 let (m, p) = old();
-                return page.send_cdp(m, p, timeout).map(drop).map_err(|e| anyhow::anyhow!("{m}: {e:#}"));
+                return page.send_cdp(m, p, timeout).map(drop).map_err(|e| e.context(m.to_string()));
             }
             return match page.send_cdp(method, params.clone(), timeout) {
                 Ok(_) => Ok(()),
                 Err(e) if crate::emulate::method_missing(&format!("{e:#}")) => {
                     self.no_rule_call.store(true, Relaxed);
                     let (m, p) = old();
-                    page.send_cdp(m, p, timeout).map(drop).map_err(|e| anyhow::anyhow!("{m}: {e:#}"))
+                    page.send_cdp(m, p, timeout).map(drop).map_err(|e| e.context(m.to_string()))
                 }
-                Err(e) => Err(anyhow::anyhow!("{method}: {e:#}")),
+                Err(e) => Err(e.context(method.to_string())),
             };
         }
         match page.send_cdp(method, params.clone(), timeout) {
@@ -1363,7 +1826,7 @@ impl BrowserSession {
             Err(e) if method == "Network.overrideNetworkState" && crate::emulate::method_missing(&format!("{e:#}")) => {
                 Ok(())
             }
-            Err(e) => Err(anyhow::anyhow!("{method}: {e:#}")),
+            Err(e) => Err(e.context(method.to_string())),
         }
     }
 
@@ -1507,7 +1970,7 @@ impl BrowserSession {
                     serde_json::json!({ "source": source, "runImmediately": true }),
                     timeout,
                 )
-                .map_err(|e| anyhow::anyhow!("Page.addScriptToEvaluateOnNewDocument: {e:#}"))?;
+                .map_err(|e| e.context("Page.addScriptToEvaluateOnNewDocument"))?;
             if let Some(id) =
                 r.get("identifier").map(|i| i.as_str().map(str::to_string).unwrap_or_else(|| i.to_string()))
             {
@@ -1522,6 +1985,12 @@ impl BrowserSession {
     /// `{cookies, origins}`: the storage-state shape browser tools commonly
     /// read and write, so a file saved elsewhere loads here and back.
     pub fn storage_state(&self) -> Result<serde_json::Value> {
+        self.storage_state_within(self.timeout(None))
+    }
+
+    /// [`BrowserSession::storage_state`] with `eval` as the longest it waits
+    /// on any one tab (a tab stuck in a dialog or a loop is skipped).
+    pub fn storage_state_within(&self, eval: Duration) -> Result<serde_json::Value> {
         let cookies = self.cookies(true, None)?;
         let cookies: Vec<serde_json::Value> = cookies
             .as_array()
@@ -1546,7 +2015,7 @@ impl BrowserSession {
                 "() => { try { return { origin: location.origin, \
                  localStorage: Object.entries(localStorage).map(([name, value]) => ({ name, value })) }; } \
                  catch (e) { return null; } }",
-                self.timeout(None),
+                eval,
             ) else {
                 continue;
             };
@@ -1690,18 +2159,26 @@ impl BrowserSession {
         let shared = self.browser.shared();
         let scope = self.scope();
         let auth = shared.credentials.lock().unwrap().contains_key(&scope);
-        let patterns: Vec<serde_json::Value> = if auth {
-            vec![serde_json::json!({ "urlPattern": "*" })]
-        } else {
-            shared
-                .routes
-                .lock()
-                .unwrap()
-                .get(&scope)
-                .into_iter()
-                .flatten()
-                .map(|r| serde_json::json!({ "urlPattern": r.pattern }))
-                .collect()
+        // Modify rules pause at the response stage; the rest (and auth,
+        // which needs every request) at the request stage.
+        let patterns: Vec<serde_json::Value> = {
+            let routes = shared.routes.lock().unwrap();
+            let rules = routes.get(&scope).into_iter().flatten();
+            let mut patterns: Vec<serde_json::Value> = if auth {
+                vec![serde_json::json!({ "urlPattern": "*" })]
+            } else {
+                rules
+                    .clone()
+                    .filter(|r| !r.action.at_response())
+                    .map(|r| serde_json::json!({ "urlPattern": r.pattern }))
+                    .collect()
+            };
+            patterns.extend(
+                rules
+                    .filter(|r| r.action.at_response())
+                    .map(|r| serde_json::json!({ "urlPattern": r.pattern, "requestStage": "Response" })),
+            );
+            patterns
         };
         if patterns.is_empty() {
             return self.set_override("fetch", vec![], vec![("Fetch.disable", serde_json::json!({}))]);
@@ -1717,6 +2194,15 @@ impl BrowserSession {
     /// browser context.
     pub fn grant(&self, permission: &str) {
         let _ = self.browser.grant_permission(permission, self.context.as_deref());
+    }
+
+    /// Set browser permissions for this session's pages (`granted`, `denied`
+    /// or `prompt`, the browser's own names, see `emulate::permission_names`).
+    pub fn set_permissions(&self, setting: &str, names: &[&str]) -> Result<()> {
+        for name in names {
+            self.browser.set_permission(name, setting, self.context.as_deref())?;
+        }
+        Ok(())
     }
 
     fn apply_overrides(&self, page: &Page) {
@@ -1855,6 +2341,23 @@ impl BrowserSession {
         self.active_tab().quiet_synced()
     }
 
+    /// The element a stale ref stood for, found again after a re-render
+    /// (see [`crate::cdp::Page::refind`]): the new ref and how it reads.
+    pub fn refind(&self, node: u64) -> Option<(u64, String)> {
+        self.active_tab().refind(node, self.timeout(None))
+    }
+
+    /// An action is about to run on the active tab.
+    pub fn mark_action(&self) {
+        self.active_tab().mark_action();
+    }
+
+    /// The last action's own requests have started on the active tab, with
+    /// no navigation since.
+    pub fn action_traffic_seen(&self) -> bool {
+        self.active_tab().action_traffic_seen()
+    }
+
     /// A `wait` just succeeded on the active tab.
     pub fn mark_quiet_synced(&self) {
         self.active_tab().mark_quiet_synced();
@@ -1863,6 +2366,12 @@ impl BrowserSession {
     /// This session's snapshot network-quiet window.
     pub fn network_quiet_window(&self) -> Duration {
         Duration::from_millis(*self.network_quiet_ms.lock().unwrap())
+    }
+
+    /// Whether `set network-quiet` chose a window other than the default
+    /// (then it holds after actions too).
+    pub fn network_quiet_chosen(&self) -> bool {
+        *self.network_quiet_ms.lock().unwrap() != DEFAULT_NETWORK_QUIET_MS
     }
 
     /// `set network-quiet <ms>`: the snapshot quiet window for this
@@ -2232,7 +2741,7 @@ impl BrowserSession {
                 &cdp::ClickOptions::default(),
                 timeout_ms,
             )
-            .map_err(|e| anyhow::anyhow!("clicking option {value:?}: {e:#}"))?;
+            .map_err(|e| e.context(format!("clicking option {value:?}")))?;
             let _ = page.evaluate(
                 &format!(
                     "() => {{ for (const e of {}.all('[data-nv-pick=\"{token}\"]')) e.removeAttribute('data-nv-pick'); return true; }}",
@@ -2411,6 +2920,11 @@ impl BrowserSession {
         self.active_tab().text_content(selector, self.timeout(timeout_ms))
     }
 
+    /// The active tab's whole text as it reads (`text` with no selector).
+    pub fn page_text(&self, timeout_ms: Option<f64>) -> Result<String> {
+        self.active_tab().page_text(self.timeout(timeout_ms))
+    }
+
     /// Page title of the active tab.
     pub fn title(&self) -> Result<String> {
         self.active_tab().title(self.timeout(None))
@@ -2428,12 +2942,63 @@ impl BrowserSession {
 
     /// Viewport PNG screenshot bytes (`full_page` captures beyond viewport).
     pub fn screenshot_png(&self, full_page: bool) -> Result<Vec<u8>> {
-        self.active_tab().screenshot_png(self.timeout(None), full_page)
+        self.screenshot_as(full_page, None)
+    }
+
+    /// A JPEG at `quality` (1-100) when given, else a PNG.
+    pub fn screenshot_as(&self, full_page: bool, quality: Option<u8>) -> Result<Vec<u8>> {
+        self.screenshot_in(full_page, quality, None)
+    }
+
+    /// [`Self::screenshot_as`] giving up after `timeout_ms` (default: the session's).
+    pub fn screenshot_in(&self, full_page: bool, quality: Option<u8>, timeout_ms: Option<f64>) -> Result<Vec<u8>> {
+        self.active_tab().screenshot_as(self.timeout(timeout_ms), full_page, quality)
     }
 
     /// True when this session drives Lightpanda rather than Chromium.
     pub fn is_lightpanda(&self) -> bool {
         self.lightpanda
+    }
+
+    /// An Electron app (`start --electron`): its windows are the app's own.
+    pub fn is_electron(&self) -> bool {
+        self.browser.shared().adopt_windows.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// What `status` (and `start`) say about an Electron app: its Electron
+    /// version (from the window's user agent) and whether `eval --main` can
+    /// reach its main process (an app may turn Node's inspector off).
+    pub fn electron_info(&self) -> Option<serde_json::Value> {
+        if !self.is_electron() {
+            return None;
+        }
+        let timeout = self.timeout(None);
+        let agent = self.active_tab().user_agent(timeout).unwrap_or_default();
+        let main_process = self.browser.has_main_process();
+        // The user agent says it unless the app set its own; then the main
+        // process does, when it can be reached. Unknown is null.
+        let version = agent
+            .split("Electron/")
+            .nth(1)
+            .and_then(|v| v.split_whitespace().next())
+            .map(|v| serde_json::Value::String(v.to_string()))
+            .or_else(|| {
+                main_process
+                    .then(|| self.browser.eval_main("process.versions.electron", timeout).ok())
+                    .flatten()
+                    .filter(serde_json::Value::is_string)
+            })
+            .unwrap_or(serde_json::Value::Null);
+        Some(serde_json::json!({ "version": version, "main_process": main_process }))
+    }
+
+    /// `eval --main`: JavaScript in an Electron app's main process (see
+    /// [`Browser::eval_main`]).
+    pub fn eval_main(&self, expression: &str, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+        if !self.is_electron() {
+            bail!("--main runs in an Electron app's main process: start the session with --electron <app>");
+        }
+        self.browser.eval_main(expression, self.timeout(timeout_ms))
     }
 
     /// The CDP WebSocket endpoint this session is attached to.
@@ -2496,6 +3061,47 @@ impl BrowserSession {
         self.timeout_ms
     }
 
+    /// Every tab's URL and whether its last document request was not a GET
+    /// (a form POST), in tab order, from one `Target.getTargets` and the
+    /// request log: what a crashed browser's tabs are reopened from. `None`
+    /// when the browser can't list its targets.
+    pub fn tab_snapshot(&self) -> Option<Vec<(String, bool)>> {
+        let infos = self.browser.target_infos().ok()?;
+        self.browser.caught_up();
+        let logs = self.browser.shared().logs.lock().unwrap();
+        Some(
+            self.pages
+                .iter()
+                .map(|p| {
+                    let url = infos.get(p.target_id()).map(|(u, _)| u.clone()).unwrap_or_default();
+                    let post = logs
+                        .tabs
+                        .get(p.session_id())
+                        .and_then(|t| t.requests.iter().rev().find(|r| r.kind == "Document"))
+                        .is_some_and(|r| !r.method.eq_ignore_ascii_case("GET"));
+                    (url, post)
+                })
+                .collect(),
+        )
+    }
+
+    /// Take over what `old` (a session whose browser died) had set: `set …`
+    /// emulation, `init-script`s and the downloads directory, applied to this
+    /// session's tab and to the tabs it opens later.
+    pub fn inherit_settings(&mut self, old: &BrowserSession) {
+        self.overrides = old.overrides.clone();
+        self.init_scripts = old.init_scripts.clone();
+        if let Some(dir) = old.downloads_dir.clone() {
+            let _ = self.set_downloads_dir(&dir);
+        }
+        let pages = std::mem::take(&mut self.pages);
+        for page in &pages {
+            self.apply_overrides(page);
+            self.apply_init_scripts(page);
+        }
+        self.pages = pages;
+    }
+
     /// Every tab's current URL, in tab order.
     pub fn tab_urls(&self) -> Vec<String> {
         self.pages.iter().map(|p| p.url(self.timeout(None)).unwrap_or_default()).collect()
@@ -2524,6 +3130,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn feature_lists_merge_into_one_flag_each() {
+        let flags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            merge_feature_flags(flags(&[
+                "--a",
+                "--enable-features=X,WebMCP",
+                "--disable-features=T",
+                "--b",
+                "--enable-features=Y,X",
+                "--disable-features=U"
+            ])),
+            flags(&["--a", "--enable-features=X,WebMCP,Y", "--disable-features=T,U", "--b"])
+        );
+        assert!(chrome_flags().iter().filter(|f| f.starts_with("--enable-features=")).count() == 1);
+        assert!(chrome_flags().iter().any(|f| f.starts_with("--enable-features=") && f.contains("WebMCP")));
+    }
+
+    #[test]
+    fn the_main_process_says_which_window_is_hidden_only_when_it_knows_it() {
+        let windows = vec![
+            ("file:///app/helper.html".to_string(), false),
+            ("file:///app/index.html".to_string(), true),
+            ("file:///app/same.html".to_string(), false),
+            ("file:///app/same.html".to_string(), true),
+        ];
+        assert_eq!(hidden_by_main("file:///app/helper.html", Some(&windows)), Some(true));
+        assert_eq!(hidden_by_main("file:///app/index.html", Some(&windows)), Some(false));
+        // One of two windows there is visible: not hidden.
+        assert_eq!(hidden_by_main("file:///app/same.html", Some(&windows)), Some(false));
+        // A window still loading (another URL on each side), or no main
+        // process: the page's own word counts.
+        assert_eq!(hidden_by_main("about:blank", Some(&windows)), None);
+        assert_eq!(hidden_by_main("file:///app/index.html", None), None);
+    }
+
+    #[test]
     fn the_sandbox_stays_on_unless_chrome_cannot_have_one() {
         assert!(!CHROME_FLAGS.contains(&"--no-sandbox"));
         assert!(!no_sandbox_wanted(false, None));
@@ -2534,5 +3176,44 @@ mod tests {
         assert!(sandbox_unavailable("[FATAL:zygote_host_impl_linux.cc(132)] No usable sandbox! If you are running"));
         assert!(sandbox_unavailable("distro that has disabled unprivileged user namespaces with AppArmor"));
         assert!(!sandbox_unavailable("net::ERR_NAME_NOT_RESOLVED"));
+    }
+
+    /// `--electron <dir>` finds the Electron in the app's node_modules (or a
+    /// parent's) and passes the app; an executable runs as it is.
+    #[test]
+    fn electron_resolves_an_app_directory_to_its_electron() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("packages").join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("main.js"), "").unwrap();
+        let binary = if cfg!(target_os = "macos") {
+            "Electron.app/Contents/MacOS/Electron"
+        } else if cfg!(windows) {
+            "electron.exe"
+        } else {
+            "electron"
+        };
+        let err = resolve_electron(app.to_str().unwrap(), &[]).unwrap_err().to_string();
+        assert!(err.contains("npm install electron"), "{err}");
+        let exe = root.path().join("node_modules").join("electron").join("dist").join(binary);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        let (found, args) = resolve_electron(app.to_str().unwrap(), &["--x".into()]).unwrap();
+        assert_eq!(std::fs::canonicalize(&found).unwrap(), std::fs::canonicalize(&exe).unwrap());
+        assert_eq!(args, [app.to_str().unwrap().to_string(), "--x".into()]);
+        let script = app.join("main.js");
+        let (_, args) = resolve_electron(script.to_str().unwrap(), &[]).unwrap();
+        assert_eq!(args, [script.to_str().unwrap().to_string()]);
+        // An executable (here the binary itself) is run as it is.
+        let (found, args) = resolve_electron(exe.to_str().unwrap(), &[".".into()]).unwrap();
+        assert_eq!((found.as_str(), args), (exe.to_str().unwrap(), vec![".".to_string()]));
+        assert!(resolve_electron("/no/such/app", &[]).is_err());
+        // A macOS app bundle runs the executable named after it.
+        let bundle = root.path().join("Foo.app");
+        let inner = bundle.join("Contents").join("MacOS").join("Foo");
+        std::fs::create_dir_all(inner.parent().unwrap()).unwrap();
+        std::fs::write(&inner, "").unwrap();
+        let (found, args) = resolve_electron(bundle.to_str().unwrap(), &[]).unwrap();
+        assert_eq!((found.as_str(), args.len()), (inner.to_str().unwrap(), 0));
     }
 }

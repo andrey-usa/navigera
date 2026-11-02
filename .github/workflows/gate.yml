@@ -1,0 +1,52 @@
+name: gate
+
+# Timing gate before a release: the candidate (this ref) against the release
+# before it, on one runner, with fixed probes (bench/gate/gate.py). Fails when
+# the candidate is more than 25% (and 20 ms) slower on any probe.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "release tag to compare with (empty: the latest release)"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+        with:
+          toolchain: stable
+      - name: The candidate
+        run: cargo build --locked --release
+      - name: The release before it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ inputs.base }}
+        run: |
+          tag="${BASE:-$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)}"
+          echo "base: $tag"
+          mkdir -p "$RUNNER_TEMP/base"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern navigera-x86_64-unknown-linux-musl.tar.gz --dir "$RUNNER_TEMP/base"
+          tar -xzf "$RUNNER_TEMP/base/navigera-x86_64-unknown-linux-musl.tar.gz" -C "$RUNNER_TEMP/base"
+          "$RUNNER_TEMP/base/navigera" --version
+          echo "BASE_TAG=$tag" >> "$GITHUB_ENV"
+      - name: Probes (median of 10 each, interleaved)
+        run: |
+          set -o pipefail
+          export CHROME_BIN="$(command -v google-chrome)"
+          rc=0
+          python3 bench/gate/gate.py --base "$RUNNER_TEMP/base/navigera" --candidate target/release/navigera \
+            --runs 5 --summary "$RUNNER_TEMP/gate.md" || rc=$?
+          { echo "Base: $BASE_TAG, candidate: ${GITHUB_SHA::7}"; echo; cat "$RUNNER_TEMP/gate.md"; } >> "$GITHUB_STEP_SUMMARY"
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/gate.md" "timing gate vs $BASE_TAG"
+          exit $rc

@@ -36,6 +36,8 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The stderr line Chrome prints once the browser DevTools WebSocket is live.
 const DEVTOOLS_LISTENING: &str = "DevTools listening on ws://";
+/// Node's inspector line (`--inspect`), in an Electron app's main process.
+const NODE_LISTENING: &str = "Debugger listening on";
 
 /// Bytes of captured stderr retained for launch-failure messages.
 const STDERR_TAIL_BYTES: usize = 2000;
@@ -55,6 +57,20 @@ pub struct LaunchedChrome {
 /// Ensures a failed launch never leaks a Chrome process (whose DevTools stderr
 /// we captured) — a failed `target.createTarget`-style discovery previously
 /// left browser processes running.
+/// How an Electron app that quit during launch ended, as a parenthesis for
+/// the error: a clean exit at once is what a single-instance app does when
+/// another copy holds its lock (it hands its arguments over and quits).
+pub fn electron_exit_note(status: Option<std::process::ExitStatus>) -> String {
+    match status {
+        Some(s) if s.success() => format!(
+            " ({s}: a single-instance app exits like this when a copy of it is already running: close that copy, \
+             or quit the session that started it)"
+        ),
+        Some(s) => format!(" ({s})"),
+        None => String::new(),
+    }
+}
+
 struct KillOnDrop(Option<Child>);
 
 impl KillOnDrop {
@@ -181,6 +197,76 @@ pub fn launch_chrome(
     capture.detach();
 
     Ok(LaunchedChrome { child: kill.disarm(), profile_dir, ws_url, job })
+}
+
+/// An Electron app navigera launched (`start --electron`): the app's own
+/// process, its DevTools URL and its stderr tail.
+pub struct LaunchedElectron {
+    pub child: Child,
+    pub ws_url: String,
+    /// The main process's Node inspector (`--inspect=0`), when the app
+    /// allows it (a packaged app may turn the switch off).
+    pub node_ws: Option<String>,
+    pub stderr: StderrTail,
+    /// Windows: the kill-on-close job holding the app (see `procjob`).
+    pub job: Option<super::procjob::ProcJob>,
+}
+
+/// Launch an Electron app with a DevTools port of its own choosing and read
+/// the port back from its stderr. Only the debugging switch is added: an
+/// app is not a browser, and Chrome's launch flags (a temporary profile,
+/// headless mode, no first-run pages) would change how it starts. `exe` is
+/// the Electron binary (with the app's directory or main script among
+/// `args`) or a packaged app's own executable. Where the sandbox cannot
+/// start (root), `--no-sandbox` is added, as for Chrome.
+pub fn launch_electron(exe: &str, args: &[String], no_sandbox: bool) -> Result<LaunchedElectron> {
+    let mut cmd = Command::new(exe);
+    // The main process's inspector too, for `eval --main`.
+    cmd.arg("--inspect=0").arg("--remote-debugging-port=0");
+    if no_sandbox {
+        cmd.arg("--no-sandbox");
+    }
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    own_process_group(&mut cmd);
+    let mut child = cmd.spawn().with_context(|| format!("spawn the Electron app {exe}"))?;
+    let job = super::procjob::ProcJob::contain(&child);
+    let stderr = child.stderr.take().context("the app was spawned without a stderr pipe")?;
+    let mut kill = KillOnDrop(Some(child));
+    let capture = Capture::start(stderr);
+    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+    let ws_url = loop {
+        if let Some(url) = capture.wait_url(Duration::from_millis(20)) {
+            break url;
+        }
+        if let Ok(Some(status)) = kill.as_mut().try_wait() {
+            thread::sleep(Duration::from_millis(20));
+            let _ = kill.disarm().wait();
+            return Err(anyhow!(
+                "the Electron app exited during launch before it opened a DevTools port{}; its stderr:\n{}",
+                electron_exit_note(Some(status)),
+                capture.tail()
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "the Electron app printed no DevTools URL within {} s (an app that removes --remote-debugging-port from its command line can't be driven); its stderr:\n{}",
+                DISCOVERY_TIMEOUT.as_secs(),
+                capture.tail()
+            ));
+        }
+    };
+    // Node prints its inspector before Chromium starts its DevTools server;
+    // give a slow line a moment.
+    let mut node_ws = capture.find_ws_after(NODE_LISTENING);
+    let waited = Instant::now();
+    while node_ws.is_none() && waited.elapsed() < Duration::from_millis(500) {
+        thread::sleep(Duration::from_millis(20));
+        node_ws = capture.find_ws_after(NODE_LISTENING);
+    }
+    // Kept capturing for the app's lifetime: a crash later is explained by
+    // its last lines.
+    let stderr = capture.tail_handle();
+    Ok(LaunchedElectron { child: kill.disarm(), ws_url, node_ws, stderr, job })
 }
 
 /// A browser launched with `--remote-debugging-pipe`: CDP runs over two
@@ -413,6 +499,17 @@ impl Capture {
                 None
             }
         }
+    }
+
+    /// The first `ws://` URL captured after `marker` (Node's `Debugger
+    /// listening on ws://…` in an Electron app's main process).
+    fn find_ws_after(&self, marker: &str) -> Option<String> {
+        let b = self.buf.lock().ok()?;
+        let text = String::from_utf8_lossy(&b);
+        let at = text.find(marker)? + marker.len();
+        let rest = &text[at..];
+        let start = rest.find("ws://")?;
+        rest[start..].split_whitespace().next().map(str::to_string)
     }
 
     /// Last `STDERR_TAIL_BYTES` chars of captured stderr (best-effort).
