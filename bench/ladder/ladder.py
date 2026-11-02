@@ -2,7 +2,9 @@
 """Browser-driver ladder: same scripted session, CDP drivers, one table.
 
 Contenders (each drives the same headless Chrome on the same fixture pages):
-  nv-serve        navigera serve on Chrome (this repo: from-scratch Rust CDP engine)
+  nv-serve        navigera serve on Chrome (this repo: from-scratch Rust CDP engine;
+                  bench.yml builds the static musl binary the releases ship)
+  nv-baseline     the same, another build for an A/B ($NAVIGERA_BASELINE)
   nv-edge         navigera serve on Microsoft Edge
   nv-brave        navigera serve on Brave
   nv-lightpanda   navigera serve on Lightpanda (headless Chromium for AI agents)
@@ -49,7 +51,9 @@ Env:
   LADDER_BASE    fixture server base URL (set by this script itself)
   LADDER_REPS    session repetitions (default 3)
 
-Outputs (in --out-dir): results.json, table.md, per-contender artifacts.
+Outputs (in --out-dir): results.json, table.md, publish.json (every run, the
+median, and the version of every contender and browser), per-contender
+artifacts.
 """
 import argparse
 import http.server
@@ -57,6 +61,7 @@ import json
 import math
 import os
 import socketserver
+import statistics
 import subprocess
 import sys
 import threading
@@ -106,7 +111,10 @@ NOTES: dict[str, list[str]] = {}
 BROWSER_TAGS = {"nv-edge": "msedge", "nv-brave": "brave", "nv-lightpanda": "lightpanda",
                 "nv-shell": "chrome-headless-shell"}
 
-OPTIONAL_SCENARIOS = ("eval", "cold", "realworld", "browse", "agent")
+OPTIONAL_SCENARIOS = ("eval", "cold", "realworld", "browse", "agent", "parallel")
+
+# Parallel agents: how many sessions are held open at once.
+PARALLEL_NS = (1, 4, 8)
 
 
 def is_nv(name: str) -> bool:
@@ -161,7 +169,20 @@ def kill_stray_chrome(chrome_tag: str) -> None:
             os.kill(pid, 15)
         except (ProcessLookupError, PermissionError):
             pass
-    time.sleep(1.0)
+    # It runs before every rep: wait only when something was left, and only
+    # until it has gone.
+    deadline = time.monotonic() + 1.0
+    while strays and time.monotonic() < deadline:
+        strays = {p for p in strays if Path(f"/proc/{p}").exists() and not is_zombie(p)}
+        time.sleep(0.05)
+
+
+def is_zombie(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            return f.read().rsplit(b")", 1)[1].split()[0] == b"Z"
+    except (OSError, IndexError):
+        return True
 
 
 # Process names (comm) that belong to a browser: Chrome's processes are
@@ -411,9 +432,11 @@ def percentile(xs: list[float], q: float) -> float:
 
 
 def bench_session(name: str, argv: list[str], env: dict, out_dir: Path,
-                  reps: int, chrome_tag: str, timeout_s: int) -> dict:
+                  reps, chrome_tag: str, timeout_s: int) -> dict:
+    """`reps`: how many, or which rep numbers to run (the ladder interleaves
+    contenders one rep at a time); likewise `rep_ids` below."""
     runs = []
-    for rep in range(reps):
+    for rep in (range(reps) if isinstance(reps, int) else reps):
         extract = out_dir / f"extract_a-{name}-r{rep}.json"
         shot = out_dir / f"shot-{name}-r{rep}.png"
         stats = out_dir / f"stats-{name}-r{rep}.json"
@@ -456,17 +479,17 @@ def bench_session(name: str, argv: list[str], env: dict, out_dir: Path,
             "browser_pss_kb": detail.get("browser_pss_kb", 0),
             "counts": counts, "extract": str(extract),
         })
-        print(f"  [session] {name} rep {rep + 1}/{reps}: "
+        print(f"  [session] {name} rep {rep + 1}: "
               f"wall {wall:.2f}s driver-cpu {cpu:.2f}s", flush=True)
     best = min(runs, key=lambda r: r["wall_s"])
     return {"runs": runs, "best": best}
 
 
 def bench_eval(name: str, argv: list[str], env: dict, out_dir: Path,
-               chrome_tag: str, timeout_s: int) -> dict:
+               chrome_tag: str, timeout_s: int, rep_ids=range(3)) -> dict:
     """Warm eval round-trip: 200 evals, report mean/p95 of the best session."""
     sessions = []
-    for rep in range(3):
+    for rep in rep_ids:
         stats = out_dir / f"evalstats-{name}-r{rep}.json"
         run_env = {**env, "LADDER_N_EVAL": "200"}
         if is_nv(name):
@@ -500,7 +523,7 @@ def bench_eval(name: str, argv: list[str], env: dict, out_dir: Path,
 
 
 def bench_realworld(name: str, argv: list[str], env: dict, out_dir: Path,
-                    chrome_tag: str) -> dict:
+                    chrome_tag: str, rep_ids=range(3)) -> dict:
     """Real-world scenario on https://example.com (all contenders).
 
     goto -> title/h1/paragraph evals -> quit. Checks the extracted facts and
@@ -508,7 +531,7 @@ def bench_realworld(name: str, argv: list[str], env: dict, out_dir: Path,
     failing the whole ladder (external dependency).
     """
     runs = []
-    for rep in range(3):
+    for rep in rep_ids:
         stats = out_dir / f"realworld-{name}-r{rep}.json"
         run_env = {**env, "LADDER_STATS_OUT": str(stats)}
         if is_nv(name):
@@ -541,7 +564,7 @@ def bench_realworld(name: str, argv: list[str], env: dict, out_dir: Path,
 
 
 def bench_browse(name: str, argv: list[str], env: dict, out_dir: Path,
-                 chrome_tag: str) -> dict:
+                 chrome_tag: str, rep_ids=range(3)) -> dict:
     """Real-world gentle browsing: GitHub awesome list + trending (all contenders).
 
     goto -> scroll in steps -> extract -> goto trending -> click-through.
@@ -552,7 +575,7 @@ def bench_browse(name: str, argv: list[str], env: dict, out_dir: Path,
     Best of 3.
     """
     runs = []
-    for rep in range(3):
+    for rep in rep_ids:
         stats = out_dir / f"browse-{name}-r{rep}.json"
         run_env = {**env, "LADDER_STATS_OUT": str(stats)}
         if is_nv(name):
@@ -622,10 +645,11 @@ def check_browse_facts(f: dict) -> bool:
     return browse_failure(f) is None
 
 
-def bench_cold(name: str, argv: list[str], env: dict, chrome_tag: str) -> dict:
+def bench_cold(name: str, argv: list[str], env: dict, chrome_tag: str,
+               rep_ids=range(5)) -> dict:
     """Cold start: launch -> new page -> one eval -> close. Best of 5."""
     runs = []
-    for rep in range(5):
+    for rep in rep_ids:
         if is_nv(name):
             # one-shot mode: process start + browser launch + one eval + close
             # (nv_serve.py-only args like --navigera don't apply here)
@@ -649,13 +673,21 @@ def bench_cold(name: str, argv: list[str], env: dict, chrome_tag: str) -> dict:
 
 
 AGENT_DAEMON_MARKERS = (b"agent-browser", b"playwright-cli", b"@playwright/cli",
-                        b"playwright-mcp", b"@playwright/mcp", b"chrome-devtools-mcp")
+                        b"playwright-mcp", b"@playwright/mcp", b"chrome-devtools-mcp",
+                        # navigera's shared-browser host (0.6.5+) outlives a
+                        # session's `quit` by its grace period, like the
+                        # daemons above.
+                        b"browser-host")
+
+# Agent steps outside the canonical session (cli_agent.EXTRA_OPS): reported
+# on their own, left out of the total and the per-step mean.
+AGENT_EXTRA_OPS = ("snapshot b", "start warm", "quit warm")
 
 
 def kill_agent_daemons() -> None:
     """agent-browser / playwright-cli leave their daemons idling after
-    `close`; stop them (and any MCP server) so each rep starts cold like the
-    navigera one does."""
+    `close`, and navigera its shared browser's host; stop them (and any MCP
+    server) so each rep starts cold."""
     me = os.getpid()
     for pid, (_, name) in proc_table().items():
         if pid == me:
@@ -679,10 +711,13 @@ def bench_agent(tools: dict[str, list[str]], env: dict, out_dir: Path,
                 chrome_tag: str, expected: dict, base_extract: str | None) -> dict:
     """Agent-style CLI scenario (contenders/cli_agent.py): every step is its own
     process against a warm background session. Best of 3 by total wall."""
-    results = {}
-    for name, extra in tools.items():
-        runs = []
-        for rep in range(3):
+    # Interleaved like the ladder's reps: each tool's first run, then each
+    # tool's second in the reverse order, then the third.
+    runs_by: dict[str, list] = {name: [] for name in tools}
+    for rep in range(3):
+        for name in (list(tools) if rep % 2 == 0 else list(reversed(list(tools)))):
+            extra = tools[name]
+            runs = runs_by[name]
             kill_stray_chrome(chrome_tag)
             kill_agent_daemons()
             extract = out_dir / f"agent-extract-{name}-r{rep}.json"
@@ -702,17 +737,133 @@ def bench_agent(tools: dict[str, list[str]], env: dict, out_dir: Path,
                    "title_b": expected["title_b"], "rows_b": expected["rows_b"]}
             ok = counts == exp and (base_extract is None
                                     or normalized_extract(str(extract)) == base_extract)
-            ops = [s["ms"] for s in doc["steps"] if s["op"] not in ("start", "close", "exit")]
+            ops = [s["ms"] for s in doc["steps"]
+                   if s["op"] not in ("start", "close", "exit") + AGENT_EXTRA_OPS]
             runs.append({"ok": ok, "wall_s": doc["wall_s"], "steps": doc["steps"],
+                         "total_wall_s": doc.get("total_wall_s"), "calls": doc.get("calls"),
                          "op_mean_ms": sum(ops) / len(ops),
-                         "snapshot_bytes": doc["snapshot_bytes"], "counts": counts})
+                         "snapshot_bytes": doc["snapshot_bytes"],
+                         "snapshot_b_bytes": doc.get("snapshot_b_bytes"), "counts": counts})
             print(f"  [agent] {name} rep {rep + 1}/3: wall {doc['wall_s']:.2f}s "
                   f"op mean {sum(ops) / len(ops):.1f} ms ok={ok}", flush=True)
-        kill_agent_daemons()
+    kill_agent_daemons()
+    results = {}
+    for name, runs in runs_by.items():
         good = [r for r in runs if r.get("ok")]
         best = min(good, key=lambda r: r["wall_s"]) if good else (runs[0] if runs else {})
         results[name] = {"runs": runs, "best": best}
     return results
+
+
+def bench_parallel(tools: dict[str, str], env: dict, chrome_tag: str) -> dict:
+    """Parallel agents (contenders/parallel.py): N sessions of one tool open
+    at once, each on the listing page after a snapshot. Memory is every
+    process the run started (browsers, daemons, MCP servers, session
+    servers), summed as PSS so shared pages count once, at its peak over a
+    second of sampling; the driver script itself is left out."""
+    results: dict = {}
+    for label, tool in tools.items():
+        rows = []
+        for n in PARALLEL_NS:
+            kill_stray_chrome(chrome_tag)
+            kill_agent_daemons()
+            before = set(proc_table())
+            proc = subprocess.Popen([sys.executable, str(CONTENDERS / "parallel.py"), "--tool", tool,
+                                     "--n", str(n)], env=env, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            row = {"n": n}
+            try:
+                line = proc.stdout.readline()
+                ready = json.loads(line) if line.strip() else {}
+                if not ready.get("ready"):
+                    raise RuntimeError(f"not ready: {line.strip()[:200]} {proc.stderr.read()[-600:]}")
+                peak_kb, browsers = 0, 0
+                for _ in range(5):
+                    table = proc_table()
+                    new = [pid for pid in table if pid not in before and pid != proc.pid]
+                    peak_kb = max(peak_kb, sum(pss_kb(pid) or 0 for pid in new))
+                    browsers = max(browsers, len({pid for pid in new
+                                                  if table[pid][1].startswith(BROWSER_PREFIXES)}))
+                    time.sleep(0.25)
+                row.update({"pss_mb": round(peak_kb / 1024, 1), "browser_procs": browsers,
+                            "up_s": round(ready["up_s"], 3), "session_ms": ready["session_ms"]})
+                proc.stdin.write("\n")
+                proc.stdin.flush()
+                proc.wait(timeout=120)
+            except Exception as e:
+                proc.kill()
+                proc.wait()
+                row["error"] = " ".join(str(e).split())[-400:]
+            print(f"  [parallel] {label} x{n}: " + (f"{row['pss_mb']:.0f} MB, up {row['up_s']:.2f}s"
+                                                    if "pss_mb" in row else f"FAILED {row['error']}"), flush=True)
+            rows.append(row)
+        results[label] = rows
+    kill_stray_chrome(chrome_tag)
+    kill_agent_daemons()
+    return results
+
+
+def collect_versions() -> dict[str, str]:
+    """The version of every contender, tool and browser this run measured.
+
+    Contenders come from semver ranges or @latest (the weekly run measures
+    the newest releases), so without this a change between two runs can't
+    be traced to a release."""
+    import re
+    import shutil
+
+    def first_line(argv: list[str]) -> str:
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        except Exception:
+            return ""
+        text = (r.stdout or r.stderr or "").strip()
+        return text.splitlines()[0].strip() if text else ""
+
+    v: dict[str, str] = {"navigera": first_line([os.environ["NAVIGERA"], "--version"])}
+    if "nv-baseline" in NAVIGERA_ENGINE_ARGS:
+        v["nv-baseline"] = first_line([NAVIGERA_BINARY["nv-baseline"], "--version"])
+    for label, env_var in (("chrome", "CHROME_BIN"), ("edge", "EDGE_BIN"), ("brave", "BRAVE_BIN"),
+                           ("chrome-headless-shell", "SHELL_BIN")):
+        binary = os.environ.get(env_var)
+        if binary and Path(binary).exists():
+            v[label] = first_line([binary, "--version"])
+    lp = shutil.which("lightpanda")
+    if lp:
+        v["lightpanda"] = first_line([lp, "version"])
+    for pkg in ("playwright-core", "puppeteer-core"):
+        try:
+            v[pkg] = json.loads((HERE / "node_modules" / pkg / "package.json").read_text())["version"]
+        except (OSError, ValueError, KeyError):
+            pass
+    for crate in ("chromiumoxide", "chromey"):
+        try:
+            lock = (CONTENDERS / crate / "Cargo.lock").read_text()
+            m = re.search(r'\[\[package\]\]\nname = "' + crate + r'"\nversion = "([^"]+)"', lock)
+            if m:
+                v[crate] = m.group(1)
+        except OSError:
+            pass
+    for label, module, d in (("chromedp", "github.com/chromedp/chromedp", "chromedp"),
+                             ("go-rod", "github.com/go-rod/rod", "gorod")):
+        try:
+            m = re.search(re.escape(module) + r"\s+(v\S+)", (CONTENDERS / d / "go.mod").read_text())
+            if m:
+                v[label] = m.group(1)
+        except OSError:
+            pass
+    npm = shutil.which("npm")
+    if npm:
+        try:
+            r = subprocess.run([npm, "ls", "-g", "--depth=0", "--json"], capture_output=True,
+                               text=True, timeout=60)
+            deps = json.loads(r.stdout or "{}").get("dependencies") or {}
+            for pkg in ("agent-browser", "@playwright/cli", "@playwright/mcp", "chrome-devtools-mcp"):
+                if deps.get(pkg, {}).get("version"):
+                    v[pkg] = deps[pkg]["version"]
+        except Exception:
+            pass
+    return v
 
 
 def normalized_extract(path: str) -> str:
@@ -755,7 +906,8 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def write_publish_json(out_dir: Path, results: dict, contenders: dict,
-                       reps: int, env_text: str, agent_results: dict | None = None) -> None:
+                       reps: int, env_text: str, agent_results: dict | None = None,
+                       versions: dict | None = None, parallel_results: dict | None = None) -> None:
     """Compact, chart-ready results (publish.json): what a results page or a
     remote agent needs, small enough to ship as check-run annotations."""
     def r3(x):
@@ -771,6 +923,7 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
             "correct": r.get("correct", False),
             "session": {
                 "wall_s": r3(sb["wall_s"]),
+                "median_wall_s": r3(statistics.median(x["wall_s"] for x in r["session"]["runs"])),
                 "runs_wall_s": [r3(x["wall_s"]) for x in r["session"]["runs"]],
                 "driver_cpu_s": r3(sb["cpu_s"]),
                 "reaped_child_cpu_s": r3(sb.get("cpu_reaped_s")),
@@ -783,13 +936,16 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
             row["session"]["phases_ms"] = sb["phases"]
         if r.get("eval"):
             eb = r["eval"]["best"]
-            row["eval"] = {"mean_ms": r3(eb["mean_ms"]), "p95_ms": r3(eb["p95_ms"])}
+            row["eval"] = {"mean_ms": r3(eb["mean_ms"]), "p95_ms": r3(eb["p95_ms"]),
+                           "runs_mean_ms": [r3(x["mean_ms"]) for x in r["eval"]["sessions"]]}
             if "engine_mean_ms" in eb:
                 row["eval"]["engine_mean_ms"] = r3(eb["engine_mean_ms"])
                 row["eval"]["engine_p95_ms"] = r3(eb["engine_p95_ms"])
         if r.get("cold"):
             cb = r["cold"]["best"]
-            row["cold"] = {"wall_s": r3(cb["wall_s"])}
+            row["cold"] = {"wall_s": r3(cb["wall_s"]),
+                           "median_wall_s": r3(statistics.median(x["wall_s"] for x in r["cold"]["runs"])),
+                           "runs_wall_s": [r3(x["wall_s"]) for x in r["cold"]["runs"]]}
             if cb.get("phases"):
                 row["cold"]["phases_ms"] = cb["phases"]
         for key in ("realworld", "browse"):
@@ -808,6 +964,7 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
         "commit": os.environ.get("GITHUB_SHA"),
         "env": env_text.replace("**", ""),
         "reps": reps,
+        "versions": versions or {},
         "contenders": rows,
         "notes": NOTES,
         "skipped": SKIPPED,
@@ -817,12 +974,16 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
              "wall_s": r3(r["best"].get("wall_s")),
              "runs_wall_s": [r3(x.get("wall_s")) for x in r["runs"]],
              "op_mean_ms": r3(r["best"].get("op_mean_ms")),
+             "total_wall_s": r3(r["best"].get("total_wall_s")),
+             "calls": r["best"].get("calls"),
              "snapshot_bytes": r["best"].get("snapshot_bytes"),
+             "snapshot_b_bytes": r["best"].get("snapshot_b_bytes"),
              "steps": r["best"].get("steps"),
              **({"errors": [x["error"] for x in r["runs"] if x.get("error")]}
                 if any(x.get("error") for x in r["runs"]) else {})}
             for name, r in (agent_results or {}).items()
         ],
+        "parallel": [{"name": name, "runs": rows} for name, rows in (parallel_results or {}).items()],
     }
     # indent=1 keeps lines short so annotate.py can chunk it.
     (out_dir / "publish.json").write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8")
@@ -853,7 +1014,12 @@ def main() -> int:
     chrome_tag = os.path.basename(chrome_bin)
 
     # Fixture server on 127.0.0.1, ephemeral port.
-    server = socketserver.TCPServer(
+    # Threaded: a single-threaded server blocks on the first connection it
+    # accepts, and Chrome opens connections it may not use yet (preconnect),
+    # so a page's request could wait behind an idle socket until Chrome
+    # dropped it.
+    socketserver.ThreadingTCPServer.daemon_threads = True
+    server = socketserver.ThreadingTCPServer(
         ("127.0.0.1", 0),
         lambda *a, **k: QuietHandler(*a, directory=str(FIXTURES), **k),
     )
@@ -973,49 +1139,74 @@ def main() -> int:
             except Exception as e:  # warmup is best-effort
                 print(f"warmup: {bin_path} failed: {e}", flush=True)
 
+    # Reps are interleaved: every contender's first rep, then every
+    # contender's second in the reverse order, and so on. A runner that
+    # drifts during the run (a noisy neighbour, throttling) then shifts every
+    # contender alike, instead of whichever ran during the slow minutes.
+    def run_stage(key: str, name: str, argv: list[str], tag: str, rep: int) -> list:
+        if key == "session":
+            return bench_session(name, argv + (["session"] if not is_nv(name) else []),
+                                 env, out_dir, [rep], tag, 180)["runs"]
+        if key == "eval":
+            return bench_eval(name, argv, env, out_dir, tag, 180, [rep])["sessions"]
+        if key == "cold":
+            return bench_cold(name, argv, env, tag, [rep])["runs"]
+        if key == "realworld":
+            return bench_realworld(name, argv, env, out_dir, tag, [rep])["runs"]
+        return bench_browse(name, argv, env, out_dir, tag, [rep])["runs"]
+
+    def finish(key: str, runs: list) -> dict:
+        if key == "eval":
+            return {"sessions": runs, "best": min(runs, key=lambda r: r["mean_ms"])}
+        if key in ("realworld", "browse"):
+            ok_runs = [r for r in runs if r["ok"]]
+            return {"runs": runs,
+                    "best": min(ok_runs, key=lambda r: r["wall_s"]) if ok_runs else runs[0]}
+        return {"runs": runs, "best": min(runs, key=lambda r: r["wall_s"])}
+
+    stages = [("session", "session", args.reps), ("eval", "eval micro", 3),
+              ("cold", "cold start", 5), ("realworld", "realworld example.com", 3),
+              ("browse", "browse github", 3)]
+    parts: dict[str, dict[str, list]] = {name: {} for name in contenders}
+    failed: set[tuple[str, str]] = set()
+    for key, label, n in stages:
+        if key != "session" and key not in scenarios:
+            continue
+        for rep in range(n):
+            order = list(contenders) if rep % 2 == 0 else list(reversed(list(contenders)))
+            print(f"== {label}: rep {rep + 1}/{n}: " + ", ".join(order), flush=True)
+            for name in order:
+                if name not in contenders or (name, key) in failed:
+                    continue
+                tag = BROWSER_TAGS.get(name, chrome_tag)
+                kill_stray_chrome(chrome_tag)
+                if tag != chrome_tag:
+                    kill_stray_chrome(tag)
+                try:
+                    parts[name].setdefault(key, []).extend(
+                        run_stage(key, name, contenders[name], tag, rep))
+                except Exception as e:
+                    # Experimental contenders: a failure is recorded instead
+                    # of failing the whole ladder; a failed session drops it.
+                    if name not in EXPERIMENTAL:
+                        raise
+                    if key == "session":
+                        print(f"== {name}: SKIPPED (session failed: {e})", flush=True)
+                        # Tail of the error: where navigera's own message lands.
+                        SKIPPED[name] = " ".join(str(e).split())[-700:]
+                        NAVIGERA_ENGINE_ARGS.pop(name, None)
+                        contenders.pop(name)
+                        parts.pop(name, None)
+                        continue
+                    NOTES.setdefault(name, []).append(
+                        f"{key} failed: {' '.join(str(e).split())[-300:]}")
+                    failed.add((name, key))
+                    parts[name].pop(key, None)
     results: dict = {}
-    for name, argv in list(contenders.items()):
-        tag = BROWSER_TAGS.get(name, chrome_tag)
-        kill_stray_chrome(chrome_tag)
-        if tag != chrome_tag:
-            kill_stray_chrome(tag)
-        # Experimental contenders: a session failure skips them (with the
-        # reason in the table) instead of failing the whole ladder.
-        try:
-            print(f"== {name}: session (x{args.reps})", flush=True)
-            session = bench_session(name, argv + (["session"] if not is_nv(name) else []),
-                                    env, out_dir, args.reps, tag, 180)
-        except Exception as e:
-            if name in EXPERIMENTAL:
-                print(f"== {name}: SKIPPED (session failed: {e})", flush=True)
-                # Tail of the error: where navigera's own message lands.
-                SKIPPED[name] = " ".join(str(e).split())[-700:]
-                NAVIGERA_ENGINE_ARGS.pop(name, None)
-                contenders.pop(name)
-                continue
-            raise
+    for name in contenders:
+        entry = {key: finish(key, runs) for key, runs in parts[name].items() if runs}
         # stash shot path for the report
-        session["best"]["shot"] = str(out_dir / f"shot-{name}-r0.png")
-        entry: dict = {"session": session}
-        stages = [
-            ("eval", "eval micro", lambda: bench_eval(name, argv, env, out_dir, tag, 180)),
-            ("cold", "cold start (x5)", lambda: bench_cold(name, argv, env, tag)),
-            ("realworld", "realworld example.com (x3)",
-             lambda: bench_realworld(name, argv, env, out_dir, tag)),
-            ("browse", "browse github (x3)",
-             lambda: bench_browse(name, argv, env, out_dir, tag)),
-        ]
-        for key, label, run in stages:
-            if key not in scenarios:
-                continue
-            print(f"== {name}: {label}", flush=True)
-            try:
-                entry[key] = run()
-            except Exception as e:
-                if name not in EXPERIMENTAL:
-                    raise
-                NOTES.setdefault(name, []).append(
-                    f"{key} failed: {' '.join(str(e).split())[-300:]}")
+        entry["session"]["best"]["shot"] = str(out_dir / f"shot-{name}-r0.png")
         results[name] = entry
 
     check_correctness(results, expected)
@@ -1031,6 +1222,15 @@ def main() -> int:
         shell = os.environ.get("SHELL_BIN")
         if "nv-serve" in contenders and shell and Path(shell).exists():
             tools["navigera (headless shell)"] = ["--tool", "nv", "--chrome", shell]
+        if "nv-serve" in contenders:
+            # The skill's way (known steps in one `batch` call), and two
+            # diagnostics kept out of the README: a browser of the session's
+            # own instead of the shared one, and the A/B baseline build.
+            tools["navigera (batch)"] = ["--tool", "nvb"]
+            tools["navigera (own browser)"] = ["--tool", "nv", "--own-browser"]
+            if "nv-baseline" in contenders:
+                tools["navigera (baseline)"] = ["--tool", "nv", "--navigera",
+                                                NAVIGERA_BINARY["nv-baseline"]]
         for label, tool, env_var, binary, hint in [
             ("agent-browser", "ab", "AGENT_BROWSER", "agent-browser", "npm i -g agent-browser"),
             ("playwright-cli", "pw", "PLAYWRIGHT_CLI", "playwright-cli", "npm i -g @playwright/cli"),
@@ -1049,6 +1249,26 @@ def main() -> int:
                         if first else None)
         print("== agent-style CLI scenario: " + ", ".join(tools), flush=True)
         agent_results = bench_agent(tools, env, out_dir, chrome_tag, expected, base_extract)
+
+    parallel_results: dict = {}
+    if "parallel" in scenarios:
+        import shutil
+        ptools: dict[str, str] = {}
+        if "nv-serve" in contenders:
+            ptools["navigera"] = "nv"
+            ptools["navigera (own browser)"] = "nv-own"
+        for label, tool, env_var, binary in [
+            ("agent-browser", "ab", "AGENT_BROWSER", "agent-browser"),
+            ("playwright-cli", "pw", "PLAYWRIGHT_CLI", "playwright-cli"),
+            ("Playwright MCP", "pwmcp", "PLAYWRIGHT_MCP", "playwright-mcp"),
+            ("Chrome DevTools MCP", "cdmcp", "CHROME_DEVTOOLS_MCP", "chrome-devtools-mcp"),
+        ]:
+            found = os.environ.get(env_var) or shutil.which(binary)
+            if found:
+                env[env_var] = found
+                ptools[label] = tool
+        print("== parallel agents: " + ", ".join(ptools), flush=True)
+        parallel_results = bench_parallel(ptools, env, chrome_tag)
 
     summary = {
         "contenders": list(contenders),
@@ -1185,18 +1405,44 @@ def main() -> int:
     if agent_results:
         lines.append("### agent tools: one CLI process (or one MCP tools/call) per step, warm session (best of 3)")
         lines.append("")
-        lines.append("| tool | kind | total wall | mean per step | snapshot | snapshot output | gate |")
-        lines.append("|---|---|---|---|---|---|---|")
+        lines.append("| tool | kind | calls | total wall | mean per call | snapshot | snapshot output | "
+                     "1000-row snapshot | its output | 2nd session start | gate |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for name, r in agent_results.items():
             b = r["best"]
             kind = "MCP" if "MCP" in name else "CLI"
             if not b.get("wall_s"):
                 err = next((x.get("error", "") for x in r["runs"] if x.get("error")), "")
-                lines.append(f"| `{name}` | {kind} | failed | — | — | — | ✗ {err[-160:].replace('|', '/')} |")
+                lines.append(f"| `{name}` | {kind} | — | failed | — | — | — | — | — | — | ✗ {err[-160:].replace('|', '/')} |")
                 continue
-            snap = next((st["ms"] for st in b.get("steps") or [] if st["op"] == "snapshot"), 0)
-            lines.append(f"| `{name}` | {kind} | {b['wall_s']:.2f}s | {b['op_mean_ms']:.1f} ms | {snap:.0f} ms | "
-                         f"{b['snapshot_bytes'] / 1024:.1f} KB | {'✓' if b['ok'] else '✗'} |")
+            step_ms = {st["op"]: st["ms"] for st in b.get("steps") or []}
+            snap_b = step_ms.get("snapshot b")
+            warm = step_ms.get("start warm")
+            lines.append(f"| `{name}` | {kind} | {b.get('calls') or '—'} | {b['wall_s']:.2f}s | {b['op_mean_ms']:.1f} ms | "
+                         f"{step_ms.get('snapshot', 0):.0f} ms | {b['snapshot_bytes'] / 1024:.1f} KB | "
+                         + (f"{snap_b:.0f} ms | {(b.get('snapshot_b_bytes') or 0) / 1024:.1f} KB | "
+                            if snap_b is not None else "— | — | ")
+                         + (f"{warm:.0f} ms | " if warm is not None else "— | ")
+                         + f"{'✓' if b['ok'] else '✗'} |")
+        lines.append("")
+        lines.append("Snapshot output is each tool's default (what an agent reads). The 1000-row snapshot "
+                     "and the 2nd session start are extra steps, outside the total. `navigera (batch)` puts "
+                     "the known steps in three `batch` calls (per step = per call).")
+        lines.append("")
+    if parallel_results:
+        lines.append("### parallel agents: N sessions open at once, each after goto + snapshot "
+                     "(PSS of every process the tool started, MB)")
+        lines.append("")
+        lines.append("| tool | " + " | ".join(f"{n} agent{'s' if n > 1 else ''}" for n in PARALLEL_NS)
+                     + " | per extra agent | browser processes at max | up (max N) |")
+        lines.append("|---|" + "---|" * (len(PARALLEL_NS) + 3))
+        for label, rows in parallel_results.items():
+            cells = [f"{r['pss_mb']:.0f}" if "pss_mb" in r else "✗" for r in rows]
+            ok = [r for r in rows if "pss_mb" in r]
+            per = (f"{(ok[-1]['pss_mb'] - ok[0]['pss_mb']) / (ok[-1]['n'] - ok[0]['n']):.0f}"
+                   if len(ok) > 1 else "—")
+            lines.append(f"| `{label}` | " + " | ".join(cells) + f" | {per} | "
+                         + (f"{ok[-1]['browser_procs']} | {ok[-1]['up_s']:.2f}s |" if ok else "— | — |"))
         lines.append("")
     if NOTES:
         lines.append("### Notes (experimental contenders)")
@@ -1212,7 +1458,9 @@ def main() -> int:
             lines.append(f"- `{name}`: {reason.replace('|', '/')}")
         lines.append("")
     (out_dir / "table.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    write_publish_json(out_dir, results, contenders, args.reps, env_line(""), agent_results)
+    versions = collect_versions()
+    write_publish_json(out_dir, results, contenders, args.reps, env_line(""), agent_results, versions,
+                       parallel_results)
     print("\n".join(lines), flush=True)
 
     server.shutdown()

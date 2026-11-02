@@ -27,9 +27,9 @@ on:
         required: false
         default: ''
       scenarios:
-        description: "optional stages besides the session gate: eval,cold,realworld,browse,agent"
+        description: "optional stages besides the session gate: eval,cold,realworld,browse,agent,parallel"
         required: false
-        default: 'eval,cold,realworld,browse,agent'
+        default: 'eval,cold,realworld,browse,agent,parallel'
       baseline_ref:
         description: "A/B: also run navigera built from this ref (branch, tag or FULL commit SHA) as nv-baseline; same machine, same run"
         required: false
@@ -143,21 +143,31 @@ jobs:
           npm install -g agent-browser@latest @playwright/cli@latest @playwright/mcp@latest chrome-devtools-mcp@latest
           npm ls -g --depth=0
 
-      - name: Build navigera (release)
-        run: cargo build --release --bin navigera
-
+      - name: Build navigera (static musl, as released)
+        # The numbers are the released build's: install.sh, npm, pip and
+        # Homebrew install this static musl binary (mimalloc, tuned in
+        # .cargo/config.toml), so the ladder measures it, not a glibc build.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked --bin navigera --target x86_64-unknown-linux-musl
+          echo "NAVIGERA=$PWD/target/x86_64-unknown-linux-musl/release/navigera" >> "$GITHUB_ENV"
 
       - name: Build baseline navigera (A/B)
         if: inputs.baseline_ref != ''
         env:
           BASELINE_REF: ${{ inputs.baseline_ref }}
+        # Built the same way, from inside its own tree: cargo reads
+        # .cargo/config.toml from the working directory, and the baseline's
+        # build settings are part of what the A/B compares.
         run: |
           git fetch --depth=1 origin "$BASELINE_REF"
           git worktree add /tmp/nv-baseline FETCH_HEAD
-          cargo build --release --bin navigera \
-            --manifest-path /tmp/nv-baseline/Cargo.toml --target-dir /tmp/nv-baseline-target
-          echo "NAVIGERA_BASELINE=/tmp/nv-baseline-target/release/navigera" >> "$GITHUB_ENV"
-          echo "baseline: $(git -C /tmp/nv-baseline rev-parse --short HEAD)"
+          cd /tmp/nv-baseline
+          cargo build --release --bin navigera --target x86_64-unknown-linux-musl \
+            --target-dir /tmp/nv-baseline-target
+          echo "NAVIGERA_BASELINE=/tmp/nv-baseline-target/x86_64-unknown-linux-musl/release/navigera" >> "$GITHUB_ENV"
+          echo "baseline: $(git rev-parse --short HEAD)"
 
       - name: Build chromiumoxide contender (release)
         run: |
@@ -192,10 +202,9 @@ jobs:
         env:
           LADDER_PROFILE: ${{ inputs.profile == 'true' && '1' || '0' }}
           ONLY: ${{ inputs.only || '' }}
-          SCENARIOS: ${{ inputs.scenarios || 'eval,cold,realworld,browse,agent' }}
+          SCENARIOS: ${{ inputs.scenarios || 'eval,cold,realworld,browse,agent,parallel' }}
         run: |
           set -o pipefail
-          export NAVIGERA="$PWD/target/release/navigera"
           export CHROME_BIN
           mkdir -p bench/ladder/out
           python3 bench/ladder/ladder.py --out-dir bench/ladder/out \
