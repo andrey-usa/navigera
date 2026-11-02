@@ -32,6 +32,11 @@ know:
 
 ### Added
 
+- `--compact` (and `NAVIGERA_OUTPUT=compact` for a whole shell): `--raw`,
+  and an action that left the page as it was prints `ok`, one that moved it
+  only its own fields and what changed. Ten steps of a form, a table read
+  and a heading: 827 characters of output instead of 3,246 (JSON) or 2,756
+  (`--raw`), no slower (fill median 8.9 vs 10.0 ms, interleaved).
 - `batch [<file> | -] [--keep-going]` runs several steps in one call over
   one connection: one command per line, written as on the command line, or
   JSON ops. Every line is parsed before anything runs; the first failure

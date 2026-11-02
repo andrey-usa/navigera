@@ -457,3 +457,41 @@ fn a_batch_runs_steps_in_one_call() {
         );
     }
 }
+
+/// `--compact`: an action that left the page as it was prints `ok`, one that
+/// moved it only what changed; reads print their value; errors as `--raw`.
+#[test]
+fn compact_output_says_only_what_changed() {
+    let Some(site) = edge_site() else { return };
+    let base = &site.base;
+    for (engine, bin) in engines() {
+        let a = Agent::new("compact", engine, bin.clone());
+        let compact = |args: &[&str]| {
+            let mut cmd = Command::new(tool_exe());
+            cmd.args(["--session", &a.session, "--engine", engine, "--compact"]);
+            if let Some(bin) = &bin {
+                cmd.arg("--chromium").arg(bin);
+            }
+            let out = cmd.args(args).stdin(Stdio::null()).output().expect("run navigera");
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            )
+        };
+        let (ok, out, _) = compact(&["goto", &format!("{base}/form")]);
+        assert!(ok && out.contains("\"title\":\"form\"") && out.contains("/form"), "[{engine}] {out}");
+        assert_eq!(compact(&["fill", "--label", "Email address", "a@b.c"]).1, "ok", "[{engine}]");
+        assert_eq!(
+            compact(&["check", "--label", "I accept the terms"]).1,
+            r#"{"changed":true,"checked":true}"#,
+            "[{engine}]"
+        );
+        assert_eq!(compact(&["click", "--testid", "save-btn"]).1, "ok", "[{engine}]");
+        assert_eq!(compact(&["text", "--selector", "#out"]).1, "saved", "[{engine}]");
+        let (ok, out, err) = compact(&["click", "--text", "Nowhere", "--timeout-ms", "300"]);
+        assert!(!ok && out.is_empty() && err.contains("error: click"), "[{engine}] {out} {err}");
+        // The full envelope is still there without the flag.
+        assert_eq!(a.ok(&["fill", "--label", "Email address", "x"])["title"], "form", "[{engine}]");
+    }
+}

@@ -612,6 +612,9 @@ pub fn client(config: &SessionConfig, name: &str, command: &Command, output: &mu
     if let Some(caller) = caller_id() {
         request[CALLER] = json!(caller);
     }
+    if config.compact {
+        request["compact"] = json!(true);
+    }
     localize_request(&mut request, config);
     let mut writer = &stream;
     // One write: on Windows (TCP) a split line would wait out Nagle.

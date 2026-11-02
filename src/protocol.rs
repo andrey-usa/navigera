@@ -871,6 +871,9 @@ pub struct SessionConfig {
     pub pretty: bool,
     /// Print only the result (strings raw), errors as `error: …` on stderr.
     pub raw: bool,
+    /// `--raw`, and an action that left the page as it was prints `ok`
+    /// (else only what changed: url, title, tab).
+    pub compact: bool,
     /// CDP transport: `pipe` (default on Linux/macOS) or `ws` (DevTools
     /// port; the default on Windows).
     pub transport: Option<String>,
@@ -949,6 +952,7 @@ impl Default for SessionConfig {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             pretty: false,
             raw: false,
+            compact: false,
             transport: None,
             session: None,
             idle_timeout_s: DEFAULT_IDLE_TIMEOUT_S,
@@ -1196,6 +1200,10 @@ pub fn usage(program: &str) -> String {
     let flags: &[(&str, String)] = &[
         ("-s, --session <name>", "a warm browser behind a local socket ($NAVIGERA_SESSION)".into()),
         ("--raw", "print only the result (strings unquoted); errors on stderr".into()),
+        (
+            "--compact",
+            "--raw, and an action that left the page as it was prints ok (else only what changed); $NAVIGERA_OUTPUT=compact sets it for every command".into(),
+        ),
         ("--timeout-ms <ms>", format!("navigation and command timeout (default {DEFAULT_TIMEOUT_MS})")),
         (
             "--wait-ms <ms>",
@@ -1463,6 +1471,9 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
     if extract_present(args, "--raw") {
         config.raw = true;
     }
+    if extract_present(args, "--compact") {
+        (config.raw, config.compact) = (true, true);
+    }
     if let Some(t) = extract_value(args, "--transport")? {
         config.transport = Some(t);
     }
@@ -1613,6 +1624,12 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     if let Some(engine) = std::env::var("NAVIGERA_ENGINE").ok().filter(|e| !e.trim().is_empty()) {
         config.engine = engine.trim().to_string();
     }
+    // The output an agent wants, set once for its shell.
+    match std::env::var("NAVIGERA_OUTPUT").ok().as_deref().map(str::trim) {
+        Some("compact") => (config.raw, config.compact) = (true, true),
+        Some("raw") => config.raw = true,
+        _ => {}
+    }
 
     // Leading globals (the only place --timeout-ms is global; after a
     // command it is that op's own timeout).
@@ -1638,6 +1655,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
             "--pretty" => config.pretty = true,
             "--raw" => config.raw = true,
+            "--compact" => (config.raw, config.compact) = (true, true),
             "--transport" => config.transport = Some(value("--transport")?),
             "--session" | "-s" => config.session = Some(value("--session")?),
             "--attach" => {
@@ -2516,6 +2534,9 @@ pub struct Driver {
     history: Vec<Value>,
     /// What a shared browser's crash is recovered from.
     crash: Crash,
+    /// The page state the last op reported (`--compact` says only what
+    /// changed since).
+    reported: Option<Value>,
 }
 
 /// How often the storage snapshot is retaken (the tab list is kept on every op).
@@ -2602,12 +2623,12 @@ impl Driver {
         if let Some(app) = &config.electron {
             let session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
                 .map_err(|e| anyhow::anyhow!("could not launch the Electron app: {e:#}"))?;
-            return Ok(Self { session, history: Vec::new(), crash: Crash::default() });
+            return Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None });
         }
         if let Some(target) = config.attach_target() {
             let session = BrowserSession::attach(&target, config.timeout_ms)
                 .map_err(|e| anyhow::anyhow!("could not connect to the browser: {e:#}"))?;
-            return Ok(Self { session, history: Vec::new(), crash: Crash::default() });
+            return Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None });
         }
         let session = BrowserSession::launch_with(
             &config.engine,
@@ -2619,7 +2640,7 @@ impl Driver {
         .map_err(|e| {
             anyhow::anyhow!("browser launch failed (engine={}, headed={}): {e:#}", config.engine, config.headed)
         })?;
-        Ok(Self { session, history: Vec::new(), crash: Crash::default() })
+        Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None })
     }
 
     /// A named session's or an MCP server's browser: a context of its own
@@ -2633,7 +2654,7 @@ impl Driver {
         let session = BrowserSession::launch_shared(!config.headed, config.chromium.as_deref(), config.timeout_ms)
             .map_err(|e| anyhow::anyhow!("browser launch failed (shared browser, headed={}): {e:#}", config.headed))?;
         let crash = Crash { headless: !config.headed, ..Crash::default() };
-        Ok(Self { session, history: Vec::new(), crash })
+        Ok(Self { session, history: Vec::new(), crash, reported: None })
     }
 
     /// The process-wide settings `config` names: natural mode, the element
@@ -2660,7 +2681,7 @@ impl Driver {
     /// once.
     pub fn fork(&self) -> anyhow::Result<Self> {
         let crash = Crash { headless: self.crash.headless, ..Crash::default() };
-        Ok(Self { session: self.session.fork()?, history: Vec::new(), crash })
+        Ok(Self { session: self.session.fork()?, history: Vec::new(), crash, reported: None })
     }
 
     /// Active tab state the model needs after every op.
@@ -2918,6 +2939,19 @@ impl Driver {
             })
             .collect();
         json!({ "tabs": tabs, "active": active, "url": self.session.url() })
+    }
+
+    /// Keep the page state `result` reports; with `compact`, make it say
+    /// only what the op itself returned and what changed since the last
+    /// report (`"ok"` when that is nothing).
+    pub(crate) fn report_state(&mut self, result: &mut Option<Value>, compact: bool) {
+        let Some(value) = result.as_ref() else { return };
+        let (own, state) = split_state(value);
+        let Some(state) = state else { return };
+        let before = self.reported.replace(state.clone());
+        if compact {
+            *result = Some(compact_result(own, &state, before.as_ref()));
+        }
     }
 
     /// Run one op, after relaunching the shared browser if it died since the
@@ -4488,11 +4522,12 @@ pub(crate) fn handle_line(driver: &mut Driver, raw: &str) -> Option<(Vec<Respons
 }
 
 fn handle_value(driver: &mut Driver, value: Value) -> (Response, bool) {
-    let (id, command) = match value {
+    let (id, command, compact) = match value {
         Value::Object(mut map) => {
             let id = map.remove("id").unwrap_or(Value::Null);
+            let compact = map.remove("compact").and_then(|c| c.as_bool()).unwrap_or(false);
             match serde_json::from_value::<Command>(Value::Object(map)) {
-                Ok(command) => (id, command),
+                Ok(command) => (id, command, compact),
                 Err(e) => return (err_response(id, format!("bad command: {e}"), Instant::now()), false),
             }
         }
@@ -4500,7 +4535,7 @@ fn handle_value(driver: &mut Driver, value: Value) -> (Response, bool) {
     };
     let started = Instant::now();
     let is_quit = matches!(command, Command::Quit { .. });
-    let response = match driver.run_op(&command) {
+    let mut response = match driver.run_op(&command) {
         Ok(outcome) => outcome_response(id, outcome, started),
         Err(e) => {
             let mut r = err_response(id, format!("{e:#}"), started);
@@ -4511,6 +4546,7 @@ fn handle_value(driver: &mut Driver, value: Value) -> (Response, bool) {
             r
         }
     };
+    driver.report_state(&mut response.result, compact);
     (response, is_quit)
 }
 
@@ -4784,10 +4820,11 @@ pub fn oneshot(config: &SessionConfig, command: &Command, output: &mut dyn Write
             return ExitCode::from(1);
         }
     };
-    let response = match driver.run_op(command) {
+    let mut response = match driver.run_op(command) {
         Ok(outcome) => outcome_response(Value::Null, outcome, started),
         Err(e) => err_response(Value::Null, format!("{e:#}"), started),
     };
+    driver.report_state(&mut response.result, config.compact);
     driver.session().close();
     crate::timing::report();
     let value = serde_json::to_value(&response).unwrap_or(Value::Null);
@@ -4929,6 +4966,35 @@ pub fn split_state(result: &Value) -> (Option<Value>, Option<Value>) {
         }
         Value::Null => (None, None),
         other => (Some(other.clone()), None),
+    }
+}
+
+/// `--compact`: what the op returned beyond the page state, plus the state
+/// fields that changed since `before` (url and title when there was no
+/// report yet); `"ok"` when that is nothing.
+fn compact_result(own: Option<Value>, state: &Value, before: Option<&Value>) -> Value {
+    let mut out = match own {
+        Some(Value::Object(map)) => map,
+        Some(other) => {
+            let mut map = serde_json::Map::new();
+            map.insert("result".into(), other);
+            map
+        }
+        None => serde_json::Map::new(),
+    };
+    for (k, v) in state.as_object().into_iter().flatten() {
+        let changed = match before {
+            None => k == "url" || k == "title",
+            Some(b) => b.get(k) != Some(v),
+        };
+        if changed {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    if out.is_empty() {
+        json!("ok")
+    } else {
+        Value::Object(out)
     }
 }
 
@@ -5219,6 +5285,22 @@ mod tests {
         assert!(batch_steps("goto /a\nstart").unwrap_err().starts_with("line 2:"));
         assert!(batch_steps("-s other goto /a").unwrap_err().contains("can't name a session"));
         assert!(batch_steps("frobnicate").unwrap_err().starts_with("line 1:"));
+    }
+
+    #[test]
+    fn compact_says_ok_or_only_what_changed() {
+        let st = json!({ "tab": 0, "tabs": 1, "url": "http://h/a", "title": "A" });
+        assert_eq!(compact_result(None, &st, None), json!({ "url": "http://h/a", "title": "A" }));
+        assert_eq!(compact_result(None, &st, Some(&st)), json!("ok"));
+        let mut moved = st.clone();
+        moved["title"] = json!("B");
+        moved["tabs"] = json!(2);
+        assert_eq!(compact_result(None, &moved, Some(&st)), json!({ "title": "B", "tabs": 2 }));
+        assert_eq!(compact_result(Some(json!({ "selected": ["L"] })), &st, Some(&st)), json!({ "selected": ["L"] }));
+        let mut checked = st.clone();
+        checked["checked"] = json!(true);
+        let (own, state) = split_state(&checked);
+        assert_eq!(compact_result(own, &state.unwrap(), Some(&st)), json!({ "checked": true }));
     }
 
     #[test]

@@ -24,6 +24,10 @@ or set `$CHROME_BIN`.
 
 ## The loop: start, look, act, look again
 
+Set `export NAVIGERA_OUTPUT=compact` once: an action that left the page as
+it was prints `ok`, one that moved it only what changed (`{"title":"Cart"}`),
+a read only its value. Errors still say what went wrong.
+
 ```bash
 navigera -s work start                    # once: warm headless browser named "work"
 navigera -s work goto https://example.com

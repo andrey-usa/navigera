@@ -4,7 +4,7 @@
 
 Install: `curl -fsSL https://raw.githubusercontent.com/andrey-usa/navigera/master/install.sh | sh` (Windows PowerShell: `irm https://raw.githubusercontent.com/andrey-usa/navigera/master/install.ps1 | iex`; or `cargo install --locked --git https://github.com/andrey-usa/navigera navigera`), then `navigera install-skill` to put the version-matched agent guide in ./.agents/skills (`--claude` for ./.claude/skills).
 
-Core loop: `navigera -s work start` → `goto <url>` → `--raw ax` → `click <ref>` / `fill <ref> "<text>"` / `press Enter` → `--raw ax` → `quit`. Every command prints one JSON line (`{"ok":true,"result":…}`), or only the result with `--raw`. Several known steps go in one call with `batch` (one command per line on stdin or in a file; stops at the first failure).
+Core loop: `navigera -s work start` → `goto <url>` → `--raw ax` → `click <ref>` / `fill <ref> "<text>"` / `press Enter` → `--raw ax` → `quit`. Every command prints one JSON line (`{"ok":true,"result":…}`), or only the result with `--raw`; `--compact` (or `NAVIGERA_OUTPUT=compact`) prints `ok` for an action that left the page as it was, else only what changed. Several known steps go in one call with `batch` (one command per line on stdin or in a file; stops at the first failure).
 
 Electron apps: `navigera -s app start --electron ./my-app` launches the app (its directory or main script, a packaged executable or a .app bundle) and drives its windows as tabs; `quit` ends it.
 
