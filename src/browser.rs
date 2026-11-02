@@ -879,6 +879,24 @@ impl BrowserSession {
     /// session's own. Closing it closes its context; the browser stays for
     /// the other sessions.
     pub fn launch_shared(headless: bool, executable: Option<&str>, nav_timeout_ms: f64) -> Result<Self> {
+        // A host whose browser has just died refuses the join (never
+        // reached) and takes its files away: the next try starts a new host.
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            match Self::launch_shared_once(headless, executable, nav_timeout_ms) {
+                Err(e)
+                    if Instant::now() < until
+                        && e.chain().any(|c| c.downcast_ref::<crate::cdp::NeverReached>().is_some()) =>
+                {
+                    crate::timing::log(&format!("[browser] the shared browser died while joining it: {e:#}; again"));
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                done => return done,
+            }
+        }
+    }
+
+    fn launch_shared_once(headless: bool, executable: Option<&str>, nav_timeout_ms: f64) -> Result<Self> {
         let started = std::time::Instant::now();
         let Some(exe) = resolve_executable_for(executable, headless && !natural()) else {
             bail!(

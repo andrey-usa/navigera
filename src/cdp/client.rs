@@ -650,7 +650,7 @@ mod tests {
     async fn write_to_a_gone_peer_never_reached_it() {
         let (client, peer) = framed_pair();
         drop(peer);
-        let err = client.send("Page.navigate", json!({}), None, T).await.unwrap_err();
+        let err = client.send("Page.navigate", json!({ "url": "about:blank" }), None, T).await.unwrap_err();
         assert!(format!("{err:#}").contains(NEVER_REACHED), "{err:#}");
     }
 
@@ -669,7 +669,7 @@ mod tests {
             d
         });
         let big = "A".repeat(4 << 20);
-        let err = client.send("X.mutate", json!({ "big": big }), None, T).await.unwrap_err();
+        let err = client.send("Runtime.evaluate", json!({ "expression": big }), None, T).await.unwrap_err();
         let dispatches = peer_task.await.unwrap();
         assert!(format!("{err:#}").contains(NEVER_REACHED), "{err:#}");
         assert_eq!(dispatches.load(Ordering::SeqCst), 0, "no dispatch, so no replay risk");
@@ -687,11 +687,11 @@ mod tests {
             let mut buf = Vec::new();
             let frame = read_frame(&mut peer, &mut buf).await;
             let text = std::str::from_utf8(&frame).unwrap();
-            assert!(text.contains("X.mutate"));
+            assert!(text.contains("Runtime.evaluate"));
             d.fetch_add(1, Ordering::SeqCst); // dispatched
             drop(peer); // response lost
         });
-        let err = client.send("X.mutate", json!({}), None, T).await.unwrap_err();
+        let err = client.send("Runtime.evaluate", json!({ "expression": "1" }), None, T).await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains(CLOSED) && !msg.contains(NEVER_REACHED), "{msg}");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -709,9 +709,14 @@ mod tests {
             *h.lock().unwrap() = Some((failed, unsent));
         });
         let writer = client.raw_writer().unwrap();
-        let big = format!("{{\"id\":7,\"method\":\"X.mutate\",\"params\":{{\"big\":\"{}\"}}}}", "A".repeat(4 << 20));
+        let big = format!(
+            "{{\"id\":7,\"method\":\"Runtime.evaluate\",\"params\":{{\"expression\":\"{}\"}}}}",
+            "A".repeat(4 << 20)
+        );
         writer.send(big.clone()).unwrap();
-        writer.send("{\"id\":8,\"method\":\"X.mutate\",\"params\":{}}".to_string()).unwrap();
+        writer
+            .send("{\"id\":8,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"1\"}}".to_string())
+            .unwrap();
         let mut got = vec![0u8; 100];
         let n = peer.read(&mut got).await.unwrap();
         assert!(n > 0);
@@ -724,7 +729,11 @@ mod tests {
         }
         let (failed, unsent) = handed.lock().unwrap().take().expect("write failure reported");
         assert_eq!(failed, big, "the frame mid-write");
-        assert_eq!(unsent, ["{\"id\":8,\"method\":\"X.mutate\",\"params\":{}}"], "never attempted");
+        assert_eq!(
+            unsent,
+            ["{\"id\":8,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"1\"}}"],
+            "never attempted"
+        );
         assert!(client.is_closed());
     }
 
@@ -752,10 +761,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(300)).await;
             drop(peer);
         });
-        let ok = client.send("X.mutate", json!({ "n": 1 }), None, T).await.unwrap();
+        let ok = client.send("Runtime.evaluate", json!({ "expression": "1" }), None, T).await.unwrap();
         assert_eq!(ok, json!({}));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let err = client.send("X.mutate", json!({ "n": 2 }), None, T).await.unwrap_err();
+        let err = client.send("Runtime.evaluate", json!({ "expression": "2" }), None, T).await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains(CLOSED) && !msg.contains(NEVER_REACHED), "{msg}");
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -782,7 +791,7 @@ mod tests {
             drop(ws); // connection lost with the request maybe executed
         });
         let client = CdpClient::connect_within(&format!("ws://{addr}"), T).await.unwrap();
-        let err = client.send("X.mutate", json!({}), None, T).await.unwrap_err();
+        let err = client.send("Runtime.evaluate", json!({ "expression": "1" }), None, T).await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains(CLOSED) && !msg.contains(NEVER_REACHED), "{msg}");
         for _ in 0..100 {
@@ -791,7 +800,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        let err = client.send("X.mutate", json!({}), None, T).await.unwrap_err();
+        let err = client.send("Runtime.evaluate", json!({ "expression": "1" }), None, T).await.unwrap_err();
         assert!(format!("{err:#}").contains(NEVER_REACHED), "{err:#}");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1, "dispatched once, never replayed");
     }

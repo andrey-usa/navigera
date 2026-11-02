@@ -2694,17 +2694,17 @@ mod crash_retry_transport_tests {
         let d = Arc::clone(&dispatches);
         tokio::spawn(async move {
             let frame = read_frame(&mut peer).await.expect("the mutation frame");
-            assert!(frame.contains("X.mutate"), "{frame}");
+            assert!(frame.contains("Runtime.evaluate"), "{frame}");
             d.fetch_add(1, Ordering::SeqCst);
             let id = serde_json::from_str::<serde_json::Value>(&frame).unwrap()["id"].clone();
             peer.write_all(format!("{{\"id\":{id},\"result\":{{\"done\":true}}}}\0").as_bytes()).await.unwrap();
             // The browser dies here: EOF before the follow-up is written.
         });
         let before = client.effects_uncertain();
-        client.send("X.mutate", json!({}), None, T).await.unwrap();
+        client.send("Runtime.evaluate", json!({ "expression": "1" }), None, T).await.unwrap();
         assert_eq!(client.effects_uncertain(), before + 1, "an answered request's effect stays unproven");
         until_closed(&client).await;
-        let err = client.send("X.observe", json!({}), None, T).await.unwrap_err();
+        let err = client.send("Browser.getVersion", json!({}), None, T).await.unwrap_err();
         assert!(err.chain().any(|c| c.downcast_ref::<NeverReached>().is_some()), "{err:#}");
         assert_eq!(client.effects_uncertain(), before + 1, "a never-reached request adds nothing");
         assert!(
@@ -2733,7 +2733,7 @@ mod crash_retry_transport_tests {
         });
         until_closed(&dead).await;
         let before = dead.effects_uncertain();
-        let err = dead.send("X.mutate", json!({}), None, T).await.unwrap_err();
+        let err = dead.send("Runtime.evaluate", json!({ "expression": "1" }), None, T).await.unwrap_err();
         assert!(err.chain().any(|c| c.downcast_ref::<NeverReached>().is_some()), "{err:#}");
         assert_eq!(dead.effects_uncertain(), before, "a never-reached request adds nothing");
         assert!(
@@ -2746,12 +2746,12 @@ mod crash_retry_transport_tests {
         let d = Arc::clone(&dispatches);
         tokio::spawn(async move {
             let frame = read_frame(&mut fresh_peer).await.expect("the retried frame");
-            assert!(frame.contains("X.mutate"), "{frame}");
+            assert!(frame.contains("Runtime.evaluate"), "{frame}");
             d.fetch_add(1, Ordering::SeqCst);
             let id = serde_json::from_str::<serde_json::Value>(&frame).unwrap()["id"].clone();
             fresh_peer.write_all(format!("{{\"id\":{id},\"result\":{{\"done\":true}}}}\0").as_bytes()).await.unwrap();
         });
-        fresh.send("X.mutate", json!({}), None, T).await.unwrap();
+        fresh.send("Runtime.evaluate", json!({ "expression": "1" }), None, T).await.unwrap();
         assert_eq!(dispatches.load(Ordering::SeqCst), 1, "the retry ran the command once");
         drop(dead);
         counter.await.unwrap();

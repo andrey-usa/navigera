@@ -764,16 +764,31 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
     // browser's children hold its write end open), so watch both: a
     // command refused before its write positively never ran.
     let chrome_dead = Arc::new(AtomicBool::new(false));
-    browser.closed_watch().on_close({
+    // At the death, this host's socket and pid files go at once: a session
+    // that relaunches (or starts) then finds no host here and starts a new
+    // one, instead of joining this one, which refuses everything until it
+    // exits at its next look.
+    let on_death: Arc<dyn Fn() + Send + Sync> = {
         let chrome_dead = Arc::clone(&chrome_dead);
-        move || chrome_dead.store(true, Ordering::SeqCst)
+        let files = [socket.clone(), pid_file.clone()];
+        Arc::new(move || {
+            if !chrome_dead.swap(true, Ordering::SeqCst) {
+                for file in &files {
+                    let _ = std::fs::remove_file(file);
+                }
+            }
+        })
+    };
+    browser.closed_watch().on_close({
+        let on_death = Arc::clone(&on_death);
+        move || on_death()
     });
     {
-        let chrome_dead = Arc::clone(&chrome_dead);
+        let on_death = Arc::clone(&on_death);
         let browser = Arc::clone(&browser);
         std::thread::spawn(move || loop {
             if browser.is_closed() || browser.exit_status().is_some() {
-                chrome_dead.store(true, Ordering::SeqCst);
+                on_death();
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -863,8 +878,17 @@ pub fn serve_host(config: &SessionConfig) -> ExitCode {
             break format!("no session for {} s", grace.as_secs());
         }
     };
-    let _ = std::fs::remove_file(&socket);
-    let _ = std::fs::remove_file(&pid_file);
+    if browser.is_closed() || chrome_dead.load(Ordering::SeqCst) {
+        // Removed at the death (now, if its hooks haven't run yet): a new
+        // host may own these paths by now.
+        on_death();
+    } else {
+        let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(&pid_file);
+    }
+    // Closing the browser is ours from here: its death hooks must not
+    // remove files a new host may have made since.
+    chrome_dead.store(true, Ordering::SeqCst);
     // Every client's connection ends with its socket.
     if let Ok(mut r) = router.lock() {
         for client in r.clients.values() {
