@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The static Linux binaries (what `install.sh`, npm, pip and Homebrew
+  install) used three times the memory of the other builds and took three
+  times as long over their first snapshot of a large page, since 0.7.1:
+  mimalloc committed its whole arena up front, and transparent huge pages
+  then backed it with 2 MiB pages. It now commits on demand: a scripted
+  session's peak 17.7 to 5.9 MB, the first snapshot of a 2,000-row table
+  about 550 to 215 ms (median of 6 fresh processes), later snapshots 20%
+  faster.
+
 ## [0.7.1] - 2026-11-02
 
 ### Behaviour changes
