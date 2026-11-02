@@ -609,7 +609,7 @@ fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Val
     }
 }
 
-/// T-0226: the never-reached classification, with a scripted peer on the
+/// The never-reached classification, with a scripted peer on the
 /// other end of a socket pair so each delivery case is deterministic.
 /// The invariant under test: a request is only ever marked NEVER_REACHED
 /// (recoverable) when the peer provably could not dispatch it; anything

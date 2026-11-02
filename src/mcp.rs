@@ -739,7 +739,7 @@ pub fn in_working_dir(name: &str) -> bool {
 /// at a time, each part that exists followed to where it leads before the
 /// next `..` is taken from there. Collapsing `..` first got it wrong:
 /// `link/../x`, with `link` a link out of the working directory, read as `x`
-/// inside it while the system wrote `x` beside the link's target (T-0085).
+/// inside it while the system wrote `x` beside the link's target.
 fn inside(root: &std::path::Path, path: &std::path::Path) -> bool {
     use std::path::Component;
     let mut at = std::path::PathBuf::new();
@@ -965,8 +965,8 @@ mod tests {
             if std::os::unix::fs::symlink(std::env::temp_dir(), link).is_ok() {
                 for path in [
                     "target/mcp-test-link-out/a.pdf",
-                    // `..` is taken from where the link leads, not from the link
-                    // (T-0085): these are beside the temporary directory.
+                    // `..` is taken from where the link leads, not from the
+                    // link: these are beside the temporary directory.
                     "target/mcp-test-link-out/../a.pdf",
                     "target/not-yet/../mcp-test-link-out/../a.pdf",
                 ] {
