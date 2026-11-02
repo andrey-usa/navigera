@@ -3536,11 +3536,15 @@ impl Driver {
         }
         let result = self.dispatch(command).map_err(|e| {
             let msg = format!("{e:#}");
+            // Never reached: on the shared browser the op is run again on a
+            // relaunched one (the typed cause must stay); a browser of the
+            // session's own is just gone.
+            let never = e.chain().any(|c| c.downcast_ref::<crate::cdp::NeverReached>().is_some());
             if msg.contains(crate::cdp::CONNECTION_CLOSED) && self.session.is_shared() {
                 anyhow::anyhow!(
                     "{msg} — the shared browser is gone (it crashed or was killed); this command did not complete and was not retried; the next command relaunches the browser and reopens this session's tabs"
                 )
-            } else if msg.contains(crate::cdp::CONNECTION_CLOSED) {
+            } else if msg.contains(crate::cdp::CONNECTION_CLOSED) || (never && !self.session.is_shared()) {
                 let how = self.session.browser_exit().unwrap_or_else(|| "connection lost".into());
                 anyhow::anyhow!("{msg} — the browser is gone ({how}); run `quit`, then `start` again")
             } else {

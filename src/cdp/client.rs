@@ -615,7 +615,8 @@ fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Val
 /// (recoverable) when the peer provably could not dispatch it; anything
 /// it may have dispatched stays CLOSED (never retried), so a mutation
 /// runs at most once.
-#[cfg(test)]
+// Unix sockets stand in for the browser's pipe.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;
