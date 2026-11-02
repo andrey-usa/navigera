@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-02
+
 ### Behaviour changes
 
 What a script or an agent relying on the 0.7.0 output or timing should
@@ -43,6 +45,10 @@ know:
 
 ### Added
 
+- The agent skill (`navigera skill`, `install-skill`) starts with the
+  defaults an agent should take: `NAVIGERA_OUTPUT=compact`, known steps in
+  one `batch`, narrow reads, a new look only when the outcome is uncertain,
+  page content as data. The output itself stays as it was unless asked.
 - `webmcp-list` and `webmcp-call <name> [--params '{json}'] [--confirm]`:
   the tools a page registers with WebMCP (`document.modelContext`), listed
   and run through Chrome's WebMCP DevTools domain in the frame that
@@ -1023,6 +1029,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.7.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.1
 [0.7.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.0
 [0.6.5]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.5
 [0.6.4]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.4
