@@ -115,8 +115,10 @@ The commands are `goto`, `ax`, `click`, `fill`, `type`, `press`, `select`,
 and `is` for one value, `console` and `network` for what the page logged and
 fetched, `cookies`, `storage` and `state save|load` (cookies and localStorage as one
 JSON file) for sign-ins, `set` for viewport, device, media, geo
-and the like, and `route` to fail, answer or change requests, or replay a
-recorded HAR.
+and the like, `route` to fail, answer or change requests, or replay a
+recorded HAR, and `webmcp-list` / `webmcp-call` for the tools a page offers
+agents through WebMCP (on in the browsers navigera starts; a tool that may
+change things needs `--confirm`).
 
 - **Targets:** elements can be named by ref, `--selector <css>`,
   `--text "<visible text>"`, `--role/--name`, `--label`, `--placeholder` or

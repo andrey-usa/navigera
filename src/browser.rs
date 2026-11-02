@@ -5,7 +5,7 @@
 //! agent needs. The wire protocol in `navigera.rs` is unchanged.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
@@ -79,7 +79,9 @@ const CHROME_FLAGS: &[&str] = &[
     // feature here is fine there). Its hint fetches are network work that
     // `--disable-background-networking` already stops.
     "--disable-features=Translate,TranslateUI,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,site-per-process",
-    "--enable-features=NetworkService,NetworkServiceInProcess",
+    // WebMCP: the tools a page registers on `document.modelContext`
+    // (`webmcp-list`, `webmcp-call`); a Chrome without it ignores the name.
+    "--enable-features=NetworkService,NetworkServiceInProcess,WebMCP",
 ];
 
 /// [`CHROME_FLAGS`] adjusted by two diagnostic knobs, for bisecting a
@@ -101,7 +103,42 @@ pub(crate) fn chrome_flags() -> Vec<String> {
     if let Ok(extra) = std::env::var("NAVIGERA_EXTRA_FLAGS") {
         flags.extend(extra.split_whitespace().map(str::to_string));
     }
-    flags
+    merge_feature_flags(flags)
+}
+
+/// One `--enable-features` and one `--disable-features` holding every
+/// feature the flags name: Chrome keeps only the last of each, so a feature
+/// added through `NAVIGERA_EXTRA_FLAGS` would otherwise drop navigera's own.
+pub(crate) fn merge_feature_flags(flags: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(flags.len());
+    let mut lists: Vec<(&str, usize, Vec<String>)> = Vec::new();
+    for flag in flags {
+        let Some((prefix, list)) = ["--enable-features=", "--disable-features="]
+            .iter()
+            .find_map(|p| flag.strip_prefix(p).map(|rest| (*p, rest.to_string())))
+        else {
+            out.push(flag);
+            continue;
+        };
+        let names = list.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+        match lists.iter_mut().find(|(p, ..)| *p == prefix) {
+            Some((_, _, all)) => {
+                for n in names {
+                    if !all.contains(&n) {
+                        all.push(n);
+                    }
+                }
+            }
+            None => {
+                lists.push((prefix, out.len(), names.collect()));
+                out.push(String::new());
+            }
+        }
+    }
+    for (prefix, at, names) in lists {
+        out[at] = format!("{prefix}{}", names.join(","));
+    }
+    out
 }
 
 const NO_SANDBOX: &str = "--no-sandbox";
@@ -1601,6 +1638,83 @@ impl BrowserSession {
         }
     }
 
+    /// The WebMCP tools the active tab's frames registered (`WebMCP` CDP
+    /// domain). `Ok(None)`: the browser has no WebMCP at all.
+    pub fn webmcp_tools(&self) -> Result<Option<Vec<serde_json::Value>>> {
+        let tab = self.active_tab();
+        if let Err(e) = tab.send_cdp("WebMCP.enable", serde_json::json!({}), self.timeout(None)) {
+            let text = format!("{e:#}");
+            if text.contains("wasn't found") || text.contains("not found") {
+                return Ok(None);
+            }
+            return Err(e);
+        }
+        // Tools already registered arrive as events right after `enable`.
+        let read =
+            || self.browser.shared().webmcp.lock().unwrap().tools.get(tab.session_id()).cloned().unwrap_or_default();
+        let mut tools = Vec::new();
+        for _ in 0..4 {
+            self.browser.caught_up();
+            tools = read();
+            if !tools.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(Some(tools))
+    }
+
+    /// Call a WebMCP tool in the frame that registered it and wait for its
+    /// answer (`WebMCP.toolResponded`): the output, or the tool's error.
+    pub fn webmcp_invoke(
+        &self,
+        tool: &serde_json::Value,
+        input: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value> {
+        let tab = self.active_tab();
+        let r = tab.send_cdp(
+            "WebMCP.invokeTool",
+            serde_json::json!({ "frameId": tool["frameId"], "toolName": tool["name"], "input": input }),
+            self.timeout(None),
+        )?;
+        let id = r.get("invocationId").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.browser.caught_up();
+            if let Some(answer) = self.browser.shared().webmcp.lock().unwrap().responses.remove(&id) {
+                return match answer.get("status").and_then(serde_json::Value::as_str) {
+                    Some("Completed") => Ok(answer.get("output").cloned().unwrap_or(serde_json::Value::Null)),
+                    Some("Canceled") => anyhow::bail!("the page canceled the call"),
+                    _ => {
+                        let text = answer
+                            .get("errorText")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|t| !t.is_empty())
+                            .or_else(|| answer.pointer("/exception/description").and_then(serde_json::Value::as_str))
+                            .unwrap_or("the tool failed")
+                            .to_string();
+                        anyhow::bail!("{text}")
+                    }
+                };
+            }
+            if Instant::now() >= deadline {
+                let _ = tab.send_cdp(
+                    "WebMCP.cancelInvocation",
+                    serde_json::json!({ "invocationId": id }),
+                    self.timeout(None),
+                );
+                anyhow::bail!("no answer within {} ms (the call was canceled)", timeout.as_millis());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The browser's user agent.
+    pub fn user_agent(&self) -> String {
+        self.browser.user_agent().unwrap_or_default()
+    }
+
     /// A logged request's response body: (body, base64-encoded?).
     pub fn response_body(&self, request_id: &str) -> Result<(String, bool)> {
         let r = self.active_tab().send_cdp(
@@ -2978,6 +3092,24 @@ fn is_syntax_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feature_lists_merge_into_one_flag_each() {
+        let flags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            merge_feature_flags(flags(&[
+                "--a",
+                "--enable-features=X,WebMCP",
+                "--disable-features=T",
+                "--b",
+                "--enable-features=Y,X",
+                "--disable-features=U"
+            ])),
+            flags(&["--a", "--enable-features=X,WebMCP,Y", "--disable-features=T,U", "--b"])
+        );
+        assert!(chrome_flags().iter().filter(|f| f.starts_with("--enable-features=")).count() == 1);
+        assert!(chrome_flags().iter().any(|f| f.starts_with("--enable-features=") && f.contains("WebMCP")));
+    }
 
     #[test]
     fn the_main_process_says_which_window_is_hidden_only_when_it_knows_it() {

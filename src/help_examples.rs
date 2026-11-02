@@ -482,6 +482,19 @@ pub const EXAMPLES: &[Help] = &[
         ],
     ),
     ("url", &[("navigera -s s url", "")], &[]),
+    ("webmcp-list", &[("navigera -s s webmcp-list", "the tools the page offers an agent")], &[]),
+    (
+        "webmcp-call",
+        &[
+            ("navigera -s s webmcp-call search_flights --params '{\"to\":\"LIS\"}'", "a read-only tool"),
+            ("navigera -s s webmcp-call add_to_cart --params '{\"sku\":\"A1\"}' --confirm", "one that changes things"),
+        ],
+        &[
+            ("<name>", "the tool, as webmcp-list names it"),
+            ("--params '{json}'", "its input, a JSON object (default {})"),
+            ("--confirm", "needed for a tool the page doesn't mark read-only"),
+        ],
+    ),
     ("status", &[("navigera -s s status", "")], &[]),
     (
         "locate",

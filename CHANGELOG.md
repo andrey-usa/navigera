@@ -23,6 +23,10 @@ know:
 - An icon-only control that printed as a bare `button [ref=N]` may now
   carry `icon="svg"`, `img="inline"` or an image's file name.
 - `text` with no selector is the page's whole text (it was an error).
+- The browsers navigera starts have WebMCP on (`--enable-features=WebMCP`),
+  and the `--enable-features` / `--disable-features` lists from
+  `NAVIGERA_EXTRA_FLAGS` are merged into navigera's own instead of replacing
+  them (Chrome keeps only the last of each flag).
 - `network --har` includes the response bodies the browser still holds,
   so the file is larger.
 - A session on the shared browser no longer ends when that browser dies: its
@@ -32,6 +36,13 @@ know:
 
 ### Added
 
+- `webmcp-list` and `webmcp-call <name> [--params '{json}'] [--confirm]`:
+  the tools a page registers with WebMCP (`document.modelContext`), listed
+  and run through Chrome's WebMCP DevTools domain in the frame that
+  registered them. Every answer says the tools are the page's and
+  untrusted; a tool not marked read-only needs `--confirm`. MCP clients
+  run them as `browser_run` steps. Chrome 153 and later, https or
+  localhost pages.
 - `set device` knows 55 devices (recent iPhones, Pixels, Galaxy phones and
   tablets, iPads, two desktop sizes).
 - `set permissions grant|deny|reset <name>…` sets geolocation,

@@ -193,6 +193,9 @@ pub struct Shared {
     pub dialogs: Mutex<Vec<(Scope, Value)>>,
     /// Page session id -> the scope it belongs to.
     pub scopes: Mutex<HashMap<String, Scope>>,
+    /// WebMCP tools each page session's frames registered, and the answers
+    /// to invocations (by invocation id).
+    pub webmcp: Mutex<WebMcp>,
     /// Frame id of a subframe -> the scope of the tab it is in (a download
     /// a subframe starts is that tab's).
     pub frame_scopes: Mutex<HashMap<String, Scope>>,
@@ -237,6 +240,13 @@ pub struct Shared {
     /// Several sessions share this browser (`BrowserSession::fork`): each
     /// takes only the tabs its own tabs opened or closed.
     pub forked: std::sync::atomic::AtomicBool,
+}
+
+/// What the `WebMCP` domain reported.
+#[derive(Default)]
+pub struct WebMcp {
+    pub tools: HashMap<String, Vec<Value>>,
+    pub responses: HashMap<String, Value>,
 }
 
 /// What a `route` does with the requests its pattern matches.
@@ -961,6 +971,21 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                 let session = session.to_string();
                 let shared = Arc::clone(shared);
                 tokio::spawn(async move { arm_dialog(&client, &shared, &session).await });
+            }
+        }
+        "WebMCP.toolsAdded" | "WebMCP.toolsRemoved" => {
+            let mut w = shared.webmcp.lock().unwrap();
+            let tools = w.tools.entry(session.to_string()).or_default();
+            for t in params.get("tools").and_then(Value::as_array).into_iter().flatten() {
+                tools.retain(|old| !(old["name"] == t["name"] && old["frameId"] == t["frameId"]));
+                if method == "WebMCP.toolsAdded" {
+                    tools.push(t.clone());
+                }
+            }
+        }
+        "WebMCP.toolResponded" => {
+            if let Some(id) = params.get("invocationId").and_then(Value::as_str) {
+                shared.webmcp.lock().unwrap().responses.insert(id.to_string(), params.clone());
             }
         }
         "Page.javascriptDialogOpening" => {

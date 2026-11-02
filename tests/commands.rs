@@ -528,3 +528,36 @@ fn compact_output_says_only_what_changed() {
         assert_eq!(a.ok(&["fill", "--label", "Email address", "x"])["title"], "form", "[{engine}]");
     }
 }
+
+/// WebMCP: the browser navigera starts has it on; a page's tools are listed
+/// and called, a tool not marked read-only needs --confirm, and everything
+/// says it is the page's. Chrome only (153 and later have WebMCP).
+#[test]
+fn webmcp_tools_are_listed_and_called() {
+    let Some(site) = edge_site() else { return };
+    let Some((engine, bin)) = engines().into_iter().find(|(e, _)| *e == "chrome") else { return };
+    let a = Agent::new("webmcp", engine, bin);
+    a.ok(&["goto", &format!("{}/webmcp", site.base)]);
+    let r = a.run(&["webmcp-list"]);
+    if r["ok"] == false && r["error"].as_str().unwrap_or_default().contains("has no WebMCP") {
+        eprintln!("skipping: {}", r["error"]);
+        return;
+    }
+    let list = a.ok(&["webmcp-list"]);
+    assert!(list["untrusted"].as_str().unwrap().starts_with("page-provided"), "{list}");
+    let tools = list["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(names, ["add", "read_count"], "{list}");
+    assert_eq!((tools[0]["read_only"].as_bool(), tools[1]["read_only"].as_bool()), (Some(false), Some(true)), "{list}");
+    assert_eq!(tools[0]["input_schema"]["required"][0], "n", "{list}");
+
+    let r = a.ok(&["webmcp-call", "read_count"]);
+    assert_eq!(r["output"]["content"][0]["text"], "0", "{r}");
+    let e = a.err(&["webmcp-call", "add", "--params", r#"{"n":5}"#]);
+    assert!(e.contains("--confirm"), "{e}");
+    assert_eq!(a.ok(&["text", "--selector", "#count"]), "0", "refused means not run");
+    let r = a.ok(&["webmcp-call", "add", "--params", r#"{"n":5}"#, "--confirm"]);
+    assert_eq!(r["output"]["content"][0]["text"], "5", "{r}");
+    assert_eq!(a.ok(&["text", "--selector", "#count"]), "5");
+    assert!(a.err(&["webmcp-call", "nope"]).contains("it has: "));
+}
