@@ -1,0 +1,4 @@
+# The tests read each command's JSON line: the CLI's default output is the
+# compact form meant for agents (one test checks that default on its own).
+[env]
+NAVIGERA_OUTPUT = "json"

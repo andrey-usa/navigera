@@ -21,8 +21,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | global flag | meaning |
 |---|---|
 | `-s, --session <name\|path>` | named session. A bare name lives in a directory only you can enter: `$XDG_RUNTIME_DIR/navigera/<name>.sock`, else `$TMPDIR/navigera-<uid>/<name>.sock` (mode 0700; navigera refuses one that is a symlink, someone else's or open to others), `%TEMP%\navigera\` on Windows; a value with a path separator is used as the path. `$NAVIGERA_SESSION` sets a default for client calls |
-| `--compact` | `--raw`, and an action that left the page as it was (same url, title, tab) prints `ok`; one that moved it prints only its own fields and what changed (`{"title":"Saved"}`); reads print their value; errors as `--raw`. `$NAVIGERA_OUTPUT=compact` (or `raw`) sets it for every command of a shell. The session remembers the state it last reported |
-| `--raw` | print only the result (strings unquoted, e.g. the `ax` tree). Errors go to stderr as `error: …`, notes (dialogs, new tabs, an exception the page threw, an engine difference) as `note: …` |
+| `--output compact\|raw\|json` | what a command prints. `compact`, the default: an action that left the page as it was (same url, title, tab) prints `ok`; one that moved it prints only its own fields and what changed (`{"title":"Saved"}`); a read prints its value (strings unquoted, the `ax` tree as text). `raw`: the result only, as it is. `json`: one JSON line per command, `{"ok":true,"result":…}` or `{"ok":false,"error":…}`, for programs. Outside `json`, errors go to stderr as `error: …` (exit code 1) and notes as `note: …`. `$NAVIGERA_OUTPUT` sets the mode for every command of a shell; a flag wins. The session remembers the state it last reported. `--compact`: `--output compact`; `--raw`: `--output raw` |
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
 | `--wait-ms <ms>` | element ops' wait when they name no timeout, and on one `wait` for a condition, its timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
@@ -768,4 +767,4 @@ machine without a GPU still reports a software renderer).
 | `tab new`, `tab`, … | `tab-new`, `tab-list`, `tab-select`, `tab-close` |
 | `close` | `quit` (or `close`) |
 | `--session name` | `-s name` / `-s=name` |
-| `--json` (default text) | `--raw` (default JSON) |
+| `--json` (default text) | `--output json` (default compact text) |

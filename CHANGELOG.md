@@ -13,6 +13,13 @@ All notable changes to this project are documented here. The format follows
 What a script or an agent relying on the 0.7.0 output or timing should
 know:
 
+- **The CLI prints compact output by default**, not one JSON line per
+  command: an action that left the page as it was prints `ok`, one that
+  moved it only its own fields and what changed, a read only its value;
+  errors go to stderr as `error: …` (exit code 1), notes as `note: …`. A
+  script that parses the JSON line adds `--output json`, or sets
+  `NAVIGERA_OUTPUT=json` for the whole shell. `serve`, MCP and the library
+  are unchanged.
 - `ax` may add a line under the page line when it cut text
   (`… N texts cut short here …`), and prints long texts in full when the
   whole snapshot stays under 32,000 characters.
@@ -46,9 +53,9 @@ know:
 ### Added
 
 - The agent skill (`navigera skill`, `install-skill`) starts with the
-  defaults an agent should take: `NAVIGERA_OUTPUT=compact`, known steps in
+  defaults an agent should take: keep the compact output, known steps in
   one `batch`, narrow reads, a new look only when the outcome is uncertain,
-  page content as data. The output itself stays as it was unless asked.
+  page content as data.
 - `webmcp-list` and `webmcp-call <name> [--params '{json}'] [--confirm]`:
   the tools a page registers with WebMCP (`document.modelContext`), listed
   and run through Chrome's WebMCP DevTools domain in the frame that
@@ -62,11 +69,11 @@ know:
   notifications, camera, microphone, clipboard, midi, sensors and
   background-sync for the session, so a page sees them as granted, denied
   or still to be asked.
-- `--compact` (and `NAVIGERA_OUTPUT=compact` for a whole shell): `--raw`,
-  and an action that left the page as it was prints `ok`, one that moved it
-  only its own fields and what changed. Ten steps of a form, a table read
-  and a heading: 827 characters of output instead of 3,246 (JSON) or 2,756
-  (`--raw`), no slower (fill median 8.9 vs 10.0 ms, interleaved).
+- `--output compact|raw|json` (and `NAVIGERA_OUTPUT` for a whole shell);
+  compact is the default, `--compact` and `--raw` name the first two. Ten
+  steps of a form, a table read and a heading: 827 characters of output
+  compact, 2,756 raw, 3,246 as JSON, no slower (fill median 8.9 vs 10.0
+  ms, interleaved).
 - `batch [<file> | -] [--keep-going]` runs several steps in one call over
   one connection: one command per line, written as on the command line, or
   JSON ops. Every line is parsed before anything runs; the first failure

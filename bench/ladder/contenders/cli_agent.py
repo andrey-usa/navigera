@@ -29,6 +29,9 @@ import sys
 import tempfile
 import time
 
+# navigera prints compact output by default; this reads its JSON lines.
+os.environ.setdefault("NAVIGERA_OUTPUT", "json")
+
 # Same expressions as nv_serve.py, written as IIFEs so a tool that evaluates
 # the expression as-is (rather than calling a returned function) gets values.
 TITLE = "(() => document.title)()"

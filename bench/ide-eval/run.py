@@ -38,6 +38,9 @@ import tempfile
 import time
 from pathlib import Path
 
+# navigera prints compact output by default; this reads its JSON lines.
+os.environ.setdefault("NAVIGERA_OUTPUT", "json")
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 _spec = importlib.util.spec_from_file_location("agent_eval", REPO / "bench" / "agent-eval" / "run.py")

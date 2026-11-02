@@ -71,7 +71,6 @@ none). Set `$CHROME_BIN` to choose explicitly.
 ## Use (agents and people)
 
 ```sh
-export NAVIGERA_OUTPUT=compact              # agents: actions print ok (or only what changed), reads only their value
 navigera -s work start                      # warm headless browser behind a local socket
 navigera -s work goto example.com
 navigera -s work ax                         # page as an indented tree, [ref=N] on actionable nodes
@@ -86,7 +85,7 @@ command per line (or JSON ops) and prints what the steps read and the page
 state once, stopping at the first failure:
 
 ```sh
-navigera -s work --raw batch <<'EOF'
+navigera -s work batch <<'EOF'
 goto https://example.com/signup
 fill --label Email ada@example.com
 select --label Plan Pro
@@ -123,8 +122,10 @@ change things needs `--confirm`).
 - **Targets:** elements can be named by ref, `--selector <css>`,
   `--text "<visible text>"`, `--role/--name`, `--label`, `--placeholder` or
   `--testid`.
-- **Output:** every command prints one JSON line, or just the result with
-  `--raw`.
+- **Output:** compact by default, for agents: an action that left the page
+  as it was prints `ok`, one that moved it only what changed, a read only
+  its value; errors go to stderr. `--output json` (or
+  `NAVIGERA_OUTPUT=json`) prints one JSON line per command, for programs.
 - **Help:** `navigera help <command>`.
 - **Agent guide:** the version-matched guide is
   [`skills/navigera/SKILL.md`](https://github.com/andrey-usa/navigera/blob/master/skills/navigera/SKILL.md),
@@ -161,7 +162,7 @@ arguments to the app.
 
 ```sh
 navigera -s app start --electron ./my-app       # the window the app opens first
-navigera -s app --raw ax
+navigera -s app ax
 navigera -s app click --role button --name "Settings"
 navigera -s app tab-list                        # the app's new window is a tab, and the active one
 navigera -s app eval --main "({ app }) => app.getPath('userData')"   # the app's main process

@@ -491,8 +491,9 @@ fn a_batch_runs_steps_in_one_call() {
     }
 }
 
-/// `--compact`: an action that left the page as it was prints `ok`, one that
-/// moved it only what changed; reads print their value; errors as `--raw`.
+/// The default output (compact): an action that left the page as it was
+/// prints `ok`, one that moved it only what changed; reads print their
+/// value; errors as `--raw`. `--output json` gives the full line.
 #[test]
 fn compact_output_says_only_what_changed() {
     let Some(site) = edge_site() else { return };
@@ -501,7 +502,9 @@ fn compact_output_says_only_what_changed() {
         let a = Agent::new("compact", engine, bin.clone());
         let compact = |args: &[&str]| {
             let mut cmd = Command::new(tool_exe());
-            cmd.args(["--session", &a.session, "--engine", engine, "--compact"]);
+            // No flag and no NAVIGERA_OUTPUT: the default.
+            cmd.env_remove("NAVIGERA_OUTPUT");
+            cmd.args(["--session", &a.session, "--engine", engine]);
             if let Some(bin) = &bin {
                 cmd.arg("--chromium").arg(bin);
             }
@@ -524,7 +527,7 @@ fn compact_output_says_only_what_changed() {
         assert_eq!(compact(&["text", "--selector", "#out"]).1, "saved", "[{engine}]");
         let (ok, out, err) = compact(&["click", "--text", "Nowhere", "--timeout-ms", "300"]);
         assert!(!ok && out.is_empty() && err.contains("error: click"), "[{engine}] {out} {err}");
-        // The full envelope is still there without the flag.
+        // The full line for programs (this harness runs with NAVIGERA_OUTPUT=json).
         assert_eq!(a.ok(&["fill", "--label", "Email address", "x"])["title"], "form", "[{engine}]");
     }
 }

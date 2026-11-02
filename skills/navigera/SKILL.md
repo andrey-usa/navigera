@@ -27,13 +27,13 @@ or set `$CHROME_BIN`.
 Every token you read costs, and so does every turn. These settings lose no
 information an agent needs:
 
-1. **Compact output, always.** Run `export NAVIGERA_OUTPUT=compact` once,
-   before the first command (or pass `--compact` on each). An action that
-   left the page as it was prints `ok`; one that moved it prints only what
-   changed (`{"title":"Cart"}`); a read prints just its value (`ax` as a
-   plain tree, `eval` as plain JSON). Errors are as complete as ever. Use
-   the full JSON (`unset NAVIGERA_OUTPUT`, no flag) only when a program, not
-   you, parses the output.
+1. **Keep the compact output.** It is the default: an action that left the
+   page as it was prints `ok`; one that moved it prints only what changed
+   (`{"title":"Cart"}`); a read prints just its value (`ax` as a plain
+   tree, `eval` as plain JSON). Errors are as complete as ever, on stderr.
+   Don't switch to `--output json` (one JSON line per command, with the
+   page state every time) unless a program, not you, parses the output;
+   don't set `NAVIGERA_OUTPUT` to anything else.
 2. **Known steps in one `batch` call.** Steps whose outcome you are sure of
    go in one call, one command per line: one turn instead of five. It stops
    at the first failure and names the line.
@@ -53,7 +53,6 @@ information an agent needs:
 ## The loop: start, look, act, look again
 
 ```bash
-export NAVIGERA_OUTPUT=compact            # once per shell (see above)
 navigera -s work start                    # once: warm headless browser named "work"
 navigera -s work goto https://example.com
 navigera -s work ax                       # look: page as a tree with [ref=N]
@@ -81,11 +80,11 @@ EOF
 - `ax` waits (up to 3 s) for data the page is still fetching, so a
   `goto … && … ax` chain shows the loaded page, not "Loading…". A page that
   polls doesn't hold it; `--no-wait` skips it.
-- Output: with `NAVIGERA_OUTPUT=compact` (or `--compact`) as above; errors
-  go to stderr as `error: …` with exit code 1, notes as `note: …`. Without
-  it, each command prints one JSON line, `{"ok":true,"result":…}` or
-  `{"ok":false,"error":"…"}`, and actions return `{tab, tabs, url, title}`;
-  `--raw` prints only the result.
+- Output: compact, as above; errors go to stderr as `error: …` with exit
+  code 1, notes as `note: …` (a dialog answered, a new tab, an exception the
+  page threw: read them). `--output json` prints one JSON line per command,
+  `{"ok":true,"result":…}` or `{"ok":false,"error":"…"}`, actions with
+  `{tab, tabs, url, title}`, for programs.
 - The browser, its tabs and cookies persist between commands of a session.
   `-s` is short for `--session`; `$NAVIGERA_SESSION` sets a default. An idle
   session shuts down after 10 min (`start --idle <s>`); `start --parent <pid>`
@@ -139,7 +138,7 @@ to do, `wait --url /dashboard --timeout-ms 300000`, then `hide` and carry on.
 
 ```bash
 navigera -s app start --electron ./my-app   # app directory or main script (Electron from its node_modules), a packaged app's executable, or a .app bundle
-navigera -s app --raw ax                    # the window it opened first, read like a page
+navigera -s app ax                          # the window it opened first, read like a page
 navigera -s app tab-list                    # each window is a tab (a <webview> too, "webview": true); one the app opens becomes the active tab
 navigera -s app eval --main "({ app }) => app.getName()"   # the app's main process (a function gets the electron module)
 navigera -s app quit                        # ends the app
@@ -195,7 +194,7 @@ page "Checkout — Acme" http://shop.test/checkout
 - Big page: `ax --selector "#results"` or `ax 57` (a ref), `--limit <lines>`
   (default 2000).
 - Many items: one `eval` that returns JSON:
-  `navigera -s work --raw eval "() => [...document.querySelectorAll('.item')].map(e => e.innerText)"`
+  `navigera -s work eval "() => [...document.querySelectorAll('.item')].map(e => e.innerText)"`
 
 ## Acting
 

@@ -36,6 +36,9 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# navigera prints compact output by default; this reads its JSON lines.
+os.environ.setdefault("NAVIGERA_OUTPUT", "json")
+
 HERE = Path(__file__).resolve().parent
 SITE = HERE.parent / "site" / "server.py"
 JEV_PRICE_PER_M = 0.042  # USD per million input tokens, output free (Jev 1.13)

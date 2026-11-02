@@ -47,6 +47,9 @@ import types
 import urllib.request
 from pathlib import Path
 
+# navigera prints compact output by default; this reads its JSON lines.
+os.environ.setdefault("NAVIGERA_OUTPUT", "json")
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "agent-eval"))
 import run as evalrun  # noqa: E402  the eval's workspace/skill setup

@@ -16,6 +16,9 @@ import subprocess
 import sys
 import tempfile
 
+# navigera prints compact output by default; this reads its JSON lines.
+os.environ.setdefault("NAVIGERA_OUTPUT", "json")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SITE_TASKS = [
     ("/shop", "add the brass valve to the cart"),

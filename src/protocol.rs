@@ -886,8 +886,9 @@ pub struct SessionConfig {
     pub pretty: bool,
     /// Print only the result (strings raw), errors as `error: …` on stderr.
     pub raw: bool,
-    /// `--raw`, and an action that left the page as it was prints `ok`
-    /// (else only what changed: url, title, tab).
+    /// `raw`, and an action that left the page as it was prints `ok` (else
+    /// only what changed: url, title, tab). The default: most callers are
+    /// agents, who read every character; `--output json` is for programs.
     pub compact: bool,
     /// CDP transport: `pipe` (default on Linux/macOS) or `ws` (DevTools
     /// port; the default on Windows).
@@ -966,8 +967,8 @@ impl Default for SessionConfig {
             chromium: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             pretty: false,
-            raw: false,
-            compact: false,
+            raw: true,
+            compact: true,
             transport: None,
             session: None,
             idle_timeout_s: DEFAULT_IDLE_TIMEOUT_S,
@@ -1216,11 +1217,11 @@ pub fn usage(program: &str) -> String {
     out.push_str("\nGLOBAL FLAGS (before or after the command):\n");
     let flags: &[(&str, String)] = &[
         ("-s, --session <name>", "a warm browser behind a local socket ($NAVIGERA_SESSION)".into()),
-        ("--raw", "print only the result (strings unquoted); errors on stderr".into()),
         (
-            "--compact",
-            "--raw, and an action that left the page as it was prints ok (else only what changed); $NAVIGERA_OUTPUT=compact sets it for every command".into(),
+            "--output compact|raw|json",
+            "compact (the default): an action that left the page as it was prints ok, else only what changed, and a read its value; raw: the result only; json: one JSON line per command, for programs; $NAVIGERA_OUTPUT sets it for a shell; errors and notes go to stderr except in json".into(),
         ),
+        ("--raw", "--output raw: the result only (strings unquoted)".into()),
         ("--timeout-ms <ms>", format!("navigation and command timeout (default {DEFAULT_TIMEOUT_MS})")),
         (
             "--wait-ms <ms>",
@@ -1467,6 +1468,17 @@ fn extract_present(args: &mut std::collections::VecDeque<String>, flag: &str) ->
     args.len() != before
 }
 
+/// `--output compact|raw|json` (and `--raw`, `--compact`, `NAVIGERA_OUTPUT`).
+fn set_output(config: &mut SessionConfig, mode: &str) -> Result<(), String> {
+    (config.raw, config.compact) = match mode {
+        "compact" => (true, true),
+        "raw" => (true, false),
+        "json" => (false, false),
+        other => return Err(format!("--output takes compact, raw or json, got {other:?}")),
+    };
+    Ok(())
+}
+
 fn parse_pid(raw: &str) -> Result<u32, String> {
     raw.trim().parse::<u32>().ok().filter(|p| *p > 0).ok_or_else(|| format!("--parent takes a process id, got {raw:?}"))
 }
@@ -1486,10 +1498,13 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
         config.pretty = true;
     }
     if extract_present(args, "--raw") {
-        config.raw = true;
+        set_output(config, "raw")?;
     }
     if extract_present(args, "--compact") {
-        (config.raw, config.compact) = (true, true);
+        set_output(config, "compact")?;
+    }
+    if let Some(mode) = extract_value(args, "--output")? {
+        set_output(config, &mode)?;
     }
     if let Some(t) = extract_value(args, "--transport")? {
         config.transport = Some(t);
@@ -1641,11 +1656,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     if let Some(engine) = std::env::var("NAVIGERA_ENGINE").ok().filter(|e| !e.trim().is_empty()) {
         config.engine = engine.trim().to_string();
     }
-    // The output an agent wants, set once for its shell.
-    match std::env::var("NAVIGERA_OUTPUT").ok().as_deref().map(str::trim) {
-        Some("compact") => (config.raw, config.compact) = (true, true),
-        Some("raw") => config.raw = true,
-        _ => {}
+    // The output for every command of a shell (a flag still wins).
+    if let Some(mode) = std::env::var("NAVIGERA_OUTPUT").ok().filter(|m| !m.trim().is_empty()) {
+        set_output(&mut config, mode.trim()).map_err(ArgsError::Invalid)?;
     }
 
     // Leading globals (the only place --timeout-ms is global; after a
@@ -1671,8 +1684,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 config.timeout_ms = parse_f64(&raw, "--timeout-ms").map_err(ArgsError::Invalid)?;
             }
             "--pretty" => config.pretty = true,
-            "--raw" => config.raw = true,
-            "--compact" => (config.raw, config.compact) = (true, true),
+            "--raw" => set_output(&mut config, "raw").map_err(ArgsError::Invalid)?,
+            "--compact" => set_output(&mut config, "compact").map_err(ArgsError::Invalid)?,
+            "--output" => set_output(&mut config, &value("--output")?).map_err(ArgsError::Invalid)?,
             "--transport" => config.transport = Some(value("--transport")?),
             "--session" | "-s" => config.session = Some(value("--session")?),
             "--attach" => {
@@ -5661,6 +5675,23 @@ mod tests {
         };
         assert!(bad(&["navigera", "webmcp-call", "add", "--params", "[1]"]).contains("JSON object"));
         assert!(bad(&["navigera", "webmcp-call"]).contains("tool's name"));
+    }
+
+    #[test]
+    fn output_modes_set_raw_and_compact() {
+        let mut c = SessionConfig::default();
+        assert!(c.raw && c.compact, "compact is the default");
+        set_output(&mut c, "json").unwrap();
+        assert!(!c.raw && !c.compact);
+        set_output(&mut c, "raw").unwrap();
+        assert!(c.raw && !c.compact);
+        set_output(&mut c, "compact").unwrap();
+        assert!(c.raw && c.compact);
+        assert!(set_output(&mut c, "xml").is_err());
+        let p = parse_args(argv(&["navigera", "--output", "json", "title"])).unwrap();
+        assert!(!p.config.raw && !p.config.compact);
+        let p = parse_args(argv(&["navigera", "title", "--raw"])).unwrap();
+        assert!(p.config.raw && !p.config.compact);
     }
 
     #[test]

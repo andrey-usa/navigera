@@ -63,6 +63,9 @@ import threading
 import time
 from pathlib import Path
 
+# navigera prints compact output by default; this reads its JSON lines.
+os.environ.setdefault("NAVIGERA_OUTPUT", "json")
+
 HERE = Path(__file__).resolve().parent
 CONTENDERS = HERE / "contenders"
 FIXTURES = HERE / "fixtures"
