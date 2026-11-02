@@ -480,6 +480,30 @@ fn a_webview_in_an_app_window_is_a_tab_of_its_own() {
     ok(&session, &["quit"]);
 }
 
+/// A `<webview>` that loads after the session started (Electron creates
+/// its guest as a page and makes it a webview a moment later) is still a
+/// tab marked as one, and never becomes the active tab by itself.
+#[test]
+fn a_webview_that_loads_later_is_still_a_tab_of_its_own() {
+    let Some(app) = fixture_app() else {
+        eprintln!("skipping: no Electron in tests/fixtures/electron-app (run `npm install` there)");
+        return;
+    };
+    let session = session_name("webview-late");
+    let _quit = Quit(session.clone());
+    let (started, r) =
+        run(&session, &["start", "--electron", app.to_str().unwrap(), "--electron-arg=--webview-late=1500"]);
+    assert!(started && r["ok"] == true, "{r}");
+    let tabs = wait_for(Duration::from_secs(15), "the late webview as a tab", || {
+        let tabs = ok(&session, &["tab-list"]);
+        tabs["tabs"].as_array()?.iter().any(|t| t["webview"] == true).then_some(tabs)
+    });
+    let webview = tabs["tabs"].as_array().unwrap().iter().find(|t| t["webview"] == true).unwrap();
+    assert_eq!(webview["active"], false, "{tabs}");
+    assert_eq!(webview["title"], "Embedded", "{tabs}");
+    ok(&session, &["quit"]);
+}
+
 #[test]
 fn a_missing_app_is_named() {
     let session = session_name("missing");

@@ -1104,6 +1104,18 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                 }
             }
         }
+        // Electron creates a `<webview>`'s guest as a page and says it is a
+        // webview a moment later: mark it then.
+        "Target.targetInfoChanged" => {
+            let info = params.get("targetInfo").cloned().unwrap_or(Value::Null);
+            if shared.adopt_windows.load(std::sync::atomic::Ordering::Relaxed)
+                && info.get("type").and_then(Value::as_str) == Some("webview")
+            {
+                if let Some(id) = info.get("targetId").and_then(Value::as_str) {
+                    shared.embedded.lock().unwrap().insert(id.to_string());
+                }
+            }
+        }
         "Target.targetDestroyed" => {
             if let Some(id) = params.get("targetId").and_then(Value::as_str) {
                 shared.destroyed.lock().unwrap().push(id.to_string());

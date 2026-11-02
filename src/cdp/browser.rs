@@ -613,6 +613,16 @@ impl Browser {
         Ok(v.get("userAgent").and_then(Value::as_str).unwrap_or_default().to_string())
     }
 
+    /// A target's type now (`page`, `webview`, …): it can change after the
+    /// target is created.
+    pub fn target_type(&self, target_id: &str) -> Option<String> {
+        self.block_on(self.client.send("Target.getTargetInfo", json!({ "targetId": target_id }), None, CMD_TIMEOUT))
+            .ok()?
+            .pointer("/targetInfo/type")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
     /// Each page (and `<webview>`) target's URL and title, by target id.
     pub fn target_infos(&self) -> Result<std::collections::HashMap<String, (String, String)>> {
         self.block_on(async {

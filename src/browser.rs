@@ -1028,7 +1028,10 @@ impl BrowserSession {
                 }
                 std::thread::sleep(Duration::from_millis(100));
             };
-            browser.shared().take_opened();
+            // Only these windows' creation events: one created meanwhile is
+            // still to be adopted.
+            let adopted: Vec<String> = pages.iter().map(|p| p.target_id().to_string()).collect();
+            browser.shared().opened.lock().unwrap().retain(|(id, _)| !adopted.contains(id));
             (pages, active)
         } else {
             let page = match &adopt {
@@ -1146,7 +1149,9 @@ impl BrowserSession {
             std::thread::sleep(Duration::from_millis(50));
         };
         // Adopted now: the creation events of these windows are not new tabs.
-        browser.shared().take_opened();
+        // Only theirs: a target created while the window was chosen (a
+        // `<webview>` loading in a second window) is still to be adopted.
+        browser.shared().opened.lock().unwrap().retain(|(id, _)| !tried.contains(id));
         // Ready when that window has loaded and shows something: an app
         // that boots its UI after the window opens is read past its empty
         // shell (bounded by the navigation timeout; `ax` says if it isn't).
@@ -1491,6 +1496,11 @@ impl BrowserSession {
                     // but not the one the session goes on in, when its main
                     // process says so (a page's own visibility can't be
                     // trusted, see `best_window`).
+                    // Its type now, not at creation: Electron makes a
+                    // `<webview>`'s guest a page first.
+                    if self.is_electron() && self.browser.target_type(&target_id).as_deref() == Some("webview") {
+                        self.browser.shared().embedded.lock().unwrap().insert(target_id.clone());
+                    }
                     let embedded = self.browser.shared().embedded.lock().unwrap().contains(&target_id);
                     let hidden = self.is_electron() && {
                         let timeout = Duration::from_millis(1000);
