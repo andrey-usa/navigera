@@ -887,8 +887,9 @@ pub struct SessionConfig {
     /// Print only the result (strings raw), errors as `error: …` on stderr.
     pub raw: bool,
     /// `raw`, and an action that left the page as it was prints `ok` (else
-    /// only what changed: url, title, tab). The default: most callers are
-    /// agents, who read every character; `--output json` is for programs.
+    /// only what changed: url, title, tab). The command line's default (see
+    /// `parse_args`): most of its callers are agents, who read every
+    /// character. A program using this library gets JSON unless it asks.
     pub compact: bool,
     /// CDP transport: `pipe` (default on Linux/macOS) or `ws` (DevTools
     /// port; the default on Windows).
@@ -967,8 +968,8 @@ impl Default for SessionConfig {
             chromium: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             pretty: false,
-            raw: true,
-            compact: true,
+            raw: false,
+            compact: false,
             transport: None,
             session: None,
             idle_timeout_s: DEFAULT_IDLE_TIMEOUT_S,
@@ -1651,6 +1652,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         std::path::Path::new(&program).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or(program);
     let mut args: Args = argv.collect();
     let mut config = SessionConfig::default();
+    // The command line prints compact output unless asked otherwise.
+    set_output(&mut config, "compact").map_err(ArgsError::Invalid)?;
     // `--engine` wins; the variable sets it for every command of a shell
     // (an agent never has to repeat the flag).
     if let Some(engine) = std::env::var("NAVIGERA_ENGINE").ok().filter(|e| !e.trim().is_empty()) {
@@ -5680,7 +5683,9 @@ mod tests {
     #[test]
     fn output_modes_set_raw_and_compact() {
         let mut c = SessionConfig::default();
-        assert!(c.raw && c.compact, "compact is the default");
+        assert!(!c.raw && !c.compact, "the library prints JSON unless asked");
+        set_output(&mut c, "compact").unwrap();
+        assert!(c.raw && c.compact);
         set_output(&mut c, "json").unwrap();
         assert!(!c.raw && !c.compact);
         set_output(&mut c, "raw").unwrap();
