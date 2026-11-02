@@ -32,6 +32,10 @@ getting wrong, one page each, built the way those sites behave:
 /beacons        analytics POSTs at irregular 100-900 ms intervals, answered 204
 /one-fetch      "Loading..." until one fetch, which the server holds 400 ms, brings a list
 /click-fetch    a button that starts a 200 ms fetch, then brings a list
+/rerender       a list whose rows and Save button are drawn again (new elements)
+                by Redraw; Add row adds a fourth, Route pushes a new URL
+/legal          a 1,500-clause agreement (~130 KB of text), every 10th
+                clause long enough to be cut in a snapshot
 /two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
 /stale-ref      a button and a bare draggable=true handle (no handlers)
@@ -87,6 +91,49 @@ PAGES["/div-cells"] = ("cells", "", "".join(
 
 LONG = "Lorem ipsum dolor sit amet. " * 40
 PAGES["/long-text"] = ("long", "", f"<div>{LONG}</div><p>{LONG}</p>")
+
+
+def clause(n):
+    text = f"{n // 50 + 1}.{n % 50 + 1} The Supplier shall keep obligation {n} in force for the term of this Agreement."
+    if n % 10 == 0:
+        text += " It survives termination, applies to every affiliate and subcontractor, and is not limited by any" \
+            " other clause: notice of a breach is given in writing within five business days, and the cure period" \
+            f" is thirty days from that notice. Penalty schedule {n} applies to any breach not cured in time."
+    return f"<p>{text}</p>"
+
+
+PAGES["/rerender"] = ("rerender", "", """
+<p id=status>idle</p>
+<div id=app></div>
+<button id=redraw>Redraw</button> <button id=add>Add row</button> <button id=route>Route</button>
+<script>
+let rows = ['alpha', 'beta', 'gamma'];
+function draw() {
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+  for (const [i, r] of rows.entries()) {
+    const li = document.createElement('div');
+    li.textContent = r + ' ';
+    const b = document.createElement('button');
+    b.textContent = 'Edit';
+    b.onclick = () => { document.getElementById('status').textContent = 'edit ' + r; };
+    li.appendChild(b);
+    app.appendChild(li);
+  }
+  const save = document.createElement('button');
+  save.textContent = 'Save';
+  save.onclick = () => { document.getElementById('status').textContent = 'saved'; };
+  app.appendChild(save);
+}
+draw();
+document.getElementById('redraw').onclick = draw;
+document.getElementById('add').onclick = () => { rows.push('delta'); draw(); };
+document.getElementById('route').onclick = () => { history.pushState({}, '', '/rerender?view=2'); draw(); };
+</script>""")
+
+PAGES["/legal"] = ("agreement", "", "<main><h1>Master Services Agreement</h1>" + "".join(
+    (f"<h2>Section {n // 50 + 1}</h2>" if n % 50 == 0 else "") + clause(n) for n in range(1500)
+) + "</main>")
 
 PAGES["/cookie-banner"] = ("cookie banner", "", """
 <p id=status>waiting</p>
@@ -403,6 +450,9 @@ window.ink = (x, y) => g.getImageData(x, y, 1, 1).data[3];
 </script>
 """)
 
+# What a form POST to /posted shows, and what reopening it with GET shows.
+PAGES["/posted"] = ("posted", "", """<p>posted</p>""")
+
 PAGES["/download"] = ("download", "", """
 <a id=dl href="/file.csv">Download CSV</a>
 <button id=blob type=button>Save notes</button>
@@ -718,9 +768,22 @@ setTimeout(() => {{
 </script>""")
 
 
+BUMPS = 0
+BUMPS_LOCK = __import__("threading").Lock()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    def bump(self):
+        # An effect outside the browser: no relaunch or storage snapshot
+        # can mask it, so a replayed command shows here.
+        with BUMPS_LOCK:
+            global BUMPS
+            BUMPS += 1
+            n = BUMPS
+        self.send(str(n), ctype="text/plain")
 
     def send(self, body, ctype="text/html; charset=utf-8", extra=()):
         data = body.encode()
@@ -735,14 +798,32 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(length)
+        if urlparse(self.path).path == "/bump":
+            self.bump()
+            return
         if urlparse(self.path).path == "/collect":
             self.send_response(204)
             self.end_headers()
+            return
+        # A page a form POST loads (an empty 404 would become Chrome's own
+        # error page, which has no path of its own).
+        if urlparse(self.path).path == "/posted":
+            body = b"<!doctype html><title>posted</title><p>posted</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         self.send_response(404)
         self.end_headers()
 
     def do_GET(self):
+        if urlparse(self.path).path == "/bumps":
+            with BUMPS_LOCK:
+                n = BUMPS
+            self.send(str(n), ctype="text/plain")
+            return
         u = urlparse(self.path)
         q = parse_qs(u.query, keep_blank_values=True)
         if u.path == "/frameset":

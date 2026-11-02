@@ -191,6 +191,18 @@ impl Drop for Session {
     }
 }
 
+/// The first command after the browser was killed. One that reaches the
+/// session before it has seen the browser go counts as in flight and fails
+/// unretried (documented; a CI runner is often that slow to see it); the
+/// next one is then the first after the crash.
+fn after_crash(s: &Session, args: &[&str]) -> (bool, Value) {
+    let (success, r) = s.run(args);
+    if !success && r.to_string().contains("was not retried") {
+        return s.run(args);
+    }
+    (success, r)
+}
+
 /// Wait until `f` holds, or fail with `what`.
 fn eventually(what: &str, within: Duration, mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + within;
@@ -302,24 +314,177 @@ fn own_browser_keeps_a_browser_per_session() {
     assert_eq!(a.ok(&["status"])["browser"], "own");
 }
 
-/// The shared browser killed: the next op says so in plain words, and
-/// `start` relaunches it.
+/// Two sessions with a cookie, localStorage and two tabs each (the second
+/// tab last loaded by a form POST, in `a`), the browser killed: each
+/// session's next command relaunches or joins one browser, reopens its tabs,
+/// restores its storage, and says what was lost, as a note and as the
+/// `recovered` field.
 #[test]
-fn a_dead_shared_browser_is_reported_and_relaunched() {
-    if !chrome() {
-        return;
-    }
-    let browser = Browser::new("dead", 2);
+fn a_killed_shared_browser_is_relaunched_and_sessions_carry_on() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let browser = Browser::new("dead", 5);
     let a = browser.start("a", &[]);
+    let b = browser.start("b", &[]);
+    let page = format!("{}/download", site.url);
+    for (s, who) in [(&a, "a"), (&b, "b")] {
+        s.ok(&["goto", &page]);
+        s.ok(&["eval", &format!("localStorage.setItem('who', '{who}'); document.cookie = 'who={who}; path=/'; 1")]);
+        s.ok(&["tab-new", &format!("{}/download?tab={who}", site.url)]);
+    }
+    // A tab whose last document load was a form POST.
+    a.ok(&[
+        "eval",
+        "document.body.insertAdjacentHTML('beforeend', '<form id=pf method=post action=/posted></form>'); \
+         setTimeout(() => document.getElementById('pf').submit(), 0); 1",
+    ]);
+    eventually("the POST loaded", Duration::from_secs(20), || a.text(&["eval", "location.pathname"]) == "/posted");
+    b.ok(&["tab-select", "0"]);
+    // The storage snapshot is taken once a session has been idle for 1 s.
+    std::thread::sleep(Duration::from_millis(1800));
     let pids = browser.wait_browsers(1, Duration::from_secs(5));
     assert_eq!(pids.len(), 1);
     kill(pids[0]);
+    // The sessions see the connection end (a command racing it is in flight).
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Both at once: one relaunch, the other joins it.
     let started = Instant::now();
-    let err = a.fails(&["eval", "1"]);
-    assert!(err.contains("shared browser is gone") && err.contains("start"), "{err}");
-    assert!(started.elapsed() < Duration::from_secs(10), "no hang: {:?}", started.elapsed());
-    // The session server has ended with it: `start` makes a new one.
+    let probe = ["eval", "[localStorage.getItem('who'), document.cookie, location.pathname]"];
+    let (ra, rb) = std::thread::scope(|scope| {
+        let ha = scope.spawn(|| after_crash(&a, &probe));
+        let hb = scope.spawn(|| after_crash(&b, &probe));
+        (ha.join().unwrap(), hb.join().unwrap())
+    });
+    assert!(started.elapsed() < Duration::from_secs(15), "recovery took {:?}", started.elapsed());
+    for (name, (success, r)) in [("a", ra), ("b", rb)] {
+        assert!(success && r["ok"] == true, "{name}: {r}");
+        assert_eq!(r["recovered"]["browser"], "relaunched", "{name}: {r}");
+        assert_eq!(r["recovered"]["tabs"], 2, "{name}: {r}");
+        assert_eq!(r["recovered"]["reopened"], 2, "{name}: {r}");
+        assert!(r["recovered"]["lost"].as_array().is_some_and(|l| !l.is_empty()), "{name}: {r}");
+        let note = r["notes"][0].as_str().unwrap_or_default();
+        assert!(note.contains("relaunched") && note.contains("lost:"), "{name}: {note}");
+        // Storage and cookie came back.
+        assert_eq!(r["result"][0], name, "{name}: {r}");
+        assert_eq!(r["result"][1], format!("who={name}"), "{name}: {r}");
+        // `a`'s active tab was last loaded by the form POST; `b` had none.
+        let as_get = if name == "a" { serde_json::json!([1]) } else { serde_json::json!([]) };
+        assert_eq!(r["recovered"]["reopened_as_get"], as_get, "{name}: {r}");
+    }
+    let tabs = a.ok(&["tab-list"]);
+    assert_eq!(tabs["tabs"].as_array().map(Vec::len), Some(2), "{tabs}");
+    // One browser for both.
+    assert_eq!(browser.wait_browsers(1, Duration::from_secs(5)).len(), 1, "one relaunch, one browser");
+    assert_eq!(a.sessions_on_browser(), "shared (2 sessions)");
+    // `b` had tab 0 active when it died; it still is.
+    let tabs = b.ok(&["tab-list"]);
+    assert_eq!(tabs["active"], 0, "{tabs}");
+    assert_eq!(tabs["tabs"].as_array().map(Vec::len), Some(2), "{tabs}");
+}
+
+/// The tab a form POST loaded is reopened with GET, and the note says so.
+#[test]
+fn a_tab_loaded_by_a_post_is_reopened_with_get_and_named() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let browser = Browser::new("post", 5);
+    let a = browser.start("a", &[]);
+    a.ok(&["goto", &format!("{}/download", site.url)]);
+    a.ok(&[
+        "eval",
+        "document.body.insertAdjacentHTML('beforeend', '<form id=pf method=post action=/posted></form>'); \
+         setTimeout(() => document.getElementById('pf').submit(), 0); 1",
+    ]);
+    eventually("the POST loaded", Duration::from_secs(20), || a.text(&["eval", "location.pathname"]) == "/posted");
+
+    let pids = browser.wait_browsers(1, Duration::from_secs(5));
+    kill(pids[0]);
+    std::thread::sleep(Duration::from_millis(300));
+    let (success, r) = after_crash(&a, &["eval", "location.pathname"]);
+    assert!(success && r["ok"] == true, "{r}");
+    assert_eq!(r["result"], "/posted", "{r}");
+    assert_eq!(r["recovered"]["reopened_as_get"], serde_json::json!([0]), "{r}");
+    assert!(r["notes"][0].as_str().unwrap_or_default().contains("form POST"), "{r}");
+}
+
+/// A command running when the browser dies fails and is not retried (it may
+/// have had a side effect); the next command recovers.
+#[test]
+fn a_command_running_when_the_browser_dies_is_not_retried() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let browser = Browser::new("inflight", 5);
+    let a = browser.start("a", &[]);
+    a.ok(&["goto", &format!("{}/download", site.url)]);
+    let pids = browser.wait_browsers(1, Duration::from_secs(5));
+    let err = std::thread::scope(|scope| {
+        let h = scope.spawn(|| a.fails(&["eval", "new Promise(r => setTimeout(r, 6000))"]));
+        std::thread::sleep(Duration::from_millis(700));
+        kill(pids[0]);
+        h.join().unwrap()
+    });
+    assert!(err.contains("was not retried") && err.contains("next command relaunches"), "{err}");
+    let (success, r) = a.run(&["eval", "1 + 1"]);
+    assert!(success && r["ok"] == true && r["result"] == 2, "{r}");
+    assert_eq!(r["recovered"]["browser"], "relaunched", "{r}");
+}
+
+/// A command that never reached the crashed browser runs after the
+/// relaunch - exactly once: recovery is not a replay. The effect is a
+/// POST to the test site, OUTSIDE the browser: no relaunch, storage
+/// snapshot or reopen can mask an extra run.
+#[test]
+fn a_never_reached_command_runs_once_after_the_relaunch() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let browser = Browser::new("once", 5);
+    let a = browser.start("a", &[]);
+    a.ok(&["goto", &format!("{}/download", site.url)]);
+    let pids = browser.wait_browsers(1, Duration::from_secs(5));
+    kill(pids[0]);
+    std::thread::sleep(Duration::from_millis(300));
+    let bump = &["eval", "fetch('/bump', {method: 'POST'}).then(r => r.text())"];
+    let bumps = &["eval", "fetch('/bumps').then(r => r.text())"];
+    let read_bumps = |a: &Session| -> u64 {
+        let (success, n) = a.run(bumps);
+        assert!(success, "{n}");
+        n["result"].as_str().unwrap_or_default().parse().unwrap_or(u64::MAX)
+    };
+    let (success, r) = a.run(bump);
+    if !success {
+        // Answered in flight: CLOSED is unknown - the request may have
+        // run before its answer was lost, so 0 and 1 are both
+        // legitimate. What must never happen is an automatic replay of
+        // the uncertain op (that could make it 2).
+        assert!(r.to_string().contains("was not retried"), "{r}");
+        let b = read_bumps(&a);
+        assert!(b <= 1, "an uncertain failure is never replayed automatically: {b}");
+        let (success, r2) = a.run(bump);
+        assert!(success && r2["ok"] == true, "{r2}");
+        let after = read_bumps(&a);
+        assert_eq!(after, b + 1, "one explicit run adds exactly one effect: {b} -> {after}");
+    } else {
+        // Recovered through the typed never-reached retry (or pre-op
+        // recovery): the first attempt ran nothing and the op ran once -
+        // a replayed first attempt would read 2.
+        assert_eq!(read_bumps(&a), 1, "ran exactly once, never replayed");
+    }
+}
+
+/// A browser that dies again right after a recovery ends the session, with
+/// a plain error: no crash loop. `start` makes a new one.
+#[test]
+fn a_second_crash_right_after_a_recovery_ends_the_session() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let browser = Browser::new("loop", 5);
+    let a = browser.start("a", &[]);
+    a.ok(&["goto", &format!("{}/download", site.url)]);
+    kill(browser.wait_browsers(1, Duration::from_secs(5))[0]);
+    std::thread::sleep(Duration::from_millis(300));
+    let (success, r) = after_crash(&a, &["eval", "1"]);
+    assert!(success && r["recovered"]["browser"] == "relaunched", "{r}");
+    kill(browser.wait_browsers(1, Duration::from_secs(5))[0]);
+    std::thread::sleep(Duration::from_millis(300));
+    let (_, r) = after_crash(&a, &["eval", "1"]);
+    let err = r["error"].as_str().unwrap_or_default().to_string();
+    assert!(err.contains("crashed again") && err.contains("start"), "{err}");
     let a = browser.start("a", &[]);
     assert_eq!(a.text(&["eval", "1 + 1"]), "2");
-    assert_eq!(browser.wait_browsers(1, Duration::from_secs(5)).len(), 1);
 }

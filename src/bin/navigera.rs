@@ -11,6 +11,12 @@
 
 use std::process::ExitCode;
 
+/// The static Linux build's allocator: musl's own is several times slower
+/// on the small allocations of a large page's snapshot.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     navigera::cli::main(std::env::args())
 }

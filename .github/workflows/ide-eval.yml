@@ -42,6 +42,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # The CLI's default output is the compact form for agents; the steps
+  # here read the JSON lines.
+  NAVIGERA_OUTPUT: json
   # Pinned so a run measures navigera, not an agent update.
   CLINE: cline@3.0.70
   KILO: "@kilocode/cli@7.8.8"

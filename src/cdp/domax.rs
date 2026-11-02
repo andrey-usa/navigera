@@ -8,8 +8,9 @@
 //! here instead: roles from the HTML-AAM mappings, names from the
 //! accessible-name steps (labelledby, label, native sources, content,
 //! title, placeholder), the states the renderer prints, and same-process
-//! frames. The nodes have the shape of Chrome's, so [`super::ax::render`]
-//! prints them the same way.
+//! frames. The nodes are the printer's own ([`super::ax::Node`], what it
+//! reads Chrome's JSON into), so [`super::ax::render_nodes`] prints them
+//! the same way, without a JSON map per node in between.
 //!
 //! What is not modelled: names from CSS generated content, Chrome's
 //! layout-table heuristics, a `<dialog>`'s modality (`showModal` leaves no
@@ -20,12 +21,12 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
-use super::ax::Frame;
+use super::ax::{Frame, Node};
 
 /// The tree of a snapshot's main document, and of each same-process frame.
 pub struct Built {
-    pub nodes: Vec<Value>,
-    pub frames: Vec<Frame>,
+    pub nodes: Vec<Node>,
+    pub frames: Vec<Frame<Node>>,
     pub title: String,
     pub url: String,
 }
@@ -70,14 +71,41 @@ const SKIP: &[&str] =
     &["HEAD", "SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "TITLE", "META", "LINK", "BASE", "BR", "WBR", "DATALIST"];
 
 pub fn build(snap: &Value) -> Option<Built> {
+    build_from(snap, None)
+}
+
+/// The tree of one element's subtree (`ax --selector`, a ref scope): the
+/// element is the first node, frames inside it follow. Building only the
+/// scope keeps a scoped snapshot of a large page from paying for the
+/// whole page's tree. `None` when the element is not in the snapshot;
+/// no nodes when it is hidden (it, or an ancestor, is not exposed).
+pub fn build_scoped(snap: &Value, scope_backend: u64) -> Option<Built> {
+    build_from(snap, Some(scope_backend))
+}
+
+fn build_from(snap: &Value, scope: Option<u64>) -> Option<Built> {
     let strings: Vec<&str> = snap.get("strings")?.as_array()?.iter().map(|v| v.as_str().unwrap_or("")).collect();
     let documents = snap.get("documents")?.as_array()?;
     let docs: Vec<Doc> = documents.iter().map(|d| Doc::new(d, &strings)).collect();
     let main = docs.first()?;
     let mut frames = Vec::new();
     let mut nodes = Vec::new();
+    // Where the walk starts: each document's root, or the scope element in
+    // whichever document holds it.
+    let mut start: Option<(usize, usize)> = None;
+    if let Some(backend) = scope {
+        let found = docs
+            .iter()
+            .enumerate()
+            .find_map(|(d, doc)| doc.backend.iter().position(|&b| b == backend as i64).map(|i| (d, i)));
+        let (d, i) = found?;
+        if !docs[d].exposed_with_ancestors(i) {
+            return Some(Built { nodes, frames, title: main.title.to_string(), url: main.url.to_string() });
+        }
+        start = Some((d, i));
+    }
     // Frames hang under their <iframe>; each is a document of its own.
-    let mut queue = vec![(0usize, None::<u64>)];
+    let mut queue = vec![(start.map_or(0, |(d, _)| d), None::<u64>)];
     let mut seen = HashSet::new();
     while let Some((d, owner)) = queue.pop() {
         if !seen.insert(d) || d >= docs.len() {
@@ -85,7 +113,11 @@ pub fn build(snap: &Value) -> Option<Built> {
         }
         let mut out = Vec::new();
         let mut owned = Vec::new();
-        docs[d].emit(d, &mut out, &mut owned);
+        let from = match (owner, start) {
+            (None, Some((_, i))) => Some(i),
+            _ => None,
+        };
+        docs[d].emit(d, from, &mut out, &mut owned);
         for (iframe_backend, child_doc) in owned {
             queue.push((child_doc, Some(iframe_backend)));
         }
@@ -680,6 +712,8 @@ impl<'a> Doc<'a> {
             "svg" | "SVG" => "SvgRoot",
             "HR" => "separator",
             "PROGRESS" => "progressbar",
+            // Chrome's own role for it (no ARIA one).
+            "CANVAS" => "Canvas",
             "METER" => "meter",
             "OUTPUT" => "status",
             "IFRAME" | "FRAME" => "Iframe",
@@ -1073,9 +1107,9 @@ impl<'a> Doc<'a> {
         out
     }
 
-    fn properties(&self, i: usize, role: &str) -> Vec<Value> {
+    fn properties(&self, i: usize, role: &str) -> Vec<(String, Option<Value>)> {
         let mut props = Vec::new();
-        let mut push = |name: &str, value: Value| props.push(json!({ "name": name, "value": { "value": value } }));
+        let mut push = |name: &str, value: Value| props.push((name.to_string(), Some(value)));
         if self.focusable(i) {
             push("focusable", json!(true));
         }
@@ -1158,56 +1192,73 @@ impl<'a> Doc<'a> {
 
     /// Append this document's nodes to `out`; `frames` gets each
     /// <iframe> with a document in the snapshot.
-    fn emit(&self, d: usize, out: &mut Vec<Value>, frames: &mut Vec<(u64, usize)>) {
-        let Some(root) = (0..self.ty.len()).find(|&i| self.ty[i] == 9) else { return };
+    /// Is `i` in the tree with every ancestor up to its document (through
+    /// shadow hosts)? A scoped walk starts below them, so it checks.
+    fn exposed_with_ancestors(&self, i: usize) -> bool {
+        let mut at = i as i64;
+        for _ in 0..4096 {
+            if at < 0 {
+                return true;
+            }
+            if !self.shown(at as usize) {
+                return false;
+            }
+            at = self.parent[at as usize];
+        }
+        false
+    }
+
+    /// Emit the AX nodes of document `d` from its root, or from `from` (a
+    /// scoped snapshot's element) down.
+    fn emit(&self, d: usize, from: Option<usize>, out: &mut Vec<Node>, frames: &mut Vec<(u64, usize)>) {
+        let Some(root) = from.or_else(|| (0..self.ty.len()).find(|&i| self.ty[i] == 9)) else { return };
         let id = |i: usize| format!("d{d}n{i}");
-        // Iterative walk: (node, parent AX id).
-        let mut stack: Vec<(usize, Option<String>)> = vec![(root, None)];
-        // AX children per emitted node, filled as the walk reaches them.
-        let mut pending_children: HashMap<String, Vec<String>> = HashMap::new();
-        let mut order: Vec<(String, Value)> = Vec::new();
+        // Iterative walk: (node, its parent's place in `out`). Each node is
+        // added to its parent's children as the walk reaches it.
+        let mut stack: Vec<(usize, Option<usize>)> = vec![(root, None)];
         while let Some((i, parent)) = stack.pop() {
             if !self.shown(i) {
                 continue;
             }
-            let my = id(i);
-            let mut node = match self.ty[i] {
-                9 => json!({
-                    "role": { "value": "RootWebArea" },
-                    "name": { "value": self.title },
-                    "properties": [
-                        { "name": "focusable", "value": { "value": true } },
-                        { "name": "url", "value": { "value": self.url } },
-                    ],
-                }),
-                3 => json!({
-                    "role": { "value": "StaticText" },
-                    "name": { "value": squash(self.text_of_node(i)) },
-                }),
-                _ if self.is_marker(i) => json!({
-                    "role": { "value": "ListMarker" },
-                    "name": { "value": squash(self.text_of_node(i)) },
-                }),
+            let mut node = Node { id: id(i), ..Node::default() };
+            // A text child the node gets: generated content's text, or a
+            // form field's (below).
+            let mut generated: Option<String> = None;
+            match self.ty[i] {
+                9 => {
+                    node.role = "RootWebArea".to_string();
+                    node.name = self.title.to_string();
+                    node.props = vec![
+                        ("focusable".to_string(), Some(Value::Bool(true))),
+                        ("url".to_string(), Some(Value::String(self.url.to_string()))),
+                    ];
+                }
+                3 => {
+                    node.role = "StaticText".to_string();
+                    node.name = squash(self.text_of_node(i));
+                }
+                _ if self.is_marker(i) => {
+                    node.role = "ListMarker".to_string();
+                    node.name = squash(self.text_of_node(i));
+                }
                 // Generated content: Chrome's ignored box around its text.
-                _ if self.pseudo.contains(&i) => json!({
-                    "role": { "value": "none" },
-                    "properties": [],
-                    "childIds": [],
-                    "generated": squash(&self.generated_text(i)),
-                }),
+                _ if self.pseudo.contains(&i) => {
+                    node.role = "none".to_string();
+                    generated = Some(squash(&self.generated_text(i)));
+                }
                 // `visibility: hidden`: not there for a user, though a
                 // child that sets it visible is.
-                _ if self.invisible(i) => json!({ "role": { "value": "generic" }, "properties": [] }),
+                _ if self.invisible(i) => node.role = "generic".to_string(),
                 _ => {
                     let role = self.role(i);
-                    let mut n = json!({ "role": { "value": role } });
+                    // What a form field's text child would be: its name
+                    // (a button) or value (a field), when it has one.
+                    let mut value_given = None;
                     if role != "generic" && role != "none" {
-                        let name = self.name(i, &role);
-                        if !name.is_empty() {
-                            n["name"] = json!({ "value": name });
-                        }
+                        node.name = self.name(i, &role);
                         if let Some(v) = self.value_of(i, &role) {
-                            n["value"] = json!({ "value": v });
+                            value_given = Some(v.clone());
+                            node.value = v;
                         }
                     } else {
                         let named = self
@@ -1224,26 +1275,34 @@ impl<'a> Doc<'a> {
                                     .filter(|t| !t.is_empty() && !self.holds_controls(i))
                             });
                         if let Some(t) = named {
-                            n["name"] = json!({ "value": t });
+                            node.name = t;
                         }
                     }
                     if let Some(desc) = self.attr(i, "aria-describedby").map(|ids| self.idref_text(ids)) {
-                        if !desc.is_empty() {
-                            n["description"] = json!({ "value": desc });
-                        }
+                        node.description = desc;
                     }
-                    n["properties"] = Value::Array(self.properties(i, &role));
-                    n
+                    node.props = self.properties(i, &role);
+                    // A form field's text (a button's label, a field's
+                    // value) is a text node inside it in Chrome's tree, as
+                    // names compare with.
+                    if self.tag[i] == "INPUT" {
+                        generated = match role.as_str() {
+                            "button" if self.input_type(i) != "image" && !node.name.is_empty() => {
+                                Some(node.name.clone())
+                            }
+                            "textbox" | "searchbox" | "spinbutton" | "combobox" => value_given,
+                            _ => None,
+                        };
+                    }
+                    node.role = role;
                 }
-            };
-            node["nodeId"] = json!(my);
-            node["ignored"] = json!(false);
-            if self.backend[i] > 0 {
-                node["backendDOMNodeId"] = json!(self.backend[i]);
             }
-            if let Some(p) = &parent {
-                node["parentId"] = json!(p);
-                pending_children.entry(p.clone()).or_default().push(my.clone());
+            if self.backend[i] > 0 {
+                node.backend = Some(self.backend[i] as u64);
+            }
+            if let Some(p) = parent {
+                node.parent = Some(out[p].id.clone());
+                out[p].children.push(node.id.clone());
             }
             if self.ty[i] == 1 {
                 if let Some(&doc) = self.content_doc.get(&i) {
@@ -1252,25 +1311,19 @@ impl<'a> Doc<'a> {
                     }
                 }
             }
-            let mut generated = node.as_object_mut().and_then(|o| o.remove("generated"));
-            // A form field's text (a button's label, a field's value) is a
-            // text node inside it in Chrome's tree, as names compare with.
-            if self.tag[i] == "INPUT" && generated.is_none() {
-                let role = node.pointer("/role/value").and_then(Value::as_str).unwrap_or("").to_string();
-                generated = match role.as_str() {
-                    "button" if self.input_type(i) != "image" => node.pointer("/name/value").cloned(),
-                    "textbox" | "searchbox" | "spinbutton" | "combobox" => node.pointer("/value/value").cloned(),
-                    _ => None,
-                };
-            }
-            order.push((my.clone(), node));
+            let at = out.len();
+            let my = node.id.clone();
+            out.push(node);
             if let Some(text) = generated {
                 let text_id = format!("{my}t");
-                pending_children.entry(my.clone()).or_default().push(text_id.clone());
-                order.push((
-                    text_id.clone(),
-                    json!({ "nodeId": text_id, "ignored": false, "parentId": my, "role": { "value": "StaticText" }, "name": { "value": text } }),
-                ));
+                out[at].children.push(text_id.clone());
+                out.push(Node {
+                    id: text_id,
+                    parent: Some(my),
+                    role: "StaticText".to_string(),
+                    name: text,
+                    ..Node::default()
+                });
             }
             // The options of a closed select are its children; a text node
             // or a frame has none here.
@@ -1282,12 +1335,8 @@ impl<'a> Doc<'a> {
                 if self.tag[i] == "OPTION" && self.ty[k] == 3 {
                     continue;
                 }
-                stack.push((k, Some(my.clone())));
+                stack.push((k, Some(at)));
             }
-        }
-        for (my, mut node) in order {
-            node["childIds"] = json!(pending_children.remove(&my).unwrap_or_default());
-            out.push(node);
         }
     }
 }
@@ -1394,7 +1443,7 @@ mod tests {
 
     fn render(nodes: &[Spec]) -> String {
         let built = build(&snap(nodes)).unwrap();
-        super::super::ax::render("", &built.nodes, &built.frames, &super::super::ax::Options::default()).text
+        super::super::ax::render_nodes("", &built.nodes, &built.frames, &super::super::ax::Options::default()).text
     }
 
     #[test]
@@ -1420,6 +1469,39 @@ mod tests {
             "- main:\n  - heading \"Orders\" [level=2]\n  - searchbox \"Search\" [required, ref=7]\n  \
              - link \"Next page\" [ref=8] url=http://x.test/c?x=1\n  - button \"Close\" [ref=10]: X"
         );
+    }
+
+    /// A scoped build holds the element's subtree only, named as in the
+    /// whole tree (a `<label for>` outside the scope still names a field);
+    /// a hidden element, or one inside a hidden ancestor, gives no nodes;
+    /// an element not in the snapshot gives none at all.
+    #[test]
+    fn a_scoped_build_holds_the_scope_only() {
+        let specs: &[Spec] = &[
+            ("MAIN", 0, &[], None, true),
+            ("H2", 1, &[], None, true),
+            ("#text", 2, &[], Some("Orders"), true),
+            ("LABEL", 1, &[("for", "q")], None, true),
+            ("#text", 4, &[], Some("Search"), true),
+            ("FORM", 1, &[], None, true),
+            ("INPUT", 6, &[("id", "q"), ("type", "search")], None, true),
+            ("DIV", 1, &[("hidden", "")], None, false),
+            ("DIV", 1, &[("aria-hidden", "true")], None, true),
+            ("SPAN", 9, &[], None, true),
+            ("#text", 10, &[], Some("hidden too"), true),
+        ];
+        let snapshot = snap(specs);
+        // Spec k is node k + 1, backend id k + 2.
+        let form = 7;
+        let built = build_scoped(&snapshot, form).unwrap();
+        assert_eq!(built.nodes.first().and_then(|n| n.backend), Some(form));
+        assert!(built.nodes.iter().all(|n| n.name != "Orders"), "outside the scope");
+        let opts = super::super::ax::Options { root_backend_id: Some(form), ..Default::default() };
+        let out = super::super::ax::render_nodes("", &built.nodes, &built.frames, &opts).text;
+        assert_eq!(out, "- form:\n  - searchbox \"Search\" [ref=8]");
+        assert!(build_scoped(&snapshot, 9).unwrap().nodes.is_empty(), "a hidden element");
+        assert!(build_scoped(&snapshot, 11).unwrap().nodes.is_empty(), "inside an aria-hidden ancestor");
+        assert!(build_scoped(&snapshot, 999).is_none(), "not in the snapshot");
     }
 
     #[test]

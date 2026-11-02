@@ -1892,6 +1892,8 @@ pub struct AxOptions {
     pub all_refs: bool,
     pub limit: usize,
     pub scope: Option<Target>,
+    /// Texts, names and values uncut (`ax --full-text`).
+    pub full_text: bool,
 }
 
 /// Where the mouse is and which buttons it holds (bits: 1 left, 2 right,
@@ -1917,7 +1919,26 @@ pub struct Page {
     pointer: Arc<std::sync::Mutex<Pointer>>,
     /// Set while the tab's last command timed out (see [`STALLED_WAIT`]).
     stalled: Arc<std::sync::atomic::AtomicBool>,
+    /// What each ref a snapshot printed was (see [`Page::refind`]).
+    seen_refs: Arc<std::sync::Mutex<std::collections::HashMap<u64, SeenRef>>>,
 }
+
+/// A ref as a snapshot printed it: its element's role and full name, its
+/// place among the snapshot's elements of that role and name (and how many
+/// there were), the scope the snapshot was taken in, and the document.
+#[derive(Clone, Debug)]
+struct SeenRef {
+    role: String,
+    name: String,
+    nth: usize,
+    of: usize,
+    scope: Option<u64>,
+    url: String,
+    generation: u64,
+}
+
+/// The refs one tab remembers, at most (oldest snapshot's dropped first).
+const SEEN_REFS_MAX: usize = 50_000;
 
 impl Page {
     pub fn new(
@@ -1936,7 +1957,88 @@ impl Page {
             worlds: Default::default(),
             pointer: Default::default(),
             stalled: Default::default(),
+            seen_refs: Default::default(),
         }
+    }
+
+    /// Remember what a snapshot's refs were (see [`Page::refind`]).
+    fn remember_refs(&self, refs: &[(u64, String, String)], url: &str, scope: Option<u64>) {
+        let started = std::time::Instant::now();
+        self.remember_refs_inner(refs, url, scope);
+        crate::timing::record("ax_remember_refs", started);
+    }
+
+    fn remember_refs_inner(&self, refs: &[(u64, String, String)], url: &str, scope: Option<u64>) {
+        let generation = self.nav_generation();
+        let mut counts: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
+        for (_, role, name) in refs {
+            *counts.entry((role, name)).or_default() += 1;
+        }
+        let mut nth: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
+        let mut seen = self.seen_refs.lock().unwrap();
+        if seen.len() + refs.len() > SEEN_REFS_MAX {
+            seen.clear();
+        }
+        for (id, role, name) in refs {
+            let at = nth.entry((role, name)).or_default();
+            seen.insert(
+                *id,
+                SeenRef {
+                    role: role.clone(),
+                    name: name.clone(),
+                    nth: *at,
+                    of: counts[&(role.as_str(), name.as_str())],
+                    scope,
+                    url: url.to_string(),
+                    generation,
+                },
+            );
+            *at += 1;
+        }
+    }
+
+    /// The element a stale ref stood for, found again after a re-render:
+    /// on the same document and URL, among the elements of the ref's role
+    /// and name (in the snapshot's scope), the one at its place, when there
+    /// are as many of them as the snapshot had. Returns the new ref and how
+    /// the element reads (`button "Save"`). None when that isn't certain.
+    pub fn refind(&self, node: u64, timeout: Duration) -> Option<(u64, String)> {
+        let seen = self.seen_refs.lock().unwrap().get(&node).cloned()?;
+        if seen.generation != self.nav_generation() || self.url(timeout).ok()? != seen.url {
+            return None;
+        }
+        let root = match seen.scope {
+            Some(scope) => scope,
+            None => {
+                let doc = self.send("DOM.getDocument", json!({ "depth": 0 }), timeout).ok()?;
+                doc.pointer("/root/backendNodeId")?.as_u64()?
+            }
+        };
+        let found = self
+            .send(
+                "Accessibility.queryAXTree",
+                json!({ "backendNodeId": root, "accessibleName": seen.name, "role": seen.role }),
+                timeout,
+            )
+            .ok()?;
+        let nodes: Vec<u64> = found
+            .get("nodes")?
+            .as_array()?
+            .iter()
+            .filter(|n| n.get("ignored").and_then(Value::as_bool) != Some(true))
+            .filter_map(|n| n.get("backendDOMNodeId").and_then(Value::as_u64))
+            .collect();
+        if nodes.len() != seen.of {
+            return None;
+        }
+        let now = *nodes.get(seen.nth)?;
+        if now == node {
+            return None;
+        }
+        let what = format!("{} {}", seen.role, serde_json::to_string(&seen.name).unwrap_or_default());
+        // The new ref is the same element: found again after the next one.
+        self.seen_refs.lock().unwrap().insert(now, seen);
+        Some((now, what))
     }
 
     pub fn target_id(&self) -> &str {
@@ -2045,6 +2147,17 @@ impl Page {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// An action is about to run here (see [`Shared::mark_action`]).
+    pub fn mark_action(&self) {
+        self.shared.mark_action(&self.session_id, self.nav_generation());
+    }
+
+    /// The last action's own requests have started, with no navigation
+    /// since (see [`Shared::action_traffic_seen`]).
+    pub fn action_traffic_seen(&self) -> bool {
+        self.shared.action_traffic_seen(&self.session_id, self.nav_generation())
     }
 
     /// A `wait` just succeeded on this tab: remember when, for the next
@@ -3964,6 +4077,44 @@ impl Page {
     }
 
     /// First matching element's textContent, if present.
+    /// An app window as the app shows it: whether it is hidden (an Electron
+    /// app's helper or dropdown window, made with `show: false`), and its
+    /// area, to pick the window a user would look at.
+    pub fn window_shown(&self, timeout: Duration) -> Option<(bool, f64, String)> {
+        let v = self
+            .evaluate_raw(
+                "[document.visibilityState === 'hidden', window.innerWidth * window.innerHeight, location.href]",
+                timeout,
+            )
+            .ok()?;
+        Some((v[0].as_bool()?, v[1].as_f64().unwrap_or(0.0), v[2].as_str().unwrap_or_default().to_string()))
+    }
+
+    /// The document has loaded and shows something to read or use (text,
+    /// or a control): an app that boots its UI after the window opens is
+    /// past its empty shell.
+    pub fn shows_content(&self, timeout: Duration) -> bool {
+        self.evaluate_raw(
+            "document.readyState === 'complete' && !!document.body && (document.body.innerText.trim().length > 0 \
+             || !!document.querySelector('input:not([type=hidden]),button,a[href],select,textarea,[role=button],[role=link],[contenteditable]'))",
+            timeout,
+        )
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    }
+
+    /// The page's `navigator.userAgent`.
+    pub fn user_agent(&self, timeout: Duration) -> Result<String> {
+        Ok(self.evaluate_raw("navigator.userAgent", timeout)?.as_str().unwrap_or_default().to_string())
+    }
+
+    /// The page's whole text as it reads (`innerText` of the body).
+    pub fn page_text(&self, timeout: Duration) -> Result<String> {
+        let value = self.evaluate_raw("(document.body || document.documentElement || {}).innerText ?? ''", timeout)?;
+        Ok(value.as_str().unwrap_or_default().to_string())
+    }
+
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
         let value = self.evaluate_raw(&format!("({DEEP}.first({sel}) || {{}}).textContent ?? null"), timeout)?;
@@ -4021,11 +4172,46 @@ impl Page {
 
     /// PNG screenshot bytes; `full_page` captures beyond the viewport.
     pub fn screenshot_png(&self, timeout: Duration, full_page: bool) -> Result<Vec<u8>> {
-        let mut params = json!({ "format": "png" });
+        self.screenshot_as(timeout, full_page, None)
+    }
+
+    /// Screenshot bytes: a JPEG at `quality` (1-100) when given, else a PNG.
+    pub fn screenshot_as(&self, timeout: Duration, full_page: bool, quality: Option<u8>) -> Result<Vec<u8>> {
+        let mut params = match quality {
+            Some(q) => json!({ "format": "jpeg", "quality": q }),
+            None => json!({ "format": "png" }),
+        };
         if full_page {
             params["captureBeyondViewport"] = Value::Bool(true);
         }
-        let res = self.send("Page.captureScreenshot", params, timeout)?;
+        // A capture asked for while the page is replacing its document (a click
+        // that confirm()s, posts and reloads) can be lost: Chrome never answers it,
+        // and the next capture works at once. So with no answer after 400 ms it is
+        // asked for again, and whichever answers first is taken: a slow capture
+        // that is only slow (a long full page) still answers in its own time.
+        let started = std::time::Instant::now();
+        let session = Some(self.session_id.as_str());
+        let res = self.block_on(async {
+            let first = self.client.send("Page.captureScreenshot", params.clone(), session, timeout);
+            tokio::pin!(first);
+            tokio::select! {
+                r = &mut first => return r,
+                _ = tokio::time::sleep(timeout.min(Duration::from_millis(400))) => {}
+            }
+            let left = timeout.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return first.await;
+            }
+            let second = self.client.send("Page.captureScreenshot", params, session, left);
+            tokio::pin!(second);
+            tokio::select! {
+                r = &mut first => match r {
+                    Ok(v) => Ok(v),
+                    Err(_) => second.await,
+                },
+                r = &mut second => r,
+            }
+        })?;
         let data =
             res.get("data").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("captureScreenshot: no data"))?;
         base64::engine::general_purpose::STANDARD.decode(data).context("screenshot base64 decode")
@@ -4108,9 +4294,9 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
             .collect();
         let text =
             |i: Option<&Value>| i.and_then(Value::as_u64).and_then(|i| strings.get(i as usize).copied()).unwrap_or("");
-        let documents = snap.get("documents").and_then(Value::as_array).cloned().unwrap_or_default();
+        let documents: &[Value] = snap.get("documents").and_then(Value::as_array).map_or(&[], Vec::as_slice);
         let page_origin = documents.first().and_then(|d| http_origin(text(d.get("documentURL"))));
-        for doc in &documents {
+        for doc in documents {
             let nodes = &doc["nodes"];
             let foreign = match (&page_origin, http_origin(text(doc.get("documentURL")))) {
                 (Some(page), Some(own)) => *page != own,
@@ -4340,6 +4526,12 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                 }
                 let mut queue = std::collections::VecDeque::from([(i, 0)]);
                 let mut img = None;
+                // Last resorts: a vector icon with nothing to call it by, an
+                // inline (`data:`) image. They still say it is an icon.
+                let mut bare = None;
+                let file_of = |url: &str| -> String {
+                    url.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("").trim().to_string()
+                };
                 let mut seen = 0;
                 while let Some((at, depth)) = queue.pop_front() {
                     seen += 1;
@@ -4353,6 +4545,21 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                     if let Some(class) = attr_of(at, "class").split_whitespace().find(|c| icon_class(c)) {
                         return Some(format!("icon={}", short(class)));
                     }
+                    // An icon component's test id (`<svg data-testid="DeleteIcon">`).
+                    let testid = attr_of(at, "data-testid").trim();
+                    if !testid.is_empty() && matches!(tag_of(at), "svg" | "SVG") {
+                        return Some(format!("icon={}", short(testid)));
+                    }
+                    // A background image set on the element itself.
+                    let style = attr_of(at, "style");
+                    if img.is_none() && style.contains("url(") {
+                        let url = style.split("url(").nth(1).unwrap_or("").split(')').next().unwrap_or("");
+                        let url = url.trim().trim_matches(['"', '\'']);
+                        let file = file_of(url);
+                        if !file.is_empty() && !url.starts_with("data:") {
+                            img = Some(format!("img={}", short(&file)));
+                        }
+                    }
                     match tag_of(at) {
                         "use" | "USE" => {
                             let href = Some(attr_of(at, "href"))
@@ -4365,12 +4572,14 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                         }
                         "IMG" if img.is_none() => {
                             let src = attr_of(at, "src");
-                            let file =
-                                src.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("").trim();
+                            let file = file_of(src);
                             if !file.is_empty() && !src.starts_with("data:") {
-                                img = Some(format!("img={}", short(file)));
+                                img = Some(format!("img={}", short(&file)));
+                            } else if bare.is_none() {
+                                bare = Some(format!("img={}", short("inline")));
                             }
                         }
+                        "svg" | "SVG" if bare.is_none() => bare = Some(format!("icon={}", short("svg"))),
                         _ => {}
                     }
                     if depth < 4 {
@@ -4379,7 +4588,8 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                         }
                     }
                 }
-                img
+                // A description says it better than "an icon" does.
+                img.or(bare.filter(|_| attr_of(i, "aria-describedby").trim().is_empty()))
             };
             for (i, &backend) in backends.iter().enumerate() {
                 if types.get(i) != Some(&1) {
@@ -4658,38 +4868,49 @@ impl Page {
     /// The text tree built from the DOM snapshot (see `domax`): one
     /// snapshot serves the tree and the clickable elements.
     fn ax_tree_dom(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        // A scope is found first: only its subtree is built.
+        let root_backend_id = match &opts.scope {
+            Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
+            None => None,
+        };
         let started = std::time::Instant::now();
         let snap = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
         crate::timing::record("ax_dom_snapshot", started);
         let started = std::time::Instant::now();
-        let clicks = clickables_from(&snap);
-        let built = domax::build(&snap).ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
-        drop(snap);
+        // The clickable elements and the tree read the same snapshot, side
+        // by side.
+        let (clicks, built) = std::thread::scope(|s| {
+            let clicks = s.spawn(|| clickables_from(&snap));
+            let built = match root_backend_id {
+                Some(backend) => domax::build_scoped(&snap, backend),
+                None => domax::build(&snap),
+            };
+            (clicks.join(), built)
+        });
+        let clicks = clicks.map_err(|_| anyhow::anyhow!("reading the snapshot's clickable elements failed"))?;
+        let built = built.ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
+        // Freeing a large snapshot takes milliseconds: not on the way to
+        // the answer.
+        std::thread::spawn(move || drop(snap));
         crate::timing::record("ax_dom_build", started);
-        let root_backend_id = match &opts.scope {
-            Some(target) => {
-                let backend = self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?;
-                let has = |nodes: &[Value]| {
-                    nodes.iter().any(|n| n.get("backendDOMNodeId").and_then(Value::as_u64) == Some(backend))
-                };
-                if !has(&built.nodes) && !built.frames.iter().any(|f| has(&f.nodes)) {
-                    bail!("the scope is not in the snapshot's tree");
-                }
-                Some(backend)
+        if let Some(backend) = root_backend_id {
+            let has = |nodes: &[ax::Node]| nodes.iter().any(|n| n.backend == Some(backend));
+            if !has(&built.nodes) && !built.frames.iter().any(|f| has(&f.nodes)) {
+                bail!("the scope is not in the snapshot's tree");
             }
-            None => None,
-        };
+        }
         let url = built.url.clone();
         let origin = url
             .find("://")
             .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
             .unwrap_or_default();
         let started = std::time::Instant::now();
-        let rendered = ax::render(
+        let rendered = ax::render_nodes(
             &format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default()),
             &built.nodes,
             &built.frames,
             &ax::Options {
+                full_text: opts.full_text,
                 all_refs: opts.all_refs,
                 limit: opts.limit,
                 root_backend_id,
@@ -4699,6 +4920,8 @@ impl Page {
             },
         );
         crate::timing::record("ax_render", started);
+        std::thread::spawn(move || drop(built));
+        self.remember_refs(&rendered.refs, &url, root_backend_id);
         Ok(Value::String(rendered.text))
     }
 
@@ -4791,6 +5014,7 @@ impl Page {
             &seed,
             &frames,
             &ax::Options {
+                full_text: opts.full_text,
                 all_refs: opts.all_refs,
                 limit: opts.limit,
                 root_backend_id: scoped_backend,
@@ -4804,6 +5028,7 @@ impl Page {
         if failed {
             bail!("lazy AX fetch failed");
         }
+        self.remember_refs(&rendered.refs, &url, scoped_backend);
         Ok(Value::String(rendered.text))
     }
 
@@ -4868,6 +5093,7 @@ impl Page {
             &nodes,
             &frames,
             &ax::Options {
+                full_text: opts.full_text,
                 all_refs: opts.all_refs,
                 limit: opts.limit,
                 root_backend_id,
@@ -4877,6 +5103,7 @@ impl Page {
             },
         );
         crate::timing::record("ax_render", started);
+        self.remember_refs(&rendered.refs, &url, root_backend_id);
         let mut text = rendered.text;
         // Lightpanda's tree stops at a shadow root; what is inside is read
         // from the page instead, without refs (see SHADOW_AX).
@@ -4960,8 +5187,12 @@ const LAZY_CALLS_PER_NODE: f64 = 0.25;
 /// (see `domax`), not Chrome's accessibility tree, which costs about a
 /// tenth of a millisecond per node read in full and three times that read
 /// lazily: a 2,000-row table (18,000 nodes) took 2.1 s for the tree and
-/// 0.19 s for the snapshot. Smaller pages keep Chrome's tree.
-const DOM_TREE_NODES: u64 = 3000;
+/// 0.19 s for the snapshot; a 1,500-element page 166-201 ms against 29-40.
+/// The snapshot tree is the same text on 43 of the 45 fixture pages (not:
+/// Chrome's JSON viewer, whose controls the snapshot doesn't hold, and a
+/// canvas role since mapped). Small pages, where the difference is a few
+/// ms, keep Chrome's tree.
+const DOM_TREE_NODES: u64 = 800;
 
 /// How long `close_target` waits for the page to go after `Page.close`.
 const CLOSE_WAIT: Duration = Duration::from_millis(1500);

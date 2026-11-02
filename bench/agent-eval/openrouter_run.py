@@ -38,6 +38,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# navigera prints compact output by default; this reads its JSON lines.
+os.environ.setdefault("NAVIGERA_OUTPUT", "json")
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import run as evalrun  # noqa: E402  the eval's site, setup, prompt and checks

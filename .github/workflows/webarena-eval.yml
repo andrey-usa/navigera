@@ -41,6 +41,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # The CLI's default output is the compact form for agents; the steps
+  # here read the JSON lines.
+  NAVIGERA_OUTPUT: json
+
 jobs:
   plan:
     runs-on: ubuntu-latest

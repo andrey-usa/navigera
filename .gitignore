@@ -17,3 +17,5 @@ __pycache__/
 /report.json
 /dump-*.html
 .primavera/
+/tests/fixtures/electron-app/node_modules/
+/tests/fixtures/electron-app/package-lock.json

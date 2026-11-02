@@ -62,6 +62,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# navigera prints compact output by default; this reads its JSON lines.
+os.environ.setdefault("NAVIGERA_OUTPUT", "json")
+
 WINDOWS = os.name == "nt"
 OS_NAME = {"nt": "windows"}.get(os.name, "darwin" if sys.platform == "darwin" else "linux")
 
