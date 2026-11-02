@@ -71,10 +71,10 @@ none). Set `$CHROME_BIN` to choose explicitly.
 ## Use (agents and people)
 
 ```sh
+export NAVIGERA_OUTPUT=compact              # agents: actions print ok (or only what changed), reads only their value
 navigera -s work start                      # warm headless browser behind a local socket
 navigera -s work goto example.com
-navigera -s work --raw ax                   # page as an indented tree, [ref=N] on actionable nodes
-# NAVIGERA_OUTPUT=compact: actions print ok (or only what changed), reads only their value
+navigera -s work ax                         # page as an indented tree, [ref=N] on actionable nodes
 navigera -s work click 12                   # act on a ref
 navigera -s work fill 31 "hello" && navigera -s work press Enter
 navigera -s work wait --text "Saved"
