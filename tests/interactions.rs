@@ -1835,3 +1835,86 @@ fn bench_site() -> Option<Site> {
     let url = line.trim().strip_prefix("LISTENING ")?.to_string();
     Some(Site { child, url })
 }
+
+/// Property changes with input/change/focus events wake a paused predicate;
+/// a silent property assignment still has the timer fallback.
+#[test]
+fn property_events_wake_the_wait_after_the_pages_handlers() {
+    if !chrome() { return; }
+    let s = Session::start("event-wake", &[]);
+    s.ok(&["goto", "data:text/html,<input id=c type=checkbox><input id=v><div id=m></div>"]);
+    let js = format!(r#"(async () => {{
+        const deep = {}, c = document.getElementById('c'), v = document.getElementById('v');
+        let added = 0, removed = 0;
+        const add = document.addEventListener.bind(document), remove = document.removeEventListener.bind(document);
+        document.addEventListener = (...args) => {{ added++; return add(...args); }};
+        document.removeEventListener = (...args) => {{ removed++; return remove(...args); }};
+        const samples = [];
+        for (const kind of ['change', 'input', 'focus', 'silent']) {{
+            c.checked = false; v.blur(); v.value = ''; let changed = 0;
+            const predicate = () => kind === 'focus' ? document.activeElement === v : kind === 'input' ? v.value === 'committed' : c.checked;
+            // The page's handler must run before the wait is rechecked.
+            const handler = () => {{ v.value = 'committed'; }};
+            v.addEventListener('input', handler);
+            setTimeout(() => {{
+                if (kind === 'focus') v.focus();
+                else if (kind === 'input') {{ v.value = 'draft'; v.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
+                else {{ c.checked = true; if (kind === 'change') c.dispatchEvent(new Event('change', {{ bubbles: true }})); }}
+                changed = performance.now();
+            }}, 25);
+            while (!predicate()) await deep.wake(100);
+            samples.push([kind, performance.now() - changed, predicate(), kind !== 'input' || v.value === 'committed']);
+            v.removeEventListener('input', handler);
+        }}
+        return {{ samples, added, removed, value: v.value }};
+    }})()"#, navigera::cdp::DEEP);
+    let r = s.ok(&["eval", &js]);
+    assert!(r["added"].as_u64().unwrap() >= 16, "listeners not installed: {r}");
+    assert_eq!(r["added"], r["removed"], "listeners leaked: {r}");
+    assert_eq!(r["samples"].as_array().unwrap().len(), 4, "{r}");
+    // These are correctness checks, not machine-dependent performance gates.
+    for row in r["samples"].as_array().unwrap() {
+        assert!(row[1].as_f64().unwrap().is_finite(), "{r}");
+        assert_eq!(row[2], true, "predicate not met: {r}");
+        assert_eq!(row[3], true, "page handler not seen: {r}");
+    }
+}
+
+/// Input events from fill and non-composed events in nested roots also wake
+/// the pause. Every watched root loses its capture listeners afterwards.
+#[test]
+fn event_wakes_cover_fill_shadow_roots_and_frame_documents() {
+    if !chrome() { return; }
+    let s = Session::start("event-wake-roots", &[]);
+    s.ok(&["goto", "data:text/html,<input id=v><div id=host></div><iframe></iframe>"]);
+    let js = format!(r#"(() => {{
+        const deep = {}, doc = document.querySelector('iframe').contentDocument;
+        doc.body.innerHTML = '<input>';
+        const shadow = document.getElementById('host').attachShadow({{mode:'open'}});
+        shadow.innerHTML = '<input>';
+        const roots = [document, shadow, doc], counts = roots.map(() => [0, 0]);
+        roots.forEach((root, i) => {{
+            const add = root.addEventListener.bind(root), remove = root.removeEventListener.bind(root);
+            root.addEventListener = (...args) => {{ if (args[2] === true) counts[i][0]++; return add(...args); }};
+            root.removeEventListener = (...args) => {{ if (args[2] === true) counts[i][1]++; return remove(...args); }};
+        }});
+        window.fillDone = (async () => {{
+            const v = document.getElementById('v');
+            while (v.value !== 'ready') await deep.wake(100);
+            for (const root of [shadow, doc]) {{
+                const input = root.querySelector('input');
+                setTimeout(() => {{ input.value = 'ready'; input.dispatchEvent(new Event('input', {{bubbles:true, composed:false}})); }}, 25);
+                while (input.value !== 'ready') await deep.wake(100);
+            }}
+            return counts;
+        }})();
+        return true;
+    }})()"#, navigera::cdp::DEEP);
+    s.ok(&["eval", &js]);
+    s.ok(&["fill", "--selector", "#v", "ready"]);
+    let counts = s.ok(&["eval", "window.fillDone"]);
+    for row in counts.as_array().unwrap() {
+        assert!(row[0].as_u64().unwrap() >= 12, "root not watched: {counts}");
+        assert_eq!(row[0], row[1], "listeners leaked: {counts}");
+    }
+}

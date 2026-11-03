@@ -169,14 +169,24 @@ pub const DEEP: &str = r#"(() => {
     const MIN_GAP = 8;
     let lastEnd = -1e9;
     const wake = (ms) => new Promise((resolve) => {
-        let mo = null, timer = 0, done = false;
+        let mo = null, timer = 0, eventTimer = 0, done = false;
+        const watching = [], events = ['focusin', 'focusout', 'input', 'change'];
         const finish = () => {
             if (done) return;
             done = true;
             lastEnd = performance.now();
             clearTimeout(timer);
+            clearTimeout(eventTimer);
+            for (const r of watching) for (const type of events) r.removeEventListener(type, onEvent, true);
             if (mo) mo.disconnect();
             resolve();
+        };
+        // Defer until the page's own handlers finish, including controlled
+        // inputs. Silent property writes still use the unchanged timer.
+        const onEvent = () => {
+            if (done || eventTimer) return;
+            const gap = Math.max(0, MIN_GAP - (performance.now() - lastEnd));
+            eventTimer = setTimeout(finish, gap);
         };
         timer = setTimeout(finish, ms);
         try {
@@ -189,7 +199,11 @@ pub const DEEP: &str = r#"(() => {
                 if (gap > 0) setTimeout(finish, gap); else finish();
             });
             const what = { subtree: true, childList: true, attributes: true, characterData: true };
-            for (const r of roots()) mo.observe(r, what);
+            for (const r of roots()) {
+                mo.observe(r, what);
+                watching.push(r);
+                for (const type of events) r.addEventListener(type, onEvent, true);
+            }
         } catch (_) {}
     });
     const pierced = (sel) => {
