@@ -2129,6 +2129,32 @@ impl BrowserSession {
         self.sync_fetch()
     }
 
+    /// Set this session's domain allowlist: every tab's requests to other
+    /// hosts are refused at the Fetch request stage, before any route
+    /// rule. On failure the policy is not left half-installed: it is
+    /// removed again and the Fetch override recomputed without it.
+    pub fn set_allow_domains(&mut self, policy: crate::domains::DomainPolicy) -> Result<()> {
+        self.browser.shared().set_allow_policy(&self.scope(), Some(policy));
+        if let Err(e) = self.sync_fetch() {
+            self.browser.shared().set_allow_policy(&self.scope(), None);
+            let _ = self.sync_fetch();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// The session's allowlist for `status`: its entries, whether only
+    /// top-level navigation is checked, and the hosts it refused, if any.
+    pub fn allow_status(&self) -> Option<serde_json::Value> {
+        let policy = self.browser.shared().allow_policy(&self.scope())?;
+        let denied = self.browser.shared().denied_summary(&self.scope());
+        Some(serde_json::json!({
+            "entries": policy.display_entries(),
+            "docs_only": policy.docs_only,
+            "denied": denied.iter().map(|(h, n)| serde_json::json!({ "host": h, "count": n })).collect::<Vec<_>>(),
+        }))
+    }
+
     /// Remove the rule for `pattern`, or every rule; returns how many went.
     pub fn remove_routes(&mut self, pattern: Option<&str>) -> Result<usize> {
         let removed = {
@@ -2166,12 +2192,15 @@ impl BrowserSession {
         let shared = self.browser.shared();
         let scope = self.scope();
         let auth = shared.credentials.lock().unwrap().contains_key(&scope);
+        // An allowlist pauses every request at the request stage, whatever
+        // the routes say: removing all routes must not disable it.
+        let allowlisted = shared.allow.lock().unwrap().contains_key(&scope);
         // Modify rules pause at the response stage; the rest (and auth,
         // which needs every request) at the request stage.
         let patterns: Vec<serde_json::Value> = {
             let routes = shared.routes.lock().unwrap();
             let rules = routes.get(&scope).into_iter().flatten();
-            let mut patterns: Vec<serde_json::Value> = if auth {
+            let mut patterns: Vec<serde_json::Value> = if auth || allowlisted {
                 vec![serde_json::json!({ "urlPattern": "*" })]
             } else {
                 rules
@@ -2462,6 +2491,9 @@ impl BrowserSession {
         if !matches!(wait, "load" | "domcontentloaded" | "commit") {
             bail!("--wait takes load|domcontentloaded|commit, got {wait:?}");
         }
+        // When this navigation started: only a refusal from this navigation
+        // may name its host (a redirect's target, not the starting URL).
+        let nav_started = std::time::Instant::now();
         // Honors --timeout-ms (was a hard-coded 40 s per attempt).
         let timeout = self.timeout(timeout_ms);
         let max_attempts = 3;
@@ -2490,6 +2522,27 @@ impl BrowserSession {
                             bail!(
                                 "the server answered {code} with no page; the tab now shows Chrome's error page \
                                  (net::ERR_HTTP_RESPONSE_CODE_FAILURE)"
+                            );
+                        }
+                    }
+                    // A navigation the session's allowlist refused: name the
+                    // host and the flag, not just Chrome's error code. The
+                    // host is this navigation's own, or a host refused
+                    // during it (a redirect's target): a route rule's abort
+                    // is never misreported as an allowlist refusal.
+                    if msg.contains("ERR_BLOCKED_BY_CLIENT") {
+                        let host = crate::domains::refusal_host(url);
+                        let denied_here = !host.is_empty()
+                            && self.browser.shared().denied_summary(&self.scope()).iter().any(|(h, _)| *h == host);
+                        let host = if denied_here {
+                            host
+                        } else {
+                            self.browser.shared().last_denied_since(&self.scope(), nav_started).unwrap_or_default()
+                        };
+                        if !host.is_empty() {
+                            bail!(
+                                "refused by --allow-domains: {host} is not in this session's allowlist, \
+                                 so the navigation was blocked (net::ERR_BLOCKED_BY_CLIENT)"
                             );
                         }
                     }
@@ -3130,6 +3183,9 @@ impl BrowserSession {
     /// emulation, `init-script`s and the downloads directory, applied to this
     /// session's tab and to the tabs it opens later.
     pub fn inherit_settings(&mut self, old: &BrowserSession) {
+        // The recovered tabs keep the Fetch override: they keep the policy
+        // with it, or the override would run with no policy at all.
+        self.browser.shared().copy_allow_policy(&old.scope(), &self.scope());
         self.overrides = old.overrides.clone();
         self.init_scripts = old.init_scripts.clone();
         if let Some(dir) = old.downloads_dir.clone() {

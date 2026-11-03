@@ -817,6 +817,12 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     if let Some(dir) = &config.download_dir {
         cmd.arg("--download-dir").arg(dir);
     }
+    if let Some(list) = &config.allow_domains {
+        cmd.arg("--allow-domains").arg(list);
+    }
+    if config.allow_domains_docs_only {
+        cmd.arg("--allow-domains-docs-only");
+    }
     if config.own_browser {
         cmd.arg("--own-browser");
     }

@@ -243,6 +243,13 @@ pub struct Shared {
     /// `route` rules per scope, first match wins; requests matching none
     /// continue.
     pub routes: Mutex<HashMap<Scope, Vec<Route>>>,
+    /// A session's domain allowlist, per scope (see `crate::domains`):
+    /// checked before any route rule, on every request-stage pause.
+    pub allow: Mutex<HashMap<Scope, crate::domains::DomainPolicy>>,
+    /// Requests the allowlist refused, per scope: (scope, denied host,
+    /// count, when most recently refused). Hosts only, never URLs: a
+    /// refused URL's query is not recorded anywhere.
+    pub denied: Mutex<Vec<(Scope, String, u64, std::time::Instant)>>,
     /// `set credentials` per scope: answers HTTP auth challenges.
     pub credentials: Mutex<HashMap<Scope, (String, String)>>,
     /// Several sessions share this browser (`BrowserSession::fork`): each
@@ -359,6 +366,10 @@ enum Answer {
     Send(&'static str, Value),
     /// Fetch the real response's body, change it, fulfill with the result.
     Modify { set_headers: Vec<(String, String)>, replace: Vec<(String, String)> },
+    /// A domain-allowlist refusal: `Fetch.failRequest`, and never the
+    /// `Fetch.continueRequest` fallback below. A denial that cannot be
+    /// delivered leaves the request paused (blocked, not leaked).
+    Deny { request_id: String, host: String },
 }
 
 fn fulfill(request_id: &str, status: u16, headers: &[(String, String)], body_base64: &str) -> Answer {
@@ -373,8 +384,55 @@ fn fulfill(request_id: &str, status: u16, headers: &[(String, String)], body_bas
     )
 }
 
+/// The domain-allowlist verdict for a paused request, before any route
+/// rule: a scope with no policy is unaffected, but a session nobody
+/// registered (no scope to attribute the request to) is denied whenever
+/// any policy exists anywhere: an unknown session must never inherit the
+/// default scope's lack of a policy.
+fn policy_verdict(shared: &Shared, session: &str, url: &str, frame_id: &str, resource_type: &str) -> Option<String> {
+    use crate::domains::refusal_host;
+    let scopes = shared.scopes.lock().unwrap();
+    let scope = scopes.get(session).cloned();
+    drop(scopes);
+    let policy = match &scope {
+        Some(scope) => shared.allow.lock().unwrap().get(scope).cloned(),
+        // Unknown session: fail closed if any session is allowlisted.
+        None => {
+            if shared.allow.lock().unwrap().is_empty() {
+                return None;
+            }
+            let host = refusal_host(url);
+            if host.is_empty() {
+                return None; // no host to check (about/blob/data): not a leak
+            }
+            return Some(host);
+        }
+    };
+    let policy = policy?;
+    if policy.docs_only {
+        // Only top-level navigation is checked: a Document request for the
+        // tab's main frame (its frame id is the target id). A Document
+        // request with no frame id cannot be shown to be a subframe, so it
+        // is checked too; every other request passes.
+        let main = shared.sessions.lock().unwrap().get(session).cloned().unwrap_or_default();
+        let top = resource_type == "Document" && (frame_id.is_empty() || frame_id == main);
+        if !top {
+            return None;
+        }
+    }
+    if policy.allows_url(url) {
+        None
+    } else {
+        let host = refusal_host(url);
+        Some(if host.is_empty() { "unknown host".to_string() } else { host })
+    }
+}
+
 /// The answer to a paused request. `at_response`: paused at the response
 /// stage (only `Modify` rules ask for that).
+// The paused request's fields, not a bundle worth naming: the callers are
+// one event handler and its tests.
+#[allow(clippy::too_many_arguments)]
 fn route_answer(
     shared: &Shared,
     session: &str,
@@ -382,10 +440,27 @@ fn route_answer(
     method: &str,
     url: &str,
     at_response: bool,
+    frame_id: &str,
+    resource_type: &str,
 ) -> Answer {
     let go_on = || Answer::Send("Fetch.continueRequest", json!({ "requestId": request_id }));
     let fail =
         || Answer::Send("Fetch.failRequest", json!({ "requestId": request_id, "errorReason": "BlockedByClient" }));
+    if let Some(host) = policy_verdict(shared, session, url, frame_id, resource_type) {
+        // Recorded before the answer is sent, so a denial counts even if
+        // delivering it fails (and the request then stays paused, never
+        // continued).
+        let scope = shared.scopes.lock().unwrap().get(session).cloned().unwrap_or_default();
+        let mut denied = shared.denied.lock().unwrap();
+        match denied.iter_mut().find(|(s, h, _, _)| *s == scope && *h == host) {
+            Some((_, _, n, at)) => {
+                *n += 1;
+                *at = std::time::Instant::now();
+            }
+            None => denied.push((scope, host.clone(), 1, std::time::Instant::now())),
+        }
+        return Answer::Deny { request_id: request_id.to_string(), host };
+    }
     let scope = shared.scope_of(session);
     let mut routes = shared.routes.lock().unwrap();
     let Some(route) = routes
@@ -516,6 +591,59 @@ impl Shared {
         self.policy.lock().unwrap().get(scope).cloned().unwrap_or_default()
     }
 
+    /// The domain allowlist of `scope`, if one is set.
+    pub fn allow_policy(&self, scope: &str) -> Option<crate::domains::DomainPolicy> {
+        self.allow.lock().unwrap().get(scope).cloned()
+    }
+
+    /// Set (or clear) the domain allowlist of `scope`.
+    pub fn set_allow_policy(&self, scope: &str, policy: Option<crate::domains::DomainPolicy>) {
+        let mut allow = self.allow.lock().unwrap();
+        match policy {
+            Some(p) => allow.insert(scope.to_string(), p),
+            None => allow.remove(scope),
+        };
+    }
+
+    /// A crash-recovered session takes over its predecessor's allowlist:
+    /// the recovered tabs keep the Fetch override, so they must keep the
+    /// policy with it, or the override would run with no policy at all.
+    pub fn copy_allow_policy(&self, from: &str, to: &str) {
+        let policy = self.allow.lock().unwrap().get(from).cloned();
+        if let Some(p) = policy {
+            self.allow.lock().unwrap().insert(to.to_string(), p);
+        }
+    }
+
+    /// The host most recently refused for `scope` at or after `since`,
+    /// for naming a failed navigation (a redirect's denial names the
+    /// redirect target, not the URL the navigation started from). A denial
+    /// older than the navigation is never attributed to it, so a route
+    /// rule's abort is not misreported as an allowlist refusal.
+    pub fn last_denied_since(&self, scope: &str, since: std::time::Instant) -> Option<String> {
+        self.denied
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(s, _, _, at)| *s == scope && *at >= since)
+            .map(|(_, h, _, _)| h.clone())
+    }
+
+    /// Refused hosts of `scope`, most-refused first: (host, count).
+    pub fn denied_summary(&self, scope: &str) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = self
+            .denied
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(s, _, _, _)| s == scope)
+            .map(|(_, h, n, _)| (h.clone(), *n))
+            .collect();
+        out.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        out
+    }
+
     /// A session moved to a new browser context (`reset`): its routes,
     /// credentials and dialog answer go with it; `keep: false` drops them.
     pub fn move_scope(&self, from: &str, to: &str, keep: bool) {
@@ -530,6 +658,17 @@ impl Shared {
         mv(&self.routes, from, to, keep);
         mv(&self.credentials, from, to, keep);
         mv(&self.policy, from, to, keep);
+        mv(&self.allow, from, to, keep);
+        {
+            let mut denied = self.denied.lock().unwrap();
+            if keep {
+                for (s, _, _, _) in denied.iter_mut().filter(|(s, _, _, _)| *s == from) {
+                    *s = to.to_string();
+                }
+            } else {
+                denied.retain(|(s, _, _, _)| *s != from);
+            }
+        }
         {
             let mut frames = self.frame_scopes.lock().unwrap();
             if keep {
@@ -581,6 +720,8 @@ impl Shared {
         self.routes.lock().unwrap().remove(scope);
         self.credentials.lock().unwrap().remove(scope);
         self.policy.lock().unwrap().remove(scope);
+        self.allow.lock().unwrap().remove(scope);
+        self.denied.lock().unwrap().retain(|(s, _, _, _)| s != scope);
         self.dialogs.lock().unwrap().retain(|(s, _)| s != scope);
         {
             let mut downloads = self.downloads.lock().unwrap();
@@ -1041,27 +1182,47 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
             let url = params.pointer("/request/url").and_then(Value::as_str).unwrap_or("");
             let http_method = params.pointer("/request/method").and_then(Value::as_str).unwrap_or("GET");
             let at_response = params.get("responseStatusCode").is_some() || params.get("responseErrorReason").is_some();
+            let frame_id = params.get("frameId").and_then(Value::as_str).unwrap_or("").to_string();
+            let resource_type = params.get("resourceType").and_then(Value::as_str).unwrap_or("").to_string();
             let answer = if params.get("responseErrorReason").is_some() {
                 // Nothing came back to change: the failure goes on as it is.
                 Answer::Send("Fetch.continueRequest", json!({ "requestId": id }))
             } else {
-                route_answer(shared, session, &id, http_method, url, at_response)
+                route_answer(shared, session, &id, http_method, url, at_response, &frame_id, &resource_type)
             };
             let client = client.clone();
             let session = session.to_string();
             let params = params.clone();
             tokio::spawn(async move {
                 let s = Some(session.as_str()).filter(|s| !s.is_empty());
-                let (sent, method) = match answer {
+                let (sent, method, deny) = match answer {
                     Answer::Send(method, answer) => {
-                        (client.send(method, answer, s, Duration::from_secs(10)).await.is_ok(), method)
+                        (client.send(method, answer, s, Duration::from_secs(10)).await.is_ok(), method, false)
                     }
                     Answer::Modify { set_headers, replace } => (
                         modify_response(&client, s, &params, &set_headers, &replace).await.is_ok(),
                         "Fetch.fulfillRequest",
+                        false,
                     ),
+                    Answer::Deny { request_id, .. } => {
+                        // Fail closed, twice: a denial that cannot be
+                        // delivered must never fall through to continue.
+                        // If both attempts fail the request stays paused:
+                        // blocked, not leaked, and the refusal is already
+                        // recorded for the session.
+                        let fail = || {
+                            client.send(
+                                "Fetch.failRequest",
+                                json!({ "requestId": request_id, "errorReason": "BlockedByClient" }),
+                                s,
+                                Duration::from_secs(10),
+                            )
+                        };
+                        let ok = fail().await.is_ok() || fail().await.is_ok();
+                        (ok, "Fetch.failRequest", true)
+                    }
                 };
-                if !sent && method != "Fetch.continueRequest" {
+                if !sent && !deny && method != "Fetch.continueRequest" {
                     // A rule the engine can't apply must not hang the request.
                     let _ = client
                         .send("Fetch.continueRequest", json!({ "requestId": id }), s, Duration::from_secs(10))
@@ -1302,7 +1463,121 @@ mod tests {
         match a {
             Answer::Send(m, _) => m,
             Answer::Modify { .. } => "modify",
+            Answer::Deny { .. } => "Fetch.failRequest",
         }
+    }
+
+    fn answer_is_deny(a: &Answer) -> bool {
+        matches!(a, Answer::Deny { .. })
+    }
+
+    fn allowlist(shared: &Shared, scope: &str, list: &str, docs_only: bool) {
+        shared.set_allow_policy(scope, Some(crate::domains::DomainPolicy::parse(list, docs_only).unwrap()));
+    }
+
+    #[test]
+    fn allowlist_runs_before_routes_and_names_the_denied_host() {
+        let shared = Shared::default();
+        shared.register("s", "t", "");
+        // A fulfill rule for the denied host must not win over the policy.
+        shared.routes.lock().unwrap().insert(
+            "".into(),
+            vec![Route {
+                pattern: "*".into(),
+                action: RouteAction::Fulfill { status: 200, headers: vec![], body_base64: "".into() },
+                hits: 0,
+            }],
+        );
+        allowlist(&shared, "", "example.com", false);
+        let denied = route_answer(&shared, "s", "1", "GET", "https://evil.example.org/x", false, "", "Script");
+        assert!(answer_is_deny(&denied), "a denied host is a Deny, not a route answer");
+        assert_eq!(denied, Answer::Deny { request_id: "1".into(), host: "evil.example.org".into() });
+        assert_eq!(shared.denied_summary("").as_slice(), &[("evil.example.org".to_string(), 1)]);
+        // An allowed host still reaches the route rule.
+        let ok = route_answer(&shared, "s", "2", "GET", "https://example.com/x", false, "", "Script");
+        assert!(!answer_is_deny(&ok));
+        assert_eq!(method_of(ok), "Fetch.fulfillRequest");
+        // Removing every route must not disable the policy.
+        shared.routes.lock().unwrap().remove("");
+        assert!(answer_is_deny(&route_answer(
+            &shared,
+            "s",
+            "3",
+            "GET",
+            "https://evil.example.org/x",
+            false,
+            "",
+            "Script"
+        )));
+    }
+
+    #[test]
+    fn allowlist_unknown_session_is_denied_not_default_scope() {
+        let shared = Shared::default();
+        shared.register("known", "t", "");
+        allowlist(&shared, "", "example.com", false);
+        // Never registered: denied, even though the default scope has a
+        // policy that would allow this host for its own tabs.
+        assert!(answer_is_deny(&route_answer(
+            &shared,
+            "ghost",
+            "1",
+            "GET",
+            "https://example.com/x",
+            false,
+            "",
+            "Script"
+        )));
+        // With no policy anywhere, an unknown session is unaffected.
+        let bare = Shared::default();
+        assert_eq!(
+            method_of(route_answer(&bare, "ghost", "1", "GET", "https://example.com/x", false, "", "Script")),
+            "Fetch.continueRequest"
+        );
+    }
+
+    #[test]
+    fn allowlist_docs_only_checks_top_level_navigation_only() {
+        let shared = Shared::default();
+        shared.register("s", "t-main", "");
+        allowlist(&shared, "", "example.com", true);
+        // Top-level navigation to another host: denied, on every hop.
+        assert!(answer_is_deny(&route_answer(
+            &shared,
+            "s",
+            "1",
+            "GET",
+            "https://other.org/",
+            false,
+            "t-main",
+            "Document"
+        )));
+        // A subframe document, a script and a fetch to the same host pass:
+        // docs-only is a navigation restriction, not exfiltration protection.
+        for (frame, kind) in [("t-sub", "Document"), ("t-main", "Script"), ("t-main", "Fetch")] {
+            assert_eq!(
+                method_of(route_answer(&shared, "s", "2", "GET", "https://other.org/x", false, frame, kind)),
+                "Fetch.continueRequest",
+                "{kind} in {frame}"
+            );
+        }
+        // An allowed top-level navigation passes.
+        assert_eq!(
+            method_of(route_answer(&shared, "s", "3", "GET", "https://example.com/", false, "t-main", "Document")),
+            "Fetch.continueRequest"
+        );
+    }
+
+    #[test]
+    fn allowlist_moves_with_reset_and_drops_with_reset_all() {
+        let shared = Shared::default();
+        shared.register("s", "t", "ctx");
+        allowlist(&shared, "ctx", "example.com", false);
+        shared.move_scope("ctx", "ctx2", true);
+        assert!(shared.allow_policy("ctx2").is_some());
+        assert!(shared.allow_policy("ctx").is_none());
+        shared.move_scope("ctx2", "ctx3", false);
+        assert!(shared.allow_policy("ctx3").is_none());
     }
 
     fn entry(method: &str, url: &str, status: u16, body: &str) -> HarEntry {
@@ -1335,19 +1610,28 @@ mod tests {
             Answer::Send(_, p) => p["body"].as_str().unwrap_or("").to_string(),
             _ => panic!(),
         };
-        assert_eq!(body(route_answer(&shared, "s", "1", "GET", "http://h/n", false)), "MQ==");
-        assert_eq!(body(route_answer(&shared, "s", "2", "GET", "http://h/n", false)), "Mg==");
-        assert_eq!(body(route_answer(&shared, "s", "3", "GET", "http://h/n", false)), "Mg==");
-        let Answer::Send(_, p) = route_answer(&shared, "s", "4", "POST", "http://h/n", false) else { panic!() };
+        assert_eq!(body(route_answer(&shared, "s", "1", "GET", "http://h/n", false, "", "")), "MQ==");
+        assert_eq!(body(route_answer(&shared, "s", "2", "GET", "http://h/n", false, "", "")), "Mg==");
+        assert_eq!(body(route_answer(&shared, "s", "3", "GET", "http://h/n", false, "", "")), "Mg==");
+        let Answer::Send(_, p) = route_answer(&shared, "s", "4", "POST", "http://h/n", false, "", "") else { panic!() };
         assert_eq!(p["responseCode"], 201);
-        assert_eq!(method_of(route_answer(&shared, "s", "5", "GET", "http://h/gone", false)), "Fetch.failRequest");
-        assert_eq!(method_of(route_answer(&shared, "s", "6", "GET", "http://h/other", false)), "Fetch.failRequest");
+        assert_eq!(
+            method_of(route_answer(&shared, "s", "5", "GET", "http://h/gone", false, "", "")),
+            "Fetch.failRequest"
+        );
+        assert_eq!(
+            method_of(route_answer(&shared, "s", "6", "GET", "http://h/other", false, "", "")),
+            "Fetch.failRequest"
+        );
         if let RouteAction::Har { not_found_continue, .. } =
             &mut shared.routes.lock().unwrap().get_mut("").unwrap()[0].action
         {
             *not_found_continue = true;
         }
-        assert_eq!(method_of(route_answer(&shared, "s", "7", "GET", "http://h/other", false)), "Fetch.continueRequest");
+        assert_eq!(
+            method_of(route_answer(&shared, "s", "7", "GET", "http://h/other", false, "", "")),
+            "Fetch.continueRequest"
+        );
     }
 
     #[test]
@@ -1359,8 +1643,11 @@ mod tests {
             action: RouteAction::Modify { set_headers: vec![("x-a".into(), "1".into())], replace: vec![] },
             hits: 0,
         });
-        assert_eq!(method_of(route_answer(&shared, "s", "1", "GET", "http://h/api/x", false)), "Fetch.continueRequest");
-        assert_eq!(method_of(route_answer(&shared, "s", "1", "GET", "http://h/api/x", true)), "modify");
+        assert_eq!(
+            method_of(route_answer(&shared, "s", "1", "GET", "http://h/api/x", false, "", "")),
+            "Fetch.continueRequest"
+        );
+        assert_eq!(method_of(route_answer(&shared, "s", "1", "GET", "http://h/api/x", true, "", "")), "modify");
     }
 
     #[test]
@@ -1396,10 +1683,18 @@ mod tests {
                 hits: 0,
             },
         ]);
-        assert_eq!(method_of(route_answer(&shared, "s1", "1", "GET", "http://h/a.png", false)), "Fetch.failRequest");
-        let Answer::Send(m, p) = route_answer(&shared, "s1", "2", "GET", "http://h/api/x", false) else { panic!() };
+        assert_eq!(
+            method_of(route_answer(&shared, "s1", "1", "GET", "http://h/a.png", false, "", "")),
+            "Fetch.failRequest"
+        );
+        let Answer::Send(m, p) = route_answer(&shared, "s1", "2", "GET", "http://h/api/x", false, "", "") else {
+            panic!()
+        };
         assert_eq!((m, p["responseCode"].as_u64()), ("Fetch.fulfillRequest", Some(200)));
-        assert_eq!(method_of(route_answer(&shared, "s1", "3", "GET", "http://h/", false)), "Fetch.continueRequest");
+        assert_eq!(
+            method_of(route_answer(&shared, "s1", "3", "GET", "http://h/", false, "", "")),
+            "Fetch.continueRequest"
+        );
         assert_eq!(shared.routes.lock().unwrap()[""][0].hits, 1);
     }
 
@@ -1413,8 +1708,11 @@ mod tests {
             .lock()
             .unwrap()
             .insert("ctx-a".into(), vec![Route { pattern: "*".into(), action: RouteAction::Abort, hits: 0 }]);
-        assert_eq!(method_of(route_answer(&shared, "a", "1", "GET", "http://h/", false)), "Fetch.failRequest");
-        assert_eq!(method_of(route_answer(&shared, "b", "2", "GET", "http://h/", false)), "Fetch.continueRequest");
+        assert_eq!(method_of(route_answer(&shared, "a", "1", "GET", "http://h/", false, "", "")), "Fetch.failRequest");
+        assert_eq!(
+            method_of(route_answer(&shared, "b", "2", "GET", "http://h/", false, "", "")),
+            "Fetch.continueRequest"
+        );
         shared.policy.lock().unwrap().insert("ctx-b".into(), DialogPolicy { accept: false, prompt_text: None });
         assert!(shared.policy_for("ctx-a").accept);
         assert!(!shared.policy_for("ctx-b").accept);

@@ -937,6 +937,14 @@ pub struct SessionConfig {
     /// `--parent <pid>` (`$NAVIGERA_PARENT_PID`): the session server quits
     /// when that process exits.
     pub parent_pid: Option<u32>,
+    /// `--allow-domains <list>` (`$NAVIGERA_ALLOW_DOMAINS`): hostnames this
+    /// session may navigate to or request from (comma-separated, `*` globs
+    /// for subdomains); everything else is refused at the Fetch request
+    /// stage, before any route rule.
+    pub allow_domains: Option<String>,
+    /// `--allow-domains-docs-only`: check top-level navigation only. A
+    /// navigation restriction, not exfiltration protection.
+    pub allow_domains_docs_only: bool,
 }
 
 /// A snapshot's network-quiet wait runs at most this long (long polls,
@@ -985,11 +993,22 @@ impl Default for SessionConfig {
             download_dir: None,
             own_browser: false,
             parent_pid: None,
+            allow_domains: None,
+            allow_domains_docs_only: false,
         }
     }
 }
 
 impl SessionConfig {
+    /// The parsed domain allowlist, if one is configured. A malformed list
+    /// is an error, never a silently disabled policy.
+    pub fn allow_policy(&self) -> Result<Option<crate::domains::DomainPolicy>, String> {
+        match &self.allow_domains {
+            None => Ok(None),
+            Some(list) => crate::domains::DomainPolicy::parse(list, self.allow_domains_docs_only).map(Some),
+        }
+    }
+
     /// The browser to connect to instead of launching one, if any.
     pub fn attach_target(&self) -> Option<crate::browser::AttachTarget> {
         if let Some(spec) = &self.attach {
@@ -1103,7 +1122,7 @@ pub struct ParsedArgs {
 
 /// One op's CLI documentation: (name, synopsis, what it does).
 const OPS: &[(&str, &str, &str)] = &[
-    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs"),
+    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
     ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
@@ -1162,7 +1181,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("dialog", "--accept [--prompt-text <t>] | --dismiss", "how alert/confirm/prompt are answered (default: accept; every dialog is reported)"),
     ("quit", "[--close-browser]", "close the browser and the session server; attached (--attach/--profile): only disconnect, unless --close-browser"),
     ("serve", "", "for programs: read one JSON command per line on stdin (`{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}`) and answer each on stdout; the protocol is in docs/navigera.md"),
-    ("mcp", "[--headed] [--profile <name> | --attach [<where>] | --electron <app>]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
+    ("mcp", "[--headed] [--profile <name> | --attach [<where>] | --electron <app>] [--allow-domains <list>] [--allow-domains-docs-only]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call; --allow-domains works as for `start`"),
     ("batch", "[<file> | -] [--keep-going]", "run several steps in one call (one process, one connection): one command per line (`goto /form`, `fill --label Email a@b.c`; # comments) or JSON ops as `serve` takes them; stops at the first failure (--keep-going runs the rest); prints what the steps read and the page state once; reads stdin without a file"),
     ("sessions", "[--clean [--all] [--idle <s>]]", "list the named sessions (pid, idle time, browser, memory) and the shared browsers; --clean quits the ones idle 5 min or more and drops dead ones, --all quits every one"),
     ("profiles", "", "list what a session can be handed: your browsers' profiles (name, email, whether --attach can reach them now) and navigera's own --profile browsers"),
@@ -1551,6 +1570,17 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
     if extract_present(args, "--natural") {
         config.natural = true;
     }
+    if let Some(list) = extract_value(args, "--allow-domains")? {
+        config.allow_domains = Some(list);
+    }
+    if extract_present(args, "--allow-domains-docs-only") {
+        config.allow_domains_docs_only = true;
+    }
+    if config.allow_domains_docs_only && config.allow_domains.is_none() {
+        return Err("--allow-domains-docs-only narrows --allow-domains: add --allow-domains <list>".into());
+    }
+    // A malformed list fails here, at parse time, not at first navigation.
+    config.allow_policy()?;
     check_profile_flags(config)?;
     check_electron_flags(config)?;
     if config.attach.is_some() && config.profile.is_some() {
@@ -1663,6 +1693,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     if let Some(mode) = std::env::var("NAVIGERA_OUTPUT").ok().filter(|m| !m.trim().is_empty()) {
         set_output(&mut config, mode.trim()).map_err(ArgsError::Invalid)?;
     }
+    // The allowlist for every command of a shell (a flag still wins).
+    if let Some(list) = std::env::var("NAVIGERA_ALLOW_DOMAINS").ok().filter(|v| !v.trim().is_empty()) {
+        config.allow_domains = Some(list.trim().to_string());
+    }
 
     // Leading globals (the only place --timeout-ms is global; after a
     // command it is that op's own timeout).
@@ -1710,6 +1744,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             "--from" => config.from = Some(value("--from")?),
             "--from-profile" => config.from_profile = Some(value("--from-profile")?),
             "--natural" => config.natural = true,
+            "--allow-domains" => config.allow_domains = Some(value("--allow-domains")?),
+            "--allow-domains-docs-only" => config.allow_domains_docs_only = true,
             "--own-browser" => config.own_browser = true,
             "--parent" => config.parent_pid = Some(parse_pid(&value("--parent")?).map_err(ArgsError::Invalid)?),
             "--download-dir" => config.download_dir = Some(caller_path(value("--download-dir")?)),
@@ -2864,12 +2900,23 @@ pub struct Outcome {
 }
 
 impl Driver {
+    /// Install the session's domain allowlist, if one is configured. A
+    /// browser that cannot enforce it fails the launch rather than
+    /// running unenforced.
+    fn apply_allow_policy(session: &mut BrowserSession, config: &SessionConfig) -> anyhow::Result<()> {
+        if let Some(policy) = config.allow_policy().map_err(|e| anyhow::anyhow!(e))? {
+            session.set_allow_domains(policy).map_err(|e| e.context("could not install --allow-domains"))?;
+        }
+        Ok(())
+    }
+
     /// Launch the engine described by `config` (Chrome by default).
     pub fn launch(config: &SessionConfig) -> anyhow::Result<Self> {
         Self::apply_settings(config);
         if let Some(app) = &config.electron {
-            let session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
+            let mut session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
                 .map_err(|e| e.context("could not launch the Electron app"))?;
+            Self::apply_allow_policy(&mut session, config)?;
             return Ok(Self {
                 session,
                 history: Vec::new(),
@@ -2880,8 +2927,9 @@ impl Driver {
             });
         }
         if let Some(target) = config.attach_target() {
-            let session = BrowserSession::attach(&target, config.timeout_ms)
+            let mut session = BrowserSession::attach(&target, config.timeout_ms)
                 .map_err(|e| e.context("could not connect to the browser"))?;
+            Self::apply_allow_policy(&mut session, config)?;
             return Ok(Self {
                 session,
                 history: Vec::new(),
@@ -2891,7 +2939,7 @@ impl Driver {
                 compact: false,
             });
         }
-        let session = BrowserSession::launch_with(
+        let mut session = BrowserSession::launch_with(
             &config.engine,
             !config.headed,
             config.chromium.as_deref(),
@@ -2901,6 +2949,7 @@ impl Driver {
         .map_err(|e| {
             e.context(format!("browser launch failed (engine={}, headed={})", config.engine, config.headed))
         })?;
+        Self::apply_allow_policy(&mut session, config)?;
         Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None, look: None, compact: false })
     }
 
@@ -2912,8 +2961,9 @@ impl Driver {
             return Self::launch(config);
         }
         Self::apply_settings(config);
-        let session = BrowserSession::launch_shared(!config.headed, config.chromium.as_deref(), config.timeout_ms)
+        let mut session = BrowserSession::launch_shared(!config.headed, config.chromium.as_deref(), config.timeout_ms)
             .map_err(|e| e.context(format!("browser launch failed (shared browser, headed={})", config.headed)))?;
+        Self::apply_allow_policy(&mut session, config)?;
         let crash = Crash { headless: !config.headed, ..Crash::default() };
         Ok(Self { session, history: Vec::new(), crash, reported: None, look: None, compact: false })
     }
@@ -2989,6 +3039,11 @@ impl Driver {
         });
         if self.session.closed_tab().is_some() {
             state["closed"] = json!(true);
+        }
+        // The session's allowlist, when one is set, and the hosts it
+        // refused: an agent that hit a refusal sees why without guessing.
+        if let Some(allow) = self.session.allow_status() {
+            state["allow_domains"] = allow;
         }
         // The page is still being parsed (we stopped waiting for it): the
         // agent should `wait` for what it needs rather than trust `ax`.
@@ -6580,6 +6635,34 @@ mod tests {
         let err = err_response(Value::Null, "boom".into(), Instant::now());
         let line = serde_json::to_string(&err).expect("serializes");
         assert!(line.contains("\"ok\":false") && line.contains("\"error\":\"boom\""));
+    }
+
+    #[test]
+    fn allow_domains_flags_parse_and_validate() {
+        let p =
+            parse_args(argv(&["navigera", "-s", "s", "start", "--allow-domains", "example.com,*.cdn.org"])).unwrap();
+        assert_eq!(p.config.allow_domains.as_deref(), Some("example.com,*.cdn.org"));
+        assert!(!p.config.allow_domains_docs_only);
+        assert!(p.config.allow_policy().unwrap().is_some());
+        let p = parse_args(argv(&[
+            "navigera",
+            "-s",
+            "s",
+            "start",
+            "--allow-domains=example.com",
+            "--allow-domains-docs-only",
+        ]))
+        .unwrap();
+        assert!(p.config.allow_domains_docs_only);
+        assert!(p.config.allow_policy().unwrap().unwrap().docs_only);
+        // Docs-only without a list, and a malformed list, fail at parse
+        // time rather than at first navigation.
+        assert!(parse_args(argv(&["navigera", "-s", "s", "start", "--allow-domains-docs-only"])).is_err());
+        assert!(parse_args(argv(&["navigera", "-s", "s", "start", "--allow-domains", "https://example.com"])).is_err());
+        assert!(parse_args(argv(&["navigera", "-s", "s", "start", "--allow-domains", ""])).is_err());
+        // The flag also parses on `mcp` and on `serve`.
+        assert!(parse_args(argv(&["navigera", "mcp", "--allow-domains", "example.com"])).unwrap().mcp);
+        assert!(parse_args(argv(&["navigera", "serve", "--allow-domains", "example.com"])).is_ok());
     }
 
     #[test]
