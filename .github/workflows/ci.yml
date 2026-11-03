@@ -72,6 +72,17 @@ jobs:
           node --check bench/ladder/contenders/contender_puppeteer.mjs
           for f in tests/fixtures/electron-app/*.js; do node --check "$f"; done
 
+      # Files only Glama's build uses (glama.json, packaging/glama/) never go
+      # into a release: the crate's file list is checked here; npm, PyPI,
+      # Homebrew, Scoop and the archives carry the binary alone.
+      - name: Glama files stay out of the packages
+        run: |
+          sh -n packaging/glama/build.sh
+          if cargo package --list --locked --allow-dirty | grep -iE '(^|/)(glama\.json|packaging/glama/)'; then
+            echo "::error::a Glama-only file is in the crate's package list (Cargo.toml include)"
+            exit 1
+          fi
+
   # The Lightpanda engine: its end-to-end tests on Lightpanda's newest
   # stable release, on every push and pull request (the weekly run catches a
   # new release before a push does).

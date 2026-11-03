@@ -132,3 +132,30 @@ account and trusted publisher exist:
 
 Re-running the workflow for a version that already exists rebuilds its files
 and publishes it to any registry that doesn't have it yet.
+
+### Glama
+
+Glama ([glama.ai/mcp/servers/andrey-usa/navigera](https://glama.ai/mcp/servers/andrey-usa/navigera))
+builds its own image of `navigera mcp` from what is already published, and
+needs two files in this repository, used by nothing else:
+
+| file | what Glama does with it |
+|---|---|
+| `glama.json` (repository root, where Glama looks) | names the maintainers, for the listing |
+| `packaging/glama/build.sh` | its build steps: the system libraries Chrome links against, `uv tool install navigera==<version>` from PyPI, `navigera install-browser chrome-headless-shell`, and a check that the browser's libraries load, so a missing one fails the build instead of the first call |
+
+Neither goes into a release: the crate is an allowlist (`include` in
+`Cargo.toml`, checked by the "Glama files stay out of the packages" step in
+`ci.yml`), and npm, PyPI, Homebrew, Scoop and the archives carry the binary
+alone. Glama's admin form holds the rest: the build step runs
+`packaging/glama/build.sh`, the command is
+`["/root/.local/bin/navigera", "mcp"]`, and the only settings it offers
+users are the decision model's (`NAVIGERA_DECIDER_*`).
+
+A navigera release is a Glama release: auto-release builds the new version
+from the release tag once PyPI has it, under the same version number. After
+it, check the listing in Glama's "try it": `tools/list` gives the 23 tools,
+and `browser_navigate` to https://example.com followed by `browser_snapshot`
+returns the page's tree. A fix to Glama's image alone, between navigera
+releases, rebuilds the same navigera version; it never takes a version
+number of its own that reads like a navigera release.
