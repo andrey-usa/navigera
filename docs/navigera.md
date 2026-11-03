@@ -484,7 +484,7 @@ HAR or response body from `network`, a PDF, a screenshot's path, a
 the client opened). `NAVIGERA_MCP_ALLOW_FILES=1` lifts these limits.
 
 Every action takes `snapshot: true` to return the updated tree in the same
-call. The whole tool list (23 tools) is about 14 KB (~3,600 tokens), against
+call. The whole tool list (23 tools) is about 16 KB (~4,000 tokens), against
 ~26 KB for Chrome DevTools MCP 1.10.1.
 
 Client configuration (all run the same command):

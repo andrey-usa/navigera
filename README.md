@@ -6,21 +6,80 @@
 [![PyPI](https://img.shields.io/pypi/v/navigera.svg)](https://pypi.org/project/navigera/)
 [![npm](https://img.shields.io/npm/v/navigera.svg)](https://www.npmjs.com/package/navigera)
 
-**`navigera`** — extremely fast browser and Electron app automation for AI
-agents, from the shell, one command per step.
-It is a single native binary (Rust, no Node) that speaks the Chrome DevTools
-Protocol directly:
+**Browser automation for AI agents.** One native binary (Rust, no Node) that
+an agent drives from its shell, one command per step, against a warm Chrome.
+It reads pages as a compact accessibility tree with `[ref=N]` handles, acts
+with real mouse and keyboard events, and after each action prints what
+changed on the page, so the agent seldom needs a second look.
 
-- It reads pages as a compact accessibility tree with `[ref=N]` handles.
-- It acts with real mouse and keyboard events.
-- A warm browser behind a named session survives between shell calls.
-- New tabs, iframes, shadow DOM and `alert`/`confirm` dialogs are handled
-  for you.
-- Electron desktop apps (editors, chat clients, internal tools) are driven
-  the same way: `start --electron <app>`, and each of the app's windows is a
-  tab.
+```sh
+navigera -s work start                       # a warm headless browser named "work"
+navigera -s work goto https://example.com
+navigera -s work ax                          # the page as a tree; actionable nodes carry [ref=N]
+navigera -s work click 12                    # prints what the click changed, or ok
+navigera -s work quit
+```
 
 > Faster software for a better planet — less energy, less compute, more time for life.
+
+## Why navigera
+
+- **Fewer tokens and turns for agents.** When one model drives six browser
+  tools through the same tasks, navigera's sessions use the fewest tokens
+  (8.7K against 10.4K–15.1K) at the lowest cost, and every session succeeds.
+- **Fast at every step.** 28 ms per command an agent sends, against 80 ms for
+  agent-browser and 189–703 ms for the MCP servers and playwright-cli; a
+  1,000-row page reads in 76 ms as 41 KB.
+- **Light.** 7 MB for navigera itself; eight agents at once in 942 MB where
+  the other agent tools need 2.3–2.5 GB, because sessions share one browser
+  with a private context each.
+- **It tells the agent what happened.** A click that loads results prints the
+  new lines (`+ status: Results for: headphones`), one that changes nothing
+  prints `ok`, and an error says what to do next.
+- **The hard parts are handled:** new tabs, iframes, shadow DOM, dialogs,
+  uploads and downloads, your own signed-in browser, Electron desktop apps,
+  and an MCP server for IDE agents.
+
+### At a glance
+
+From one benchmark run on GitHub's runners (bench
+[41659246459](https://github.com/andrey-usa/navigera/actions/runs/41659246459))
+and the agent eval (run
+[41579693623](https://github.com/andrey-usa/navigera/actions/runs/41579693623));
+how each was measured is under [Benchmarks](#benchmarks) and
+[Agent eval](#agent-eval-how-a-generic-agent-copes-with-each-tool).
+
+| | navigera | the best of the others |
+|---|---|---|
+| tokens per agent session (one model, six tools) | **8,705** | playwright-cli 10,355 |
+| cost of the 24 agent sessions | **$0.0161** | agent-browser $0.0168 |
+| time per agent command | **28 ms** | agent-browser 80 ms |
+| a 1,000-row page as a snapshot | **76 ms, 41 KB** | Playwright MCP 138 ms, 144 KB |
+| scripted session, same Chrome | **0.51 s** | go-rod 0.54 s |
+| cold start, same Chrome | **0.21 s** | go-rod 0.23 s |
+| memory of the driver itself | **7 MB** | chromedp 8 MB |
+| eight agents at once | **942 MB** | agent-browser 2,338 MB |
+
+### Where navigera is not first
+
+- **Browsing GitHub, live: 3.37 s against go-rod's 3.29 s.** Two things
+  navigera does for agents cost time there. It records every request a page
+  makes, so `ax` can wait for data that is still loading and a click can say
+  what it changed; Chrome charges for those events, and go-rod with the same
+  events turned on slowed down by more than this gap. And navigera's click
+  returns once the new page is there, where go-rod's returns at once.
+- **One JavaScript `eval`, warm: 0.43 ms against go-rod's 0.26 ms.** Part of
+  it is that navigera is a separate process an agent's shell talks to, and
+  go-rod a library inside its caller; but in this run navigera's own round
+  trip to the page was slower too (0.36 ms). Not explained yet, and not an
+  agent trade-off.
+- **example.com, live: a tie,** 0.35 s against go-rod's 0.34 s.
+- **In the agent eval** Playwright MCP finished the price table in fewer turns
+  (median 3.5 against 4), and with `batch` allowed navigera's catalog sessions
+  cost more tokens than without it (25.9K against 11.1K).
+- navigera's fastest rows (`nv-shell`) run chrome-headless-shell, a lighter
+  build of Chrome the other drivers here don't use; the comparisons above
+  are all on the same Google Chrome.
 
 ## Install
 
@@ -68,7 +127,7 @@ headless sessions use it and headed ones the system Chrome (`navigera
 install-browser chrome` puts the full Chrome there too, for a machine with
 none). Set `$CHROME_BIN` to choose explicitly.
 
-## Use (agents and people)
+## Use
 
 ```sh
 navigera -s work start                      # warm headless browser behind a local socket
@@ -134,8 +193,9 @@ change things needs `--confirm`).
 - **Reference:** [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md) has the full
   reference, and [llms.txt](https://github.com/andrey-usa/navigera/blob/master/llms.txt) is an index for LLMs.
 
-**Hand the agent your browser.** Three ways, from most direct to most
-portable:
+### Hand the agent your browser
+
+Three ways, from most direct to most portable:
 
 | Way | the agent gets | needs |
 |---|---|---|
@@ -154,7 +214,9 @@ and navigera's own `--profile` browsers. `--profile work` without `--from` is
 a persistent browser you sign in to yourself. Either way navigera works in windows of its own, `quit` only
 disconnects, and `quit --close-browser` waits until the profile is free.
 
-**Electron apps.** `start --electron <app>` launches a desktop app built
+### Electron apps
+
+`start --electron <app>` launches a desktop app built
 on Electron and drives its windows like tabs: the same tree, refs, clicks,
 waits and `eval`. `<app>` is the app's directory or main script (navigera
 runs the Electron in its `node_modules`), a packaged app's executable, a
@@ -169,6 +231,9 @@ navigera -s app tab-list                        # the app's new window is a tab,
 navigera -s app eval --main "({ app }) => app.getPath('userData')"   # the app's main process
 navigera -s app quit                            # ends the app
 ```
+
+<details>
+<summary>How windows, the main process and attaching work</summary>
 
 Windows the app opens later are adopted as they appear; a window that
 closes itself is dropped, and the session goes on in the one before.
@@ -185,14 +250,20 @@ session. An app that is already running with a DevTools port
 (`--remote-debugging-port=9222`) is driven with `start --attach 9222`: its
 windows are the tabs, and `quit` leaves it running.
 
-**Natural mode.** `--natural` makes a headless browser look like the browser
+</details>
+
+### Natural mode
+
+`--natural` makes a headless browser look like the browser
 it is: no `HeadlessChrome` in the user agent (page, workers, request
 headers), and a real screen size. `navigator.webdriver` is false in every
 mode, and navigera never passes `--enable-automation`. It is not a CAPTCHA
 solver and fakes no fingerprint: it is a regular Chrome, run for you.
 Details: [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md#browsers-and-engines).
 
-**Parallel agents.** Give each agent its own `-s <name>`. Sessions share
+### Parallel agents
+
+Give each agent its own `-s <name>`. Sessions share
 one browser, each in a browser context of its own (cookies, storage, cache,
 tabs and downloads apart), so N agents cost one browser plus a page each,
 as Playwright's one driver with a context per test does, not N browsers.
@@ -203,6 +274,8 @@ time; `sessions --clean` quits the idle ones (`--all`: every one), and
 `start --parent <pid>` ends a session when its agent's process does. An
 unused session ends after 10 min.
 
+### From a program
+
 Programs can keep one browser on a pipe instead: `navigera serve` reads
 one JSON command per stdin line, for example
 `{"id":1,"op":"goto","url":"https://example.com"}`. The session socket speaks
@@ -212,8 +285,7 @@ the same protocol.
 
 `navigera mcp` is a Model Context Protocol server for Cline, Roo Code, Kilo
 Code, Continue, VS Code, Claude Desktop and Cursor, with the same tree, refs and
-waits as the CLI and a smaller tool list than other browser MCP servers
-(about 14 KB; the numbers are in the benchmarks below). Add it as `{"command": "navigera", "args": ["mcp"]}`, or without
+waits as the CLI, in 23 tools (a tool list of about 16 KB). Add it as `{"command": "navigera", "args": ["mcp"]}`, or without
 installing anything as
 `{"command": "npx", "args": ["-y", "navigera", "mcp"]}`; per-client snippets
 are in [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md#mcp-server-ide-agents). Agents that run
@@ -241,6 +313,9 @@ navigera -s work check "Is an error message shown?"  # {"yes":0.02,"answer":fals
 `browser_check` only then. Nothing leaves the machine otherwise; typed values
 are sent as `(filled)`.
 
+<details>
+<summary>Measured: Jev against Gemini and DeepSeek on the same decisions</summary>
+
 **Measured (2026-10-14).** On 39 decisions with known answers, Jev picked
 25/25 elements and answered 14/14 yes/no questions (151 ms median; $0.0086
 for all 39). Gemini 3.5 Flash-Lite reading the same tree got 23/25 and 14/14
@@ -261,6 +336,8 @@ tell the agent how to use the decider, Gemini CLI used it unprompted in 3 of
 of five tasks per arm); median tokens per run were 199K without the
 decider, 172K with it and 190K when told, a spread within the run-to-run
 noise at this sample size.
+
+</details>
 
 ## Supported browsers
 
@@ -287,8 +364,8 @@ and enum value against the `/json/protocol` that *that* browser serves.
 Deprecated or unknown usage fails the build. Edge and Brave are covered by
 the benchmark.
 
-**Lightpanda** 1.0 (`--engine lightpanda`) runs the same end-to-end suite in
-CI, on 1.0.1 and the nightly. It is a different engine (one tab, no layout),
+**Lightpanda** (`--engine lightpanda`) runs the same end-to-end suite in CI,
+on its newest stable release. It is a different engine (one tab, no layout),
 so navigera fills in what its CDP leaves out: shadow roots and password
 fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
 The differences that remain are listed in
@@ -469,7 +546,9 @@ action says what it changed on the page, so the agent sees the result of a
 click without another look, and a list item is one line of the tree
 instead of three.
 
-### Gemini CLI and DeepSeek on the Acme Supply site
+<details>
+<summary>Earlier evals: Gemini CLI and DeepSeek on the Acme Supply site</summary>
+
 
 Benchmarks time scripted steps. The agent eval asks the question that
 matters for agents: can a generic coding agent, given only the tool and its
@@ -544,12 +623,17 @@ shop [saucedemo.com](https://www.saucedemo.com), which exists for automation
 practice and takes no real payment (informational, judged from the
 confirmation and the order total).
 
+</details>
+
 ## Contributing
 
 See [CONTRIBUTING.md](https://github.com/andrey-usa/navigera/blob/master/CONTRIBUTING.md) for building, the test suites, reading
 CI results, A/B benchmarks and releasing.
 
 ## Layout
+
+<details>
+<summary>Where things are in this repo</summary>
 
 - `src/protocol.rs`: CLI parsing, the JSON-lines protocol and `Driver` (the `OPS` table is `--help`)
 - `src/browser.rs`: `BrowserSession`: browser discovery (incl. chrome-headless-shell), launch flags, tabs
@@ -569,3 +653,5 @@ CI results, A/B benchmarks and releasing.
 - `tools/`: `cdp_check.py` (protocol correctness), `protocol_dump.sh`, `cft_matrix.py` (Chrome version matrix)
 - `skills/navigera/SKILL.md`: the agent guide (compiled into the binary: `navigera skill`)
 - `.github/workflows/`: `ci.yml` (tests, Chrome matrix, protocol check), `bench.yml`, `agent-eval.yml`, `llm-bench.yml`, `release.yml`, `chrome-bisect.yml`, `vendor.yml`
+
+</details>
