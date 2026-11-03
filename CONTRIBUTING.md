@@ -151,8 +151,9 @@ alone. Glama's admin form holds the rest: the build step is
 `sh packaging/glama/build.sh`, run in Glama's copy of this repository (the
 build's working directory), the command is
 `["mcp-proxy", "--", "/root/.local/bin/navigera", "mcp"]` (Glama's proxy in
-front of navigera's stdio server), and the only settings it offers users are
-the decision model's (`NAVIGERA_DECIDER_*`).
+front of navigera's stdio server), and the settings it offers users are
+`CHROME_BIN` and the decision model's endpoint, `NAVIGERA_DECIDER_URL` (no
+key fields).
 
 A navigera release is a Glama release under the same number: auto-release
 names it after the tag without the `v` (`v0.8.0` is `0.8.0`). Glama builds
