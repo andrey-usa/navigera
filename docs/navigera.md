@@ -604,8 +604,8 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   own instead: `start --own-browser` (or `NAVIGERA_SHARED_BROWSER=0`);
   `--attach`, `--profile`, `--electron`, Lightpanda and `--transport ws` on Linux/macOS
   always get one.
-- **`--engine lightpanda`** (experimental; tested on Lightpanda 1.0.1 and the
-  nightly) starts `lightpanda serve` with iframes and stylesheets loaded and
+- **`--engine lightpanda`** (experimental; tested on Lightpanda's newest stable
+  release) starts `lightpanda serve` with iframes and stylesheets loaded and
   telemetry off (`LIGHTPANDA_DISABLE_TELEMETRY`). The binary comes from
   `$LIGHTPANDA_BIN` or `PATH`, or from `--chromium`; no X server is needed.
   `goto` waits for load as on Chrome. Differences from Chrome:

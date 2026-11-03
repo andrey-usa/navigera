@@ -113,13 +113,16 @@ jobs:
           echo "BRAVE_BIN=$BRAVE_BIN" >> "$GITHUB_ENV"
           "$BRAVE_BIN" --version
 
-      - name: Install Lightpanda
+      - name: Install Lightpanda (newest stable release)
         # Optional contender: a flaky vendor download must not kill the
         # ladder; a missing binary shows up under "Skipped" in the table.
+        id: lightpanda
         continue-on-error: true
+        uses: ./.github/actions/lightpanda
+      - name: Lightpanda on PATH
+        if: steps.lightpanda.outcome == 'success'
         run: |
-          curl -fsSL --retry 4 --retry-all-errors -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/download/1.0.1/lightpanda-x86_64-linux
-          chmod a+x /usr/local/bin/lightpanda
+          ln -sf "$LIGHTPANDA_BIN" /usr/local/bin/lightpanda
           lightpanda version || true
 
       - name: Install chrome-headless-shell (nv-shell contender)

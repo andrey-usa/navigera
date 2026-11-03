@@ -46,8 +46,8 @@ on:
         description: "comma-separated: navigera,navigera-lightpanda,navigera-shell,navigera+jev,navigera-lightpanda+jev,navigera-shell+jev,navigera+jev-told,agent-browser,agent-browser-lightpanda,playwright-cli (none: no agent runs)"
         default: "navigera,navigera-lightpanda,agent-browser,playwright-cli"
       lightpanda:
-        description: "Lightpanda release tag for the navigera-lightpanda tools (e.g. 1.0.1, nightly)"
-        default: "1.0.1"
+        description: "Lightpanda stable release tag for the navigera-lightpanda tools (empty: the newest stable)"
+        default: ""
       tasks:
         description: "comma-separated task ids (lookup,purchase,account,docs,support,purchase-live) or all (local tasks)"
         default: "all"
@@ -148,16 +148,9 @@ jobs:
       - uses: ./.github/actions/agent-setup
       - name: Lightpanda binary (navigera-lightpanda tools)
         if: contains(matrix.run.tool, 'lightpanda')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE: ${{ inputs.lightpanda || '1.0.1' }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/lightpanda-bin"
-          gh release download "$RELEASE" --repo lightpanda-io/browser --pattern 'lightpanda-x86_64-linux' \
-            --dir "$RUNNER_TEMP/lightpanda-bin"
-          chmod +x "$RUNNER_TEMP/lightpanda-bin"/lightpanda*
-          echo "LIGHTPANDA_BIN=$RUNNER_TEMP/lightpanda-bin/lightpanda-x86_64-linux" >> "$GITHUB_ENV"
-          echo "::notice title=agent eval lightpanda::$("$RUNNER_TEMP/lightpanda-bin/lightpanda-x86_64-linux" version)"
+        uses: ./.github/actions/lightpanda
+        with:
+          release: ${{ inputs.lightpanda }}
       - name: chrome-headless-shell (navigera-shell tools)
         if: contains(matrix.run.tool, 'shell')
         run: |

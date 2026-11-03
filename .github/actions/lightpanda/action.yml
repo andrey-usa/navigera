@@ -1,0 +1,42 @@
+name: lightpanda
+description: >
+  Downloads Lightpanda's newest stable release (the highest plain X.Y.Z tag,
+  never the nightly or a pre-release), or the stable tag given, for x86_64
+  Linux, and sets LIGHTPANDA_BIN and LIGHTPANDA_RELEASE for the later steps.
+inputs:
+  release:
+    description: a stable release tag to use instead of the newest (e.g. 1.0.1)
+    default: ""
+outputs:
+  release:
+    description: the tag downloaded
+    value: ${{ steps.get.outputs.release }}
+runs:
+  using: composite
+  steps:
+    - id: get
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE: ${{ inputs.release }}
+      run: |  # zizmor: ignore[github-env] runner-local values, no event input
+        set -euo pipefail
+        tag="$RELEASE"
+        if [ -z "$tag" ]; then
+          tag=$(gh api --paginate "repos/lightpanda-io/browser/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+        fi
+        if ! printf '%s' "$tag" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "::error title=lightpanda::not a stable Lightpanda release: '${tag}'"
+          exit 1
+        fi
+        dir="$RUNNER_TEMP/lightpanda"
+        mkdir -p "$dir"
+        gh release download "$tag" --repo lightpanda-io/browser \
+          --pattern lightpanda-x86_64-linux --dir "$dir" --clobber
+        chmod +x "$dir/lightpanda-x86_64-linux"
+        echo "LIGHTPANDA_BIN=$dir/lightpanda-x86_64-linux" >> "$GITHUB_ENV"
+        echo "LIGHTPANDA_RELEASE=$tag" >> "$GITHUB_ENV"
+        echo "release=$tag" >> "$GITHUB_OUTPUT"
+        echo "::notice title=lightpanda::$tag: $("$dir/lightpanda-x86_64-linux" version)"
