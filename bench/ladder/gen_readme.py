@@ -122,13 +122,16 @@ nv_best = next(r for r in chrome if r["name"].startswith("nv-"))
 serve_row = next((r for r in chrome if r["name"] == "nv-serve"), None)
 other = next((r for r in chrome if not r["name"].startswith("nv-")), None)
 rank = chrome.index(nv_best) + 1
+shell_row = next((r for r in chrome if r["name"] == "nv-shell"), None)
 lines += [
-    f"**Reading the table.** Session wall order: {order}. navigera's best",
-    f"({nv_best['name']}) ranks #{rank} of {len(chrome)}"
-    + (f"; on regular Chrome, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
+    f"**Reading the table.** Session wall order: {order}. Every driver but"
+    + (f" `nv-shell` runs the same Google Chrome; on it, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
        + ("ahead of" if serve_row["session"]["wall_s"] < other["session"]["wall_s"] else "behind")
        + f" the fastest other driver, {other['name']} ({other['session']['wall_s']:.2f}s)"
-       if serve_row and other and serve_row is not nv_best else "")
+       if serve_row and other else "")
+    + (f". `nv-shell` ({shell_row['session']['wall_s']:.2f}s) is navigera on chrome-headless-shell, a"
+       " lighter build of the same browser that no other row runs, so its lead is partly the"
+       " browser's" if shell_row else "")
     + ". All native drivers (navigera,",
     "go-rod, chromiumoxide, chromedp) spend tens of milliseconds of their own CPU",
     "or less; the Node drivers spend hundreds and carry 80–150 MB of their own RSS.",
