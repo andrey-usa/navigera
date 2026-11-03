@@ -419,7 +419,7 @@ artifact ("0.82s vs 0.03s"). Browser memory is the whole browser process
 tree (every renderer/GPU/utility process), sampled as summed PSS every
 250 ms (shared pages counted once).
 
-**Reading the table.** Session wall order: nv-shell 0.25s, nv-brave 0.50s, nv-serve 0.51s, nv-edge 0.53s, gorod 0.54s, chromiumoxide 0.59s, chromedp 0.78s, chromey 0.78s, puppeteer 0.82s, playwright 0.97s. Every driver but `nv-shell` runs the same Google Chrome; on it, nv-serve (0.51s) is ahead of the fastest other driver, gorod (0.54s). `nv-shell` (0.25s) is navigera on chrome-headless-shell, a lighter build of the same browser that no other row runs, so its lead is partly the browser's. All native drivers (navigera,
+**Reading the table.** Session wall order: nv-shell 0.25s, nv-brave 0.50s, nv-serve 0.51s, nv-edge 0.53s, gorod 0.54s, chromiumoxide 0.59s, chromedp 0.78s, chromey 0.78s, puppeteer 0.82s, playwright 0.97s. Every driver but `nv-shell`, `nv-edge` and `nv-brave` runs the same Google Chrome; on it, nv-serve (0.51s) is ahead of the fastest other driver, gorod (0.54s). `nv-shell` (0.25s) is navigera on chrome-headless-shell, a lighter build of the same browser that no other row runs, so its lead is partly the browser's. All native drivers (navigera,
 go-rod, chromiumoxide, chromedp) spend tens of milliseconds of their own CPU
 or less; the Node drivers spend hundreds and carry 80–150 MB of their own RSS.
 

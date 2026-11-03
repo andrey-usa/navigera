@@ -123,9 +123,12 @@ serve_row = next((r for r in chrome if r["name"] == "nv-serve"), None)
 other = next((r for r in chrome if not r["name"].startswith("nv-")), None)
 rank = chrome.index(nv_best) + 1
 shell_row = next((r for r in chrome if r["name"] == "nv-shell"), None)
+# Rows that run a browser other than the regular Google Chrome.
+off = [f"`{n}`" for n in ("nv-shell", "nv-edge", "nv-brave") if any(r["name"] == n for r in chrome)]
+off_text = off[0] if len(off) == 1 else ", ".join(off[:-1]) + " and " + off[-1] if off else ""
 lines += [
-    f"**Reading the table.** Session wall order: {order}. Every driver but"
-    + (f" `nv-shell` runs the same Google Chrome; on it, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
+    f"**Reading the table.** Session wall order: {order}"
+    + (f". Every driver{' but ' + off_text if off else ''} runs the same Google Chrome; on it, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
        + ("ahead of" if serve_row["session"]["wall_s"] < other["session"]["wall_s"] else "behind")
        + f" the fastest other driver, {other['name']} ({other['session']['wall_s']:.2f}s)"
        if serve_row and other else "")
