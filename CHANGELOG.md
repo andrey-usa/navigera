@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `start --allow-domains <list>` (also `$NAVIGERA_ALLOW_DOMAINS` and
+  `mcp --allow-domains`): a session's domain allowlist. Navigation and
+  requests to other hosts are refused at the Fetch request stage, before
+  any `route` rule, on every redirect hop; entries are hostnames
+  (`*.example.com` covers subdomains, not itself), malformed or empty
+  lists fail at startup, and a refused navigation's error names the
+  denied host and the flag (`status` lists refused hosts).
+  `--allow-domains-docs-only` checks top-level navigation only: a
+  navigation restriction, not exfiltration protection. Measured limits:
+  a hostname policy, not an origin policy; service-worker fetches and
+  WebSocket handshakes are not intercepted by Fetch in Chrome, so neither
+  mode stops exfiltration over those channels. `reset` keeps the policy,
+  `reset --all` drops it.
+
 ### Changed
 
 - Actions are faster where they used to sit out fixed waits. Saying what
