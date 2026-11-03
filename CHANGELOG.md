@@ -16,8 +16,10 @@ All notable changes to this project are documented here. The format follows
   that are new (`+`), gone (`-`) or read differently (`~`), with refs,
   read again the way that `ax` read it and after the data the action
   fetched has arrived (at most 40 lines, then a count). `ok` now means
-  nothing visible changed; before, a click that loaded results printed
-  `ok` while the page was still fetching them. Compact output only:
+  nothing visible changed, except that after a fill a line that newly
+  shows the text just typed (the field itself, a live preview) is left
+  out; before, a click that loaded results printed `ok` while the page
+  was still fetching them. Compact output only:
   `--output json`, `serve` and the MCP server are unchanged.
 - The tree is shorter on lists: a list item's bullet is left out and its
   text goes on its line (`- listitem: Blue Lamp`, one line where there
@@ -50,7 +52,9 @@ All notable changes to this project are documented here. The format follows
   other builds, since 0.7.1: mimalloc committed its whole arena up front
   and transparent huge pages backed it with 2 MiB pages. On a machine whose
   memory is fragmented, the first snapshot of a large page also took three
-  times as long. It now commits on demand: 6 MB.
+  times as long. It now commits on demand: 6 MB. Warm snapshots of very
+  large pages (2,000 rows, 13,000 elements) take 3-6% longer than with
+  0.7.1's build (timing gate, median of 10).
 
 ## [0.7.1] - 2026-11-02
 
