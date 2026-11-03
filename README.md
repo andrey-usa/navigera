@@ -455,9 +455,9 @@ Per task, the lowest median tokens: search and form `navigera` with
 playwright-cli 14.1K).
 
 What navigera lost: with `batch` allowed, the catalog cost it 25.9K tokens
-(median) against 11.1K without. And the catalog swings every tool by three
-to six times between reps, which can reorder the table: in a 3-rep run of
-the same build an hour earlier (run
+(median) against 11.1K without. And a tool's catalog cost varies two to
+seven times between its reps, which can reorder the table: in a 3-rep run of
+the same build at the same time (run
 [41579694107](https://github.com/andrey-usa/navigera/actions/runs/41579694107))
 agent-browser averaged 9,213 tokens a session and navigera 13,462. The
 same harness against navigera 0.7.1, same day (run
