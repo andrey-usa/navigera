@@ -435,26 +435,32 @@ catalog that loads in pages. Success is judged from what the site recorded
 the agent's claim; the table and the catalog are drawn per session, so no
 file holds an answer. CLI tools run without a shell (the command must start
 with the tool, one per call), MCP servers get one `tools/call` per call,
-and every tool starts on the home page. Four tasks, 3 reps each, the tools
-at their latest npm releases; means over each tool's 12 sessions
+and every tool starts on the home page. Four tasks, 6 reps each, the tools
+at their latest npm releases; means over each tool's 24 sessions
 ([`llm-bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/llm-bench.yml),
-run [41568895586](https://github.com/andrey-usa/navigera/actions/runs/41568895586)):
+run [41579693623](https://github.com/andrey-usa/navigera/actions/runs/41579693623)):
 
-| tool | success | turns per session | tokens per session | $ for the 12 sessions |
+| tool | success | turns per session | tokens per session | $ for the 24 sessions |
 |---|---|---|---|---|
-| `navigera`, `batch` allowed | 12/12 | **6.2** | **8,174** | **$0.0083** |
-| `navigera` | 12/12 | 7.8 | 12,180 | $0.0108 |
-| `agent-browser` 0.41.1 | 12/12 | 8.0 | 10,351 | $0.0087 |
-| `playwright-cli` 0.1.23 | 12/12 | 6.7 | 10,570 | $0.0101 |
-| Playwright MCP 0.0.84 | 12/12 | 9.0 | 16,429 | $0.0138 |
-| Chrome DevTools MCP 1.12.0 | 12/12 | 10.4 | 16,689 | $0.0139 |
+| `navigera` | 24/24 | 6.8 | **8,705** | **$0.0161** |
+| `navigera`, `batch` allowed | 24/24 | **6.6** | 11,689 | $0.0208 |
+| `playwright-cli` 0.1.23 | 24/24 | 6.9 | 10,355 | $0.0198 |
+| `agent-browser` 0.41.1 | 24/24 | 8.0 | 10,467 | $0.0168 |
+| Chrome DevTools MCP 1.12.0 | 24/24 | 9.8 | 14,643 | $0.0235 |
+| Playwright MCP 0.0.84 | 24/24 | 8.4 | 15,069 | $0.0248 |
 
-What navigera lost: without `batch`, agent-browser and playwright-cli used
-fewer tokens in this run. Most of the difference is the catalog, where one
-navigera session re-read a list it had just been shown in full (8.1K to
-48.0K tokens over its three reps); 3 reps leave that to chance, so read the
-table as a ranking of the model's habits with each tool as much as of the
-tools. The same harness against navigera 0.7.1, same day (run
+Per task, the lowest median tokens: search and form `navigera` with
+`batch` (5.3K, 5.8K; agent-browser 5.6K, 9.7K), the table `navigera` with
+`batch` (4.1K; Playwright MCP 4.9K), the catalog `navigera` (11.1K;
+playwright-cli 14.1K).
+
+What navigera lost: with `batch` allowed, the catalog cost it 25.9K tokens
+(median) against 11.1K without. And the catalog swings every tool by three
+to six times between reps, which can reorder the table: in a 3-rep run of
+the same build an hour earlier (run
+[41579694107](https://github.com/andrey-usa/navigera/actions/runs/41579694107))
+agent-browser averaged 9,213 tokens a session and navigera 13,462. The
+same harness against navigera 0.7.1, same day (run
 [41568863979](https://github.com/andrey-usa/navigera/actions/runs/41568863979)):
 16,661 tokens a session without `batch` and 12,755 with it. Since then an
 action says what it changed on the page, so the agent sees the result of a
