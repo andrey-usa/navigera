@@ -11,19 +11,29 @@ doc = json.load(open(pub_path))
 all_rows = doc["contenders"]
 baseline = next((r for r in all_rows if r["name"] == "nv-baseline"), None)
 ws = next((r for r in all_rows if r["name"] == "nv-ws"), None)
+# A/B rows (same build over another transport, the previous build) get a
+# sentence each, not a row in the ranking.
 rows = [r for r in all_rows if r["name"] not in ("nv-baseline", "nv-ws")]
+versions = doc.get("versions") or {}
+
+
+def ver(key, fallback):
+    """A contender's version as the run recorded it (older runs: none)."""
+    return versions.get(key, fallback).lstrip("v")
+
+
 NAMES = {
     "nv-serve": "`nv-serve` (this repo on Chrome)",
     "nv-shell": "`nv-shell` (this repo on chrome-headless-shell)",
     "nv-brave": "`nv-brave` (this repo on Brave)",
     "nv-edge": "`nv-edge` (this repo on Edge)",
     "nv-lightpanda": "`nv-lightpanda` (this repo on Lightpanda, 1 tab)",
-    "gorod": "`gorod` (go-rod 0.116.2, Go)",
-    "chromedp": "`chromedp` 0.19.1 (Go)",
-    "chromiumoxide": "`chromiumoxide` 0.7 (Rust)",
-    "chromey": "`chromey` 2.x (Rust, maintained chromiumoxide fork)",
-    "puppeteer": "`puppeteer-core` (Node)",
-    "playwright": "`playwright-core` (Node)",
+    "gorod": f"`gorod` (go-rod {ver('go-rod', '0.116.2')}, Go)",
+    "chromedp": f"`chromedp` {ver('chromedp', '0.19.1')} (Go)",
+    "chromiumoxide": f"`chromiumoxide` {ver('chromiumoxide', '0.7')} (Rust)",
+    "chromey": f"`chromey` {ver('chromey', '2.x')} (Rust, maintained chromiumoxide fork)",
+    "puppeteer": f"`puppeteer-core` {ver('puppeteer-core', '')} (Node)".replace("  ", " "),
+    "playwright": f"`playwright-core` {ver('playwright-core', '')} (Node)".replace("  ", " "),
 }
 
 
@@ -50,6 +60,12 @@ def b(text, cond):
     return f"**{text}**" if cond else text
 
 
+def med(stage):
+    """' (median)' when the run recorded one."""
+    m = (stage or {}).get("median_wall_s")
+    return f" ({m:.2f})" if m is not None else ""
+
+
 lines = [
     "## Benchmarks",
     "",
@@ -57,9 +73,10 @@ lines = [
     "fill+click filter → visible-count eval → screenshot → new tab → goto detail →",
     "title/row-count evals → close) driven against the same headless browser by",
     "each driver. Fixtures are deterministic and local (500-card listing,",
-    "1000-row detail). Run in CI via `.github/workflows/bench.yml`.",
+    "1000-row detail). navigera is the static Linux binary the releases ship.",
+    "Reps are interleaved across contenders. Run in CI via `.github/workflows/bench.yml`.",
     "",
-    "| contender | session wall (best of 3) | warm eval mean (200×) | cold start (best of 5) | driver CPU (own) | driver peak RSS (own) | browser memory (PSS) |",
+    f"| contender | session wall, best (median) of {doc['reps']} | warm eval mean (200×) | cold start, best (median) of 5 | driver CPU (own) | driver peak RSS (own) | browser memory (PSS) |",
     "|---|---|---|---|---|---|---|",
 ]
 for r in chrome + exp:
@@ -67,9 +84,9 @@ for r in chrome + exp:
     ev = r.get("eval", {}).get("mean_ms")
     cold = r.get("cold", {}).get("wall_s")
     lines.append(
-        f"| {NAMES.get(r['name'], r['name'])} | {b(f'{s['wall_s']:.2f}s', s['wall_s'] == fast_wall)} | "
+        f"| {NAMES.get(r['name'], r['name'])} | {b(f'{s['wall_s']:.2f}s', s['wall_s'] == fast_wall)}{med(s)} | "
         f"{b(f'{ev:.2f} ms', ev == fast_eval and not r['experimental']) if ev is not None else '—'} | "
-        f"{b(f'{cold:.2f}s', cold == fast_cold and not r['experimental']) if cold is not None else '—'} | "
+        f"{b(f'{cold:.2f}s', cold == fast_cold and not r['experimental']) + med(r.get('cold')) if cold is not None else '—'} | "
         f"{b(cpu(s['driver_cpu_s']), s['driver_cpu_s'] < 0.05)} | "
         f"{b(f'{s['driver_rss_mb']:.0f} MB', round(s['driver_rss_mb']) == round(low_rss))} | "
         f"{mem(s['browser_pss_mb'])} |"
@@ -83,7 +100,7 @@ lines += [
     f"Measured {date} on GitHub-hosted `ubuntu-latest` ({env}).",
     "Every driver produced byte-identical extracted data and counts (correctness",
     "gate); wall is best-of-N.",
-    "The ladder reruns weekly ([`bench.yml`](.github/workflows/bench.yml)) against",
+    "The ladder reruns weekly ([`bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/bench.yml)) against",
     "the latest contender releases. GitHub runners vary between runs, so compare",
     "rows within one run.",
     "",
@@ -105,13 +122,16 @@ nv_best = next(r for r in chrome if r["name"].startswith("nv-"))
 serve_row = next((r for r in chrome if r["name"] == "nv-serve"), None)
 other = next((r for r in chrome if not r["name"].startswith("nv-")), None)
 rank = chrome.index(nv_best) + 1
+shell_row = next((r for r in chrome if r["name"] == "nv-shell"), None)
 lines += [
-    f"**Reading the table.** Session wall order: {order}. navigera's best",
-    f"({nv_best['name']}) ranks #{rank} of {len(chrome)}"
-    + (f"; on regular Chrome, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
+    f"**Reading the table.** Session wall order: {order}. Every driver but"
+    + (f" `nv-shell` runs the same Google Chrome; on it, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
        + ("ahead of" if serve_row["session"]["wall_s"] < other["session"]["wall_s"] else "behind")
        + f" the fastest other driver, {other['name']} ({other['session']['wall_s']:.2f}s)"
-       if serve_row and other and serve_row is not nv_best else "")
+       if serve_row and other else "")
+    + (f". `nv-shell` ({shell_row['session']['wall_s']:.2f}s) is navigera on chrome-headless-shell, a"
+       " lighter build of the same browser that no other row runs, so its lead is partly the"
+       " browser's" if shell_row else "")
     + ". All native drivers (navigera,",
     "go-rod, chromiumoxide, chromedp) spend tens of milliseconds of their own CPU",
     "or less; the Node drivers spend hundreds and carry 80–150 MB of their own RSS.",
@@ -125,11 +145,14 @@ if rw and br:
     lines += [
         "### Real-world (public internet, best of 3, same run)",
         "",
-        f"example.com goto → title/h1: {rw_ok} of {len(rw)} pass; "
+        f"example.com goto → title check: {rw_ok} of {len(rw)} pass; "
         + ", ".join(f"{r['name']} {r['realworld']['wall_s']:.2f}s" for r in sorted(rw, key=lambda r: r["realworld"]["wall_s"])) + ".",
         "",
         f"GitHub browse (awesome-list scroll + trending click-through): {br_ok} of {len(br)} pass; "
         + ", ".join(f"{r['name']} {r['browse']['wall_s']:.2f}s" for r in sorted(br, key=lambda r: r["browse"]["wall_s"])) + ".",
+        "navigera's click returns once the new page has settled; the other drivers'",
+        "clicks return at once and they then poll the URL, so the browse rows do not",
+        "time the same readiness. The example.com check is the title; h1 is read, not checked.",
         "Live pages change between runs, so these are informational, not part of the",
         "correctness gate. (The scroll check used to fail at random for every driver:",
         "GitHub sets CSS `scroll-behavior: smooth`, so `scrollY` was read mid-animation;",
@@ -169,8 +192,8 @@ if baseline and serve:
     def pct(new, old):
         return f"{100 * (new / old - 1):+.0f}%"
     lines += [
-        "**This build vs the previous one, same machine and run** (`nv-baseline`,",
-        "built from the previous master by the ladder's `baseline_ref` A/B):",
+        f"**This build vs {versions.get('nv-baseline', 'the previous one')}, same machine and run** (`nv-baseline`,",
+        "built the same way by the ladder's `baseline_ref` A/B):",
         f"session {baseline['session']['wall_s']:.2f}s → {serve['session']['wall_s']:.2f}s "
         f"({pct(serve['session']['wall_s'], baseline['session']['wall_s'])}), "
         f"cold start {baseline['cold']['wall_s']:.2f}s → {serve['cold']['wall_s']:.2f}s "
@@ -187,7 +210,19 @@ if baseline and serve:
             f"close {ph.get('close', 0):.0f} ms.",
             "",
         ]
-agent = doc.get("agent_cli") or []
+label = {
+    "navigera": "`navigera` (this repo)",
+    "navigera (batch)": "`navigera`, known steps in `batch`",
+    "navigera (headless shell)": "`navigera` on chrome-headless-shell",
+    "agent-browser": f"`agent-browser` {ver('agent-browser', '')} (Vercel Labs, Rust)".replace("  ", " "),
+    "playwright-cli": f"`playwright-cli` {ver('@playwright/cli', '')} (Microsoft)".replace("  ", " "),
+    "Playwright MCP": f"Playwright MCP {ver('@playwright/mcp', '')} (Microsoft)".replace("  ", " "),
+    "Chrome DevTools MCP": f"Chrome DevTools MCP {ver('chrome-devtools-mcp', '')} (Google)".replace("  ", " "),
+}
+# Diagnostic agent rows (the A/B baseline build, a browser of its own) stay
+# out of the README.
+agent = [a for a in doc.get("agent_cli") or []
+         if a["name"] not in ("navigera (baseline)", "navigera (own browser)")]
 if agent:
     lines += [
         "### Agent tools (scripted, warm session, best of 3)",
@@ -195,38 +230,60 @@ if agent:
         "How an agent's tool calls drive a browser: CLI tools run one process per",
         "step (a shell tool), MCP servers get one `tools/call` per step over a",
         "persistent connection. Same canonical session plus one page snapshot.",
+        "Snapshot sizes are each tool's default output, what the agent reads.",
+        "Outside the session's total, each tool also snapshots the 1000-row page,",
+        "and navigera starts a second agent's session while the first one's browser",
+        "is up (sessions share one browser, a context each).",
         "",
-        "| tool | kind | total wall | mean per step | snapshot | snapshot size | gate |",
-        "|---|---|---|---|---|---|---|",
+        "| tool | kind | calls | total wall | per call | snapshot | its size | 1000-row snapshot | its size | 2nd session start | gate |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
-    label = {
-        "navigera": "`navigera` (this repo)",
-        "navigera (headless shell)": "`navigera` on chrome-headless-shell",
-        # bench.yml installs these @latest and the run records no version,
-        # so the table names none rather than one that may be stale.
-        "agent-browser": "`agent-browser` (Vercel Labs, Rust)",
-        "playwright-cli": "`playwright-cli` (Microsoft)",
-        "Playwright MCP": "Playwright MCP (Microsoft)",
-        "Chrome DevTools MCP": "Chrome DevTools MCP (Google)",
-    }
     for a in agent:
         kind = "MCP" if "MCP" in a["name"] else "CLI"
         if not a.get("wall_s"):
-            lines.append(f"| {label.get(a['name'], a['name'])} | {kind} | failed | — | — | — | ✗ |")
+            lines.append(f"| {label.get(a['name'], a['name'])} | {kind} | — | failed | — | — | — | — | — | — | ✗ |")
             continue
         steps = {s_['op']: s_['ms'] for s_ in a.get("steps") or []}
+        big = steps.get("snapshot b")
+        warm = steps.get("start warm")
         lines.append(
-            f"| {label.get(a['name'], a['name'])} | {kind} | {a['wall_s']:.2f}s | {a['op_mean_ms']:.0f} ms | "
-            f"{steps.get('snapshot', 0):.0f} ms | {a['snapshot_bytes'] / 1024:.0f} KB | "
-            f"{'✓' if a['ok'] else '✗'} |")
+            f"| {label.get(a['name'], a['name'])} | {kind} | {a.get('calls') or '—'} | {a['wall_s']:.2f}s | "
+            f"{a['op_mean_ms']:.0f} ms | {steps.get('snapshot', 0):.0f} ms | {a['snapshot_bytes'] / 1024:.0f} KB | "
+            + (f"{big:.0f} ms | {(a.get('snapshot_b_bytes') or 0) / 1024:.0f} KB | " if big is not None else "— | — | ")
+            + (f"{warm:.0f} ms | " if warm is not None else "— | ")
+            + f"{'✓' if a['ok'] else '✗'} |")
     lines += [
         "",
-        "Per-step time includes process start (CLI) or JSON-RPC (MCP), the hop to",
+        "Per-call time includes process start (CLI) or JSON-RPC (MCP), the hop to",
         "the daemon, and the CDP work. playwright-cli and Playwright MCP share Playwright's tool",
         "backend, which waits a fixed 500 ms after every action (`timeouts.settle`); playwright-cli",
-        "also starts a Node process per step.",
+        "also starts a Node process per step. `batch` saves calls, which are an agent's turns,",
+        "not time: its row runs the same steps in fewer, longer calls.",
         "",
     ]
+par = doc.get("parallel") or []
+if par:
+    ns = [r_["n"] for r_ in par[0]["runs"]]
+    plabel = {**label, "navigera": "`navigera` (sessions share one browser)",
+              "navigera (own browser)": "`navigera --own-browser` (a browser each)"}
+    lines += [
+        "### Parallel agents (memory, same run)",
+        "",
+        "N agents, each with a session of its own (navigera `-s <name>`, agent-browser and",
+        "playwright-cli sessions, one MCP server each), all open at once on the listing",
+        "after a snapshot. Memory is every process the tool started (browsers, daemons,",
+        "servers), summed as PSS.",
+        "",
+        "| tool | " + " | ".join(f"{n} agent{'s' if n > 1 else ''}" for n in ns) + " | per extra agent |",
+        "|---|" + "---|" * (len(ns) + 1),
+    ]
+    for p_ in par:
+        ok = [r_ for r_ in p_["runs"] if "pss_mb" in r_]
+        cells = [f"{r_['pss_mb']:.0f} MB" if "pss_mb" in r_ else "failed" for r_ in p_["runs"]]
+        per = (f"{(ok[-1]['pss_mb'] - ok[0]['pss_mb']) / (ok[-1]['n'] - ok[0]['n']):.0f} MB"
+               if len(ok) > 1 else "—")
+        lines.append(f"| {plabel.get(p_['name'], p_['name'])} | " + " | ".join(cells) + f" | {per} |")
+    lines.append("")
 for r in exp:
     s = r["session"]
     lines += [

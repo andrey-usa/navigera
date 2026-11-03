@@ -109,6 +109,9 @@ pub struct NetState {
     /// action (a click, a key, a fill) started: requests after it, with no
     /// navigation since, are that action's own traffic.
     pub action: Option<(u64, u64)>,
+    /// When that action started: a request soon after it is the action's
+    /// own (a "load more"), however much it looks like a poll.
+    pub action_at: Option<std::time::Instant>,
 }
 
 impl NetState {
@@ -176,6 +179,11 @@ const POLL_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The longest gap between requests that still makes them a poll.
 const POLL_MAX_INTERVAL: Duration = Duration::from_secs(10);
+
+/// A request that starts this soon after an action is the action's own: an
+/// agent pressing "Load more" every few seconds fetches one path at a
+/// poll's pace, and its snapshot must wait for each page of results.
+const ACTION_REQUEST_WINDOW: Duration = Duration::from_secs(1);
 
 /// Sessions on one browser (forks, or one session across `reset`s) each
 /// keep their own routes, HTTP credentials and dialog answer, keyed by the
@@ -621,6 +629,7 @@ impl Shared {
         let mut net = self.net.lock().unwrap();
         let state = net.entry(session_id.to_string()).or_default();
         state.action = Some((state.seq, nav_generation));
+        state.action_at = Some(std::time::Instant::now());
     }
 
     /// Has the last action's own traffic started (a request since it, no
@@ -858,9 +867,10 @@ fn note_network(shared: &Shared, method: &str, params: &Value, session: &str) {
                 let method = params.pointer("/request/method").and_then(Value::as_str).unwrap_or("GET");
                 let target = if key.is_empty() { String::new() } else { format!("{method} {key}") };
                 let mut poll = state.background.contains(&target);
+                let by_action = state.action_at.is_some_and(|t| now.duration_since(t) <= ACTION_REQUEST_WINDOW);
                 if !key.is_empty() {
                     let starts = state.starts.entry(key.clone()).or_default();
-                    poll |= is_poll(starts, now);
+                    poll |= !by_action && is_poll(starts, now);
                     starts.push(now);
                     if starts.len() > 3 {
                         starts.remove(0);
@@ -1209,6 +1219,31 @@ mod tests {
         // A burst to one path is loading: too quick to be a poll.
         assert!(!is_poll(&[t0, at(t0, 1)], at(t0, 2)));
         assert!(!is_poll(&[t0, at(t0, 120)], at(t0, 240)));
+    }
+
+    /// An agent pressing "Load more" every few seconds fetches one path at a
+    /// poll's pace; a request right after an action is still its own and
+    /// holds the snapshot.
+    #[test]
+    fn a_request_right_after_an_action_is_not_a_poll() {
+        let shared = Shared::default();
+        let ev = |method: &str, params: Value| note_network(&shared, method, &params, "s");
+        let sent = |id: &str| json!({ "requestId": id, "type": "Fetch", "request": { "url": format!("http://x.test/api/items?page={id}"), "method": "GET" } });
+        for id in ["0", "1"] {
+            ev("Network.requestWillBeSent", sent(id));
+            ev("Network.loadingFinished", json!({ "requestId": id }));
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        // A third at the same pace, no action: a poll, not waited for.
+        ev("Network.requestWillBeSent", sent("2"));
+        assert_eq!(shared.net_state("s").0, 0);
+        ev("Network.loadingFinished", json!({ "requestId": "2" }));
+        std::thread::sleep(Duration::from_millis(300));
+        // The same after an action: the action's own, waited for.
+        shared.mark_action("s", 0);
+        ev("Network.requestWillBeSent", sent("3"));
+        assert_eq!(shared.net_state("s").0, 1);
+        assert!(shared.action_traffic_seen("s", 0));
     }
 
     #[test]

@@ -290,6 +290,19 @@ jobs:
       - env:
           VERSION: ${{ needs.packages.outputs.version }}
         run: |
+          # The artifact download drops file modes: the binaries must be
+          # executable in the tarballs npm publishes.
+          find pkg/npm -path '*/bin/*' -type f -exec chmod 755 {} +
+          # And checked: a package whose binary is not executable is not published.
+          for dir in pkg/npm/*/; do
+            (cd "$dir" && npm pack --dry-run --json 2>/dev/null) | node -e '
+              const p = JSON.parse(require("fs").readFileSync(0))[0];
+              for (const f of p.files)
+                if (f.path.startsWith("bin/") && !f.path.endsWith(".js") && !(f.mode & 0o111)) {
+                  console.error(`::error title=npm::${p.name}: ${f.path} is not executable in the package`);
+                  process.exit(1);
+                }'
+          done
           # Platform packages first: the main package depends on them.
           for dir in $(ls -d pkg/npm/*/ | grep -v '/navigera/$') pkg/npm/navigera/; do
             name=$(node -p "require('./$dir/package.json').name")

@@ -6,6 +6,56 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-03
+
+### Behaviour changes
+
+- An action says what it changed on the page, so an agent needs no look
+  after it. After an `ax`, a click, fill, press, select, check, drag or
+  upload that stays on the same document prints the lines of that tree
+  that are new (`+`), gone (`-`) or read differently (`~`), with refs,
+  read again the way that `ax` read it and after the data the action
+  fetched has arrived (at most 40 lines, then a count). `ok` now means
+  nothing visible changed, except that after a fill a line that newly
+  shows the text just typed (the field itself, a live preview) is left
+  out; before, a click that loaded results printed `ok` while the page
+  was still fetching them. Compact output only:
+  `--output json`, `serve` and the MCP server are unchanged.
+- The tree is shorter on lists: a list item's bullet is left out and its
+  text goes on its line (`- listitem: Blue Lamp`, one line where there
+  were three), and a list item carries no `level` (its indentation is
+  its level). Numbered markers (`1.`) stay.
+
+### Changed
+
+- MCP: seven tool descriptions say when to use the tool and what it
+  costs (`browser_snapshot`, `browser_type`, `browser_press_key`,
+  `browser_wait_for`, `browser_file_upload`, `browser_run`,
+  `browser_resize`), and `glama.json` names the maintainer for the Glama
+  listing.
+
+### Fixed
+
+- npm: `npm install -g navigera` and `npx navigera` failed on Linux and
+  macOS from 0.6.5 to 0.7.1 (EACCES): the platform packages shipped the
+  binary without its executable bit. The release now refuses a package
+  whose binary isn't executable, and the launcher repairs one that lost
+  the bit.
+- A snapshot after a "Load more" waits for the page it loads again. Three
+  requests to one path at a steady pace counted as polling and were not
+  waited for, and an agent clicking "Load more" every few seconds is that
+  pace: from the third page on, `ax` showed the "Loading…" button. A
+  request that starts within a second of an action is now the action's
+  own.
+- The static Linux binaries (what `install.sh`, npm, pip and Homebrew
+  install) peaked at 19 MB in a scripted session, against 6 MB for the
+  other builds, since 0.7.1: mimalloc committed its whole arena up front
+  and transparent huge pages backed it with 2 MiB pages. On a machine whose
+  memory is fragmented, the first snapshot of a large page also took three
+  times as long. It now commits on demand: 6 MB. Warm snapshots of very
+  large pages (2,000 rows, 13,000 elements) take 3-6% longer than with
+  0.7.1's build (timing gate, median of 10).
+
 ## [0.7.1] - 2026-11-02
 
 ### Behaviour changes

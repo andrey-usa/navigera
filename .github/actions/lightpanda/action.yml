@@ -1,0 +1,47 @@
+name: lightpanda
+description: >
+  Downloads Lightpanda's newest stable release (the highest plain X.Y.Z tag,
+  never the nightly or a pre-release), or the stable tag given, for x86_64
+  Linux, and sets LIGHTPANDA_BIN and LIGHTPANDA_RELEASE for the later steps.
+inputs:
+  release:
+    description: a stable release tag to use instead of the newest (e.g. 1.0.1)
+    default: ""
+outputs:
+  release:
+    description: the tag downloaded
+    value: ${{ steps.get.outputs.release }}
+runs:
+  using: composite
+  steps:
+    - id: get
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE: ${{ inputs.release }}
+      run: |  # zizmor: ignore[github-env] runner-local values, no event input
+        set -euo pipefail
+        tag="$RELEASE"
+        stable='^v?[0-9]+\.[0-9]+\.[0-9]+$'
+        if [ -z "$tag" ]; then
+          # The highest plain version among releases that are not drafts or
+          # pre-releases, compared without a leading `v` (old tags have one,
+          # and a plain sort would put v0.2.6 above 1.0.1).
+          tag=$(gh api --paginate "repos/lightpanda-io/browser/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | grep -E "$stable" | awk '{v = $0; sub(/^v/, "", v); print v, $0}' \
+            | sort -V -k1,1 | tail -1 | cut -d' ' -f2 || true)
+        fi
+        if ! printf '%s' "$tag" | grep -qE "$stable"; then
+          echo "::error title=lightpanda::not a stable Lightpanda release: '${tag}'"
+          exit 1
+        fi
+        dir="$RUNNER_TEMP/lightpanda"
+        mkdir -p "$dir"
+        gh release download "$tag" --repo lightpanda-io/browser \
+          --pattern lightpanda-x86_64-linux --dir "$dir" --clobber
+        chmod +x "$dir/lightpanda-x86_64-linux"
+        echo "LIGHTPANDA_BIN=$dir/lightpanda-x86_64-linux" >> "$GITHUB_ENV"
+        echo "LIGHTPANDA_RELEASE=$tag" >> "$GITHUB_ENV"
+        echo "release=$tag" >> "$GITHUB_OUTPUT"
+        echo "::notice title=lightpanda::$tag: $("$dir/lightpanda-x86_64-linux" version)"

@@ -1256,6 +1256,13 @@ impl BrowserSession {
         &self.pages[self.active]
     }
 
+    /// Which document the active tab shows: its target and how many
+    /// navigations it has made. Two reads of one document have the same.
+    pub fn page_identity(&self) -> (String, u64) {
+        let tab = self.active_tab();
+        (tab.target_id().to_string(), tab.nav_generation())
+    }
+
     /// This session's downloads so far (`clear` empties its list afterwards).
     /// Save this session's downloads in `dir` from now on (created if
     /// missing), across `reset`; other sessions keep theirs. A test runner
@@ -2356,6 +2363,22 @@ impl BrowserSession {
     /// no navigation since.
     pub fn action_traffic_seen(&self) -> bool {
         self.active_tab().action_traffic_seen()
+    }
+
+    /// [`Self::action_traffic_seen`], given up to `grace` for the action's
+    /// first request to show: a click handler's fetch starts at once, but
+    /// the browser's word of it can trail the click's own reply.
+    pub fn action_traffic_within(&self, grace: Duration) -> bool {
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            if self.action_traffic_seen() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// A `wait` just succeeded on the active tab.

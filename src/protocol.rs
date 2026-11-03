@@ -2586,7 +2586,27 @@ pub struct Driver {
     /// The page state the last op reported (`--compact` says only what
     /// changed since).
     reported: Option<Value>,
+    /// The last tree `ax` gave as text, so an action can say what it changed
+    /// on the page (see [`Driver::page_change`]).
+    look: Option<Look>,
+    /// The last report was compact: an agent reads what actions change.
+    compact: bool,
 }
+
+/// A text tree as an `ax` read it, and the document it was read from.
+struct Look {
+    command: Command,
+    tree: String,
+    page: (String, u64),
+}
+
+/// At most this many changed lines follow an action; past that the page
+/// is better read again with `ax`.
+const CHANGE_LINES: usize = 40;
+
+/// How long an action's first request may take to show before the page is
+/// read again to say what the action changed.
+const ACTION_TRAFFIC_GRACE: Duration = Duration::from_millis(50);
 
 /// How often the storage snapshot is retaken (the tab list is kept on every op).
 const STORAGE_EVERY: Duration = Duration::from_millis(500);
@@ -2849,12 +2869,26 @@ impl Driver {
         if let Some(app) = &config.electron {
             let session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
                 .map_err(|e| e.context("could not launch the Electron app"))?;
-            return Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None });
+            return Ok(Self {
+                session,
+                history: Vec::new(),
+                crash: Crash::default(),
+                reported: None,
+                look: None,
+                compact: false,
+            });
         }
         if let Some(target) = config.attach_target() {
             let session = BrowserSession::attach(&target, config.timeout_ms)
                 .map_err(|e| e.context("could not connect to the browser"))?;
-            return Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None });
+            return Ok(Self {
+                session,
+                history: Vec::new(),
+                crash: Crash::default(),
+                reported: None,
+                look: None,
+                compact: false,
+            });
         }
         let session = BrowserSession::launch_with(
             &config.engine,
@@ -2866,7 +2900,7 @@ impl Driver {
         .map_err(|e| {
             e.context(format!("browser launch failed (engine={}, headed={})", config.engine, config.headed))
         })?;
-        Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None })
+        Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None, look: None, compact: false })
     }
 
     /// A named session's or an MCP server's browser: a context of its own
@@ -2880,7 +2914,7 @@ impl Driver {
         let session = BrowserSession::launch_shared(!config.headed, config.chromium.as_deref(), config.timeout_ms)
             .map_err(|e| e.context(format!("browser launch failed (shared browser, headed={})", config.headed)))?;
         let crash = Crash { headless: !config.headed, ..Crash::default() };
-        Ok(Self { session, history: Vec::new(), crash, reported: None })
+        Ok(Self { session, history: Vec::new(), crash, reported: None, look: None, compact: false })
     }
 
     /// The process-wide settings `config` names: natural mode, the element
@@ -2907,7 +2941,14 @@ impl Driver {
     /// once.
     pub fn fork(&self) -> anyhow::Result<Self> {
         let crash = Crash { headless: self.crash.headless, ..Crash::default() };
-        Ok(Self { session: self.session.fork()?, history: Vec::new(), crash, reported: None })
+        Ok(Self {
+            session: self.session.fork()?,
+            history: Vec::new(),
+            crash,
+            reported: None,
+            look: None,
+            compact: false,
+        })
     }
 
     /// Active tab state the model needs after every op.
@@ -3197,19 +3238,91 @@ impl Driver {
     /// Keep the page state `result` reports; with `compact`, make it say
     /// only what the op itself returned and what changed since the last
     /// report (`"ok"` when that is nothing).
-    pub(crate) fn report_state(&mut self, result: &mut Option<Value>, compact: bool) {
+    pub(crate) fn report_state(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
+        self.compact = compact;
+        if let (Command::Ax { .. }, Some(Value::String(tree))) = (command, result.as_ref()) {
+            self.look = Some(Look { command: command.clone(), tree: tree.clone(), page: self.session.page_identity() });
+        }
         let Some(value) = result.as_ref() else { return };
         let (own, state) = split_state(value);
         let Some(state) = state else { return };
         let before = self.reported.replace(state.clone());
         if compact {
-            *result = Some(compact_result(own, &state, before.as_ref()));
+            let short = compact_result(own, &state, before.as_ref());
+            *result = Some(self.page_change(command, &short).unwrap_or(short));
         }
+    }
+
+    /// An action is next and the last look was cut to fewer lines than an
+    /// `ax` shows by default: read it again at the default (same scope) first, so what the action changes
+    /// further down is seen too, not reported as `ok`.
+    fn whole_look_before(&mut self, command: &Command) {
+        if !self.compact || !reports_page_change(command) {
+            return;
+        }
+        let Some(look) = self.look.as_ref() else { return };
+        let cut = matches!(look.command, Command::Ax { limit: Some(n), .. } if n > 0 && n < DEFAULT_AX_LIMIT);
+        if !cut || look.page != self.session.page_identity() {
+            return;
+        }
+        let mut whole = look.command.clone();
+        if let Command::Ax { limit, .. } = &mut whole {
+            *limit = None;
+        }
+        self.look = match self.run_op_inner(&whole) {
+            Ok(Outcome { result: Value::String(tree), .. }) => {
+                Some(Look { command: whole, tree, page: self.session.page_identity() })
+            }
+            _ => None,
+        };
+    }
+
+    /// What an action changed on a page it did not leave: the lines of the
+    /// tree the last `ax` showed that are new, gone or different now, read
+    /// again the way that `ax` read it (so it waits, as `ax` does, for data
+    /// the action is fetching). An agent sees the outcome of its action
+    /// without spending a turn on a look; `ok` is left only when nothing it
+    /// could see changed. None when the action navigated or changed tabs
+    /// (the state says so), or there is no earlier look at this document.
+    fn page_change(&mut self, command: &Command, short: &Value) -> Option<Value> {
+        let typed = match command {
+            Command::Fill { value, .. } | Command::Type { value, .. } | Command::InsertText { value, .. } => {
+                Some(value.as_str())
+            }
+            _ => None,
+        };
+        if !reports_page_change(command)
+            || short.get("url").is_some()
+            || short.get("title").is_some()
+            || short.get("tab").is_some()
+        {
+            return None;
+        }
+        let look = self.look.take()?;
+        if look.page != self.session.page_identity() {
+            return None;
+        }
+        // Read after what the action started, not before it: once its
+        // requests show, the read waits for them as an `ax` after an action
+        // does (else it would catch the page's "Loading…" in between).
+        self.session.action_traffic_within(ACTION_TRAFFIC_GRACE);
+        let tree = match self.run_op_inner(&look.command) {
+            Ok(Outcome { result: Value::String(tree), .. }) => tree,
+            _ => return None,
+        };
+        let change = tree_change(&look.tree, &tree, typed);
+        self.look = Some(Look { tree, ..look });
+        let change = change?;
+        Some(Value::String(match short {
+            Value::String(ok) if ok == "ok" => change,
+            other => format!("{other}\n{change}"),
+        }))
     }
 
     /// Run one op, after relaunching the shared browser if it died since the
     /// last one; its outcome says so, and what was lost.
     pub fn run_op(&mut self, command: &Command) -> anyhow::Result<Outcome> {
+        self.whole_look_before(command);
         let mut recovered = if self.session.is_shared()
             && self.session.browser_gone()
             && !self.crash.given_up
@@ -4897,7 +5010,7 @@ fn handle_value(driver: &mut Driver, value: Value) -> (Response, bool) {
             r
         }
     };
-    driver.report_state(&mut response.result, compact);
+    driver.report_state(&command, &mut response.result, compact);
     (response, is_quit)
 }
 
@@ -5175,7 +5288,7 @@ pub fn oneshot(config: &SessionConfig, command: &Command, output: &mut dyn Write
         Ok(outcome) => outcome_response(Value::Null, outcome, started),
         Err(e) => err_response(Value::Null, format!("{e:#}"), started),
     };
-    driver.report_state(&mut response.result, config.compact);
+    driver.report_state(command, &mut response.result, config.compact);
     driver.session().close();
     crate::timing::report();
     let value = serde_json::to_value(&response).unwrap_or(Value::Null);
@@ -5340,6 +5453,136 @@ pub fn split_state(result: &Value) -> (Option<Value>, Option<Value>) {
         Value::Null => (None, None),
         other => (Some(other.clone()), None),
     }
+}
+
+/// Actions whose compact output says what they changed on the page.
+fn reports_page_change(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Click { .. }
+            | Command::Dblclick { .. }
+            | Command::Fill { .. }
+            | Command::Type { .. }
+            | Command::InsertText { .. }
+            | Command::Press { .. }
+            | Command::Select { .. }
+            | Command::SetChecked { .. }
+            | Command::Drag { .. }
+            | Command::Upload { .. }
+    )
+}
+
+/// The lines that differ between two text trees of one page: `+` a line
+/// that is new, `-` one that is gone, `~` an element (same ref) that reads
+/// differently now, each without its indentation. A line is matched by its
+/// text without the ref, so a node a framework re-rendered as it was is
+/// not a change. After a fill (`typed`: the value it entered) the element
+/// that now shows that value and did not before is left out: that is the
+/// value just typed, while anything else the fill changed (a live count, a
+/// suggestion list) is shown. None when nothing differs; past
+/// [`CHANGE_LINES`] the rest is counted, not shown.
+fn tree_change(before: &str, after: &str, typed: Option<&str>) -> Option<String> {
+    use std::collections::HashMap;
+    // `ref=N` as the tree prints it, in the element's own bracket tag
+    // (`[ref=3]`, `[checked, ref=3]`): not inside a quoted name and not in
+    // the text after `: `, where a page may write anything.
+    fn node_ref(line: &str) -> Option<&str> {
+        let b = line.as_bytes();
+        let (mut i, mut quoted) = (0, false);
+        while i < b.len() {
+            match b[i] {
+                b'\\' if quoted => i += 1,
+                b'"' => quoted = !quoted,
+                b':' if !quoted && b.get(i + 1) == Some(&b' ') => return None,
+                b'[' if !quoted => {
+                    let end = i + line[i..].find(']')?;
+                    let mut at = i + 1;
+                    for item in line[i + 1..end].split(", ") {
+                        let digits =
+                            item.strip_prefix("ref=").map_or(0, |d| d.bytes().take_while(u8::is_ascii_digit).count());
+                        if digits > 0 && digits + 4 == item.len() {
+                            return Some(&line[at..at + item.len()]);
+                        }
+                        at += item.len() + 2;
+                    }
+                    i = end;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+    fn key(line: &str) -> String {
+        let line = line.trim_start();
+        let Some(r) = node_ref(line) else { return line.to_string() };
+        for form in [format!(" [{r}]"), format!(", {r}"), format!("{r}, ")] {
+            if line.contains(&form) {
+                return line.replacen(&form, "", 1);
+            }
+        }
+        line.to_string()
+    }
+    let mut left: HashMap<String, usize> = HashMap::new();
+    for line in before.lines() {
+        *left.entry(key(line)).or_default() += 1;
+    }
+    let mut added = Vec::new();
+    for line in after.lines() {
+        match left.get_mut(&key(line)) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => added.push(line.trim_start()),
+        }
+    }
+    let mut removed = Vec::new();
+    for line in before.lines() {
+        if let Some(n) = left.get_mut(&key(line)) {
+            if *n > 0 {
+                *n -= 1;
+                removed.push(line.trim_start());
+            }
+        }
+    }
+    let gone_refs: HashMap<&str, &str> = removed.iter().filter_map(|l| node_ref(l).map(|r| (r, *l))).collect();
+    let new_refs: HashMap<&str, ()> = added.iter().filter_map(|l| node_ref(l)).map(|r| (r, ())).collect();
+    // A bare container (`listitem:`) or a list marker says nothing a reader
+    // needs: the lines under it carry the text and the refs.
+    fn says_something(line: &str) -> bool {
+        let line = line.strip_prefix("- ").unwrap_or(line);
+        if line.starts_with("ListMarker") {
+            return false;
+        }
+        node_ref(line).is_some() || line.contains('"') || !line.trim_end().ends_with(':')
+    }
+    added.retain(|l| says_something(l));
+    removed.retain(|l| says_something(l));
+    let mut lines = Vec::new();
+    for line in &added {
+        let was = node_ref(line).and_then(|r| gone_refs.get(r));
+        let changed = was.is_some();
+        if let (Some(was), Some(v)) = (was, typed.filter(|v| !v.is_empty())) {
+            if line.contains(v) && !was.contains(v) {
+                continue;
+            }
+        }
+        let mark = if changed { '~' } else { '+' };
+        lines.push(format!("{mark} {}", line.strip_prefix("- ").unwrap_or(line)));
+    }
+    for line in &removed {
+        if node_ref(line).is_some_and(|r| new_refs.contains_key(r)) {
+            continue;
+        }
+        lines.push(format!("- {}", line.strip_prefix("- ").unwrap_or(line)));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let more = lines.len().saturating_sub(CHANGE_LINES);
+    lines.truncate(CHANGE_LINES);
+    if more > 0 {
+        lines.push(format!("... and {more} more changed lines (`ax` reads the page)"));
+    }
+    Some(lines.join("\n"))
 }
 
 /// `--compact`: what the op returned beyond the page state, plus the state
@@ -5697,6 +5940,54 @@ mod tests {
         assert!(!p.config.raw && !p.config.compact);
         let p = parse_args(argv(&["navigera", "title", "--raw"])).unwrap();
         assert!(p.config.raw && !p.config.compact);
+    }
+
+    #[test]
+    fn an_action_says_which_lines_of_the_tree_it_changed() {
+        let before = "page \"Shop\" http://x/\n- form:\n  - textbox \"Name\" [ref=2]\n  - checkbox \"I agree\" [ref=3]\n  - button \"Send\" [ref=4]";
+        // Nothing a reader could see changed: no change, so the action says `ok`.
+        assert_eq!(super::tree_change(before, before, None), None);
+        // A node re-rendered as it was (new ref, same text) is not a change.
+        let rerendered = before.replace("[ref=4]", "[ref=9]");
+        assert_eq!(super::tree_change(before, &rerendered, None), None);
+        // A flag inside a bracket with the ref: one changed element, `~`.
+        let checked = before.replace("\"I agree\" [ref=3]", "\"I agree\" [checked, ref=3]");
+        assert_eq!(
+            super::tree_change(before, &checked, None).as_deref(),
+            Some("~ checkbox \"I agree\" [checked, ref=3]")
+        );
+        // New text and a removed button; bare containers and list markers are left out.
+        let after = format!(
+            "{}\n- status: Sent\n- list:\n  - listitem:\n    - ListMarker \"x\"\n    - text: one",
+            before.replace("\n  - button \"Send\" [ref=4]", "")
+        );
+        assert_eq!(
+            super::tree_change(before, &after, None).as_deref(),
+            Some("+ status: Sent\n+ text: one\n- button \"Send\" [ref=4]")
+        );
+        // After a fill, the field's own line is the value just typed.
+        let filled = before.replace("\"Name\" [ref=2]", "\"Name\" [ref=2]: Ada");
+        assert_eq!(super::tree_change(before, &filled, Some("Ada")), None);
+        assert_eq!(super::tree_change(before, &filled, None).as_deref(), Some("~ textbox \"Name\" [ref=2]: Ada"));
+        // ...but what else the fill changed is shown (a live count).
+        let live_before = "- textbox \"q\" [ref=2]\n- status [ref=5]: Results: 0";
+        let live_after = "- textbox \"q\" [ref=2]: shoes\n- status [ref=5]: Results: 12";
+        assert_eq!(
+            super::tree_change(live_before, live_after, Some("shoes")).as_deref(),
+            Some("~ status [ref=5]: Results: 12")
+        );
+        // A page's own text that reads like a ref is text, not a ref.
+        let quoted_before = "- text: \"x [ref=2] y\"\n- button \"B\" [ref=2]";
+        let quoted_after = "- text: \"x [ref=2] y2\"";
+        assert_eq!(
+            super::tree_change(quoted_before, quoted_after, None).as_deref(),
+            Some("+ text: \"x [ref=2] y2\"\n- text: \"x [ref=2] y\"\n- button \"B\" [ref=2]")
+        );
+        // Past the cap the rest is counted.
+        let many: String = (0..50).map(|i| format!("\n- text: row {i}")).collect();
+        let out = super::tree_change(before, &format!("{before}{many}"), None).unwrap();
+        assert_eq!(out.lines().count(), super::CHANGE_LINES + 1);
+        assert!(out.ends_with("... and 10 more changed lines (`ax` reads the page)"));
     }
 
     #[test]

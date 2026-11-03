@@ -32,8 +32,8 @@ on:
         description: "comma-separated OpenRouter model ids"
         default: "deepseek/deepseek-v4.1-flash,inception/mercury-3"
       lightpanda:
-        description: "Lightpanda release tag for the navigera-lightpanda tools (e.g. 1.0.1, nightly)"
-        default: "1.0.1"
+        description: "Lightpanda stable release tag for the navigera-lightpanda tools (empty: the newest stable)"
+        default: ""
 
 permissions:
   contents: read
@@ -121,16 +121,9 @@ jobs:
       # $CHROME_BIN at chrome-headless-shell instead.
       - name: Lightpanda binary (navigera-lightpanda tools)
         if: contains(matrix.run.tool, 'lightpanda')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE: ${{ inputs.lightpanda || '1.0.1' }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/lightpanda-bin"
-          gh release download "$RELEASE" --repo lightpanda-io/browser --pattern 'lightpanda-x86_64-linux' \
-            --dir "$RUNNER_TEMP/lightpanda-bin"
-          chmod +x "$RUNNER_TEMP/lightpanda-bin"/lightpanda*
-          echo "LIGHTPANDA_BIN=$RUNNER_TEMP/lightpanda-bin/lightpanda-x86_64-linux" >> "$GITHUB_ENV"
-          echo "::notice title=openrouter eval lightpanda::$("$RUNNER_TEMP/lightpanda-bin/lightpanda-x86_64-linux" version)"
+        uses: ./.github/actions/lightpanda
+        with:
+          release: ${{ inputs.lightpanda }}
       - name: chrome-headless-shell (navigera-shell tools)
         if: contains(matrix.run.tool, 'shell')
         run: |

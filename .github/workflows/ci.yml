@@ -5,7 +5,8 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
-  # Weekly: a new Chrome Stable/Beta must not break agents before we notice.
+  # Weekly: a new Chrome Stable/Beta or Lightpanda release must not break
+  # agents before we notice.
   schedule:
     - cron: "17 6 * * 1"
 
@@ -71,17 +72,24 @@ jobs:
           node --check bench/ladder/contenders/contender_puppeteer.mjs
           for f in tests/fixtures/electron-app/*.js; do node --check "$f"; done
 
-  # The Lightpanda engine: its end-to-end tests on the pinned release and
-  # on the nightly (a nightly regression is reported, not merged-blocking).
+      # Files only Glama's build uses (glama.json, packaging/glama/) never go
+      # into a release: the crate's file list is checked here; npm, PyPI,
+      # Homebrew, Scoop and the archives carry the binary alone.
+      - name: Glama files stay out of the packages
+        run: |
+          sh -n packaging/glama/build.sh
+          if cargo package --list --locked --allow-dirty | grep -iE '(^|/)(glama\.json|packaging/glama/)'; then
+            echo "::error::a Glama-only file is in the crate's package list (Cargo.toml include)"
+            exit 1
+          fi
+
+  # The Lightpanda engine: its end-to-end tests on Lightpanda's newest
+  # stable release, on every push and pull request (the weekly run catches a
+  # new release before a push does).
   lightpanda:
-    name: lightpanda (${{ matrix.release }})
-    strategy:
-      fail-fast: false
-      matrix:
-        release: ["1.0.1", nightly]
+    name: lightpanda (latest stable)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: ${{ matrix.release == 'nightly' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -89,16 +97,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
         with:
           toolchain: stable
-      - name: Lightpanda ${{ matrix.release }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/lp"
-          gh release download "${{ matrix.release }}" --repo lightpanda-io/browser \
-            --pattern lightpanda-x86_64-linux --dir "$RUNNER_TEMP/lp"
-          chmod +x "$RUNNER_TEMP/lp/lightpanda-x86_64-linux"
-          echo "LIGHTPANDA_BIN=$RUNNER_TEMP/lp/lightpanda-x86_64-linux" >> "$GITHUB_ENV"
-          "$RUNNER_TEMP/lp/lightpanda-x86_64-linux" version
+      - uses: ./.github/actions/lightpanda
       - name: Tests (Lightpanda e2e; no X server)
         env:
           NAVIGERA_REQUIRE_LIGHTPANDA: "1"
@@ -108,7 +107,7 @@ jobs:
           unset DISPLAY
           if ! cargo test --locked --test lightpanda --test commands 2>&1 | tee /tmp/test.log; then
             sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
-            python3 bench/ladder/annotate.py /tmp/test-tail.log "lightpanda ${{ matrix.release }} test failure"
+            python3 bench/ladder/annotate.py /tmp/test-tail.log "lightpanda $LIGHTPANDA_RELEASE test failure"
             exit 1
           fi
 

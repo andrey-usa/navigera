@@ -16,8 +16,21 @@ Tools:
   pwmcp   @playwright/mcp over stdio                   (Microsoft, MCP)
   cdmcp   chrome-devtools-mcp over stdio               (Google, Puppeteer, MCP)
 
-Prints one JSON line: {tool, wall_s, steps:[{op, ms}], snapshot_bytes,
-counts, extract_out}. Env: NAVIGERA, CHROME_BIN, LADDER_BASE,
+Extra steps, outside the canonical session and its total (`wall_s`):
+`snapshot b`, a snapshot of the 1000-row detail page (the large page an
+agent most often has to read), and for navigera `start warm` / `quit warm`,
+a second session started while the first one's shared browser is still up.
+`nvb` is navigera driven the way its skill tells agents to: the steps whose
+outcome is known go in one `batch` call.
+
+Snapshot sizes are of each tool's default output, what an agent reads
+(navigera's compact tree, agent-browser without --json); the other steps
+use the tools' JSON output to read values.
+
+Prints one JSON line: {tool, wall_s, total_wall_s, calls, steps:[{op, ms}],
+snapshot_bytes, snapshot_b_bytes, counts, extract_out}. `calls` is how many
+tool calls (commands, or MCP tools/call) the canonical session took: an
+agent's turns, which `batch` cuts. Env: NAVIGERA, CHROME_BIN, LADDER_BASE,
 AGENT_BROWSER, PLAYWRIGHT_CLI, PLAYWRIGHT_MCP, CHROME_DEVTOOLS_MCP (binaries).
 """
 import argparse
@@ -34,6 +47,9 @@ os.environ.setdefault("NAVIGERA_OUTPUT", "json")
 
 # Same expressions as nv_serve.py, written as IIFEs so a tool that evaluates
 # the expression as-is (rather than calling a returned function) gets values.
+# Steps outside the canonical session: reported, not part of wall_s.
+EXTRA_OPS = ("snapshot b", "start warm", "quit warm")
+
 TITLE = "(() => document.title)()"
 CARDS = "(() => document.querySelectorAll('.card').length)()"
 EXTRACT = ("(() => Array.from(document.querySelectorAll('.card')).map(c => ({"
@@ -44,9 +60,9 @@ VISIBLE = "(() => document.querySelectorAll('.card:not(.hidden)').length)()"
 ROWS = "(() => document.querySelectorAll('#rows tr').length)()"
 
 
-def run(argv: list[str], env: dict, cwd: str | None = None) -> tuple[float, str]:
+def run(argv: list[str], env: dict, cwd: str | None = None, stdin: str | None = None) -> tuple[float, str]:
     t0 = time.perf_counter()
-    p = subprocess.run(argv, env=env, cwd=cwd, capture_output=True, text=True, timeout=120)
+    p = subprocess.run(argv, env=env, cwd=cwd, input=stdin, capture_output=True, text=True, timeout=120)
     ms = (time.perf_counter() - t0) * 1000.0
     if p.returncode != 0:
         raise RuntimeError(f"{argv[:5]}... exited {p.returncode}\nstdout: {p.stdout[-1500:]}\n"
@@ -58,7 +74,7 @@ def result_of(tool: str, out: str):
     if tool == "pw":
         return json.loads(out) if out.strip() else None
     doc = json.loads(out.strip().splitlines()[-1])
-    if tool == "nv":
+    if tool in ("nv", "nvb"):
         if not doc.get("ok"):
             raise RuntimeError(f"navigera error: {doc.get('error')}")
         return doc.get("result")
@@ -76,6 +92,7 @@ class Mcp:
         self.p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=self.log, env=env, cwd=cwd, text=True, bufsize=1)
         self.next_id = 0
+        self.calls = 0  # tools/call requests
         self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                     "clientInfo": {"name": "ladder", "version": "1"}})
         self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -101,6 +118,7 @@ class Mcp:
                 return msg["result"]
 
     def tool(self, name: str, args: dict) -> tuple[float, str]:
+        self.calls += 1
         t0 = time.perf_counter()
         res = self.request("tools/call", {"name": name, "arguments": args})
         ms = (time.perf_counter() - t0) * 1000.0
@@ -151,31 +169,63 @@ def uid_for(snapshot: str, pattern: str) -> str:
 def run_cli(tool: str, args, base: str, env: dict):
     s = args.session
     cwd = None
-    if tool == "nv":
-        exe = os.environ["NAVIGERA"]
+    if tool in ("nv", "nvb"):
+        exe = args.navigera or os.environ["NAVIGERA"]
+        chrome = args.chrome or env["CHROME_BIN"]
+        start = ["start", "--chromium", chrome] + (["--own-browser"] if args.own_browser else [])
 
-        def cmd(*a):
-            return [exe, "--session", s, *a]
+        def cmd(*a, session=s):
+            return [exe, "--session", session, *a]
 
         def ev(js):
             return cmd("eval", js)
 
-        plan = [
-            ("start", cmd("start", "--chromium", args.chrome or env["CHROME_BIN"])),
-            ("goto", cmd("goto", f"{base}/page_a.html")),
-            ("eval title", ev(TITLE)),
-            ("eval count", ev(CARDS)),
-            ("eval extract", ev(EXTRACT)),
-            ("snapshot", cmd("ax")),
-            ("fill", cmd("fill", "--selector", "#q", "--value", "widget")),
-            ("click", cmd("click", "--selector", "#search")),
-            ("eval visible", ev(VISIBLE)),
-            ("screenshot", cmd("screenshot", "--path", args.shot_out)),
-            ("tab new", cmd("tab-new", f"{base}/page_b.html")),
-            ("eval title b", ev(TITLE)),
-            ("eval rows", ev(ROWS)),
-            ("close", cmd("quit")),
-        ]
+        if tool == "nv":
+            plan = [
+                ("start", cmd(*start)),
+                ("goto", cmd("goto", f"{base}/page_a.html")),
+                ("eval title", ev(TITLE)),
+                ("eval count", ev(CARDS)),
+                ("eval extract", ev(EXTRACT)),
+                ("snapshot", cmd("ax")),
+                ("fill", cmd("fill", "--selector", "#q", "--value", "widget")),
+                ("click", cmd("click", "--selector", "#search")),
+                ("eval visible", ev(VISIBLE)),
+                ("screenshot", cmd("screenshot", "--path", args.shot_out)),
+                ("tab new", cmd("tab-new", f"{base}/page_b.html")),
+                ("eval title b", ev(TITLE)),
+                ("eval rows", ev(ROWS)),
+                ("snapshot b", cmd("ax")),
+                ("close", cmd("quit")),
+                # A second agent's session while the first one's browser is
+                # still up: on the shared browser (0.6.5+) it joins it.
+                ("start warm", cmd(*start, session=s + "-2")),
+                ("quit warm", cmd("quit", session=s + "-2")),
+            ]
+        else:
+            # The skill's way: known steps in one batch call, a look between.
+            def batch(*lines):
+                return cmd("batch", "-"), "\n".join(lines) + "\n"
+
+            def q(text):
+                return '"' + text + '"'  # the expressions and paths hold no double quotes
+
+            plan = [
+                ("start", cmd(*start)),
+                ("batch goto+evals", *batch(f"goto {base}/page_a.html", f"eval {q(TITLE)}",
+                                            f"eval {q(CARDS)}", f"eval {q(EXTRACT)}")),
+                ("snapshot", cmd("ax")),
+                ("batch fill+click+eval+shot", *batch("fill --selector #q --value widget",
+                                                      "click --selector #search", f"eval {q(VISIBLE)}",
+                                                      f"screenshot --path {q(args.shot_out)}")),
+                ("batch tab+evals", *batch(f"tab-new {base}/page_b.html", f"eval {q(TITLE)}",
+                                           f"eval {q(ROWS)}")),
+                ("snapshot b", cmd("ax")),
+                ("close", cmd("quit")),
+            ]
+            batch_values = {"batch goto+evals": {2: "eval title", 3: "eval count", 4: "eval extract"},
+                            "batch fill+click+eval+shot": {3: "eval visible"},
+                            "batch tab+evals": {2: "eval title b", 3: "eval rows"}}
     elif tool == "ab":
         exe = os.environ.get("AGENT_BROWSER", "agent-browser")
         env.setdefault("AGENT_BROWSER_EXECUTABLE_PATH", args.chrome or env.get("CHROME_BIN", ""))
@@ -201,6 +251,7 @@ def run_cli(tool: str, args, base: str, env: dict):
             ("tab new", cmd("tab", "new", f"{base}/page_b.html")),
             ("eval title b", ev(TITLE)),
             ("eval rows", ev(ROWS)),
+            ("snapshot b", cmd("snapshot")),
             ("close", cmd("close")),
         ]
     else:  # pw: playwright-cli
@@ -232,23 +283,35 @@ def run_cli(tool: str, args, base: str, env: dict):
             ("tab new", cmd("tab-new", f"{base}/page_b.html")),
             ("eval title b", ev(TITLE)),
             ("eval rows", ev(ROWS)),
+            ("snapshot b", cmd("snapshot")),
             ("close", cmd("close")),
         ]
 
-    steps, values, snapshot_bytes = [], {}, 0
+    steps, values, sizes = [], {}, {}
+    # What the agent reads: each tool's default output for snapshots.
+    snap_env = {k: v for k, v in env.items() if k != "NAVIGERA_OUTPUT"}
     t0 = time.perf_counter()
-    for name, argv in plan:
-        ms, out = run(argv, env, cwd)
+    for name, argv, *stdin in plan:
+        if name.startswith("snapshot") and tool == "ab":
+            argv = [a for a in argv if a != "--json"]
+        ms, out = run(argv, snap_env if name.startswith("snapshot") else env, cwd,
+                      stdin[0] if stdin else None)
         steps.append({"op": name, "ms": round(ms, 2)})
         if name.startswith("eval"):
             values[name] = result_of(tool, out)
-        elif name == "snapshot":
-            snapshot_bytes = len(out.encode())
-            if tool != "pw":
-                result_of(tool, out)  # raises on a failed snapshot
-        elif name not in ("start", "close") and tool != "pw":
+        elif name.startswith("batch"):
+            res = result_of(tool, out)
+            if res.get("failed"):
+                raise RuntimeError(f"batch {name} failed: {res}")
+            by_step = {r["step"]: r.get("result") for r in res.get("results") or []}
+            for step_no, key in batch_values[name].items():
+                values[key] = by_step.get(step_no)
+        elif name.startswith("snapshot"):
+            sizes[name] = len(out.encode())  # a failed one exits non-zero
+        elif name not in ("start", "close", "start warm", "quit warm") and tool != "pw":
             result_of(tool, out)
-    return time.perf_counter() - t0, steps, values, snapshot_bytes
+    calls = sum(1 for p in plan if p[0] not in EXTRA_OPS)
+    return time.perf_counter() - t0, steps, values, sizes, calls
 
 
 def run_mcp(tool: str, args, base: str, env: dict):
@@ -277,7 +340,7 @@ def run_mcp(tool: str, args, base: str, env: dict):
         values[name] = mcp_json(step(name, "browser_evaluate" if tool == "pwmcp" else "evaluate_script",
                                      {"function": fn}))
 
-    snapshot = ""
+    snapshot = snapshot_b = ""
     try:
         if tool == "pwmcp":
             step("goto", "browser_navigate", {"url": f"{base}/page_a.html"})
@@ -304,6 +367,7 @@ def run_mcp(tool: str, args, base: str, env: dict):
                 steps.append({"op": "tab new", "ms": round(ms1 + ms2, 2)})
             ev("eval title b", TITLE)
             ev("eval rows", ROWS)
+            snapshot_b = step("snapshot b", "browser_snapshot", {})
             step("close", "browser_close", {})
         else:
             # 1.10 defaults to --page-id-routing: page tools need a pageId.
@@ -338,16 +402,23 @@ def run_mcp(tool: str, args, base: str, env: dict):
             cd("tab new", "new_page", {"url": f"{base}/page_b.html"})
             cdev("eval title b", TITLE)
             cdev("eval rows", ROWS)
+            snapshot_b = cd("snapshot b", "take_snapshot", {})
     finally:
         c0 = time.perf_counter()
         mcp.close()
         steps.append({"op": "close" if tool != "pwmcp" else "exit", "ms": round((time.perf_counter() - c0) * 1000.0, 2)})
-    return time.perf_counter() - t0, steps, values, len(snapshot.encode())
+    extra_calls = sum(1 for st in steps if st["op"] in EXTRA_OPS)
+    return (time.perf_counter() - t0, steps, values,
+            {"snapshot": len(snapshot.encode()), "snapshot b": len(snapshot_b.encode())},
+            mcp.calls - extra_calls)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tool", choices=["nv", "ab", "pw", "pwmcp", "cdmcp"], required=True)
+    ap.add_argument("--tool", choices=["nv", "nvb", "ab", "pw", "pwmcp", "cdmcp"], required=True)
+    ap.add_argument("--navigera", default="", help="navigera binary (default $NAVIGERA)")
+    ap.add_argument("--own-browser", action="store_true",
+                    help="navigera: `start --own-browser` instead of the shared browser")
     ap.add_argument("--extract-out", required=True)
     ap.add_argument("--shot-out", required=True)
     ap.add_argument("--chrome", help="browser binary (default $CHROME_BIN)")
@@ -357,9 +428,12 @@ def main() -> int:
     base = os.environ["LADDER_BASE"]
     env = dict(os.environ)
     if args.tool in ("pwmcp", "cdmcp"):
-        wall, steps, values, snapshot_bytes = run_mcp(args.tool, args, base, env)
+        total, steps, values, sizes, calls = run_mcp(args.tool, args, base, env)
     else:
-        wall, steps, values, snapshot_bytes = run_cli(args.tool, args, base, env)
+        total, steps, values, sizes, calls = run_cli(args.tool, args, base, env)
+    # The canonical session's wall leaves the extra steps out, so it stays
+    # comparable with runs that had none.
+    wall = total - sum(st["ms"] for st in steps if st["op"] in EXTRA_OPS) / 1000.0
     with open(args.extract_out, "w", encoding="utf-8") as f:
         json.dump(values.get("eval extract"), f)
     counts = {
@@ -369,8 +443,10 @@ def main() -> int:
         "title_b": values.get("eval title b"),
         "rows_b": values.get("eval rows"),
     }
-    print(json.dumps({"tool": args.tool, "wall_s": wall, "steps": steps,
-                      "snapshot_bytes": snapshot_bytes, "counts": counts,
+    print(json.dumps({"tool": args.tool, "wall_s": wall, "total_wall_s": total, "calls": calls,
+                      "steps": steps,
+                      "snapshot_bytes": sizes.get("snapshot", 0),
+                      "snapshot_b_bytes": sizes.get("snapshot b", 0), "counts": counts,
                       "extract_out": args.extract_out}))
     return 0
 

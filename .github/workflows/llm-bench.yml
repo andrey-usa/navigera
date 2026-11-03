@@ -1,0 +1,104 @@
+name: llm-bench
+
+# One model (DeepSeek-V4.1-Flash through SiliconFlow; SILICONFLOW_API_KEY in
+# the main environment) drives each browser tool through one function on a
+# local site the driver serves (bench/llm/llm_bench.py). Success is judged
+# from what the site recorded and the final answer. One job per tool, in
+# parallel: RESULT lines and the summary table as annotations, transcripts
+# in the job log. The README's "One model, six tools" table comes from a run
+# of this workflow.
+
+on:
+  # A change to the harness on next runs it; the owner or an agent can
+  # dispatch it any time.
+  push:
+    branches: [next]
+    paths:
+      - bench/llm/**
+      - .github/workflows/llm-bench.yml
+  workflow_dispatch:
+    inputs:
+      arms:
+        description: comma-separated arms
+        default: nav-default,nav-batch,agent-browser,playwright-cli,playwright-mcp,chrome-devtools-mcp
+      reps:
+        default: "3"
+      nav_ref:
+        description: build navigera from this ref instead of the checkout (an A/B, e.g. v0.7.1)
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # An A/B against another build (nav_ref) runs beside the plain run.
+  group: llm-bench-${{ github.ref }}-${{ inputs.nav_ref }}-${{ inputs.arms }}
+  cancel-in-progress: true
+
+jobs:
+  arms:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.a.outputs.list }}
+    steps:
+      - id: a
+        env:
+          ARMS: ${{ inputs.arms || 'nav-default,nav-batch,agent-browser,playwright-cli,playwright-mcp,chrome-devtools-mcp' }}
+        run: echo "list=$(python3 -c 'import json,os; print(json.dumps([a for a in os.environ["ARMS"].split(",") if a]))')" >> "$GITHUB_OUTPUT"
+
+  bench:
+    needs: arms
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    environment: main
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: ${{ fromJSON(needs.arms.outputs.list) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+      - name: Build navigera
+        if: startsWith(matrix.arm, 'nav-')
+        env:
+          NAV_REF: ${{ inputs.nav_ref }}
+        run: |
+          src=$PWD
+          if [ -n "$NAV_REF" ]; then
+            git fetch --depth 1 origin "$NAV_REF"
+            git worktree add /tmp/nav-ref FETCH_HEAD
+            src=/tmp/nav-ref
+          fi
+          (cd "$src" && cargo build --release --locked --bin navigera)
+          echo "::notice::navigera $(git -C "$src" rev-parse --short HEAD) $("$src/target/release/navigera" --version)"
+          echo "NAV_BIN=$src/target/release/navigera" >> "$GITHUB_ENV"
+      - name: Install node tools and Chromium
+        if: ${{ !startsWith(matrix.arm, 'nav-') }}
+        run: |
+          mkdir -p /tmp/tools-npm && cd /tmp/tools-npm
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund agent-browser@latest @playwright/cli@latest @playwright/mcp@latest chrome-devtools-mcp@latest
+          npx playwright install --with-deps chromium
+          for p in agent-browser @playwright/cli @playwright/mcp chrome-devtools-mcp; do
+            echo "::notice::$p $(node -p "require('$p/package.json').version")"
+          done
+      - name: Run
+        env:
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+          ARM: ${{ matrix.arm }}
+          REPS: ${{ inputs.reps || '3' }}
+        run: |
+          TOOLS_DIR=/tmp/tools-npm python3 bench/llm/llm_bench.py \
+            --arms "$ARM" --reps "$REPS" --budget 0.60 --out bench/llm/out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: llm-bench-${{ matrix.arm }}
+          path: bench/llm/out/

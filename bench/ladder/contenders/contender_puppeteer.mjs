@@ -123,8 +123,10 @@ async function browse() {
   t = performance.now();
   await page.click('article.Box-row h2 a');
   let newUrl = null;
+  // Look first, then every 250 ms: a click that already waited for its
+  // navigation is seen at once, as any driver's would be.
   for (let i = 0; i < 24; i++) {
-    await new Promise(r => setTimeout(r, 250));
+    if (i > 0) await new Promise(r => setTimeout(r, 250));
     newUrl = page.url();
     if (newUrl && !newUrl.includes('trending')) break;
   }

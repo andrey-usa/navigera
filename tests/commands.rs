@@ -492,8 +492,8 @@ fn a_batch_runs_steps_in_one_call() {
 }
 
 /// The default output (compact): an action that left the page as it was
-/// prints `ok`, one that moved it only what changed; reads print their
-/// value; errors as `--raw`. `--output json` gives the full line.
+/// prints `ok`, one that moved it only what changed (after a look, the
+/// changed lines of the tree); reads print their value; errors as `--raw`. `--output json` gives the full line.
 #[test]
 fn compact_output_says_only_what_changed() {
     let Some(site) = edge_site() else { return };
@@ -523,6 +523,12 @@ fn compact_output_says_only_what_changed() {
             r#"{"changed":true,"checked":true}"#,
             "[{engine}]"
         );
+        // After a look, an action says what it changed on the page: the
+        // lines of that tree that are new (`+`), gone (`-`) or different (`~`).
+        assert!(compact(&["ax"]).0, "[{engine}]");
+        let (ok, out, _) = compact(&["click", "--testid", "save-btn"]);
+        assert!(ok && out.starts_with("+ ") && out.contains("saved"), "[{engine}] {out}");
+        // Again: nothing it could see changed, so `ok`.
         assert_eq!(compact(&["click", "--testid", "save-btn"]).1, "ok", "[{engine}]");
         assert_eq!(compact(&["text", "--selector", "#out"]).1, "saved", "[{engine}]");
         let (ok, out, err) = compact(&["click", "--text", "Nowhere", "--timeout-ms", "300"]);

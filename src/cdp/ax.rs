@@ -572,6 +572,13 @@ impl<'a> Tree<'a> {
             })
     }
 
+    /// A list item's bullet (`•`, `◦`): it says nothing the line's role
+    /// does not. A number or a letter (`1.`, `b)`) is kept.
+    fn is_bullet(&self, idx: usize) -> bool {
+        Self::role(&self.nodes[idx]) == "ListMarker"
+            && !text_of(&self.nodes[idx], "name").chars().any(char::is_alphanumeric)
+    }
+
     fn is_transparent(&mut self, idx: usize) -> bool {
         if self.is_clickable(idx) {
             return false;
@@ -594,7 +601,7 @@ impl<'a> Tree<'a> {
     /// Children with transparent wrappers expanded in place.
     fn effective_children(&mut self, idx: usize, out: &mut Vec<usize>) {
         for &child in self.children(idx).iter() {
-            if SILENT.contains(&Self::role(&self.nodes[child])) {
+            if SILENT.contains(&Self::role(&self.nodes[child])) || self.is_bullet(child) {
                 continue;
             }
             if self.is_transparent(child) {
@@ -644,7 +651,8 @@ impl<'a> Tree<'a> {
                 out.push("invalid".into());
             }
         }
-        if let Some(level) = node.prop("level").and_then(Value::as_u64) {
+        // A list item's level is its indentation in the tree already.
+        if let Some(level) = node.prop("level").and_then(Value::as_u64).filter(|_| role != "listitem") {
             out.push(format!("level={level}"));
         }
         out

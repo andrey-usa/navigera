@@ -1123,10 +1123,13 @@ fn a_list_that_listens_for_its_items_marks_the_items() {
     };
     assert!(!tree.iter().any(|l| l.trim_start().starts_with("- list [")), "{ax}");
     assert_eq!(tree.iter().filter(|l| l.contains("listitem") && l.contains("ref=")).count(), 3, "{ax}");
-    // An item's ref is on its listitem line, above its text.
+    // An item's ref and its text are on one line, its listitem's.
     let item_ref = |fruit: &str| {
-        let at = tree.iter().position(|l| l.contains(&format!("text: {fruit}"))).unwrap();
-        ref_in(tree[..at].iter().rfind(|l| l.contains("listitem")).unwrap())
+        ref_in(
+            tree.iter()
+                .find(|l| l.contains("listitem") && l.ends_with(&format!(": {fruit}")))
+                .unwrap_or_else(|| panic!("{fruit}: {ax}")),
+        )
     };
     s.ok(&["click", &item_ref("Cherry")]);
     assert_eq!(s.ok(&["title"]), "picked Cherry");

@@ -21,7 +21,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | global flag | meaning |
 |---|---|
 | `-s, --session <name\|path>` | named session. A bare name lives in a directory only you can enter: `$XDG_RUNTIME_DIR/navigera/<name>.sock`, else `$TMPDIR/navigera-<uid>/<name>.sock` (mode 0700; navigera refuses one that is a symlink, someone else's or open to others), `%TEMP%\navigera\` on Windows; a value with a path separator is used as the path. `$NAVIGERA_SESSION` sets a default for client calls |
-| `--output compact\|raw\|json` | what a command prints. `compact`, the default: an action that left the page as it was (same url, title, tab) prints `ok`; one that moved it prints only its own fields and what changed (`{"title":"Saved"}`); a read prints its value (strings unquoted, the `ax` tree as text). `raw`: the result only, as it is. `json`: one JSON line per command, `{"ok":true,"result":…}` or `{"ok":false,"error":…}`, for programs. Outside `json`, errors go to stderr as `error: …` (exit code 1) and notes as `note: …`. `$NAVIGERA_OUTPUT` sets the mode for every command of a shell; a flag wins. The session remembers the state it last reported. `--compact`: `--output compact`; `--raw`: `--output raw` |
+| `--output compact\|raw\|json` | what a command prints. `compact`, the default: an action that moved the page prints only its own fields and what changed (`{"title":"Saved"}`); one that left it on the same document, after an `ax` of it, prints the lines of that tree that changed (`+` new, `-` gone, `~` the same element reading differently; at most 40, then a count), read again the way that `ax` read it, waiting as `ax` does for data the action fetches, and `ok` when no line changed (after a `fill`, the field's own new value is not a change); a read prints its value (strings unquoted, the `ax` tree as text). `raw`: the result only, as it is. `json`: one JSON line per command, `{"ok":true,"result":…}` or `{"ok":false,"error":…}`, for programs. Outside `json`, errors go to stderr as `error: …` (exit code 1) and notes as `note: …`. `$NAVIGERA_OUTPUT` sets the mode for every command of a shell; a flag wins. The session remembers the state it last reported. `--compact`: `--output compact`; `--raw`: `--output raw` |
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
 | `--wait-ms <ms>` | element ops' wait when they name no timeout, and on one `wait` for a condition, its timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
@@ -484,7 +484,7 @@ HAR or response body from `network`, a PDF, a screenshot's path, a
 the client opened). `NAVIGERA_MCP_ALLOW_FILES=1` lifts these limits.
 
 Every action takes `snapshot: true` to return the updated tree in the same
-call. The whole tool list (23 tools) is about 14 KB (~3,600 tokens), against
+call. The whole tool list (23 tools) is about 16 KB (~4,000 tokens), against
 ~26 KB for Chrome DevTools MCP 1.10.1.
 
 Client configuration (all run the same command):
@@ -604,8 +604,8 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   own instead: `start --own-browser` (or `NAVIGERA_SHARED_BROWSER=0`);
   `--attach`, `--profile`, `--electron`, Lightpanda and `--transport ws` on Linux/macOS
   always get one.
-- **`--engine lightpanda`** (experimental; tested on Lightpanda 1.0.1 and the
-  nightly) starts `lightpanda serve` with iframes and stylesheets loaded and
+- **`--engine lightpanda`** (experimental; tested on Lightpanda's newest stable
+  release) starts `lightpanda serve` with iframes and stylesheets loaded and
   telemetry off (`LIGHTPANDA_DISABLE_TELEMETRY`). The binary comes from
   `$LIGHTPANDA_BIN` or `PATH`, or from `--chromium`; no X server is needed.
   `goto` waits for load as on Chrome. Differences from Chrome:

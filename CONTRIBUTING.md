@@ -84,6 +84,11 @@ gh workflow run bench.yml --ref my-branch -f reps=3 \
 
 Measurement rules the ladder follows:
 
+- navigera is measured as released: the static musl build (both sides of an
+  A/B, each built from its own tree, since `.cargo/config.toml` is part of
+  the build).
+- Reps are interleaved across contenders, and `publish.json` keeps every
+  run, the median and each contender's version beside the best.
 - Driver CPU and memory are the driver's own (`utime+stime` from the zombie's
   `/proc/<pid>/stat`, VmHWM), never `wait4` totals, which include every child
   the driver reaped.
@@ -103,8 +108,10 @@ in `src/protocol.rs` together.
    (snapshots of large and div-heavy pages, scoped snapshots, waits around
    long polls, beacons and clicks that fetch, a covered click, a big select)
    on the last release and the candidate, one runner; it fails when the
-   candidate is more than 25% (and 20 ms) slower on any of them. Locally:
-   `python3 bench/gate/gate.py --base <old navigera> --candidate target/release/navigera`.
+   candidate is more than 25% (and 20 ms) slower on any of them. Both are
+   the static musl build a release ships. Locally:
+   `cargo build --release --target x86_64-unknown-linux-musl`, then
+   `python3 bench/gate/gate.py --base <old navigera> --candidate target/x86_64-unknown-linux-musl/release/navigera`.
 2. Bump `version` in `Cargo.toml` and add a `CHANGELOG.md` entry on `master`,
    with a "Behaviour changes" section for what a script or an agent relying
    on the old output or timing should know.
@@ -125,3 +132,30 @@ account and trusted publisher exist:
 
 Re-running the workflow for a version that already exists rebuilds its files
 and publishes it to any registry that doesn't have it yet.
+
+### Glama
+
+Glama ([glama.ai/mcp/servers/andrey-usa/navigera](https://glama.ai/mcp/servers/andrey-usa/navigera))
+builds its own image of `navigera mcp` from what is already published, and
+needs two files in this repository, used by nothing else:
+
+| file | what Glama does with it |
+|---|---|
+| `glama.json` (repository root, where Glama looks) | names the maintainers, for the listing |
+| `packaging/glama/build.sh` | its build steps: the system libraries Chrome links against, `uv tool install navigera==<version>` from PyPI, `navigera install-browser chrome-headless-shell`, and a check that the browser's libraries load, so a missing one fails the build instead of the first call |
+
+Neither goes into a release: the crate is an allowlist (`include` in
+`Cargo.toml`, checked by the "Glama files stay out of the packages" step in
+`ci.yml`), and npm, PyPI, Homebrew, Scoop and the archives carry the binary
+alone. Glama's admin form holds the rest: the build step runs
+`packaging/glama/build.sh`, the command is
+`["/root/.local/bin/navigera", "mcp"]`, and the only settings it offers
+users are the decision model's (`NAVIGERA_DECIDER_*`).
+
+A navigera release is a Glama release: auto-release builds the new version
+from the release tag once PyPI has it, under the same version number. After
+it, check the listing in Glama's "try it": `tools/list` gives the 23 tools,
+and `browser_navigate` to https://example.com followed by `browser_snapshot`
+returns the page's tree. A fix to Glama's image alone, between navigera
+releases, rebuilds the same navigera version; it never takes a version
+number of its own that reads like a navigera release.

@@ -6,6 +6,7 @@ bench/ladder/contenders/chromey/Cargo.lock
 *.log
 /reports/
 /bench/ladder/out/
+/bench/llm/out/
 /bench/ladder/node_modules/
 /bench/ladder/fixtures/
 __pycache__/

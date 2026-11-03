@@ -83,6 +83,14 @@ try {{
   console.error("Install from source instead: cargo install {name}");
   process.exit(1);
 }}
+// A binary that lost its executable bit on the way (a package published
+// with it unset) is made executable before it runs, where the install allows.
+if (process.platform !== "win32") {{
+  const fs = require("fs");
+  try {{
+    if ((fs.statSync(bin).mode & 0o111) === 0) fs.chmodSync(bin, 0o755);
+  }} catch {{}}
+}}
 const result = spawnSync(bin, process.argv.slice(2), {{ stdio: "inherit" }});
 if (result.error) {{
   console.error(`{name}: ${{result.error.message}}`);

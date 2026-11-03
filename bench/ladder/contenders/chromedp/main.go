@@ -290,8 +290,12 @@ func runBrowse(chromeBin string) (map[string]any, error) {
 		return nil, fmt.Errorf("click: %w", err)
 	}
 	var newURL *string
+	// Look first, then every 250 ms: a click that already waited for its
+	// navigation is seen at once, as any driver's would be.
 	for i := 0; i < 24; i++ {
-		time.Sleep(250 * time.Millisecond)
+		if i > 0 {
+			time.Sleep(250 * time.Millisecond)
+		}
 		u, err := chromedp.Run(ctx, chromedp.Evaluate[string](`(() => location.href)()`))
 		if err != nil {
 			continue
