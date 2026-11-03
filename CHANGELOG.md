@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A wait on something only a property shows (`wait --js` on a field's
+  value, focus or a checkbox; assertions built on the same wait) ends when
+  the page fires `input`, `change`, `focusin` or `focusout` for that change,
+  instead of at the next check up to 100 ms later. A wait for a field's
+  value after a `fill` ended 97 ms after the input event, and now ends in
+  under 1 ms (median of 20, timed in the page, Chrome 156). A change a
+  script makes without an event (`el.checked = true` alone) is still seen
+  at the next check.
+
 ## [0.8.0] - 2026-11-03
 
 ### Behaviour changes
