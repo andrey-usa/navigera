@@ -101,9 +101,9 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_snapshot",
-            "The page as an indented accessibility tree; actionable elements carry [ref=N]. Waits briefly for data \
-             the page is still fetching. Scope it with ref or selector on big pages. Long texts are cut (a line at the \
-             top says how much); full_text prints every word.",
+            "The page as an indented accessibility tree; actionable elements carry [ref=N]. The main way to read a \
+             page: cheaper and more exact than a screenshot. Waits briefly for data the page is still fetching. On big pages scope it with ref or selector. Long texts are cut (a \
+             line at the top says how much); full_text prints every word.",
             object(
                 props(&[
                     target_props(),
@@ -131,7 +131,8 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_type",
-            "Type text key by key into the element (or the focused one); `submit` presses Enter after.",
+            "Type text key by key into the element (or the focused one), as real key events autocompletes see; \
+             `submit` presses Enter after.",
             object(
                 action(json!({
                     "value": {"type": "string", "description": "The text to type"},
@@ -143,7 +144,8 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_press_key",
-            "Press a key or chord: Enter, Tab, Escape, ArrowDown, Control+a.",
+            "Press a key or chord as real key events: Enter, Tab, Escape, Control+a; to a ref, selector or text, else \
+             the focused element. For text, browser_type.",
             object(action(json!({"key": {"type": "string", "description": "A key name or chord, e.g. Enter or Control+a"}})), &["key"]),
             false,
         ),
@@ -190,7 +192,8 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_wait_for",
-            "Wait until every given condition holds (default up to 5 s; timeout_ms for longer).",
+            "Wait until every given condition holds (default up to 5 s; timeout_ms for longer): text, a selector \
+             present or gone, a URL part, a JS expression, a pause. Navigating actions already wait.",
             object(
                 props(&[json!({
                     "text": {"type": "string", "description": "Visible text appears"},
@@ -281,7 +284,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_file_upload",
-            "Set the files of an <input type=file>.",
+            "Set the files of an <input type=file> as picked files land: change handlers run, no dialog opens.",
             object(
                 action(json!({"paths": {"type": "array", "items": {"type": "string"}, "description": "Files in the working directory"}})),
                 &["paths"],
@@ -290,7 +293,8 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_run",
-            "Run several steps in order and stop at the first failure; end with a snapshot. Each step is \
+            "Run several steps in order and stop at the first failure, naming the step that failed (the steps before \
+             it stay applied); end with a snapshot. Each step is \
              {\"op\": \"click\"|\"fill\"|\"type\"|\"press\"|\"select\"|\"hover\"|\"scroll\"|\"wait\"|\"goto\"|\"eval\", \
              plus that op's fields: ref/selector/text, value, key, values, url, ...}. Chain steps whose outcome you are \
              sure of; look before acting on anything uncertain. A page's own WebMCP tools: {\"op\": \"webmcp-list\"}, \
@@ -333,7 +337,8 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_resize",
-            "Set the viewport size of every tab.",
+            "Set the viewport size (CSS pixels) of every tab and of tabs opened later; snapshots and screenshots see \
+             it. For a tall page, browser_screenshot with full_page.",
             object(
                 props(&[json!({
                     "width": {"type": "integer", "description": "CSS pixels"},

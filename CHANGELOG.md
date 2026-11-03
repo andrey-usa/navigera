@@ -21,6 +21,11 @@ All notable changes to this project are documented here. The format follows
   text goes on its line (`- listitem: Blue Lamp`, one line where there
   were three), and a list item carries no `level` (its indentation is
   its level). Numbered markers (`1.`) stay.
+- MCP: seven tool descriptions say when to use the tool and what it
+  costs (`browser_snapshot`, `browser_type`, `browser_press_key`,
+  `browser_wait_for`, `browser_file_upload`, `browser_run`,
+  `browser_resize`), and `glama.json` names the maintainer for the Glama
+  listing.
 
 ### Fixed
 
