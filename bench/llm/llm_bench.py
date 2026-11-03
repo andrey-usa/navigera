@@ -42,6 +42,7 @@ import argparse
 import glob
 import json
 import os
+import queue
 import random
 import shlex
 import shutil
@@ -381,37 +382,67 @@ def tool_env():
     return env
 
 
+class ToolHang(RuntimeError):
+    """The tool stopped answering: the session ends, classed as such."""
+
+
 class McpServer:
+    """A persistent MCP server over stdio JSON-RPC. Replies are read on a
+    thread of their own, so a server that stops answering costs one call's
+    deadline, not the whole job."""
+
     def __init__(self, cmd, env_extra):
         env = tool_env()
         env.update(env_extra)
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True,
                                   bufsize=1, env=env)
+        self.lines = queue.Queue()
+        threading.Thread(target=self._pump, daemon=True).start()
         self.rid = 0
-        self.rpc("initialize", {"protocolVersion": "2024-11-05",
-                                "capabilities": {},
-                                "clientInfo": {"name": "llm-bench",
-                                               "version": "2"}})
-        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        tools = self.rpc("tools/list", {})
+        try:
+            self.rpc("initialize", {"protocolVersion": "2024-11-05",
+                                    "capabilities": {},
+                                    "clientInfo": {"name": "llm-bench",
+                                                   "version": "2"}})
+            self._send({"jsonrpc": "2.0",
+                        "method": "notifications/initialized"})
+            tools = self.rpc("tools/list", {})
+        except Exception:
+            self.p.kill()
+            raise
         self.tool_names = [t.get("name") for t in
                            tools.get("result", {}).get("tools", [])]
+
+    def _pump(self):
+        for line in self.p.stdout:
+            self.lines.put(line)
+        self.lines.put(None)
 
     def _send(self, obj):
         self.p.stdin.write(json.dumps(obj) + "\n")
         self.p.stdin.flush()
 
-    def rpc(self, method, params):
+    def rpc(self, method, params, timeout=CMD_TIMEOUT):
         self.rid += 1
         rid = self.rid
         self._send({"jsonrpc": "2.0", "id": rid, "method": method,
                     "params": params})
+        deadline = time.monotonic() + timeout
         while True:
-            line = self.p.stdout.readline()
-            if not line:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise ToolHang(f"{method}: no answer within {timeout} s")
+            try:
+                line = self.lines.get(timeout=left)
+            except queue.Empty:
+                continue
+            if line is None:
                 return {}
-            d = json.loads(line)
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
             if d.get("id") == rid:
                 return d
 
@@ -424,6 +455,7 @@ class McpServer:
             self.p.wait(timeout=10)
         except Exception:
             self.p.kill()
+            self.p.wait()
 
 
 def bins(tools_dir, nav_bin):
@@ -556,7 +588,11 @@ def setup_arm(arm, sess, b, cwd):
         mcp = McpServer(["node", os.path.join(
             tools_dir, "node_modules", "@playwright", "mcp", "cli.js"),
             "--headless", "--config", cfg_path], {})
-        mcp.call("browser_navigate", {"url": home})
+        try:
+            mcp.call("browser_navigate", {"url": home})
+        except Exception:
+            mcp.close()
+            raise
         return mcp
     if arm == "chrome-devtools-mcp":
         mcp = McpServer(["node", os.path.join(
@@ -566,8 +602,12 @@ def setup_arm(arm, sess, b, cwd):
             "--executablePath", chrome_path(),
             "--chrome-arg=--no-sandbox",
             "--chrome-arg=--disable-setuid-sandbox"], {})
-        mcp.call("list_pages", {})
-        mcp.call("navigate_page", {"url": home})
+        try:
+            mcp.call("list_pages", {})
+            mcp.call("navigate_page", {"url": home})
+        except Exception:
+            mcp.close()
+            raise
         return mcp
     raise ValueError(arm)
 
@@ -596,6 +636,8 @@ def exec_command(command, arm, sess, b, cwd, mcp):
             return f"error: bad json args: {e}"
         try:
             d = mcp.call(name, args)
+        except ToolHang:
+            raise
         except Exception as e:
             return f"error: mcp call failed: {e}"
         res = d.get("result") or d.get("error") or {}
@@ -685,6 +727,8 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
                                      "same way; try something else."})
     except BudgetStop as e:
         stop = f"budget ({e})"
+    except ToolHang as e:
+        stop = f"tool-hang ({e})"
     except Exception as e:
         stop = f"error ({e})"
     finally:
