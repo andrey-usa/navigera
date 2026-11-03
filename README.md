@@ -519,7 +519,8 @@ CI results, A/B benchmarks and releasing.
 - `bench/site/server.py`: Acme Supply, a deterministic local shop (SPA, iframes, shadow DOM, dialogs, popups, login, upload)
 - `bench/ladder/`: driver ladder and agent-tool benchmark (`publish.json` per run, `gen_readme.py`)
 - `bench/agent-eval/`: Gemini CLI agent eval across navigera, playwright-cli and agent-browser
+- `bench/llm/`: one model drives each tool (navigera, agent-browser, playwright-cli, Playwright MCP, Chrome DevTools MCP) on a site the driver serves, judged from its recorded state (`llm-bench.yml`)
 - `bench/decide/`: decision benchmark (`compare.py`), TypeSafe relay (`relay.py`) and a stand-in for runs without a key (`mock_jev.py`)
 - `tools/`: `cdp_check.py` (protocol correctness), `protocol_dump.sh`, `cft_matrix.py` (Chrome version matrix)
 - `skills/navigera/SKILL.md`: the agent guide (compiled into the binary: `navigera skill`)
-- `.github/workflows/`: `ci.yml` (tests, Chrome matrix, protocol check), `bench.yml`, `agent-eval.yml`, `release.yml`, `chrome-bisect.yml`, `vendor.yml`
+- `.github/workflows/`: `ci.yml` (tests, Chrome matrix, protocol check), `bench.yml`, `agent-eval.yml`, `llm-bench.yml`, `release.yml`, `chrome-bisect.yml`, `vendor.yml`
