@@ -17,6 +17,10 @@ All notable changes to this project are documented here. The format follows
   nothing visible changed; before, a click that loaded results printed
   `ok` while the page was still fetching them. Compact output only:
   `--output json` and `serve` are unchanged.
+- The tree is shorter on lists: a list item's bullet is left out and its
+  text goes on its line (`- listitem: Blue Lamp`, one line where there
+  were three), and a list item carries no `level` (its indentation is
+  its level). Numbered markers (`1.`) stay.
 
 ### Fixed
 
