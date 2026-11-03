@@ -426,6 +426,43 @@ same tab), so it is listed apart from the Chrome-family ranking.
 
 ## Agent eval: how a generic agent copes with each tool
 
+### One model, six tools
+
+DeepSeek-V4.1-Flash drives each tool through one shell function on a local
+shop the harness serves: a search, an order form, a price table and a
+catalog that loads in pages. Success is judged from what the site recorded
+(the search run, the order placed) and from the final answer, never from
+the agent's claim; the table and the catalog are drawn per session, so no
+file holds an answer. CLI tools run without a shell (the command must start
+with the tool, one per call), MCP servers get one `tools/call` per call,
+and every tool starts on the home page. Four tasks, 3 reps each, the tools
+at their latest npm releases; means over each tool's 12 sessions
+([`llm-bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/llm-bench.yml),
+run [41568895586](https://github.com/andrey-usa/navigera/actions/runs/41568895586)):
+
+| tool | success | turns per session | tokens per session | $ for the 12 sessions |
+|---|---|---|---|---|
+| `navigera`, `batch` allowed | 12/12 | **6.2** | **8,174** | **$0.0083** |
+| `navigera` | 12/12 | 7.8 | 12,180 | $0.0108 |
+| `agent-browser` 0.41.1 | 12/12 | 8.0 | 10,351 | $0.0087 |
+| `playwright-cli` 0.1.23 | 12/12 | 6.7 | 10,570 | $0.0101 |
+| Playwright MCP 0.0.84 | 12/12 | 9.0 | 16,429 | $0.0138 |
+| Chrome DevTools MCP 1.12.0 | 12/12 | 10.4 | 16,689 | $0.0139 |
+
+What navigera lost: without `batch`, agent-browser and playwright-cli used
+fewer tokens in this run. Most of the difference is the catalog, where one
+navigera session re-read a list it had just been shown in full (8.1K to
+48.0K tokens over its three reps); 3 reps leave that to chance, so read the
+table as a ranking of the model's habits with each tool as much as of the
+tools. The same harness against navigera 0.7.1, same day (run
+[41568863979](https://github.com/andrey-usa/navigera/actions/runs/41568863979)):
+16,661 tokens a session without `batch` and 12,755 with it. Since then an
+action says what it changed on the page, so the agent sees the result of a
+click without another look, and a list item is one line of the tree
+instead of three.
+
+### Gemini CLI and DeepSeek on the Acme Supply site
+
 Benchmarks time scripted steps. The agent eval asks the question that
 matters for agents: can a generic coding agent, given only the tool and its
 own documentation, finish real tasks? [`agent-eval.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/agent-eval.yml)
