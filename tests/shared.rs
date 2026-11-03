@@ -337,7 +337,12 @@ fn a_killed_shared_browser_is_relaunched_and_sessions_carry_on() {
         "document.body.insertAdjacentHTML('beforeend', '<form id=pf method=post action=/posted></form>'); \
          setTimeout(() => document.getElementById('pf').submit(), 0); 1",
     ]);
-    eventually("the POST loaded", Duration::from_secs(20), || a.text(&["eval", "location.pathname"]) == "/posted");
+    // Asked while the POST commits, Chrome may answer that the page navigated
+    // away under the eval: ask again, as for any page that is still loading.
+    eventually("the POST loaded", Duration::from_secs(20), || {
+        let (_, r) = a.run(&["eval", "location.pathname"]);
+        r["ok"] == true && r["result"] == "/posted"
+    });
     b.ok(&["tab-select", "0"]);
     // The storage snapshot is taken once a session has been idle for 1 s.
     std::thread::sleep(Duration::from_millis(1800));
@@ -394,7 +399,12 @@ fn a_tab_loaded_by_a_post_is_reopened_with_get_and_named() {
         "document.body.insertAdjacentHTML('beforeend', '<form id=pf method=post action=/posted></form>'); \
          setTimeout(() => document.getElementById('pf').submit(), 0); 1",
     ]);
-    eventually("the POST loaded", Duration::from_secs(20), || a.text(&["eval", "location.pathname"]) == "/posted");
+    // Asked while the POST commits, Chrome may answer that the page navigated
+    // away under the eval: ask again, as for any page that is still loading.
+    eventually("the POST loaded", Duration::from_secs(20), || {
+        let (_, r) = a.run(&["eval", "location.pathname"]);
+        r["ok"] == true && r["result"] == "/posted"
+    });
 
     let pids = browser.wait_browsers(1, Duration::from_secs(5));
     kill(pids[0]);
