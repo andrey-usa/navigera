@@ -3285,7 +3285,12 @@ impl Driver {
     /// could see changed. None when the action navigated or changed tabs
     /// (the state says so), or there is no earlier look at this document.
     fn page_change(&mut self, command: &Command, short: &Value) -> Option<Value> {
-        let value_entry = matches!(command, Command::Fill { .. } | Command::Type { .. } | Command::InsertText { .. });
+        let typed = match command {
+            Command::Fill { value, .. } | Command::Type { value, .. } | Command::InsertText { value, .. } => {
+                Some(value.as_str())
+            }
+            _ => None,
+        };
         if !reports_page_change(command)
             || short.get("url").is_some()
             || short.get("title").is_some()
@@ -3305,7 +3310,7 @@ impl Driver {
             Ok(Outcome { result: Value::String(tree), .. }) => tree,
             _ => return None,
         };
-        let change = tree_change(&look.tree, &tree, value_entry);
+        let change = tree_change(&look.tree, &tree, typed);
         self.look = Some(Look { tree, ..look });
         let change = change?;
         Some(Value::String(match short {
@@ -5471,24 +5476,40 @@ fn reports_page_change(command: &Command) -> bool {
 /// that is new, `-` one that is gone, `~` an element (same ref) that reads
 /// differently now, each without its indentation. A line is matched by its
 /// text without the ref, so a node a framework re-rendered as it was is
-/// not a change. After a fill (`value_entry`) an element whose own line
-/// changed is left out: that is the value just typed. None when nothing
-/// differs; past [`CHANGE_LINES`] the rest is counted, not shown.
-fn tree_change(before: &str, after: &str, value_entry: bool) -> Option<String> {
+/// not a change. After a fill (`typed`: the value it entered) the element
+/// that now shows that value and did not before is left out: that is the
+/// value just typed, while anything else the fill changed (a live count, a
+/// suggestion list) is shown. None when nothing differs; past
+/// [`CHANGE_LINES`] the rest is counted, not shown.
+fn tree_change(before: &str, after: &str, typed: Option<&str>) -> Option<String> {
     use std::collections::HashMap;
-    // `ref=N` as the tree prints it: in a bracket of its own (`[ref=3]`)
-    // or after other flags in one (`[checked, ref=3]`).
+    // `ref=N` as the tree prints it, in the element's own bracket tag
+    // (`[ref=3]`, `[checked, ref=3]`): not inside a quoted name and not in
+    // the text after `: `, where a page may write anything.
     fn node_ref(line: &str) -> Option<&str> {
-        let mut from = 0;
-        while let Some(i) = line[from..].find("ref=") {
-            let at = from + i;
-            if matches!(line[..at].chars().last(), Some('[' | ' ')) {
-                let digits = line[at + 4..].bytes().take_while(u8::is_ascii_digit).count();
-                if digits > 0 {
-                    return Some(&line[at..at + 4 + digits]);
+        let b = line.as_bytes();
+        let (mut i, mut quoted) = (0, false);
+        while i < b.len() {
+            match b[i] {
+                b'\\' if quoted => i += 1,
+                b'"' => quoted = !quoted,
+                b':' if !quoted && b.get(i + 1) == Some(&b' ') => return None,
+                b'[' if !quoted => {
+                    let end = i + line[i..].find(']')?;
+                    let mut at = i + 1;
+                    for item in line[i + 1..end].split(", ") {
+                        let digits =
+                            item.strip_prefix("ref=").map_or(0, |d| d.bytes().take_while(u8::is_ascii_digit).count());
+                        if digits > 0 && digits + 4 == item.len() {
+                            return Some(&line[at..at + item.len()]);
+                        }
+                        at += item.len() + 2;
+                    }
+                    i = end;
                 }
+                _ => {}
             }
-            from = at + 4;
+            i += 1;
         }
         None
     }
@@ -5522,7 +5543,7 @@ fn tree_change(before: &str, after: &str, value_entry: bool) -> Option<String> {
             }
         }
     }
-    let gone_refs: HashMap<&str, ()> = removed.iter().filter_map(|l| node_ref(l)).map(|r| (r, ())).collect();
+    let gone_refs: HashMap<&str, &str> = removed.iter().filter_map(|l| node_ref(l).map(|r| (r, *l))).collect();
     let new_refs: HashMap<&str, ()> = added.iter().filter_map(|l| node_ref(l)).map(|r| (r, ())).collect();
     // A bare container (`listitem:`) or a list marker says nothing a reader
     // needs: the lines under it carry the text and the refs.
@@ -5537,9 +5558,12 @@ fn tree_change(before: &str, after: &str, value_entry: bool) -> Option<String> {
     removed.retain(|l| says_something(l));
     let mut lines = Vec::new();
     for line in &added {
-        let changed = node_ref(line).is_some_and(|r| gone_refs.contains_key(r));
-        if changed && value_entry {
-            continue;
+        let was = node_ref(line).and_then(|r| gone_refs.get(r));
+        let changed = was.is_some();
+        if let (Some(was), Some(v)) = (was, typed.filter(|v| !v.is_empty())) {
+            if line.contains(v) && !was.contains(v) {
+                continue;
+            }
         }
         let mark = if changed { '~' } else { '+' };
         lines.push(format!("{mark} {}", line.strip_prefix("- ").unwrap_or(line)));
@@ -5922,14 +5946,14 @@ mod tests {
     fn an_action_says_which_lines_of_the_tree_it_changed() {
         let before = "page \"Shop\" http://x/\n- form:\n  - textbox \"Name\" [ref=2]\n  - checkbox \"I agree\" [ref=3]\n  - button \"Send\" [ref=4]";
         // Nothing a reader could see changed: no change, so the action says `ok`.
-        assert_eq!(super::tree_change(before, before, false), None);
+        assert_eq!(super::tree_change(before, before, None), None);
         // A node re-rendered as it was (new ref, same text) is not a change.
         let rerendered = before.replace("[ref=4]", "[ref=9]");
-        assert_eq!(super::tree_change(before, &rerendered, false), None);
+        assert_eq!(super::tree_change(before, &rerendered, None), None);
         // A flag inside a bracket with the ref: one changed element, `~`.
         let checked = before.replace("\"I agree\" [ref=3]", "\"I agree\" [checked, ref=3]");
         assert_eq!(
-            super::tree_change(before, &checked, false).as_deref(),
+            super::tree_change(before, &checked, None).as_deref(),
             Some("~ checkbox \"I agree\" [checked, ref=3]")
         );
         // New text and a removed button; bare containers and list markers are left out.
@@ -5938,16 +5962,30 @@ mod tests {
             before.replace("\n  - button \"Send\" [ref=4]", "")
         );
         assert_eq!(
-            super::tree_change(before, &after, false).as_deref(),
+            super::tree_change(before, &after, None).as_deref(),
             Some("+ status: Sent\n+ text: one\n- button \"Send\" [ref=4]")
         );
         // After a fill, the field's own line is the value just typed.
         let filled = before.replace("\"Name\" [ref=2]", "\"Name\" [ref=2]: Ada");
-        assert_eq!(super::tree_change(before, &filled, true), None);
-        assert_eq!(super::tree_change(before, &filled, false).as_deref(), Some("~ textbox \"Name\" [ref=2]: Ada"));
+        assert_eq!(super::tree_change(before, &filled, Some("Ada")), None);
+        assert_eq!(super::tree_change(before, &filled, None).as_deref(), Some("~ textbox \"Name\" [ref=2]: Ada"));
+        // ...but what else the fill changed is shown (a live count).
+        let live_before = "- textbox \"q\" [ref=2]\n- status [ref=5]: Results: 0";
+        let live_after = "- textbox \"q\" [ref=2]: shoes\n- status [ref=5]: Results: 12";
+        assert_eq!(
+            super::tree_change(live_before, live_after, Some("shoes")).as_deref(),
+            Some("~ status [ref=5]: Results: 12")
+        );
+        // A page's own text that reads like a ref is text, not a ref.
+        let quoted_before = "- text: \"x [ref=2] y\"\n- button \"B\" [ref=2]";
+        let quoted_after = "- text: \"x [ref=2] y2\"";
+        assert_eq!(
+            super::tree_change(quoted_before, quoted_after, None).as_deref(),
+            Some("+ text: \"x [ref=2] y2\"\n- text: \"x [ref=2] y\"\n- button \"B\" [ref=2]")
+        );
         // Past the cap the rest is counted.
         let many: String = (0..50).map(|i| format!("\n- text: row {i}")).collect();
-        let out = super::tree_change(before, &format!("{before}{many}"), false).unwrap();
+        let out = super::tree_change(before, &format!("{before}{many}"), None).unwrap();
         assert_eq!(out.lines().count(), super::CHANGE_LINES + 1);
         assert!(out.ends_with("... and 10 more changed lines (`ax` reads the page)"));
     }

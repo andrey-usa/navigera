@@ -16,7 +16,7 @@ All notable changes to this project are documented here. The format follows
   fetched has arrived (at most 40 lines, then a count). `ok` now means
   nothing visible changed; before, a click that loaded results printed
   `ok` while the page was still fetching them. Compact output only:
-  `--output json` and `serve` are unchanged.
+  `--output json`, `serve` and the MCP server are unchanged.
 - The tree is shorter on lists: a list item's bullet is left out and its
   text goes on its line (`- listitem: Blue Lamp`, one line where there
   were three), and a list item carries no `level` (its indentation is
