@@ -1256,6 +1256,13 @@ impl BrowserSession {
         &self.pages[self.active]
     }
 
+    /// Which document the active tab shows: its target and how many
+    /// navigations it has made. Two reads of one document have the same.
+    pub fn page_identity(&self) -> (String, u64) {
+        let tab = self.active_tab();
+        (tab.target_id().to_string(), tab.nav_generation())
+    }
+
     /// This session's downloads so far (`clear` empties its list afterwards).
     /// Save this session's downloads in `dir` from now on (created if
     /// missing), across `reset`; other sessions keep theirs. A test runner

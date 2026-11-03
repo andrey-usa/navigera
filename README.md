@@ -122,9 +122,10 @@ change things needs `--confirm`).
 - **Targets:** elements can be named by ref, `--selector <css>`,
   `--text "<visible text>"`, `--role/--name`, `--label`, `--placeholder` or
   `--testid`.
-- **Output:** compact by default, for agents: an action that left the page
-  as it was prints `ok`, one that moved it only what changed, a read only
-  its value; errors go to stderr. `--output json` (or
+- **Output:** compact by default, for agents: an action prints what it did
+  to the page (the new title and url, or, after an `ax`, the lines of that
+  tree that are new, gone or different, with their refs; `ok` when nothing
+  visible changed), a read only its value; errors go to stderr. `--output json` (or
   `NAVIGERA_OUTPUT=json`) prints one JSON line per command, for programs.
 - **Help:** `navigera help <command>`.
 - **Agent guide:** the version-matched guide is

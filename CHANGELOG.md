@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- An action says what it changed on the page, so an agent needs no look
+  after it. After an `ax`, a click, fill, press, select, check, drag or
+  upload that stays on the same document prints the lines of that tree
+  that are new (`+`), gone (`-`) or read differently (`~`), with refs,
+  read again the way that `ax` read it and after the data the action
+  fetched has arrived (at most 40 lines, then a count). `ok` now means
+  nothing visible changed; before, a click that loaded results printed
+  `ok` while the page was still fetching them. Compact output only:
+  `--output json` and `serve` are unchanged.
+
 ### Fixed
 
 - The static Linux binaries (what `install.sh`, npm, pip and Homebrew
