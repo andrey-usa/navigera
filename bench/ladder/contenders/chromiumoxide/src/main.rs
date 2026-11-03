@@ -343,8 +343,12 @@ async fn run_browse() -> anyhow::Result<serde_json::Value> {
         .await
         .map_err(|e| anyhow::anyhow!("click: {e}"))?;
     let mut new_url: Option<String> = None;
-    for _ in 0..24 {
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    // Look first, then every 250 ms: a click that already waited for its
+    // navigation is seen at once, as any driver's would be.
+    for i in 0..24 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
         if let Ok(url) = page.url().await {
             if let Some(u) = url {
                 if !u.contains("trending") {

@@ -549,7 +549,11 @@ def bench_realworld(name: str, argv: list[str], env: dict, out_dir: Path,
             continue
         if is_nv(name):
             with open(stats, encoding="utf-8") as f:
-                rw = json.load(f)["realworld"]
+                doc = json.load(f)
+            rw = doc["realworld"]
+            # navigera's own wall, as the session row takes it: the Python
+            # parent's start-up is not navigera's.
+            wall, cpu, rss = doc["wall_s"], doc["cpu_s"], doc["maxrss_kb"]
         else:
             rw = json.loads(out.decode().splitlines()[0])["realworld"]
         # Title is the primary correctness signal; h1 may be missing if the
@@ -593,7 +597,10 @@ def bench_browse(name: str, argv: list[str], env: dict, out_dir: Path,
             continue
         if is_nv(name):
             with open(stats, encoding="utf-8") as f:
-                facts = json.load(f)["realworld"]["facts"]
+                doc = json.load(f)
+            facts = doc["realworld"]["facts"]
+            # navigera's own wall, as the session row takes it.
+            wall, cpu, rss = doc["wall_s"], doc["cpu_s"], doc["maxrss_kb"]
         else:
             facts = json.loads(out.decode().splitlines()[0])["realworld"]["facts"]
         reason = browse_failure(facts)

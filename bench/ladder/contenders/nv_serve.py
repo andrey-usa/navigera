@@ -360,8 +360,11 @@ def run_browse(drv: Driver) -> dict:
     t0 = time.perf_counter()
     drv.cmd({"op": "click", "selector": "article.Box-row h2 a"})
     new_url = None
-    for _ in range(24):
-        time.sleep(0.25)
+    # Look first, then every 250 ms: navigera's click returns once the
+    # navigation it started has its new document, so it is seen at once.
+    for i in range(24):
+        if i:
+            time.sleep(0.25)
         url_info = drv.cmd({"op": "url"})["result"]
         # url op returns {"tab":..,"tabs":..,"url":..} or a plain string
         new_url = url_info.get("url") if isinstance(url_info, dict) else url_info
