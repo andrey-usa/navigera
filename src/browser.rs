@@ -2365,6 +2365,22 @@ impl BrowserSession {
         self.active_tab().action_traffic_seen()
     }
 
+    /// [`Self::action_traffic_seen`], given up to `grace` for the action's
+    /// first request to show: a click handler's fetch starts at once, but
+    /// the browser's word of it can trail the click's own reply.
+    pub fn action_traffic_within(&self, grace: Duration) -> bool {
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            if self.action_traffic_seen() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// A `wait` just succeeded on the active tab.
     pub fn mark_quiet_synced(&self) {
         self.active_tab().mark_quiet_synced();

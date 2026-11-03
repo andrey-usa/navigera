@@ -29,6 +29,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A snapshot after a "Load more" waits for the page it loads again. Three
+  requests to one path at a steady pace counted as polling and were not
+  waited for, and an agent clicking "Load more" every few seconds is that
+  pace: from the third page on, `ax` showed the "Loading…" button. A
+  request that starts within a second of an action is now the action's
+  own.
 - The static Linux binaries (what `install.sh`, npm, pip and Homebrew
   install) peaked at 19 MB in a scripted session, against 6 MB for the
   other builds, since 0.7.1: mimalloc committed its whole arena up front

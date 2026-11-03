@@ -2604,6 +2604,10 @@ struct Look {
 /// is better read again with `ax`.
 const CHANGE_LINES: usize = 40;
 
+/// How long an action's first request may take to show before the page is
+/// read again to say what the action changed.
+const ACTION_TRAFFIC_GRACE: Duration = Duration::from_millis(50);
+
 /// How often the storage snapshot is retaken (the tab list is kept on every op).
 const STORAGE_EVERY: Duration = Duration::from_millis(500);
 /// The storage snapshot waits for this long without a command: it evaluates
@@ -3293,6 +3297,10 @@ impl Driver {
         if look.page != self.session.page_identity() {
             return None;
         }
+        // Read after what the action started, not before it: once its
+        // requests show, the read waits for them as an `ax` after an action
+        // does (else it would catch the page's "Loading…" in between).
+        self.session.action_traffic_within(ACTION_TRAFFIC_GRACE);
         let tree = match self.run_op_inner(&look.command) {
             Ok(Outcome { result: Value::String(tree), .. }) => tree,
             _ => return None,
