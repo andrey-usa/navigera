@@ -6,7 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Changed
+## [0.8.0] - 2026-11-03
+
+### Behaviour changes
 
 - An action says what it changed on the page, so an agent needs no look
   after it. After an `ax`, a click, fill, press, select, check, drag or
@@ -21,6 +23,9 @@ All notable changes to this project are documented here. The format follows
   text goes on its line (`- listitem: Blue Lamp`, one line where there
   were three), and a list item carries no `level` (its indentation is
   its level). Numbered markers (`1.`) stay.
+
+### Changed
+
 - MCP: seven tool descriptions say when to use the tool and what it
   costs (`browser_snapshot`, `browser_type`, `browser_press_key`,
   `browser_wait_for`, `browser_file_upload`, `browser_run`,
@@ -29,6 +34,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- npm: `npm install -g navigera` and `npx navigera` failed on Linux and
+  macOS from 0.6.5 to 0.7.1 (EACCES): the platform packages shipped the
+  binary without its executable bit. The release now refuses a package
+  whose binary isn't executable, and the launcher repairs one that lost
+  the bit.
 - A snapshot after a "Load more" waits for the page it loads again. Three
   requests to one path at a steady pace counted as polling and were not
   waited for, and an agent clicking "Load more" every few seconds is that
