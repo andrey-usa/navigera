@@ -2065,10 +2065,15 @@ impl Page {
         // uncaught exceptions, failed loads, CSP reports), Network feeds
         // `network` and `network_quiet` (an engine without it just never
         // waits for data). `NAVIGERA_NO_NETWORK=1` (diagnostic) leaves
-        // Network off.
+        // Network off; `NAVIGERA_NETWORK_BUFFER=<bytes>` (diagnostic) caps
+        // the response bodies Chrome keeps for `network --body`.
         let network = async {
             if std::env::var_os("NAVIGERA_NO_NETWORK").is_none() {
-                let _ = send("Network.enable").await;
+                let params = match std::env::var("NAVIGERA_NETWORK_BUFFER").ok().and_then(|v| v.parse::<u64>().ok()) {
+                    Some(n) => json!({ "maxTotalBufferSize": n, "maxResourceBufferSize": n }),
+                    None => json!({}),
+                };
+                let _ = self.client.send("Network.enable", params, session, CMD_TIMEOUT).await;
             }
         };
         let (page, _, _, _) = tokio::join!(send("Page.enable"), send("Runtime.enable"), send("Log.enable"), network);
