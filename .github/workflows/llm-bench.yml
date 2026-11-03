@@ -31,7 +31,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: llm-bench-${{ github.ref }}
+  # An A/B against another build (nav_ref) runs beside the plain run.
+  group: llm-bench-${{ github.ref }}-${{ inputs.nav_ref }}-${{ inputs.arms }}
   cancel-in-progress: true
 
 jobs:
