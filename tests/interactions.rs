@@ -1840,10 +1840,13 @@ fn bench_site() -> Option<Site> {
 /// a silent property assignment still has the timer fallback.
 #[test]
 fn property_events_wake_the_wait_after_the_pages_handlers() {
-    if !chrome() { return; }
+    if !chrome() {
+        return;
+    }
     let s = Session::start("event-wake", &[]);
     s.ok(&["goto", "data:text/html,<input id=c type=checkbox><input id=v><div id=m></div>"]);
-    let js = format!(r#"(async () => {{
+    let js = format!(
+        r#"(async () => {{
         const deep = {}, c = document.getElementById('c'), v = document.getElementById('v');
         let added = 0, removed = 0;
         const add = document.addEventListener.bind(document), remove = document.removeEventListener.bind(document);
@@ -1867,7 +1870,9 @@ fn property_events_wake_the_wait_after_the_pages_handlers() {
             v.removeEventListener('input', handler);
         }}
         return {{ samples, added, removed, value: v.value }};
-    }})()"#, navigera::cdp::DEEP);
+    }})()"#,
+        navigera::cdp::DEEP
+    );
     let r = s.ok(&["eval", &js]);
     assert!(r["added"].as_u64().unwrap() >= 16, "listeners not installed: {r}");
     assert_eq!(r["added"], r["removed"], "listeners leaked: {r}");
@@ -1884,10 +1889,13 @@ fn property_events_wake_the_wait_after_the_pages_handlers() {
 /// the pause. Every watched root loses its capture listeners afterwards.
 #[test]
 fn event_wakes_cover_fill_shadow_roots_and_frame_documents() {
-    if !chrome() { return; }
+    if !chrome() {
+        return;
+    }
     let s = Session::start("event-wake-roots", &[]);
     s.ok(&["goto", "data:text/html,<input id=v><div id=host></div><iframe></iframe>"]);
-    let js = format!(r#"(() => {{
+    let js = format!(
+        r#"(() => {{
         const deep = {}, doc = document.querySelector('iframe').contentDocument;
         doc.body.innerHTML = '<input>';
         const shadow = document.getElementById('host').attachShadow({{mode:'open'}});
@@ -1909,7 +1917,9 @@ fn event_wakes_cover_fill_shadow_roots_and_frame_documents() {
             return counts;
         }})();
         return true;
-    }})()"#, navigera::cdp::DEEP);
+    }})()"#,
+        navigera::cdp::DEEP
+    );
     s.ok(&["eval", &js]);
     s.ok(&["fill", "--selector", "#v", "ready"]);
     let counts = s.ok(&["eval", "window.fillDone"]);
