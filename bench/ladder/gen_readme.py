@@ -145,11 +145,14 @@ if rw and br:
     lines += [
         "### Real-world (public internet, best of 3, same run)",
         "",
-        f"example.com goto → title/h1: {rw_ok} of {len(rw)} pass; "
+        f"example.com goto → title check: {rw_ok} of {len(rw)} pass; "
         + ", ".join(f"{r['name']} {r['realworld']['wall_s']:.2f}s" for r in sorted(rw, key=lambda r: r["realworld"]["wall_s"])) + ".",
         "",
         f"GitHub browse (awesome-list scroll + trending click-through): {br_ok} of {len(br)} pass; "
         + ", ".join(f"{r['name']} {r['browse']['wall_s']:.2f}s" for r in sorted(br, key=lambda r: r["browse"]["wall_s"])) + ".",
+        "navigera's click returns once the new page has settled; the other drivers'",
+        "clicks return at once and they then poll the URL, so the browse rows do not",
+        "time the same readiness. The example.com check is the title; h1 is read, not checked.",
         "Live pages change between runs, so these are informational, not part of the",
         "correctness gate. (The scroll check used to fail at random for every driver:",
         "GitHub sets CSS `scroll-behavior: smooth`, so `scrollY` was read mid-animation;",

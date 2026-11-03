@@ -348,9 +348,12 @@ or less; the Node drivers spend hundreds and carry 80–150 MB of their own RSS.
 
 ### Real-world (public internet, best of 3, same run)
 
-example.com goto → title/h1: 10 of 10 pass; nv-shell 0.18s, gorod 0.34s, chromey 0.35s, nv-serve 0.35s, chromiumoxide 0.35s, nv-brave 0.37s, nv-edge 0.39s, chromedp 0.52s, puppeteer 0.63s, playwright 0.70s.
+example.com goto → title check: 10 of 10 pass; nv-shell 0.18s, gorod 0.34s, chromey 0.35s, nv-serve 0.35s, chromiumoxide 0.35s, nv-brave 0.37s, nv-edge 0.39s, chromedp 0.52s, puppeteer 0.63s, playwright 0.70s.
 
 GitHub browse (awesome-list scroll + trending click-through): 10 of 10 pass; nv-shell 3.18s, gorod 3.29s, nv-serve 3.37s, chromey 3.40s, nv-brave 3.41s, chromiumoxide 3.43s, puppeteer 3.62s, nv-edge 3.70s, playwright 3.81s, chromedp 3.95s.
+navigera's click returns once the new page has settled; the other drivers'
+clicks return at once and they then poll the URL, so the browse rows do not
+time the same readiness. The example.com check is the title; h1 is read, not checked.
 Live pages change between runs, so these are informational, not part of the
 correctness gate. (The scroll check used to fail at random for every driver:
 GitHub sets CSS `scroll-behavior: smooth`, so `scrollY` was read mid-animation;
