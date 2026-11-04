@@ -629,6 +629,15 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             r = r2;
             if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= Math.min(deadline, steadyBy)) break;
         }
+        // The element can appear during those frames and start to slide in:
+        // a slide's first frame hasn't moved yet, and the end of an ease-out
+        // slide moves less than a pixel a frame, so the box read as still.
+        // Settle that slide (and the page's end handler) first, from the
+        // same alignment.
+        if (moving().length && Date.now() < deadline) {
+            tries--;
+            continue;
+        }
         let x = r.left + r.width / 2, y = r.top + r.height / 2;
         const root = box.getRootNode(), doc = box.ownerDocument;
         const at = (x, y) => root.elementFromPoint ? root.elementFromPoint(x, y) : doc.elementFromPoint(x, y);

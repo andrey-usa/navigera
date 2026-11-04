@@ -120,6 +120,15 @@ All notable changes to this project are documented here. The format follows
   under 1 ms (median of 20, timed in the page, Chrome 156). A change a
   script makes without an event (`el.checked = true` alone) is still seen
   at the next check.
+- A click waits for a slide that starts while it checks that the element
+  holds still. A dialog that appeared during those frames and slid in
+  still read as still: a slide's first frame hasn't moved yet, and near
+  the end of an ease-out slide the box moves less than a pixel a frame.
+  The press then went out before the page's `transitionend` handler had
+  wired the button. Now the click looks again for a running animation on
+  the element's chain, waits for it and its end event, and reads again.
+  The sliding-modal test with six browsers at once (4 cores): pressed
+  before wired in 30 of 660 runs before, 0 of 660 now.
 
 ## [0.8.0] - 2026-11-03
 
