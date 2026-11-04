@@ -16,10 +16,14 @@ All notable changes to this project are documented here. The format follows
   lists fail at startup, and a refused navigation's error names the
   denied host and the flag (`status` lists refused hosts).
   `--allow-domains-docs-only` checks top-level navigation only: a
-  navigation restriction, not exfiltration protection. Measured limits:
-  a hostname policy, not an origin policy; service-worker fetches and
-  WebSocket handshakes are not intercepted by Fetch in Chrome, so neither
-  mode stops exfiltration over those channels. `reset` keeps the policy,
+  navigation restriction, not exfiltration protection. Requests are also
+  paused at the browser, so a popup (`window.open`, `target=_blank`) is
+  refused before its first request, not only once navigera attaches to
+  it, and in a browser of the session's own a service worker's fetches
+  are checked too (strict mode). Measured limits: a hostname policy, not
+  an origin policy; WebSocket handshakes are not intercepted by Fetch in
+  Chrome, so neither mode stops exfiltration over them, nor over a
+  service worker of a shared browser. `reset` keeps the policy,
   `reset --all` drops it.
 
 ### Changed

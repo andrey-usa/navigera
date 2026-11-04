@@ -210,6 +210,15 @@ pub struct Shared {
     /// Page targets opened by a page (they carry an `openerId`), in order:
     /// (target, opener).
     pub opened: Mutex<Vec<(String, String)>>,
+    /// Every page target's opener, kept until the target goes (`opened`
+    /// is drained when popups are adopted): whose a popup's requests are
+    /// before it is a tab (see [`browser_verdict`]).
+    pub openers: Mutex<HashMap<String, String>>,
+    /// The allowlist's browser-wide interception is on (see
+    /// [`Shared::set_intercept_all`]): requests paused with no session are
+    /// its, answered by [`browser_verdict`]. `INTERCEPT_SHARED` when other
+    /// processes' sessions share the browser.
+    pub intercept_all: std::sync::atomic::AtomicU8,
     /// An Electron app (`start --electron`): every page target it opens is
     /// one of its windows, adopted as a tab (an app's new window has no
     /// opener); its DevTools windows are not.
@@ -428,6 +437,107 @@ fn policy_verdict(shared: &Shared, session: &str, url: &str, frame_id: &str, res
     }
 }
 
+/// [`Shared::intercept_all`]: off, on in a browser of this process's own,
+/// on in a shared browser.
+pub const INTERCEPT_OFF: u8 = 0;
+pub const INTERCEPT_OWN: u8 = 1;
+pub const INTERCEPT_SHARED: u8 = 2;
+
+/// The scope of the tab a frame belongs to: a tab's main frame (its id is
+/// the target's), one of its subframes, or a popup a tab opened, through
+/// openers (a popup's first requests go out before it is adopted as a
+/// tab, and a popup's own popup later still). None when no tab of this
+/// process is shown to have made the frame.
+/// The bool: the frame is a main frame (a tab's or a popup's).
+fn frame_owner(shared: &Shared, frame_id: &str) -> Option<(Scope, bool)> {
+    if frame_id.is_empty() {
+        return None;
+    }
+    let tab_scope = |frame: &str| {
+        let session = shared.sessions.lock().unwrap().iter().find(|(_, t)| *t == frame).map(|(s, _)| s.clone())?;
+        shared.scopes.lock().unwrap().get(&session).cloned()
+    };
+    if let Some(scope) = tab_scope(frame_id) {
+        return Some((scope, true));
+    }
+    if let Some(scope) = shared.frame_scopes.lock().unwrap().get(frame_id).cloned() {
+        return Some((scope, false));
+    }
+    // A popup's main frame: its opener's scope, wherever the chain of
+    // openers reaches a tab.
+    let mut frame = frame_id.to_string();
+    for _ in 0..16 {
+        frame = shared.openers.lock().unwrap().get(&frame).cloned()?;
+        if let Some(scope) = tab_scope(&frame) {
+            return Some((scope, true));
+        }
+    }
+    None
+}
+
+/// The verdict on a request the browser-wide interception paused (no
+/// session: popups before they are tabs, workers, any target navigera has
+/// not attached to): the refused host and the scopes it counts for, or
+/// None to let it go on. The tab's own interception checks again; the same
+/// policy gives the same answer, so a refusal is counted once.
+///
+/// A request no tab is shown to have made is refused, in a browser of this
+/// process's own, when every session here has an allowlist and none allows
+/// it; in a shared browser it may be another process's, and goes on.
+fn browser_verdict(shared: &Shared, url: &str, frame_id: &str, resource_type: &str) -> Option<(String, Vec<Scope>)> {
+    use crate::domains::refusal_host;
+    let document = resource_type == "Document";
+    let host_of = || {
+        let host = refusal_host(url);
+        if host.is_empty() {
+            "unknown host".to_string()
+        } else {
+            host
+        }
+    };
+    if let Some((scope, top)) = frame_owner(shared, frame_id) {
+        let policy = shared.allow.lock().unwrap().get(&scope).cloned()?;
+        if policy.docs_only && !(document && top) {
+            return None;
+        }
+        return (!policy.allows_url(url)).then(|| (host_of(), vec![scope]));
+    }
+    if shared.intercept_all.load(Ordering::Relaxed) != INTERCEPT_OWN {
+        return None;
+    }
+    let allow = shared.allow.lock().unwrap();
+    if allow.is_empty() {
+        return None;
+    }
+    let scopes: std::collections::HashSet<Scope> = shared.scopes.lock().unwrap().values().cloned().collect();
+    if scopes.iter().any(|s| !allow.contains_key(s)) {
+        return None;
+    }
+    // A document with no tab to show it is a subframe: checked, like a
+    // top-level one (docs-only fails closed on what it cannot place).
+    let checked: Vec<_> = allow.iter().filter(|(_, p)| !p.docs_only || document).collect();
+    if checked.is_empty() || checked.iter().any(|(_, p)| p.allows_url(url)) {
+        return None;
+    }
+    if refusal_host(url).is_empty() {
+        return None; // no host to check (about/blob/data): not a leak
+    }
+    Some((host_of(), checked.into_iter().map(|(s, _)| s.clone()).collect()))
+}
+
+/// Count a refusal of `host` for `scope` (before the answer is sent, so a
+/// denial counts even if delivering it fails).
+fn record_denial(shared: &Shared, scope: Scope, host: &str) {
+    let mut denied = shared.denied.lock().unwrap();
+    match denied.iter_mut().find(|(s, h, _, _)| *s == scope && *h == host) {
+        Some((_, _, n, at)) => {
+            *n += 1;
+            *at = std::time::Instant::now();
+        }
+        None => denied.push((scope, host.to_string(), 1, std::time::Instant::now())),
+    }
+}
+
 /// The answer to a paused request. `at_response`: paused at the response
 /// stage (only `Modify` rules ask for that).
 // The paused request's fields, not a bundle worth naming: the callers are
@@ -451,14 +561,7 @@ fn route_answer(
         // delivering it fails (and the request then stays paused, never
         // continued).
         let scope = shared.scopes.lock().unwrap().get(session).cloned().unwrap_or_default();
-        let mut denied = shared.denied.lock().unwrap();
-        match denied.iter_mut().find(|(s, h, _, _)| *s == scope && *h == host) {
-            Some((_, _, n, at)) => {
-                *n += 1;
-                *at = std::time::Instant::now();
-            }
-            None => denied.push((scope, host.clone(), 1, std::time::Instant::now())),
-        }
+        record_denial(shared, scope, &host);
         return Answer::Deny { request_id: request_id.to_string(), host };
     }
     let scope = shared.scope_of(session);
@@ -1187,6 +1290,18 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
             let answer = if params.get("responseErrorReason").is_some() {
                 // Nothing came back to change: the failure goes on as it is.
                 Answer::Send("Fetch.continueRequest", json!({ "requestId": id }))
+            } else if session.is_empty() && shared.intercept_all.load(Ordering::Relaxed) != INTERCEPT_OFF {
+                // The allowlist's browser-wide pause: the policy only, never
+                // a route rule (those are the tabs' own).
+                match browser_verdict(shared, url, &frame_id, &resource_type) {
+                    Some((host, scopes)) => {
+                        for scope in scopes {
+                            record_denial(shared, scope, &host);
+                        }
+                        Answer::Deny { request_id: id.clone(), host }
+                    }
+                    None => Answer::Send("Fetch.continueRequest", json!({ "requestId": id })),
+                }
             } else {
                 route_answer(shared, session, &id, http_method, url, at_response, &frame_id, &resource_type)
             };
@@ -1261,6 +1376,11 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
             let kind = info.get("type").and_then(Value::as_str);
             let is_page = kind == Some("page");
             let opener = info.get("openerId").and_then(Value::as_str).unwrap_or("");
+            if is_page && !opener.is_empty() {
+                if let Some(id) = info.get("targetId").and_then(Value::as_str) {
+                    shared.openers.lock().unwrap().insert(id.to_string(), opener.to_string());
+                }
+            }
             let url = info.get("url").and_then(Value::as_str).unwrap_or("");
             let app = shared.adopt_windows.load(std::sync::atomic::Ordering::Relaxed);
             let window = app && !url.starts_with("devtools://");
@@ -1289,6 +1409,7 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
         }
         "Target.targetDestroyed" => {
             if let Some(id) = params.get("targetId").and_then(Value::as_str) {
+                shared.openers.lock().unwrap().remove(id);
                 shared.destroyed.lock().unwrap().push(id.to_string());
             }
         }
@@ -1566,6 +1687,58 @@ mod tests {
             method_of(route_answer(&shared, "s", "3", "GET", "https://example.com/", false, "t-main", "Document")),
             "Fetch.continueRequest"
         );
+    }
+
+    #[test]
+    fn browser_pause_judges_popups_by_their_opener() {
+        let shared = Shared::default();
+        shared.intercept_all.store(INTERCEPT_OWN, Ordering::Relaxed);
+        shared.register("s", "tab", "a");
+        allowlist(&shared, "a", "example.com", false);
+        // window.open from the tab, then a popup of that popup: neither is a
+        // tab yet, both are the tab's scope, and their documents top-level.
+        shared.openers.lock().unwrap().insert("pop".into(), "tab".into());
+        shared.openers.lock().unwrap().insert("pop2".into(), "pop".into());
+        assert_eq!(frame_owner(&shared, "pop"), Some(("a".into(), true)));
+        assert_eq!(frame_owner(&shared, "pop2"), Some(("a".into(), true)));
+        let v = browser_verdict(&shared, "https://evil.org/x", "pop", "Document");
+        assert_eq!(v, Some(("evil.org".to_string(), vec!["a".to_string()])));
+        assert_eq!(browser_verdict(&shared, "https://example.com/", "pop2", "Document"), None);
+        // A subframe of a tab is the tab's, not top-level.
+        shared.frame_scopes.lock().unwrap().insert("sub".into(), "a".into());
+        assert_eq!(frame_owner(&shared, "sub"), Some(("a".into(), false)));
+        // Docs-only: the popup's document is checked, its subresources not.
+        allowlist(&shared, "a", "example.com", true);
+        assert!(browser_verdict(&shared, "https://evil.org/", "pop", "Document").is_some());
+        assert_eq!(browser_verdict(&shared, "https://evil.org/i.png", "pop", "Image"), None);
+        assert_eq!(browser_verdict(&shared, "https://evil.org/", "sub", "Document"), None);
+    }
+
+    #[test]
+    fn browser_pause_fails_closed_only_on_what_this_process_owns() {
+        let shared = Shared::default();
+        shared.register("s", "tab", "a");
+        allowlist(&shared, "a", "example.com", false);
+        // A request no tab made (a worker's, frame unknown): refused in a
+        // browser of this process's own, when no policy here allows it.
+        shared.intercept_all.store(INTERCEPT_OWN, Ordering::Relaxed);
+        assert_eq!(
+            browser_verdict(&shared, "https://evil.org/x", "", "Fetch"),
+            Some(("evil.org".to_string(), vec!["a".to_string()]))
+        );
+        assert_eq!(browser_verdict(&shared, "https://example.com/x", "", "Fetch"), None);
+        assert_eq!(browser_verdict(&shared, "data:text/plain,x", "", "Fetch"), None);
+        // A session here without an allowlist may own it: it goes on.
+        shared.register("s2", "tab2", "b");
+        assert_eq!(browser_verdict(&shared, "https://evil.org/x", "", "Fetch"), None);
+        // In a shared browser it may be another process's: it goes on.
+        let shared = Shared::default();
+        shared.register("s", "tab", "a");
+        allowlist(&shared, "a", "example.com", false);
+        shared.intercept_all.store(INTERCEPT_SHARED, Ordering::Relaxed);
+        assert_eq!(browser_verdict(&shared, "https://evil.org/x", "", "Fetch"), None);
+        // A tab of this process is judged by its own policy either way.
+        assert!(browser_verdict(&shared, "https://evil.org/x", "tab", "Document").is_some());
     }
 
     #[test]

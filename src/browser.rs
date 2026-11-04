@@ -2135,12 +2135,23 @@ impl BrowserSession {
     /// removed again and the Fetch override recomputed without it.
     pub fn set_allow_domains(&mut self, policy: crate::domains::DomainPolicy) -> Result<()> {
         self.browser.shared().set_allow_policy(&self.scope(), Some(policy));
-        if let Err(e) = self.sync_fetch() {
+        if let Err(e) = self.sync_fetch().and_then(|()| self.intercept_popups()) {
             self.browser.shared().set_allow_policy(&self.scope(), None);
             let _ = self.sync_fetch();
             return Err(e);
         }
         Ok(())
+    }
+
+    /// The allowlist's pause at the browser, for the requests no tab's own
+    /// interception sees: a popup's first ones (window.open, target=_blank),
+    /// before navigera has attached to it. Lightpanda opens popups as frames
+    /// of the tab, which its interception already covers.
+    fn intercept_popups(&self) -> Result<()> {
+        if self.browser.shared().is_single_target() {
+            return Ok(());
+        }
+        self.browser.intercept_all(self.is_shared())
     }
 
     /// The session's allowlist for `status`: its entries, whether only
@@ -3201,6 +3212,11 @@ impl BrowserSession {
         // The recovered tabs keep the Fetch override: they keep the policy
         // with it, or the override would run with no policy at all.
         self.browser.shared().copy_allow_policy(&old.scope(), &self.scope());
+        if self.browser.shared().allow_policy(&self.scope()).is_some() {
+            if let Err(e) = self.intercept_popups() {
+                eprintln!("[browser] the allowlist's pause for popups, after the relaunch: {e:#}");
+            }
+        }
         self.overrides = old.overrides.clone();
         self.init_scripts = old.init_scripts.clone();
         if let Some(dir) = old.downloads_dir.clone() {

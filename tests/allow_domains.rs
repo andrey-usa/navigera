@@ -161,3 +161,49 @@ fn strict_refuses_other_hosts_and_docs_only_does_not() {
     assert!(!r["ok"].as_bool().unwrap(), "env allowlist let a denied host through: {r}");
     s.quit();
 }
+
+/// A popup's first request goes out before navigera has attached to the
+/// popup, so the tab's own interception can't refuse it: the browser-wide
+/// pause has to. Both ways a page opens one, in both modes (a popup's
+/// document is a top-level navigation): nothing reaches the other host,
+/// and `status` names it.
+#[test]
+fn popups_to_other_hosts_are_refused_before_their_first_request() {
+    if !chrome_available() {
+        return;
+    }
+    let site = site();
+    let allowed = format!("http://127.0.0.1:{}/", site.port);
+    let hits = format!("http://127.0.0.1:{}/hits", site.port);
+    for docs_only in [false, true] {
+        let mut args = vec!["serve", "--allow-domains", "127.0.0.1"];
+        if docs_only {
+            args.push("--allow-domains-docs-only");
+        }
+        let mut s = Serve::spawn(&args, None);
+        let r = s.call(1, "goto", json!({ "url": allowed }));
+        assert!(r["ok"].as_bool().unwrap(), "allowed goto failed: {r}");
+        let sink = format!("http://localhost:{}/sink", site.port);
+        let opens = [
+            format!("window.open({:?}); true", format!("{sink}?open")),
+            format!(
+                "(() => {{ const a = document.createElement('a'); a.href = {:?}; a.target = '_blank'; \
+                 document.body.append(a); a.click(); return true; }})()",
+                format!("{sink}?blank")
+            ),
+        ];
+        for (i, open) in opens.iter().enumerate() {
+            let r = s.call(10 + i as u64, "eval", json!({ "expression": open }));
+            assert!(r["ok"].as_bool().unwrap(), "eval failed: {r}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // The popups are tabs now; the count is read from the first one.
+        let r = s.call(19, "tab-select", json!({ "index": 0 }));
+        assert!(r["ok"].as_bool().unwrap(), "tab-select failed: {r}");
+        assert_eq!(eval_fetch(&mut s, 20, &hits), "ok:0", "a popup reached the other host (docs-only: {docs_only})");
+        let r = s.call(21, "status", json!({}));
+        let denied = r["result"]["allow_domains"]["denied"].to_string();
+        assert!(denied.contains("localhost"), "status must name the refused host: {r}");
+        s.quit();
+    }
+}

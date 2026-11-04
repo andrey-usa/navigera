@@ -461,6 +461,24 @@ impl Browser {
         self.block_on(self.client.send("Browser.setPermission", params, None, CMD_TIMEOUT)).map(|_| ())
     }
 
+    /// Pause every request of every target at the browser, for the domain
+    /// allowlist: a tab's own interception starts only once navigera has
+    /// attached to it, and a popup's first request goes out before that.
+    /// `shared`: other processes' sessions use this browser too, so a
+    /// request no tab of this process made is theirs to judge. The flag is
+    /// set first: a request paused before the reply is answered by it.
+    pub fn intercept_all(&self, shared: bool) -> Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mode = if shared { events::INTERCEPT_SHARED } else { events::INTERCEPT_OWN };
+        self.shared.intercept_all.store(mode, Relaxed);
+        let params = json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }] });
+        if let Err(e) = self.block_on(self.client.send("Fetch.enable", params, None, CMD_TIMEOUT)) {
+            self.shared.intercept_all.store(events::INTERCEPT_OFF, Relaxed);
+            return Err(e.context("Fetch.enable on the browser"));
+        }
+        Ok(())
+    }
+
     /// The watcher's shared state (dialog log, popups, navigation).
     pub fn shared(&self) -> &Arc<Shared> {
         &self.shared
