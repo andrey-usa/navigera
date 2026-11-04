@@ -1489,6 +1489,15 @@ fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
         let out = compact(&["fill", "--selector", "#q", word]);
         assert!(out.contains(&format!("suggested {word}")), "{out}");
     }
+    // A placeholder the click put up for work it starts 30 ms later is not
+    // the report: the page's next change is waited for.
+    for _ in 0..3 {
+        s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+        compact(&["ax"]);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let out = compact(&["click", "--text", "Save later"]);
+        assert!(out.contains("saved") && !out.contains("Saving"), "{out}");
+    }
     // An action that starts nothing isn't held for a request that never
     // comes: saying what it changed costs a read of the page, not a fixed
     // wait (it was 50 ms).

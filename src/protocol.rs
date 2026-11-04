@@ -2645,6 +2645,38 @@ const CHANGE_LINES: usize = 40;
 /// the event-loop turn that normally stands in for it.
 const ACTION_TRAFFIC_GRACE: Duration = Duration::from_millis(50);
 
+/// How long a change report that shows the page between states (see
+/// [`shows_transition`]) waits for the page to get past it.
+const TRANSITION_WAIT: Duration = Duration::from_millis(1500);
+
+/// A line the action added or changed shows the page between states: a
+/// placeholder's words ("Loading…", "Saving") or a progress bar.
+fn shows_transition(change: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "loading",
+        "please wait",
+        "saving",
+        "submitting",
+        "processing",
+        "searching",
+        "updating",
+        "sending",
+        "signing in",
+        "logging in",
+    ];
+    let word_at = |l: &str, w: &str| {
+        l.match_indices(w).any(|(i, _)| {
+            let before = l[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+            let after = l[i + w.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+            before && after
+        })
+    };
+    change.lines().filter_map(|l| l.strip_prefix("+ ").or_else(|| l.strip_prefix("~ "))).any(|l| {
+        let l = l.trim_start().to_lowercase();
+        l.starts_with("progressbar") || WORDS.iter().any(|w| word_at(&l, w))
+    })
+}
+
 /// How often the storage snapshot is retaken (the tab list is kept on every op).
 const STORAGE_EVERY: Duration = Duration::from_millis(500);
 /// The storage snapshot waits for this long without a command: it evaluates
@@ -3362,11 +3394,39 @@ impl Driver {
         // requests show, the read waits for them as an `ax` after an action
         // does (else it would catch the page's "Loading…" in between).
         self.session.action_traffic_settled(ACTION_TRAFFIC_GRACE);
-        let tree = match self.run_op_inner(&look.command) {
-            Ok(Outcome { result: Value::String(tree), .. }) => tree,
-            _ => return None,
+        let read = |me: &mut Self| match me.run_op_inner(&look.command) {
+            Ok(Outcome { result: Value::String(tree), .. }) => Some(tree),
+            _ => None,
         };
-        let change = tree_change(&look.tree, &tree, typed);
+        let mut tree = read(self)?;
+        let mut change = tree_change(&look.tree, &tree, typed);
+        // The page is between states: the action put up a placeholder
+        // ("Loading…", a progress bar) for work it starts a moment later (a
+        // timer, a frame, an effect after paint). Reporting it would cost the
+        // agent a turn to look again, so wait for the page's next change and
+        // read again, until the report shows no placeholder or the wait is
+        // up. A report without one costs nothing more.
+        if change.as_deref().is_some_and(shows_transition) {
+            let deadline = std::time::Instant::now() + TRANSITION_WAIT;
+            if let Some(mut seen) = self.session.count_changes() {
+                loop {
+                    // Read once more after counting starts: a change that came
+                    // just before it would otherwise go unseen until the deadline.
+                    tree = read(self)?;
+                    change = tree_change(&look.tree, &tree, typed);
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if !change.as_deref().is_some_and(shows_transition) || left.is_zero() {
+                        break;
+                    }
+                    if !self.session.next_change(seen, left) {
+                        break;
+                    }
+                    seen = self.session.count_changes().unwrap_or(seen);
+                    self.session.action_traffic_settled(ACTION_TRAFFIC_GRACE);
+                }
+                self.session.stop_counting_changes();
+            }
+        }
         self.look = Some(Look { tree, ..look });
         let change = change?;
         Some(Value::String(match short {
@@ -5874,6 +5934,19 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_placeholder_line_shows_the_page_between_states() {
+        assert!(super::shows_transition("+ text: Loading t3\n- text: idle"));
+        assert!(super::shows_transition("~ button \"Saving...\" [ref=4]"));
+        assert!(super::shows_transition("+ progressbar \"Upload\" [ref=9]"));
+        assert!(super::shows_transition("+ status: Please wait"));
+        // Final states, gone lines and words inside other words are not.
+        assert!(!super::shows_transition("+ text: Loaded t3\n- text: Loading t3"));
+        assert!(!super::shows_transition("+ text: Uploading guide\n+ link \"Downloads\" [ref=2]"));
+        assert!(!super::shows_transition("+ heading \"Saved searches\" [level=2]"));
+        assert!(!super::shows_transition("+ text: Long text … (+120 chars)"));
+    }
+
+    #[test]
     fn an_error_reads_without_the_os_error_number() {
         use super::plain_error;
         assert_eq!(
@@ -6677,6 +6750,7 @@ mod tests {
 
 #[cfg(test)]
 mod fork_send {
+
     /// A forked driver is moved into a worker thread.
     #[test]
     fn a_driver_can_move_to_another_thread() {

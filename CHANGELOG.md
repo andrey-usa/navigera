@@ -33,6 +33,12 @@ All notable changes to this project are documented here. The format follows
   validation. A click's mouse move, press and release go out together, with
   one wait for the three. What an action reports and where it leaves the
   page are unchanged.
+- A report of what an action changed doesn't stop at a placeholder the
+  action put up ("Loading…", "Saving", a progress bar) for work the page
+  starts a moment later (a timer, a frame, an effect after paint): it
+  waits for the page's next change and reads again, up to 1.5 s. Before,
+  such a report could show the placeholder, and the agent spent a turn
+  looking again.
 
 ### Fixed
 

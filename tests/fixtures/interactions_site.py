@@ -243,12 +243,18 @@ PAGES["/nav-intent"] = ("nav intent", "", """
 <form id=f4 action=/posted><input name=w value=4><button>Script submit</button></form>
 <a id=routed href=/posted>Routed link</a> <a id=real href=/posted>Real link</a>
 <input id=q aria-label=Query>
+<button id=save>Save later</button>
 <script>
 const out = document.getElementById('out');
 document.getElementById('plain').onclick = () => { out.textContent = 'plain ' + Date.now(); };
 f1.onsubmit = (e) => { e.preventDefault(); out.textContent = 'handled ' + Date.now(); };
 f4.onsubmit = (e) => { e.preventDefault(); f4.submit(); };
 routed.onclick = (e) => { e.preventDefault(); history.pushState({}, '', '/routed'); out.textContent = 'routed'; };
+// A placeholder at once, the request 30 ms later.
+document.getElementById('save').onclick = () => {
+  out.textContent = 'Saving...';
+  setTimeout(() => fetch('/slow-echo?ms=150').then(() => { out.textContent = 'saved'; }), 30);
+};
 // Typing asks for suggestions a timer turn later, after 20 ms of work,
 // with nothing shown first.
 q.oninput = () => setTimeout(() => {

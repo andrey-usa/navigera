@@ -2167,6 +2167,44 @@ impl Page {
         .unwrap_or(false)
     }
 
+    /// Start counting the top document's DOM changes (one observer, kept
+    /// until [`Page::stop_counting_changes`]); returns the count so far.
+    pub fn count_changes(&self, timeout: Duration) -> Option<u64> {
+        let js = "(() => { let c = window.__nvMut; if (!c) { c = { n: 0, w: null }; \
+                  c.o = new MutationObserver((r) => { c.n += r.length; const w = c.w; if (w) { c.w = null; w(); } }); \
+                  c.o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true }); \
+                  Object.defineProperty(window, '__nvMut', { value: c, configurable: true, enumerable: false }); } \
+                  return c.n; })()";
+        self.send("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }), timeout)
+            .ok()
+            .and_then(|r| r.pointer("/result/value").and_then(Value::as_u64))
+    }
+
+    /// Wait, at most `max`, for the DOM to change past `seen` (a count from
+    /// [`Page::count_changes`]). False when nothing changed in time.
+    pub fn next_change(&self, seen: u64, max: Duration) -> bool {
+        let js = format!(
+            "new Promise((r) => {{ const c = window.__nvMut; if (!c || c.n > {seen}) return r(true); \
+             const t = setTimeout(() => {{ c.w = null; r(false); }}, {}); c.w = () => {{ clearTimeout(t); r(true); }}; }})",
+            max.as_millis()
+        );
+        self.send(
+            "Runtime.evaluate",
+            json!({ "expression": js, "awaitPromise": true, "returnByValue": true }),
+            max + Duration::from_secs(1),
+        )
+        .ok()
+        .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
+        .unwrap_or(false)
+    }
+
+    /// Stop counting DOM changes (see [`Page::count_changes`]).
+    pub fn stop_counting_changes(&self, timeout: Duration) {
+        let js =
+            "(() => { const c = window.__nvMut; if (c) { c.o.disconnect(); delete window.__nvMut; } return 0; })()";
+        let _ = self.send("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }), timeout);
+    }
+
     /// Wait until no fetch/XHR is in flight and none started or ended for
     /// `quiet`, at most `max`. A single-page app usually renders what it
     /// fetched right after the response: reading the page earlier shows

@@ -2412,6 +2412,21 @@ impl BrowserSession {
         self.action_traffic_seen()
     }
 
+    /// [`cdp::Page::count_changes`] on the active tab.
+    pub fn count_changes(&self) -> Option<u64> {
+        self.active_tab().count_changes(self.timeout(None))
+    }
+
+    /// [`cdp::Page::next_change`] on the active tab.
+    pub fn next_change(&self, seen: u64, max: Duration) -> bool {
+        self.active_tab().next_change(seen, max)
+    }
+
+    /// [`cdp::Page::stop_counting_changes`] on the active tab.
+    pub fn stop_counting_changes(&self) {
+        self.active_tab().stop_counting_changes(self.timeout(None))
+    }
+
     /// [`Self::action_traffic_seen`], given up to `grace` for the action's
     /// first request to show: a click handler's fetch starts at once, but
     /// the browser's word of it can trail the click's own reply.
