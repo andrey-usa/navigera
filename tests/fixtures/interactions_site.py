@@ -851,6 +851,10 @@ PAGES["/journal"] = ("journal", ".tip{display:none} #tipped:focus ~ .tip{display
 <p><input id=imported aria-label=Imported><span class=itip>Imported tip</span></p>
 <div id=host></div>
 <input id=inclosed aria-label=Closed oninput="if (window.cs) window.cs.querySelector('span').textContent = 'closed changed'">
+<label><input type=checkbox id=agree> Agree</label>
+<label>Size <select id=size><option>Small</option><option>Medium</option><option>Large</option></select></label>
+<input type=radio name=ship id=ground aria-label=Ground checked><input type=radio name=ship id=air aria-label=Air>
+<label><input type=checkbox id=later> Later</label>
 <button id=go onclick="document.getElementById('out').textContent = 'clicked ' + (++window.k)">Go</button>
 <span id=out>idle</span>
 <script>

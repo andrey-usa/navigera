@@ -3428,6 +3428,21 @@ impl Driver {
         }
         let mut entered: Vec<&str> = look.typed.iter().map(String::as_str).collect();
         entered.extend(typed);
+        // A check or a choice that changed nothing else the tree shows: its
+        // controls' own lines, rewritten, are what a read would say.
+        if let (true, Some(id), false) =
+            (matches!(command, Command::Select { .. } | Command::SetChecked { .. }), look.journal, traffic)
+        {
+            if let Some(tree) = self.session.journal_restate(id).and_then(|moved| restate(&look.tree, &moved)) {
+                let change = tree_change(&look.tree, &tree, &entered);
+                self.look = Some(Look { tree, ..look });
+                let change = change?;
+                return Some(Value::String(match short {
+                    Value::String(ok) if ok == "ok" => change,
+                    other => format!("{other}\n{change}"),
+                }));
+            }
+        }
         let read = |me: &mut Self| match me.run_op_inner(&look.command) {
             Ok(Outcome { result: Value::String(tree), .. }) => Some(tree),
             _ => None,
@@ -3815,9 +3830,18 @@ impl Driver {
         if command.is_action() {
             self.session.mark_action();
         }
-        // A text entry after a look: the journal takes the state it will be
-        // judged against (see `page_change`).
-        if self.compact && matches!(command, Command::Fill { .. } | Command::Type { .. } | Command::InsertText { .. }) {
+        // An entry after a look (text, a check, a choice): the journal takes
+        // the state it will be judged against (see `page_change`).
+        if self.compact
+            && matches!(
+                command,
+                Command::Fill { .. }
+                    | Command::Type { .. }
+                    | Command::InsertText { .. }
+                    | Command::Select { .. }
+                    | Command::SetChecked { .. }
+            )
+        {
             if let Some(id) =
                 self.look.as_ref().filter(|l| l.page == self.session.page_identity()).and_then(|l| l.journal)
             {
@@ -5641,6 +5665,148 @@ fn reports_page_change(command: &Command) -> bool {
     )
 }
 
+/// `ref=N` as the tree prints it, in the element's own bracket tag
+/// (`[ref=3]`, `[checked, ref=3]`): not inside a quoted name and not in
+/// the text after `: `, where a page may write anything. Returns the byte
+/// offsets of that tag's `[` and `]` and the ref's range in the line.
+fn ref_tags(line: &str) -> Option<(usize, usize, std::ops::Range<usize>)> {
+    let b = line.as_bytes();
+    let (mut i, mut quoted) = (0, false);
+    while i < b.len() {
+        match b[i] {
+            b'\\' if quoted => i += 1,
+            b'"' => quoted = !quoted,
+            b':' if !quoted && b.get(i + 1) == Some(&b' ') => return None,
+            b'[' if !quoted => {
+                let end = i + line[i..].find(']')?;
+                let mut at = i + 1;
+                for item in line[i + 1..end].split(", ") {
+                    let digits =
+                        item.strip_prefix("ref=").map_or(0, |d| d.bytes().take_while(u8::is_ascii_digit).count());
+                    if digits > 0 && digits + 4 == item.len() {
+                        return Some((i, end, at..at + item.len()));
+                    }
+                    at += item.len() + 2;
+                }
+                i = end;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn node_ref(line: &str) -> Option<&str> {
+    ref_tags(line).map(|(_, _, r)| &line[r])
+}
+
+/// The JSON string `s` starts with, and its length in bytes.
+fn quoted_at(s: &str) -> Option<(String, usize)> {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'"') {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return serde_json::from_str(&s[..=i]).ok().map(|v| (v, i + 1)),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// `tree` with the lines of the controls a check or a choice moved (by
+/// node id, the line's ref) rewritten to their new state as a read prints
+/// it (see [`crate::cdp::Page::journal_restate`]). None when a control's
+/// line isn't there once, or doesn't read as the state it had before: the
+/// page is read again instead.
+fn restate(tree: &str, moved: &[(u64, crate::cdp::Restated)]) -> Option<String> {
+    let mut lines: Vec<String> = tree.split('\n').map(str::to_string).collect();
+    for (node, state) in moved {
+        let want = format!("ref={node}");
+        let at: Vec<usize> = (0..lines.len()).filter(|&i| node_ref(&lines[i]) == Some(want.as_str())).collect();
+        let [i] = at[..] else { return None };
+        lines[i] = match state {
+            crate::cdp::Restated::Checked(on) => checked_line(&lines[i], *on)?,
+            crate::cdp::Restated::Chosen { now, was } => chosen_line(&lines[i], now, was)?,
+        };
+    }
+    Some(lines.join("\n"))
+}
+
+/// A checkbox's or radio's line, checked or not: `checked` is the first of
+/// its tags when it is.
+fn checked_line(line: &str, on: bool) -> Option<String> {
+    let (open, close, _) = ref_tags(line)?;
+    let tags = &line[open + 1..close];
+    let first = tags.split(", ").next()?;
+    let tags = match (first == "checked" || first.starts_with("checked="), on) {
+        (false, true) => format!("checked, {tags}"),
+        (true, false) => tags.strip_prefix("checked, ")?.to_string(),
+        _ => return None,
+    };
+    Some(format!("{}[{tags}]{}", &line[..open], &line[close + 1..]))
+}
+
+/// A select's line with option `now` chosen instead of `was`: its
+/// `value=` (left out when it is the select's name, or empty) and the
+/// option marked `(selected)` in its list. None for a line cut anywhere
+/// that changes, or that doesn't show `was` as chosen.
+fn chosen_line(line: &str, now: &str, was: &str) -> Option<String> {
+    const SELECTED: &str = " (selected)";
+    // As the tree cuts them: a value at a name's length, an option at 60.
+    if now.chars().count() > 150 || now.chars().count() + SELECTED.len() > 60 {
+        return None;
+    }
+    let (open, close, _) = ref_tags(line)?;
+    let name = match line[..open].trim_start().strip_prefix("- combobox")?.trim() {
+        "" => String::new(),
+        quoted => match quoted_at(quoted)? {
+            (name, used) if used == quoted.len() => name,
+            _ => return None,
+        },
+    };
+    let shown = |v: &str| (!v.is_empty() && v != name).then(|| v.to_string());
+    let tail = &line[close + 1..];
+    let (value, rest) = match tail.strip_prefix(" value=") {
+        Some(t) => {
+            let (v, used) = quoted_at(t)?;
+            (Some(v), &t[used..])
+        }
+        None => (None, tail),
+    };
+    if value != shown(was) {
+        return None;
+    }
+    // The options as printed, each a quoted label (a cut one says so after
+    // it), a count of the ones left out last.
+    let mut options: Vec<String> = Vec::new();
+    let mut s = rest.strip_prefix(" options: ")?;
+    while !s.is_empty() {
+        let used = quoted_at(s).map_or(0, |(_, used)| used);
+        let end = s[used..].find(", ").map_or(s.len(), |k| used + k);
+        options.push(s[..end].to_string());
+        s = s[end..].strip_prefix(", ").unwrap_or("");
+    }
+    let whole = |o: &String| quoted_at(o).filter(|&(_, used)| used == o.len()).map(|(v, _)| v);
+    let at = |label: &str| -> Option<usize> {
+        let found: Vec<usize> = (0..options.len()).filter(|&i| whole(&options[i]).as_deref() == Some(label)).collect();
+        match found[..] {
+            [i] => Some(i),
+            _ => None,
+        }
+    };
+    let (old, new) = (at(&format!("{was}{SELECTED}"))?, at(now)?);
+    options[old] = serde_json::to_string(was).ok()?;
+    options[new] = serde_json::to_string(&format!("{now}{SELECTED}")).ok()?;
+    let value =
+        shown(now).map(|v| format!(" value={}", serde_json::to_string(&v).unwrap_or_default())).unwrap_or_default();
+    Some(format!("{}{value} options: {}", &line[..=close], options.join(", ")))
+}
+
 /// The lines that differ between two text trees of one page: `+` a line
 /// that is new, `-` one that is gone, `~` an element (same ref) that reads
 /// differently now, each without its indentation. A line is matched by its
@@ -5652,36 +5818,6 @@ fn reports_page_change(command: &Command) -> bool {
 /// [`CHANGE_LINES`] the rest is counted, not shown.
 fn tree_change(before: &str, after: &str, typed: &[&str]) -> Option<String> {
     use std::collections::HashMap;
-    // `ref=N` as the tree prints it, in the element's own bracket tag
-    // (`[ref=3]`, `[checked, ref=3]`): not inside a quoted name and not in
-    // the text after `: `, where a page may write anything.
-    fn node_ref(line: &str) -> Option<&str> {
-        let b = line.as_bytes();
-        let (mut i, mut quoted) = (0, false);
-        while i < b.len() {
-            match b[i] {
-                b'\\' if quoted => i += 1,
-                b'"' => quoted = !quoted,
-                b':' if !quoted && b.get(i + 1) == Some(&b' ') => return None,
-                b'[' if !quoted => {
-                    let end = i + line[i..].find(']')?;
-                    let mut at = i + 1;
-                    for item in line[i + 1..end].split(", ") {
-                        let digits =
-                            item.strip_prefix("ref=").map_or(0, |d| d.bytes().take_while(u8::is_ascii_digit).count());
-                        if digits > 0 && digits + 4 == item.len() {
-                            return Some(&line[at..at + item.len()]);
-                        }
-                        at += item.len() + 2;
-                    }
-                    i = end;
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        None
-    }
     fn key(line: &str) -> String {
         let line = line.trim_start();
         let Some(r) = node_ref(line) else { return line.to_string() };
@@ -6180,6 +6316,47 @@ mod tests {
         let out = super::tree_change(before, &format!("{before}{many}"), &[]).unwrap();
         assert_eq!(out.lines().count(), super::CHANGE_LINES + 1);
         assert!(out.ends_with("... and 10 more changed lines (`ax` reads the page)"));
+    }
+
+    #[test]
+    fn a_check_or_a_choice_rewrites_its_own_line_as_a_read_prints_it() {
+        use crate::cdp::Restated::{Checked, Chosen};
+        let chosen = |now: &str, was: &str| Chosen { now: now.into(), was: was.into() };
+        let tree =
+            "page \"Shop\" http://x/\n- checkbox \"Agree\" [required, ref=3]\n  - radio \"Air\" [checked, ref=4]\n\
+                    - combobox \"Size\" [ref=5] value=\"S\" options: \"S (selected)\", \"M\", \"Large \\\"L\\\"\"";
+        let checked = super::restate(tree, &[(3, Checked(true)), (4, Checked(false))]).unwrap();
+        assert_eq!(
+            super::tree_change(tree, &checked, &[]).as_deref(),
+            Some("~ checkbox \"Agree\" [checked, required, ref=3]\n~ radio \"Air\" [ref=4]")
+        );
+        let picked = super::restate(tree, &[(5, chosen("Large \"L\"", "S"))]).unwrap();
+        assert!(picked.ends_with(
+            "- combobox \"Size\" [ref=5] value=\"Large \\\"L\\\"\" options: \"S\", \"M\", \"Large \\\"L\\\" (selected)\""
+        ));
+        // The choice that is the select's name is not printed as its value.
+        let named = "- combobox \"M\" [ref=5] value=\"S\" options: \"S (selected)\", \"M\"";
+        assert_eq!(
+            super::restate(named, &[(5, chosen("M", "S"))]).as_deref(),
+            Some("- combobox \"M\" [ref=5] options: \"S\", \"M (selected)\"")
+        );
+        assert_eq!(
+            super::restate(&super::restate(named, &[(5, chosen("M", "S"))]).unwrap(), &[(5, chosen("S", "M"))])
+                .as_deref(),
+            Some(named)
+        );
+        // Whatever the line doesn't show as the state before, or can't show
+        // whole, is left to a read: a line that already reads checked, an
+        // option not among those listed, one listed twice, a cut one.
+        assert_eq!(super::restate(&checked, &[(3, Checked(true))]), None);
+        assert_eq!(super::restate(tree, &[(5, chosen("XL", "S"))]), None);
+        assert_eq!(super::restate(tree, &[(5, chosen("M", "Large"))]), None);
+        assert_eq!(super::restate(tree, &[(9, Checked(true))]), None);
+        let twice = "- combobox [ref=5] value=\"S\" options: \"S (selected)\", \"M\", \"M\"";
+        assert_eq!(super::restate(twice, &[(5, chosen("M", "S"))]), None);
+        let cut = "- combobox [ref=5] value=\"S\" options: \"S (selected)\", \"M\", …(+30)";
+        assert!(super::restate(cut, &[(5, chosen("M", "S"))]).unwrap().ends_with("\"S\", \"M (selected)\", …(+30)"));
+        assert_eq!(super::restate(cut, &[(5, chosen("Option 40", "S"))]), None);
     }
 
     #[test]

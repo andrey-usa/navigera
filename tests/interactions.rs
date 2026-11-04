@@ -1610,8 +1610,11 @@ fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
 /// last read proves it. The report is what a read after the entry says,
 /// entry by entry and for the click after them (the typed text stays out
 /// of it), whichever way the page changed: its DOM, a style that follows
-/// focus, a `:has()` rule. Compared against a session that reads the page
-/// after every entry (`NAVIGERA_CHANGE_JOURNAL=0`), and timed against it.
+/// focus, a `:has()` rule. A check, a radio switch and a choice are their
+/// controls' own lines, rewritten; a state a script set after the read is
+/// reported with the next entry. Compared against a session that reads
+/// the page after every entry (`NAVIGERA_CHANGE_JOURNAL=0`), and timed
+/// against it.
 #[test]
 fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
     let _alone = timed_alone();
@@ -1644,7 +1647,7 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
             .expect("run navigera");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
-    let steps: [&[&str]; 9] = [
+    let steps: [&[&str]; 15] = [
         &["fill", "--selector", "#name", "Ada Lovelace"],
         &["fill", "--selector", "#note", "first note"],
         &["fill", "--selector", "#count", "abc"],
@@ -1653,6 +1656,12 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
         &["fill", "--selector", "#name", "Ada"],
         &["fill", "--selector", "#restyle", "on"],
         &["fill", "--selector", "#imported", "x"],
+        &["click", "--selector", "#go"],
+        &["check", "--selector", "#agree"],
+        &["select", "--selector", "#size", "Large"],
+        &["check", "--selector", "#air"],
+        &["eval", "document.getElementById('later').checked = true"],
+        &["fill", "--selector", "#name", "Grace Hopper"],
         &["click", "--selector", "#go"],
     ];
     let mut reports: Vec<Vec<String>> = Vec::new();
@@ -1690,7 +1699,15 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
     assert!(r[6].contains("+ text: Restyled by a rule"), "a style rule a script rewrote: {r:?}");
     assert!(r[7].contains("Imported tip"), "a style from an @imported sheet: {r:?}");
     assert!(r[8].contains("clicked 1") && !r[8].contains("Lovelace") && !r[8].contains("first note"), "{r:?}");
-    assert!(r[9].contains("closed changed"), "inside a closed shadow root: {r:?}");
+    assert!(r[9].contains("~ checkbox \"Agree\" [checked, ref="), "{r:?}");
+    assert!(r[10].contains("value=\"Large\"") && r[10].contains("\"Large (selected)\""), "{r:?}");
+    assert!(r[11].contains("~ radio \"Ground\" [ref=") && r[11].contains("~ radio \"Air\" [checked, ref="), "{r:?}");
+    assert!(r[13].contains("~ checkbox \"Later\" [checked, ref="), "a state a script set after the read: {r:?}");
+    assert!(
+        r[14].contains("clicked 2") && !["Agree", "Large", "Air", "Later"].iter().any(|s| r[14].contains(s)),
+        "{r:?}"
+    );
+    assert!(r[15].contains("closed changed"), "inside a closed shadow root: {r:?}");
     let best = |name: &str| {
         (0..3)
             .map(|i| {

@@ -2438,6 +2438,11 @@ impl BrowserSession {
         self.active_tab().journal_unchanged(id, typed, self.timeout(None))
     }
 
+    /// [`cdp::Page::journal_restate`] on the active tab.
+    pub fn journal_restate(&self, id: u64) -> Option<Vec<(u64, cdp::Restated)>> {
+        self.active_tab().journal_restate(id, self.timeout(None))
+    }
+
     /// [`cdp::Page::count_changes`] on the active tab.
     pub fn count_changes(&self) -> Option<u64> {
         self.active_tab().count_changes(self.timeout(None))

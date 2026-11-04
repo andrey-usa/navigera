@@ -42,6 +42,16 @@ enum Loader<'a> {
 /// selector hears about it quickly.
 pub const DEFAULT_ELEMENT_WAIT: Duration = Duration::from_millis(5000);
 
+/// A control's new state after a check or select, as the change journal
+/// saw it (see [`Page::journal_restate`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Restated {
+    /// A checkbox or radio, checked or not now.
+    Checked(bool),
+    /// A select's chosen option, by its label, now and before.
+    Chosen { now: String, was: String },
+}
+
 /// What an element op acts on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -717,7 +727,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
 /// leaves the journal broken: the page is read again. Arming costs a walk
 /// for shadow roots; the rest is paid only before an entry.
 const JOURNAL_ARM: &str = r#"(id) => {
-    const W = window, ROOTS_MAX = 2000;
+    const W = window, ROOTS_MAX = 2000, CONTROLS_MAX = 5000;
     const old = W.__nvJournal;
     if (old) { try { old.stop(); } catch (_) {} }
     const j = { id, m: 0, e: 0, broken: '', obs: [], offs: [], typedAttr: [], inputs: [], primed: false };
@@ -771,6 +781,24 @@ const JOURNAL_ARM: &str = r#"(id) => {
     j.roots = j.rootsOf(j.docs);
     if (j.roots.length > ROOTS_MAX) j.broken = 'shadow roots';
     j.scopes = [...j.docs, ...j.roots];
+    // Form values and states: a script that sets one changes no DOM, so
+    // what the read shows of them is kept here, and an entry is judged
+    // against it (null past the cap: no entry is judged).
+    j.sig = (c) => {
+        let s = c.value + '\u0001' + c.checked + '\u0001' + c.indeterminate + '\u0001' + c.selectedIndex;
+        if (c.multiple && c.selectedOptions) for (const o of c.selectedOptions) s += ',' + o.index;
+        return s;
+    };
+    j.formOf = () => {
+        const out = [];
+        for (const scope of j.scopes) {
+            const cs = scope.querySelectorAll('input, textarea, select');
+            for (let i = 0; i < cs.length; i++) out.push([cs[i], j.sig(cs[i])]);
+            if (out.length > CONTROLS_MAX) return null;
+        }
+        return out;
+    };
+    j.controls = j.formOf();
     const counted = (r) => {
         // A framework writing a field's value attribute as it is typed.
         if (r.type === 'attributes' && r.attributeName === 'value' && r.target.tagName === 'INPUT') j.typedAttr.push(r.target);
@@ -804,13 +832,19 @@ const JOURNAL_ARM: &str = r#"(id) => {
 /// to judge it by: the state-dependent style rules and what each matches,
 /// and every form control's value and state. "" when primed, else why not.
 const JOURNAL_PRIME: &str = r#"(id) => {
-    const W = window, CONTROLS_MAX = 5000, SELECTORS_MAX = 400, MATCHED_MAX = 20000;
+    const W = window, SELECTORS_MAX = 400, MATCHED_MAX = 20000;
     const j = W.__nvJournal;
     if (!j || j.id !== id) return 'gone';
     if (j.broken) return j.broken;
-    // What happened before the entry is the read's to show, not the entry's.
+    if (!j.controls) return 'form controls';
+    // What happened before the entry is the read's to show, not the entry's:
+    // the DOM, an event, or a value or state a script set since the read.
     j.flush();
     if (j.m || j.e || j.typedAttr.length || j.inputs.length) return 'changed before the entry';
+    const form = j.formOf();
+    if (!form || form.length !== j.controls.length || form.some((x, i) => x[0] !== j.controls[i][0] || x[1] !== j.controls[i][1])) {
+        return 'changed before the entry';
+    }
     const DYN = /:(focus|focus-within|focus-visible|hover|active|checked|indeterminate|invalid|valid|user-invalid|user-valid|placeholder-shown|blank|in-range|out-of-range|autofill|has|defined|popover-open|open|modal|state|target|default|read-write|read-only|enabled|disabled|required|optional|playing|paused|fullscreen|picture-in-picture|empty)\b/;
     const PROPS = ['display', 'visibility', 'opacity', 'content', 'cursor', 'pointer-events'];
     // Pseudo-elements, which querySelectorAll can't match (`:placeholder-shown`
@@ -860,11 +894,6 @@ const JOURNAL_PRIME: &str = r#"(id) => {
         });
     };
     j.matches = (scope, sel) => { try { return [...scope.querySelectorAll(sel)]; } catch (_) { return null; } };
-    j.sig = (c) => {
-        let s = c.value + '\u0001' + c.checked + c.indeterminate + c.selectedIndex;
-        if (c.multiple && c.selectedOptions) for (const o of c.selectedOptions) s += ',' + o.index;
-        return s;
-    };
     j.tracked = [];
     j.inventory = [];
     for (const scope of j.scopes) {
@@ -884,12 +913,6 @@ const JOURNAL_PRIME: &str = r#"(id) => {
         total += m.length;
         if (total > MATCHED_MAX) return 'state styles';
         j.matched.push(m);
-    }
-    j.controls = [];
-    for (const scope of j.scopes) {
-        const cs = scope.querySelectorAll('input, textarea, select');
-        for (let i = 0; i < cs.length; i++) j.controls.push([cs[i], j.sig(cs[i])]);
-        if (j.controls.length > CONTROLS_MAX) return 'form controls';
     }
     // A script that writes a style rule (its declarations, its selector, a
     // media list, a rule inserted into a group) changes no DOM and may
@@ -940,8 +963,13 @@ const JOURNAL_PRIME: &str = r#"(id) => {
 }"#;
 
 /// Asks the journal (see [`JOURNAL_ARM`]) whether anything the tree shows
-/// changed since it was armed, other than `typed` entered into the focused
-/// text field: "" for nothing, else what did (or "gone").
+/// changed since it was armed, other than what the entry itself did: with
+/// `typed`, that text entered into the focused text field ("" for nothing
+/// else, else what did, or "gone"); with `typed` null, a state entry
+/// (check, select), whose own change is the checked state or the chosen
+/// option of the controls it moved: `{ changes }`, one per control, the
+/// controls themselves left in `changed` for their node ids ("" when it
+/// moved none).
 const JOURNAL_CHECK: &str = r#"(id, typed) => {
     const j = window.__nvJournal;
     if (!j || j.id !== id) return 'gone';
@@ -953,31 +981,80 @@ const JOURNAL_CHECK: &str = r#"(id, typed) => {
     if (j.m) return 'dom';
     if (cssom) return 'style rule';
     if (j.e) return 'event';
-    let t = document.activeElement;
-    for (;;) {
-        let n = t && t.shadowRoot && t.shadowRoot.activeElement;
-        if (!n && t && (t.tagName === 'IFRAME' || t.tagName === 'FRAME')) { try { n = t.contentDocument && t.contentDocument.activeElement; } catch (_) { n = null; } }
-        if (!n) break;
-        t = n;
-    }
-    const type = t && t.tagName === 'INPUT' ? (t.getAttribute('type') || 'text').toLowerCase() : '';
-    const text = t && (t.tagName === 'TEXTAREA' || ['text', 'search', 'email', 'url', 'tel'].includes(type));
-    if (!text || !String(t.value).includes(typed)) return 'target';
-    // The diff leaves out a field that shows the typed text and did not
-    // before; one that showed it already is reported as changed.
-    const own = j.controls.find((x) => x[0] === t);
-    if (!own) return 'target';
-    const before = own[1].slice(0, own[1].indexOf('\u0001'));
-    if (before !== String(t.value) && before.includes(typed)) return 'target';
-    // An element named by its content shows the field's value too.
+    // An element named by its content shows what a control in it holds too.
     const NAMED = 'td, th, button, a[href], summary, option, h1, h2, h3, h4, h5, h6, '
         + ['button', 'cell', 'gridcell', 'link', 'heading', 'option', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
             'treeitem', 'checkbox', 'radio', 'switch', 'columnheader', 'rowheader', 'tooltip', 'row', 'term']
             .map((r) => `[role="${r}"]`).join(', ');
-    for (let e = t; e; e = e.getRootNode().host) {
-        if (e.parentElement && e.parentElement.closest(NAMED)) return 'named';
+    const named = (t) => {
+        for (let e = t; e; e = e.getRootNode().host) {
+            if (e.parentElement && e.parentElement.closest(NAMED)) return true;
+        }
+        return false;
+    };
+    const own = new Set();
+    const changes = [];
+    if (typed === null) {
+        const sq = (s) => String(s).split(/\s+/).filter(Boolean).join(' ');
+        const label = (o) => (o ? sq(o.getAttribute('label') || '') || sq(o.textContent) : null);
+        // A select's choice is part of a name wherever its text is: a label
+        // that names another control, an element that names another by
+        // its id (aria-labelledby).
+        const quoted = (t) => {
+            const l = t.closest('label');
+            if (l && l.control !== t) return true;
+            for (const scope of j.scopes) {
+                for (const e of scope.querySelectorAll('[aria-labelledby], [aria-describedby]')) {
+                    const ids = ((e.getAttribute('aria-labelledby') || '') + ' ' + (e.getAttribute('aria-describedby') || '')).split(/\s+/);
+                    for (const x of ids) {
+                        const r = x && e.getRootNode().getElementById && e.getRootNode().getElementById(x);
+                        if (r && r.contains(t)) return true;
+                    }
+                }
+            }
+            return false;
+        };
+        const moved = j.controls.filter((x) => j.sig(x[0]) !== x[1]);
+        if (moved.length > 8) return 'form state';
+        for (const [c, before] of moved) {
+            const type = c.tagName === 'INPUT' ? (c.getAttribute('type') || 'text').toLowerCase() : '';
+            if (type === 'checkbox' || type === 'radio') {
+                // A required radio group shows as invalid until one is checked.
+                if (type === 'radio') {
+                    const scope = c.form || c.getRootNode();
+                    for (const r of scope.querySelectorAll('input[type=radio]')) if (r.name === c.name && r.required) return 'radio group';
+                }
+                changes.push({ checked: !!c.checked });
+            } else if (c.tagName === 'SELECT' && !c.multiple && !(c.size > 1)) {
+                const was = Number(before.split('\u0001')[3]);
+                if (was < 0 || c.selectedIndex < 0 || named(c) || quoted(c)) return 'named';
+                changes.push({ value: label(c.options[c.selectedIndex]), was: label(c.options[was]) });
+            } else {
+                return 'form state';
+            }
+            own.add(c);
+        }
+    } else {
+        let t = document.activeElement;
+        for (;;) {
+            let n = t && t.shadowRoot && t.shadowRoot.activeElement;
+            if (!n && t && (t.tagName === 'IFRAME' || t.tagName === 'FRAME')) { try { n = t.contentDocument && t.contentDocument.activeElement; } catch (_) { n = null; } }
+            if (!n) break;
+            t = n;
+        }
+        const type = t && t.tagName === 'INPUT' ? (t.getAttribute('type') || 'text').toLowerCase() : '';
+        const text = t && (t.tagName === 'TEXTAREA' || ['text', 'search', 'email', 'url', 'tel'].includes(type));
+        if (!text || !String(t.value).includes(typed)) return 'target';
+        // The diff leaves out a field that shows the typed text and did not
+        // before; one that showed it already is reported as changed.
+        const mine = j.controls.find((x) => x[0] === t);
+        if (!mine) return 'target';
+        const before = mine[1].slice(0, mine[1].indexOf('\u0001'));
+        if (before !== String(t.value) && before.includes(typed)) return 'target';
+        if (named(t)) return 'named';
+        own.add(t);
     }
-    if (j.typedAttr.some((x) => x !== t) || j.inputs.some((x) => x !== t)) return 'event';
+    if (j.typedAttr.some((x) => !own.has(x)) || j.inputs.some((x) => !own.has(x))) return 'event';
     const docs = j.docsOf();
     if (docs.length !== j.docs.length || docs.some((d, i) => d !== j.docs[i])) return 'frames';
     if (j.rootsOf(docs).length !== j.roots.length) return 'shadow roots';
@@ -992,10 +1069,14 @@ const JOURNAL_CHECK: &str = r#"(id, typed) => {
         const was = j.matched[i];
         if (!m || m.length !== was.length || m.some((e, k) => e !== was[k])) return 'state style';
     }
-    for (const [c, s] of j.controls) if (c !== t && j.sig(c) !== s) return 'form state';
+    for (const [c, s] of j.controls) if (!own.has(c) && j.sig(c) !== s) return 'form state';
+    // The entry is the read's now: the next one is judged from here.
     j.inputs = [];
     j.typedAttr = [];
-    return '';
+    j.controls = j.formOf();
+    if (!changes.length) return '';
+    j.changed = [...own];
+    return { changes };
 }"#;
 
 /// A script sent to a document that a navigation then replaced gets this
@@ -2652,6 +2733,53 @@ impl Page {
                 false
             }
         }
+    }
+
+    /// What a state entry (check, select) changed, when the journal armed
+    /// as `id` can prove it changed nothing else the tree shows (see
+    /// [`JOURNAL_CHECK`]): each control it moved, by node id (the tree's
+    /// `ref`), with its new state. Empty when it moved none; None when
+    /// anything else changed, or can't be told.
+    pub fn journal_restate(&self, id: u64, timeout: Duration) -> Option<Vec<(u64, Restated)>> {
+        let started = std::time::Instant::now();
+        let r = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": format!("({JOURNAL_CHECK})({id}, null)"), "returnByValue": true }),
+            timeout,
+        );
+        let verdict = r.ok().and_then(|r| r.pointer("/result/value").cloned());
+        let changes = match verdict {
+            Some(Value::String(s)) if s.is_empty() => Some(Vec::new()),
+            Some(Value::Object(o)) => o.get("changes").and_then(Value::as_array).cloned(),
+            other => {
+                crate::timing::log(&format!(
+                    "[journal] read again: {}",
+                    other.as_ref().map_or("no answer".into(), Value::to_string)
+                ));
+                None
+            }
+        };
+        let mut out = Vec::new();
+        for (i, c) in changes?.iter().enumerate() {
+            let state = match (c.get("checked").and_then(Value::as_bool), c.get("value").and_then(Value::as_str)) {
+                (Some(on), _) => Restated::Checked(on),
+                (None, Some(v)) => Restated::Chosen { now: v.to_string(), was: c.get("was")?.as_str()?.to_string() },
+                _ => return None,
+            };
+            let el = self
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": format!("window.__nvJournal.changed[{i}]"), "objectGroup": "nv-journal" }),
+                    timeout,
+                )
+                .ok()?;
+            let object = el.pointer("/result/objectId").and_then(Value::as_str)?.to_string();
+            let node = self.send("DOM.describeNode", json!({ "objectId": object }), timeout).ok()?;
+            out.push((node.pointer("/node/backendNodeId").and_then(Value::as_u64)?, state));
+        }
+        let _ = self.send("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-journal" }), timeout);
+        crate::timing::record("journal_check", started);
+        Some(out)
     }
 
     /// Start counting the top document's DOM changes (one observer, kept

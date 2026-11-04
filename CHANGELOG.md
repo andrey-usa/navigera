@@ -41,6 +41,16 @@ All notable changes to this project are documented here. The format follows
   entry. When it can't prove it (a change, a style sheet of another
   origin, a closed shadow root) the page is read as before. Reports are the same either way; `NAVIGERA_CHANGE_JOURNAL=0`
   reads after every entry, to compare.
+- `check`, `uncheck` and `select` on a large page report in the time of
+  the action too: when the journal shows the action moved only checkboxes,
+  radios or single selects, their own lines are rewritten as a read
+  prints them (`checked`, a select's `value=` and the option marked
+  `(selected)`), a radio switch and a "select all" included (10,000 table
+  rows: `check` 478 to 49 ms, `select` 447 to 34 ms; 1,000 rows: 60 to
+  22 ms and 46 to 9 ms; medians of 10 interleaved, local, Chrome 153). A
+  select inside a label of another control, a table cell or anything that
+  names by its text, an option the line doesn't list whole, or a required
+  radio group is read as before.
 - Actions are faster where they used to sit out fixed waits. Saying what
   an action changed no longer waits 50 ms for a request the action might
   have started: one turn of the page's event loop shows whether it started
@@ -59,6 +69,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A text entry on a large page reported `ok` when a script had set a
+  checkbox, a radio, a select or a field's value (no DOM change, no
+  event) between the `ax` and the entry; a read showed that change. Form
+  states are now taken with the read, and a change since then means the
+  page is read again.
 - A `batch` says what its actions changed, as each action does alone:
   `fill` and `click` in one batch printed only the page state, so an
   agent had to read the page again to learn how the batch ended. Steps
