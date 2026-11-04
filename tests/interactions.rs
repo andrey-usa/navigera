@@ -113,6 +113,22 @@ impl Drop for Session {
     }
 }
 
+/// Something that takes the element's place between the hit test and the
+/// press (here an overlay the mouse move opens) gets no press: the page
+/// never sees it, and the click is pressed again once the element is
+/// there. Before, the press clicked the overlay's own button, and the
+/// report said what that changed, as if it were the click's.
+#[test]
+fn a_press_that_would_land_on_something_else_is_held_back_and_sent_again() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("hover-cover", &[]);
+    for _ in 0..3 {
+        s.ok(&["goto", &format!("{}/hover-cover", site.url)]);
+        s.ok(&["click", "--selector", "#go"]);
+        assert_eq!(s.text(&["text", "--selector", "#out"]), "clicked 1");
+    }
+}
+
 /// A locator by role and name, or by label, costs one pass over the page:
 /// each candidate's `el.labels` used to scan the document on its first read,
 /// so the first call on 12000 buttons took about 9 s. Timed at two sizes so a

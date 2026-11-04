@@ -69,6 +69,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A click no longer presses whatever took its element's place between
+  the hit test and the press: an overlay a mouse move or a timer opened
+  just then, or an element that moves every frame. Such a press is kept
+  from the page whole (down, up, click) and pressed again where the
+  element is now; when it keeps missing, the click fails saying what it
+  would have hit, and nothing was clicked. Before, the press clicked that
+  other element and the report showed what it changed as the click's
+  (3 of 40 clicks under an overlay that opened 4 to 37 ms after load
+  pressed the overlay's button; 0 now). Clicks on a still page take as
+  long as before.
 - A text entry on a large page reported `ok` when a script had set a
   checkbox, a radio, a select or a field's value (no DOM change, no
   event) between the `ax` and the entry; a read showed that change. Form

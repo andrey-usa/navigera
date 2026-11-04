@@ -52,6 +52,21 @@ pub enum Restated {
     Chosen { now: String, was: String },
 }
 
+/// How many more times a click is pressed when its element moved as it
+/// was pressed (see [`Page::click`]).
+const MOVED_TRIES: u8 = 3;
+
+/// Where a click stands among the presses one `click` may take: `again`
+/// more may follow it once the page wires its element up, `first` is when
+/// the first of those pressed, and `moved` presses before it landed on
+/// something else (see [`Page::click`]).
+#[derive(Clone, Copy)]
+struct Tries {
+    again: u8,
+    first: Option<Instant>,
+    moved: u8,
+}
+
 /// What an element op acts on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -635,6 +650,38 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 // dispatched mouse event it never delivered (see click()).
                 const w = doc.defaultView;
                 w.top.__nvSeen = 0;
+                // The element can move between this hit test and the press
+                // (a page that shifts every frame): a press that lands on
+                // something else is kept from the page whole, down to its
+                // click, and said in `__nvMissed`, so the caller presses
+                // again where the element is now instead of clicking what
+                // took its place. First in the window's capture order.
+                try { if (w.top.__nvGuard) w.top.__nvGuard(); } catch (_) {}
+                delete w.top.__nvMissed;
+                const guards = [];
+                const unguard = () => { for (const [t, f] of guards.splice(0)) w.removeEventListener(t, f, true); };
+                const swallow = ours((e) => {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    if (e.type === 'click' || e.type === 'auxclick' || e.type === 'contextmenu') unguard();
+                });
+                const onDown = ours((e) => {
+                    unguard();
+                    const h = at(e.clientX, e.clientY);
+                    if (h && (h === el || el.contains(h) || (h.shadowRoot && h.shadowRoot.contains(el)) || onLabel(h))) return;
+                    if (e.composedPath && e.composedPath().includes(el)) return;
+                    w.top.__nvSeen++;
+                    w.top.__nvMissed = describe(h) || 'nothing';
+                    for (const t of ['mousedown', 'pointerup', 'mouseup', 'click', 'auxclick', 'contextmenu']) {
+                        guards.push([t, swallow]);
+                        w.addEventListener(t, swallow, true);
+                    }
+                    setTimeout(unguard, 1000);
+                    swallow(e);
+                });
+                guards.push(['pointerdown', onDown]);
+                w.addEventListener('pointerdown', onDown, true);
+                w.top.__nvGuard = unguard;
                 for (const t of ['pointerdown', 'mousedown', 'mouseup', 'click'])
                     w.addEventListener(t, ours(() => { w.top.__nvSeen++; }), { capture: true, once: true });
                 if (effects) armEffects(w);
@@ -3760,20 +3807,19 @@ impl Page {
     /// it up while it settles (see [`Page::wired_later`]): `clicked_again`
     /// says how long after the first press the page did.
     pub fn click(&self, target: &Target, opts: &ClickOptions, wait: Duration, timeout: Duration) -> Result<Value> {
-        self.click_once(target, opts, wait, timeout, CLICK_AGAIN, None)
+        self.click_once(target, opts, wait, timeout, Tries { again: CLICK_AGAIN, first: None, moved: 0 })
     }
 
-    /// One click; `again` more may follow it (see [`Page::click`]), and
-    /// `first` is when the first of them pressed.
+    /// One click, and the ones it may take after it (see [`Tries`]).
     fn click_once(
         &self,
         target: &Target,
         opts: &ClickOptions,
         wait: Duration,
         timeout: Duration,
-        again: u8,
-        first: Option<Instant>,
+        tries: Tries,
     ) -> Result<Value> {
+        let Tries { again, first, moved } = tries;
         let settle = json!(self.hit_settle_ms(wait));
         let strict = json!(!self.shared.is_single_target());
         let button = json!(opts.button);
@@ -3913,7 +3959,28 @@ impl Page {
         // added is, which only ever stops another click.
         let check = point.get("check").and_then(Value::as_bool) == Some(true)
             && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none(); // diagnostic knob
-        let (arrived, heard) = if check { self.press_arrived(young, timeout) } else { (true, None) };
+        let (arrived, heard, missed) = if check { self.press_arrived(young, timeout) } else { (true, None, None) };
+        if let Some(instead) = missed {
+            // The element moved as it was pressed: the press reached
+            // something else, which the page never saw. Press again where
+            // the element is now, while the element wait lasts.
+            if armed {
+                self.drop_effects(timeout);
+            }
+            if nav {
+                self.nav_planned(timeout);
+            }
+            let left = wait.saturating_sub(started.elapsed());
+            if moved < MOVED_TRIES && !left.is_zero() {
+                let tries = Tries { again, first, moved: moved + 1 };
+                return self.click_once(target, opts, left.max(Duration::from_millis(500)), timeout, tries);
+            }
+            bail!(
+                "the element kept moving as it was pressed: the press landed on {instead} instead ({} tries), \
+                 and nothing was clicked. Wait for it to settle, or --force sends the click to the element without the mouse",
+                moved + 1
+            );
+        }
         if !arrived {
             eprintln!(
                 "[click] the browser did not deliver the mouse events at ({}, {}); sending them again",
@@ -3965,7 +4032,8 @@ impl Page {
                         // The element is there and was hittable a moment
                         // ago: what is left of the wait, enough to settle.
                         let left = wait.saturating_sub(started.elapsed()).max(Duration::from_secs(1));
-                        let mut point = self.click_once(target, opts, left, timeout, again - 1, Some(first))?;
+                        let tries = Tries { again: again - 1, first: Some(first), moved };
+                        let mut point = self.click_once(target, opts, left, timeout, tries)?;
                         if point.get("clicked_again").is_none() {
                             point["clicked_again"] = json!(seen.duration_since(first).as_millis() as u64);
                         }
@@ -4146,16 +4214,19 @@ impl Page {
     /// A slow page gets 300 ms to process the events before "nothing came"
     /// is believed (a dropped event never arrives; a queued one does).
     /// With `listeners`, the first look also counts what listens for the
-    /// click ([`PATH_LISTENERS`]).
-    fn press_arrived(&self, listeners: bool, timeout: Duration) -> (bool, Option<u64>) {
+    /// click ([`PATH_LISTENERS`]). Last, what the press landed on instead
+    /// of the element when it moved before the press (`__nvMissed`): the
+    /// page was kept from that press.
+    fn press_arrived(&self, listeners: bool, timeout: Duration) -> (bool, Option<u64>, Option<String>) {
         let deadline = std::time::Instant::now() + Duration::from_millis(300);
         let mut heard = None;
+        let mut missed = None;
         let mut first = listeners;
         loop {
             let (expression, api) = if first {
-                (format!("[window.__nvSeen, {}]", path_listeners(true)), true)
+                (format!("[window.__nvSeen, window.__nvMissed, {}]", path_listeners(true)), true)
             } else {
-                ("[window.__nvSeen]".to_string(), false)
+                ("[window.__nvSeen, window.__nvMissed]".to_string(), false)
             };
             let seen = self
                 .send(
@@ -4167,15 +4238,16 @@ impl Page {
                 .map(|r| {
                     let v = r.pointer("/result/value");
                     if first {
-                        heard = v.and_then(|v| v.get(1)).and_then(Value::as_u64);
+                        heard = v.and_then(|v| v.get(2)).and_then(Value::as_u64);
                     }
+                    missed = v.and_then(|v| v.get(1)).and_then(Value::as_str).map(str::to_string);
                     v.and_then(|v| v.get(0)).and_then(Value::as_u64)
                 });
             first = false;
             match seen {
                 Some(Some(0)) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-                Some(Some(0)) => return (false, heard),
-                _ => return (true, heard),
+                Some(Some(0)) => return (false, heard, missed),
+                _ => return (true, heard, missed),
             }
         }
     }

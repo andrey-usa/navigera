@@ -66,6 +66,9 @@ getting wrong, one page each, built the way those sites behave:
                 once it is (&late: 50 ms after; &invisible: the replayed
                 click shows nothing); ?quiet: a button that works
                 from the start and shows nothing, beside a late listener
+/hover-cover    a button whose first mouse move opens an overlay over it, with
+                a Subscribe button, for 300 ms: the press that follows the
+                move lands on the overlay
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
 
@@ -748,6 +751,21 @@ customElements.define('x-panel', class extends HTMLElement {
     this.shadowRoot.querySelector('button').onclick = () => { document.getElementById('badge').count = ++n; }; }
 });
 </script>""")
+
+
+PAGES["/hover-cover"] = ("hover cover", "#cover{position:fixed;inset:0;background:#fff} #cover button{width:100%;height:100%}", """
+<button id=go onclick="document.getElementById('out').textContent = 'clicked ' + (++window.k)">Go</button>
+<span id=out>idle</span>
+<div id=cover hidden><button onclick="document.getElementById('out').textContent = 'subscribed'">Subscribe</button></div>
+<script>
+window.k = 0;
+addEventListener('pointermove', () => {
+  const c = document.getElementById('cover');
+  c.hidden = false;
+  setTimeout(() => { c.hidden = true; }, 300);
+}, { once: true });
+</script>
+""")
 
 
 PAGES["/wired-late"] = ("wired late", "", """
