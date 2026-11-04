@@ -785,10 +785,11 @@ fn a_click_that_changes_nothing_says_so() {
 /// button up: a timer after load, a script the page loads then, a listener
 /// on the button's container or on the document. Nothing listened for that
 /// click, so once the page wires the element up it is clicked again, and
-/// counts once; analytics on the document don't change that. A click
-/// something heard is not sent again when the page adds a listener later,
-/// nor one a script on the document recorded and replays once the button
-/// is wired, and a button never wired still says the click did nothing.
+/// counts once. A click something heard is never sent again: not when the
+/// page adds a listener later, not when analytics on the document heard it,
+/// and not when a script there recorded it to replay once the button is
+/// wired, even a replay that shows nothing. A button never wired still says
+/// the click did nothing.
 #[test]
 fn a_click_before_the_page_wired_the_element_is_sent_again() {
     let (true, Some(site)) = (chrome(), site()) else { return };
@@ -806,9 +807,10 @@ fn a_click_before_the_page_wired_the_element_is_sent_again() {
         ("ms=150", "#go", "went 1", 1, None),
         ("root=400", "#inner", "inner 1", 1, None),
         ("doc=400", "#go", "went 1", 1, None),
-        ("analytics&ms=400", "#go", "went 1", 1, None),
+        ("analytics&ms=400", "#go", "idle", 0, Some(false)),
         ("replay=400", "#go", "went 1", 1, Some(false)),
         ("replay=400&late", "#go", "went 1", 1, Some(false)),
+        ("replay=400&invisible", "#go", "idle", 1, Some(false)),
         ("quiet", "#go", "idle", 1, Some(false)),
         ("ms=99999", "#go", "idle", 0, Some(false)),
     ] {
@@ -831,6 +833,11 @@ fn a_click_before_the_page_wired_the_element_is_sent_again() {
         }
         if out == "idle" {
             assert!(click.get("no_effect").is_some(), "{query}: {r}");
+        }
+        // A page that replays a recorded click does it after the click
+        // returned; navigera's own clicks are all done by then.
+        if hits > 0 {
+            s.ok(&["wait", "--js", "window.hits > 0"]);
         }
         assert_eq!(s.text(&["get", "text", "--selector", "#out"]), out, "{query}: {r}");
         assert_eq!(s.ok(&["eval", "window.hits"]), hits, "{query}: {r}");

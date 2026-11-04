@@ -63,7 +63,8 @@ getting wrong, one page each, built the way those sites behave:
                 container gets (?root=N) or the document gets (?doc=N);
                 ?analytics: a document listener from the start; ?replay=N:
                 clicks recorded at the document before Go is wired, replayed
-                once it is (&late: 50 ms after); ?quiet: a button that works
+                once it is (&late: 50 ms after; &invisible: the replayed
+                click shows nothing); ?quiet: a button that works
                 from the start and shows nothing, beside a late listener
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
@@ -784,7 +785,9 @@ if (q.has('replay')) {
   const contract = (e) => { if (e.target.closest('#go')) early.push(e); };
   document.addEventListener('click', contract, true);
   addEventListener('load', () => setTimeout(() => {
-    wireGo();
+    // &invisible: the replayed click counts and shows nothing.
+    if (q.has('invisible')) document.getElementById('go').onclick = () => { hits++; };
+    else wireGo();
     document.removeEventListener('click', contract, true);
     const replay = () => { for (const e of early.splice(0)) document.getElementById('go').onclick(e); };
     if (q.has('late')) setTimeout(replay, 50); else replay();

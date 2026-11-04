@@ -64,22 +64,17 @@ All notable changes to this project are documented here. The format follows
   loaded after load sets) is sent again once the page wires it, instead
   of reporting `no_effect`. On a page loaded less than 10 s ago, a click
   that changed nothing, with no click, mouse, pointer or touch listener
-  on the element or its ancestors when it came, waits while the page
-  loads scripts or data and up to 500 ms after the click for one to
-  appear, then clicks again (`clicked_again` says how long the page
-  took). When nothing on the document or window heard it either, a
-  listener the page adds there counts too (a framework that hydrates
-  the whole document); when something there did (analytics, a script
-  that records clicks to replay them), only the element's own path being
-  wired counts, with no other change on the page meanwhile and 150 ms
-  more of watching, so a replayed click is not sent twice. A click
-  something on the element's path heard is never sent again. Goto and
-  click in one batch, 3 reps each of 7 late-wiring pages (local, release,
-  Chrome 153): 0/21 to 21/21 clicked once; pages that replay a recorded
-  click: one hit, never two; a button wired 400 ms after load answers in
-  421 ms instead of a `no_effect` in 221 ms. A handled click costs the
-  same (40 in a batch: 16.8 vs 16.6 ms each); a dead button on a page
-  that just loaded reports `no_effect` in 521 ms instead of 221 ms.
+  on the element, its ancestors, its document or window when it came
+  (so no script of the page ran for it), waits while the page loads
+  scripts or data and up to 500 ms after the click for one to appear,
+  then clicks once more (`clicked_again` says how long the page took).
+  A click anything heard is never sent again: a script that recorded it
+  may replay it later, unseen. Goto and click in one batch, 3 reps each
+  of 7 late-wiring pages (local, release, Chrome 153): 0/21 to 21/21
+  clicked once; React 18 `hydrateRoot` and Vue 3 SSR mounts loaded
+  after load: clicked once. A handled click costs the same (40 in a
+  batch: 16.8 vs 16.6 ms each); a dead button on a page that just
+  loaded reports `no_effect` in 521 ms instead of 221 ms.
   `NAVIGERA_CLICK_AGAIN=0` turns it off.
 - A wait on something only a property shows (`wait --js` on a field's
   value, focus or a checkbox; assertions built on the same wait) ends when

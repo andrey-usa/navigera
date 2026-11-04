@@ -303,26 +303,21 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     page whose document started loading less than 10 s ago, the click
     also counts what listens for it (click, mouse, pointer and touch
     listeners, handlers set as properties or attributes included,
-    navigera's own left out): on the element and its ancestors, and on
-    its document and window. When nothing on the element's path did and
-    the click changed nothing, it watches the page while it has scripts
-    or data requests in flight, and until 500 ms after the click without
-    any (never past the element wait, at most 5 s). If nothing on the
-    document or window heard the click either, no script of the page ran
-    for it, and any listener the page adds there or on the path (a script
-    after load, hydration of a container or of the whole document) means
-    the click is sent again. If something there did (analytics, a script
-    that delegates or records clicks to replay them), only a listener on
-    the element's own path counts, the page must show no other change
-    meanwhile (text or elements added or removed, the URL), and it is
-    watched 150 ms longer first, so a recorded click a script replays once
-    the element is wired is not sent twice. At most two more clicks; the
-    result carries `clicked_again` with how long after the first press
-    the page was wired. A click something on the element's path heard is
-    never sent again. A dead button on a page that just loaded reports
-    `no_effect` about 300 ms later than before. A handler delegated from
-    the document late, on a page with document listeners from the start,
-    still gets `no_effect`.
+    navigera's own left out) on the element, its ancestors, its document
+    and its window. When nothing did and the click changed nothing, no
+    script of the page ran for it: navigera watches the page while it has
+    scripts or data requests in flight, and until 500 ms after the click
+    without any (never past the element wait, at most 5 s), and if the
+    page adds such a listener there (a script after load, hydration of a
+    container or of the whole document), it clicks once more; the result
+    carries `clicked_again` with how long the page took. A click anything
+    heard is never sent again: analytics on the document, or a script
+    that records early clicks to replay them once the page is wired, may
+    act on it later where navigera can't see. A dead button on a page
+    that just loaded reports `no_effect` about 300 ms later than before.
+    Not covered: a page that listens on the document from the start
+    (`no_effect` as before), an element inside a frame, a handler wired
+    more than 500 ms after the click with nothing loading.
 - **Page errors are reported.** An uncaught exception while a command ran
   adds one line to its `notes` (`the page threw TypeError: …; \`errors\`
   lists them`), so a click whose handler crashed doesn't look like a click
