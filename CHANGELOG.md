@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Actions are faster where they used to sit out fixed waits. Saying what
+  an action changed no longer waits 50 ms for a request the action might
+  have started: one turn of the page's event loop shows whether it started
+  one. A click on a link or a submit button waits for the new document only
+  when the page planned one, not up to 150 ms when a router or a script
+  cancelled it (single-page apps, forms a script sends) or the form failed
+  validation. A click's mouse move, press and release go out together, with
+  one wait for the three. What an action reports and where it leaves the
+  page are unchanged.
+
 ### Fixed
 
 - A wait on something only a property shows (`wait --js` on a field's
