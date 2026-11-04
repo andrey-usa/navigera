@@ -4112,6 +4112,19 @@ impl Driver {
                          {ms} ms later, and it was clicked again"
                     ));
                 }
+                if let Some(on) = point.get("click_off").and_then(Value::as_str) {
+                    // The page answered the press but not on the element:
+                    // what it printed as changed may be all the click did.
+                    let went = if on.is_empty() {
+                        "the page took the element out during the press and the browser sent no click event".to_string()
+                    } else {
+                        format!("its click event went to {on}: the page moved or replaced the element during the press")
+                    };
+                    state["click_missed"] = json!(format!(
+                        "the press reached the element, but {went}, so the element's own click handler didn't run. \
+                         Check what the click should do before clicking again"
+                    ));
+                }
                 if let Some(fx) = point.get("no_effect") {
                     // Clicked, but the page did nothing: often a control
                     // the page hasn't wired up yet.

@@ -67,6 +67,20 @@ struct Tries {
     moved: u8,
 }
 
+/// What the page saw of a click's press (see [`Page::press_arrived`]).
+struct Arrival {
+    /// Some of the press's events reached the page.
+    arrived: bool,
+    /// What listens for the click, when asked for.
+    heard: Option<u64>,
+    /// What the press landed on instead of the element, which moved as it
+    /// was pressed: the page was kept from that press.
+    missed: Option<String>,
+    /// What the press's click event went to instead of the element, which
+    /// the page moved or replaced during the press: the page saw that one.
+    off: Option<String>,
+}
+
 /// What an element op acts on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -693,6 +707,50 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 w.top.__nvGuard = unguard;
                 for (const t of ['pointerdown', 'mousedown', 'mouseup', 'click'])
                     w.addEventListener(t, ours(() => { w.top.__nvSeen++; }), { capture: true, once: true });
+                // Where the press's click event goes. A page that replaces
+                // the element on mousedown, or moves it on pointerdown (a
+                // banner put in above it), has the click sent to what the
+                // down and up targets share, an ancestor, or not sent at all
+                // when the pressed element left the page (Chrome 153 and 157
+                // send none): the page saw the press, but the element's own
+                // handler never ran.
+                // `__nvOff()`, read with the press's arrival, says where the
+                // click went, '' for nowhere. A click through the element's
+                // label is the element's. Inside a closed shadow root the
+                // window sees only the host: then only the element's own
+                // listener tells, and nothing is said when it heard none.
+                try { if (w.top.__nvOffEnd) w.top.__nvOffEnd(); } catch (_) {}
+                const kind = button === 'right' ? 'contextmenu' : button === 'middle' ? 'auxclick' : 'click';
+                let on = false, went = null, seen = false, up = false, outer = el, closed = false;
+                for (let r = el.getRootNode(); r && r.host; r = outer.getRootNode()) {
+                    if (r.mode === 'closed') closed = true;
+                    outer = r.host;
+                }
+                const onEl = ours(() => { on = true; });
+                const onUp = ours(() => { up = true; });
+                const onWin = ours((e) => {
+                    seen = true;
+                    if (on || went) return;
+                    const t = e.target;
+                    if (closed && t === outer) return;
+                    if (t === el || (e.composedPath && e.composedPath().includes(el))
+                        || (t && t.nodeType === 1 && (el.contains(t) || onLabel(t)))) { on = true; return; }
+                    went = (t && t.nodeType === 1 && describe(t)) || 'the document';
+                });
+                const off = () => (on || w.top.__nvMissed ? null : went || (up && !seen && !el.isConnected ? '' : null));
+                const offEnd = () => {
+                    w.removeEventListener(kind, onWin, true);
+                    w.removeEventListener('mouseup', onUp, true);
+                    el.removeEventListener(kind, onEl, true);
+                    if (w.top.__nvOff === off) delete w.top.__nvOff;
+                    if (w.top.__nvOffEnd === offEnd) delete w.top.__nvOffEnd;
+                };
+                w.addEventListener(kind, onWin, true);
+                w.addEventListener('mouseup', onUp, true);
+                el.addEventListener(kind, onEl, true);
+                w.top.__nvOff = off;
+                w.top.__nvOffEnd = offEnd;
+                setTimeout(offEnd, 10000);
                 if (effects) armEffects(w);
                 // A page that loaded a moment ago may not have wired the
                 // element up yet: keep what a click on it reaches, the
@@ -3968,7 +4026,11 @@ impl Page {
         // added is, which only ever stops another click.
         let check = point.get("check").and_then(Value::as_bool) == Some(true)
             && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none(); // diagnostic knob
-        let (arrived, heard, missed) = if check { self.press_arrived(young, timeout) } else { (true, None, None) };
+        let Arrival { arrived, heard, missed, mut off } = if check {
+            self.press_arrived(young, timeout)
+        } else {
+            Arrival { arrived: true, heard: None, missed: None, off: None }
+        };
         if let Some(instead) = missed {
             // The element moved as it was pressed: the press reached
             // something else, which the page never saw. Press again where
@@ -4002,7 +4064,9 @@ impl Page {
             // happened on the page, so sending it again can't double-click.
             self.wait_frame(Duration::from_millis(500));
             self.mouse_click(&point, &opts.button, timeout)?;
-            if !self.press_arrived(false, timeout).0 {
+            let resent = self.press_arrived(false, timeout);
+            off = resent.off;
+            if !resent.arrived {
                 eprintln!("[click] still not delivered; dispatching DOM events");
                 if armed {
                     self.drop_effects(timeout);
@@ -4015,6 +4079,10 @@ impl Page {
                 return Ok(res);
             }
             point["redelivered"] = json!(true);
+        }
+        if let Some(on) = off {
+            // The page has already reacted to this press: not pressed again.
+            point["click_off"] = json!(on);
         }
         if nav && self.nav_planned(timeout) == Some(false) {
             // The page cancelled what the click would have loaded (a
@@ -4223,19 +4291,25 @@ impl Page {
     /// A slow page gets 300 ms to process the events before "nothing came"
     /// is believed (a dropped event never arrives; a queued one does).
     /// With `listeners`, the first look also counts what listens for the
-    /// click ([`PATH_LISTENERS`]). Last, what the press landed on instead
-    /// of the element when it moved before the press (`__nvMissed`): the
-    /// page was kept from that press.
-    fn press_arrived(&self, listeners: bool, timeout: Duration) -> (bool, Option<u64>, Option<String>) {
+    /// click ([`PATH_LISTENERS`]). Then what the press landed on instead
+    /// of the element when it moved before the press (`__nvMissed`), and
+    /// where its click event went when not to the element (`__nvOff`).
+    fn press_arrived(&self, listeners: bool, timeout: Duration) -> Arrival {
         let deadline = std::time::Instant::now() + Duration::from_millis(300);
         let mut heard = None;
-        let mut missed = None;
+        let (mut missed, mut off) = (None, None);
         let mut first = listeners;
         loop {
             let (expression, api) = if first {
-                (format!("[window.__nvSeen, window.__nvMissed, {}]", path_listeners(true)), true)
+                (
+                    format!(
+                        "[window.__nvSeen, window.__nvMissed, window.__nvOff && window.__nvOff(), {}]",
+                        path_listeners(true)
+                    ),
+                    true,
+                )
             } else {
-                ("[window.__nvSeen, window.__nvMissed]".to_string(), false)
+                ("[window.__nvSeen, window.__nvMissed, window.__nvOff && window.__nvOff()]".to_string(), false)
             };
             let seen = self
                 .send(
@@ -4247,16 +4321,17 @@ impl Page {
                 .map(|r| {
                     let v = r.pointer("/result/value");
                     if first {
-                        heard = v.and_then(|v| v.get(2)).and_then(Value::as_u64);
+                        heard = v.and_then(|v| v.get(3)).and_then(Value::as_u64);
                     }
                     missed = v.and_then(|v| v.get(1)).and_then(Value::as_str).map(str::to_string);
+                    off = v.and_then(|v| v.get(2)).and_then(Value::as_str).map(str::to_string);
                     v.and_then(|v| v.get(0)).and_then(Value::as_u64)
                 });
             first = false;
             match seen {
                 Some(Some(0)) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-                Some(Some(0)) => return (false, heard, missed),
-                _ => return (true, heard, missed),
+                Some(Some(0)) => return Arrival { arrived: false, heard, missed, off },
+                _ => return Arrival { arrived: true, heard, missed, off },
             }
         }
     }

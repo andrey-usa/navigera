@@ -129,6 +129,30 @@ fn a_press_that_would_land_on_something_else_is_held_back_and_sent_again() {
     }
 }
 
+/// A page that answers the press by moving the element (a banner put in
+/// above it on pointerdown) has the click event go to the parent the press
+/// and the release share; one that replaces it on mousedown gets that too,
+/// or no click event at all (Chrome 153, 157). Either way the element's own
+/// handler never runs. The page saw the press, so it isn't pressed again,
+/// but the result says so. Before, it read as a plain success.
+#[test]
+fn a_click_whose_click_event_lands_off_the_element_says_so() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("click-off", &[]);
+    for q in ["replace", "banner"] {
+        s.ok(&["goto", &format!("{}/click-off?{q}", site.url)]);
+        let r = s.ok(&["click", "--selector", "#go"]);
+        let said = r["click_missed"].as_str().unwrap_or_default();
+        let told = said.contains("went to div#w") || (q == "replace" && said.contains("sent no click event"));
+        assert!(told && said.contains("handler didn't run"), "{q}: {r}");
+        assert_eq!(s.text(&["text", "--selector", "#out"]), "idle", "{q}: pressed again");
+    }
+    s.ok(&["goto", &format!("{}/click-off", site.url)]);
+    let r = s.ok(&["click", "--selector", "#go"]);
+    assert!(r.get("click_missed").is_none(), "a still button: {r}");
+    assert_eq!(s.text(&["text", "--selector", "#out"]), "went");
+}
+
 /// A locator by role and name, or by label, costs one pass over the page:
 /// each candidate's `el.labels` used to scan the document on its first read,
 /// so the first call on 12000 buttons took about 9 s. Timed at two sizes so a

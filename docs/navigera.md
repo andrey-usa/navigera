@@ -318,6 +318,14 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     Not covered: a page that listens on the document from the start
     (`no_effect` as before), an element inside a frame, a handler wired
     more than 500 ms after the click with nothing loading.
+  - **A click the page moved away from says so.** A page that answers the
+    press itself, by moving the element (a banner put in above it on
+    pointerdown) or replacing it (a button rendered anew on mousedown),
+    has the release land elsewhere: the click event goes to the parent
+    the press and the release share, or the browser sends none, and the
+    element's own handler never runs. The result carries `click_missed`
+    with where the click went. The page saw the press, so navigera
+    doesn't press again: check what the click should do first.
 - **Page errors are reported.** An uncaught exception while a command ran
   adds one line to its `notes` (`the page threw TypeError: …; \`errors\`
   lists them`), so a click whose handler crashed doesn't look like a click

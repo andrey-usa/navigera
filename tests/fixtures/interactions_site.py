@@ -69,6 +69,10 @@ getting wrong, one page each, built the way those sites behave:
 /hover-cover    a button whose first mouse move opens an overlay over it, with
                 a Subscribe button, for 300 ms: the press that follows the
                 move lands on the overlay
+/click-off      a button whose page answers the press itself, so the click
+                event goes to their shared parent, #w: ?replace re-renders
+                the button on mousedown, ?banner puts a banner in above it
+                on pointerdown; neither: a still button
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
 
@@ -766,6 +770,29 @@ addEventListener('pointermove', () => {
 }, { once: true });
 </script>
 """)
+
+
+PAGES["/click-off"] = ("click off", "#go{padding:10px}", """
+<div id=w><button id=go>Go</button></div>
+<p id=out>idle</p>
+<script>
+// A press the page reacts to before the release: a framework that renders
+// the pressed state anew (?replace), a banner that slides the button down
+// (?banner). The release lands on another element than the press, so the
+// click goes to the parent they share and Go's own handler never runs.
+const q = new URLSearchParams(location.search);
+const went = () => { document.getElementById('out').textContent = 'went'; };
+const go = document.getElementById('go');
+go.onclick = went;
+if (q.has('replace')) go.onmousedown = function () {
+  const n = this.cloneNode(true);
+  n.onclick = went;
+  this.replaceWith(n);
+};
+if (q.has('banner')) go.onpointerdown = () => {
+  document.getElementById('w').insertAdjacentHTML('afterbegin', '<div style="height:80px">banner</div>');
+};
+</script>""")
 
 
 PAGES["/wired-late"] = ("wired late", "", """

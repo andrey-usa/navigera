@@ -79,6 +79,14 @@ All notable changes to this project are documented here. The format follows
   (3 of 40 clicks under an overlay that opened 4 to 37 ms after load
   pressed the overlay's button; 0 now). Clicks on a still page take as
   long as before.
+- A click whose page answered the press by moving or replacing the
+  element (a banner put in above it on pointerdown, a button rendered
+  anew on mousedown) says so in `click_missed`: the click event went to
+  the parent the press and the release share, or the browser sent none,
+  so the element's own handler never ran. Before, it read as a plain
+  success (compact output printed `ok` for the replaced button). The
+  page saw the press, so it isn't pressed again. Read with the
+  press-arrival check: no extra round trip.
 - A text entry on a large page reported `ok` when a script had set a
   checkbox, a radio, a select or a field's value (no DOM change, no
   event) between the `ax` and the entry; a read showed that change. Form
