@@ -39,8 +39,10 @@ getting wrong, one page each, built the way those sites behave:
 /two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
 /journal        a 1,300-row page with fields whose typing changes nothing
-                else, a live count, a tip a style shows on focus, and a
-                hint a :has() rule hides once the field is filled
+                else, a live count, a tip a style shows on focus, a hint a
+                :has() rule hides once the field is filled, a field whose
+                typing rewrites a style rule, a focus tip from an @imported
+                sheet; ?closed: a field that changes a closed shadow root
 /stale-ref      a button and a bare draggable=true handle (no handlers)
 /drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
 /drag-pointer   the same list, each item made draggable on pointerdown (as
@@ -782,9 +784,23 @@ PAGES["/journal"] = ("journal", ".tip{display:none} #tipped:focus ~ .tip{display
 <span id=n>0 chars</span>
 <p><input id=tipped aria-label=Tipped><span class=tip>Use your full name</span></p>
 <form><input id=code aria-label=Code placeholder=code><span class=hint>Type a code</span></form>
+<style id=rules>.later{display:none}</style>
+<p><input id=restyle aria-label=Restyle oninput="document.getElementById('rules').sheet.cssRules[0].style.display = 'inline'">
+<span class=later>Restyled by a rule</span></p>
+<style>@import url('/journal-import.css');</style>
+<p><input id=imported aria-label=Imported><span class=itip>Imported tip</span></p>
+<div id=host></div>
+<input id=inclosed aria-label=Closed oninput="if (window.cs) window.cs.querySelector('span').textContent = 'closed changed'">
 <button id=go onclick="document.getElementById('out').textContent = 'clicked ' + (++window.k)">Go</button>
 <span id=out>idle</span>
-<script>window.k = 0;</script>
+<script>
+window.k = 0;
+// ?closed: a closed shadow root, which only the snapshot reads.
+if (location.search.includes('closed')) {
+  window.cs = document.getElementById('host').attachShadow({ mode: 'closed' });
+  window.cs.innerHTML = '<span>closed idle</span>';
+}
+</script>
 """ + "".join(f"<p>row {i} of the long page</p>" for i in range(1300)))
 
 
@@ -888,6 +904,8 @@ class Handler(BaseHTTPRequestHandler):
             import time
             time.sleep(int(q.get("ms", ["2000"])[0]) / 1000)
             return self.send("{}", "application/json")
+        if u.path == "/journal-import.css":
+            return self.send(".itip{display:none} #imported:focus ~ .itip{display:inline}", "text/css")
         if u.path == "/slow-echo":
             import time
             time.sleep(int(q.get("ms", ["100"])[0]) / 1000)

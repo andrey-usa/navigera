@@ -1580,20 +1580,28 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
             .expect("run navigera");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
-    let steps: [&[&str]; 7] = [
+    let steps: [&[&str]; 9] = [
         &["fill", "--selector", "#name", "Ada Lovelace"],
         &["fill", "--selector", "#note", "first note"],
         &["fill", "--selector", "#count", "abc"],
         &["fill", "--selector", "#tipped", "Grace"],
         &["fill", "--selector", "#code", "X1"],
         &["fill", "--selector", "#name", "Ada"],
+        &["fill", "--selector", "#restyle", "on"],
+        &["fill", "--selector", "#imported", "x"],
         &["click", "--selector", "#go"],
     ];
     let mut reports: Vec<Vec<String>> = Vec::new();
     for (name, _) in &sessions {
         compact(name, &["goto", &page]);
         compact(name, &["ax"]);
-        reports.push(steps.iter().map(|a| compact(name, a)).collect());
+        let mut r: Vec<String> = steps.iter().map(|a| compact(name, a)).collect();
+        // A closed shadow root, which the page's scripts (and so the
+        // journal) can't reach: its change is reported all the same.
+        compact(name, &["goto", &format!("{page}?closed")]);
+        compact(name, &["ax"]);
+        r.push(compact(name, &["fill", "--selector", "#inclosed", "z"]));
+        reports.push(r);
     }
     // Refs are node ids: each browser numbers its own.
     let unref = |r: &Vec<String>| -> Vec<String> {
@@ -1615,7 +1623,10 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
     assert!(r[4].contains("- text: Type a code"), "a :has() rule: {r:?}");
     // "Ada" after "Ada Lovelace": the field showed it already, so it changed.
     assert!(r[5].contains("~ textbox \"Name\""), "{r:?}");
-    assert!(r[6].contains("clicked 1") && !r[6].contains("Lovelace") && !r[6].contains("first note"), "{r:?}");
+    assert!(r[6].contains("+ text: Restyled by a rule"), "a style rule a script rewrote: {r:?}");
+    assert!(r[7].contains("Imported tip"), "a style from an @imported sheet: {r:?}");
+    assert!(r[8].contains("clicked 1") && !r[8].contains("Lovelace") && !r[8].contains("first note"), "{r:?}");
+    assert!(r[9].contains("closed changed"), "inside a closed shadow root: {r:?}");
     let best = |name: &str| {
         (0..3)
             .map(|i| {

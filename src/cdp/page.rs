@@ -700,7 +700,8 @@ const JOURNAL_ARM: &str = r#"(id) => {
     const old = W.__nvJournal;
     if (old) { try { old.stop(); } catch (_) {} }
     const j = { id, m: 0, e: 0, broken: '', obs: [], offs: [], typedAttr: [], inputs: [], primed: false };
-    j.stop = () => { for (const o of j.obs) o.disconnect(); for (const off of j.offs) off(); };
+    j.unhook = () => false;
+    j.stop = () => { for (const o of j.obs) o.disconnect(); for (const off of j.offs) off(); j.unhook(); };
     j.docsOf = () => {
         const out = [];
         const visit = (d) => {
@@ -727,7 +728,24 @@ const JOURNAL_ARM: &str = r#"(id) => {
         for (const d of docs) walk(d);
         return roots;
     };
-    j.sheetsOf = (scope) => [...(scope.styleSheets || []), ...(scope.adoptedStyleSheets || [])];
+    // A scope's sheets, and the sheets they @import (which `styleSheets`
+    // leaves out). Imports come first in a sheet: the walk stops at the
+    // first rule that is none of @charset, @import or a @layer statement.
+    j.sheetsOf = (scope) => {
+        const out = [];
+        const add = (sh) => {
+            if (!sh || out.includes(sh)) return;
+            out.push(sh);
+            let rules = null;
+            try { rules = sh.cssRules; } catch (_) {}
+            for (const r of rules || []) {
+                if (r.type === 3) add(r.styleSheet);
+                else if (r.type !== 2 && r.type !== 0) break;
+            }
+        };
+        for (const sh of [...(scope.styleSheets || []), ...(scope.adoptedStyleSheets || [])]) add(sh);
+        return out;
+    };
     j.docs = j.docsOf();
     j.roots = j.rootsOf(j.docs);
     if (j.roots.length > ROOTS_MAX) j.broken = 'shadow roots';
@@ -852,6 +870,50 @@ const JOURNAL_PRIME: &str = r#"(id) => {
         for (let i = 0; i < cs.length; i++) j.controls.push([cs[i], j.sig(cs[i])]);
         if (j.controls.length > CONTROLS_MAX) return 'form controls';
     }
+    // A script that writes a style rule (its declarations, its selector, a
+    // media list, a rule inserted into a group) changes no DOM and may
+    // change no rule count, and reading every rule's text costs ms per
+    // thousand rules: the ways in are watched instead, in every document's
+    // realm, from here to the check, which takes them off (as does the
+    // next arming, or a timer for an entry that never comes back). Not
+    // seen: a declaration a script kept from before and writes by property
+    // name (`st.display = ...`, which no prototype carries in Chrome).
+    j.unhook();
+    j.cssom = false;
+    const hooks = [];
+    const flag = () => { j.cssom = true; };
+    const wrap = (proto, k, when) => {
+        const d = proto && Object.getOwnPropertyDescriptor(proto, k);
+        if (!d || !d.configurable) return;
+        const w = { ...d };
+        if (typeof d.value === 'function') {
+            const f = d.value;
+            w.value = { [k](...a) { if (!when || when(this)) flag(); return f.apply(this, a); } }[k];
+        } else {
+            if (d.get) { const g = d.get; w.get = function () { if (!when || when(this)) flag(); return g.call(this); }; }
+            if (d.set) { const st = d.set; w.set = function (v) { if (!when || when(this)) flag(); return st.call(this, v); }; }
+        }
+        Object.defineProperty(proto, k, w);
+        hooks.push(() => Object.defineProperty(proto, k, d));
+    };
+    const ofRule = (st) => !!st.parentRule;
+    for (const d of j.docs) {
+        const v = d.defaultView;
+        if (!v) continue;
+        for (const C of [v.CSSStyleRule, v.CSSNestedDeclarations, v.CSSKeyframeRule]) {
+            if (C) for (const k of ['style', 'styleMap', 'selectorText']) wrap(C.prototype, k);
+        }
+        if (v.CSSStyleDeclaration) {
+            const P = v.CSSStyleDeclaration.prototype;
+            wrap(P, 'setProperty', ofRule); wrap(P, 'removeProperty', ofRule); wrap(P, 'cssText', ofRule);
+        }
+        if (v.MediaList) for (const k of ['mediaText', 'appendMedium', 'deleteMedium']) wrap(v.MediaList.prototype, k);
+        if (v.CSSGroupingRule) for (const k of ['insertRule', 'deleteRule']) wrap(v.CSSGroupingRule.prototype, k);
+        if (v.CSSStyleSheet) for (const k of ['insertRule', 'deleteRule', 'addRule', 'removeRule', 'replace', 'replaceSync']) wrap(v.CSSStyleSheet.prototype, k);
+    }
+    const unhook = () => { for (const off of hooks.splice(0)) { try { off(); } catch (_) {} } return j.cssom; };
+    j.unhook = unhook;
+    setTimeout(() => { if (hooks.length) { unhook(); j.cssom = true; } }, 10000);
     j.primed = true;
     return '';
 }"#;
@@ -863,10 +925,12 @@ const JOURNAL_CHECK: &str = r#"(id, typed) => {
     const j = window.__nvJournal;
     if (!j || j.id !== id) return 'gone';
     if (j.broken) return j.broken;
+    const cssom = j.unhook();
     if (!j.primed) return 'not primed';
     j.primed = false;
     j.flush();
     if (j.m) return 'dom';
+    if (cssom) return 'style rule';
     if (j.e) return 'event';
     let t = document.activeElement;
     for (;;) {
@@ -4784,6 +4848,22 @@ impl Page {
     }
 }
 
+/// Whether a DOM snapshot holds a closed shadow root: the page's scripts
+/// can't reach one, so neither can the change journal (see
+/// [`JOURNAL_ARM`]).
+fn has_closed_shadow_root(snap: &Value) -> bool {
+    let Some(closed) =
+        snap.get("strings").and_then(Value::as_array).and_then(|s| s.iter().position(|x| x.as_str() == Some("closed")))
+    else {
+        return false;
+    };
+    snap.get("documents").and_then(Value::as_array).into_iter().flatten().any(|d| {
+        d.pointer("/nodes/shadowRootType/value")
+            .and_then(Value::as_array)
+            .is_some_and(|v| v.iter().any(|x| x.as_u64() == Some(closed as u64)))
+    })
+}
+
 /// What a snapshot shows a user could click (see [`Page::clickables`]).
 fn clickables_from(snap: &Value) -> ax::Clickables {
     {
@@ -5390,7 +5470,10 @@ impl Page {
         // snapshot holds (a frame of another origin in the page's process
         // can't be watched from the page).
         let docs = snap.get("documents").and_then(Value::as_array).map_or(0, Vec::len) as u64;
-        *self.journal.lock().unwrap() = armed.filter(|&(_, watched)| watched >= docs).map(|(id, _)| id);
+        // Nor can it watch inside a closed shadow root, which the snapshot
+        // reads.
+        let closed = armed.is_some() && has_closed_shadow_root(&snap);
+        *self.journal.lock().unwrap() = armed.filter(|&(_, watched)| watched >= docs && !closed).map(|(id, _)| id);
         let started = std::time::Instant::now();
         // The clickable elements and the tree read the same snapshot, side
         // by side.
