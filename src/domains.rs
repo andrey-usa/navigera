@@ -297,14 +297,7 @@ mod tests {
     #[test]
     fn network_schemes_without_an_authority_fail_closed() {
         let p = policy("example.com");
-        for url in [
-            "http:",
-            "https:example.com",
-            "http:/example.com",
-            "ws:socket",
-            "wss:/socket",
-            "HTTP:example.com",
-        ] {
+        for url in ["http:", "https:example.com", "http:/example.com", "ws:socket", "wss:/socket", "HTTP:example.com"] {
             assert!(!p.allows_url(url), "{url:?} has no network authority");
         }
         assert!(p.allows_url("custom:opaque"));
