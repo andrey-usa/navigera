@@ -1318,6 +1318,15 @@ fn drag_without_a_drag_is_a_held_mouse() {
 
 /// How long `args` takes to run on the session, in ms (the CLI start-up is in
 /// it for every sample alike).
+/// Held by the tests that time an op against another, and by the ones that
+/// load the machine with large-page reads: run side by side, the second
+/// kind slowed the first past its margin on two-core runners.
+static TIMED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn timed_alone() -> std::sync::MutexGuard<'static, ()> {
+    TIMED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn timed(s: &Session, args: &[&str]) -> (f64, Value) {
     let t = std::time::Instant::now();
     let r = s.ok(args);
@@ -1334,6 +1343,7 @@ fn median(mut v: Vec<f64>) -> f64 {
 /// a second for the held request, and later ones don't wait on either.
 #[test]
 fn long_polls_and_beacons_dont_hold_snapshots() {
+    let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("bg", &[]);
     s.ok(&["goto", &format!("{}/long-poll?hold=2500", site.url)]);
@@ -1395,6 +1405,7 @@ fn a_snapshot_does_not_wait_on_polls_and_no_wait_skips_the_wait() {
 /// says how long it waited.
 #[test]
 fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
+    let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("quiet-skip", &[]);
     let has_quiet_note = |r: &Value| {
@@ -1432,6 +1443,7 @@ fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
 /// navigation and is waited for. Nothing navigera watched is left behind.
 #[test]
 fn a_click_waits_for_a_navigation_only_when_the_page_plans_one() {
+    let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("nav-intent", &[]);
     let page = format!("{}/nav-intent", site.url);
@@ -1476,6 +1488,7 @@ fn a_click_waits_for_a_navigation_only_when_the_page_plans_one() {
 /// thought before typing), so the quiet wait alone would read it at once.
 #[test]
 fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
+    let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("turn-fetch", &[]);
     let compact = |args: &[&str]| {
@@ -1537,6 +1550,7 @@ fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
 /// after every entry (`NAVIGERA_CHANGE_JOURNAL=0`), and timed against it.
 #[test]
 fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
+    let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
     let page = format!("{}/journal", site.url);
     let sessions: Vec<(String, &str)> = ["1", "0"]

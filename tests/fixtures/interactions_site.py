@@ -38,7 +38,7 @@ getting wrong, one page each, built the way those sites behave:
                 clause long enough to be cut in a snapshot
 /two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
-/journal        a 3,000-row page with fields whose typing changes nothing
+/journal        a 1,300-row page with fields whose typing changes nothing
                 else, a live count, a tip a style shows on focus, and a
                 hint a :has() rule hides once the field is filled
 /stale-ref      a button and a bare draggable=true handle (no handlers)
@@ -785,7 +785,7 @@ PAGES["/journal"] = ("journal", ".tip{display:none} #tipped:focus ~ .tip{display
 <button id=go onclick="document.getElementById('out').textContent = 'clicked ' + (++window.k)">Go</button>
 <span id=out>idle</span>
 <script>window.k = 0;</script>
-""" + "".join(f"<p>row {i} of the long page</p>" for i in range(3000)))
+""" + "".join(f"<p>row {i} of the long page</p>" for i in range(1300)))
 
 
 PAGES["/xo-child"] = ("card frame", "", """
