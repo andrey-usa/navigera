@@ -38,6 +38,9 @@ getting wrong, one page each, built the way those sites behave:
                 clause long enough to be cut in a snapshot
 /two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
+/journal        a 3,000-row page with fields whose typing changes nothing
+                else, a live count, a tip a style shows on focus, and a
+                hint a :has() rule hides once the field is filled
 /stale-ref      a button and a bare draggable=true handle (no handlers)
 /drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
 /drag-pointer   the same list, each item made draggable on pointerdown (as
@@ -769,6 +772,20 @@ def xo_parent(port, child_host):
 <script>
 addEventListener('message', (e) => {{ if (e.data && e.data.paid) document.getElementById('paid').textContent = 'paid ' + e.data.paid; }});
 </script>""")
+
+
+PAGES["/journal"] = ("journal", ".tip{display:none} #tipped:focus ~ .tip{display:inline} .hint{display:none} "
+    "form:has(#code:placeholder-shown) .hint{display:block}", """
+<input id=name aria-label=Name>
+<textarea id=note aria-label=Note></textarea>
+<input id=count aria-label=Count oninput="document.getElementById('n').textContent = this.value.length + ' chars'">
+<span id=n>0 chars</span>
+<p><input id=tipped aria-label=Tipped><span class=tip>Use your full name</span></p>
+<form><input id=code aria-label=Code placeholder=code><span class=hint>Type a code</span></form>
+<button id=go onclick="document.getElementById('out').textContent = 'clicked ' + (++window.k)">Go</button>
+<span id=out>idle</span>
+<script>window.k = 0;</script>
+""" + "".join(f"<p>row {i} of the long page</p>" for i in range(3000)))
 
 
 PAGES["/xo-child"] = ("card frame", "", """

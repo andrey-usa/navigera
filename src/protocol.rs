@@ -2634,6 +2634,26 @@ struct Look {
     command: Command,
     tree: String,
     page: (String, u64),
+    /// The change journal armed with the read (see
+    /// [`crate::cdp::Page::journal_unchanged`]).
+    journal: Option<u64>,
+    /// Text entered into fields since the read, which `tree` doesn't show
+    /// yet: each is left out of the next report as that entry's own.
+    typed: Vec<String>,
+}
+
+impl Look {
+    fn new(command: Command, tree: String, page: (String, u64), journal: Option<u64>) -> Self {
+        Look { command, tree, page, journal, typed: Vec::new() }
+    }
+}
+
+/// Whether a read arms the change journal that lets a text entry's report
+/// skip reading the page again (`NAVIGERA_CHANGE_JOURNAL=0` turns it off,
+/// to compare against a read after every entry).
+fn change_journal() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_CHANGE_JOURNAL").map_or(true, |v| v.trim() != "0"))
 }
 
 /// At most this many changed lines follow an action; past that the page
@@ -3329,7 +3349,8 @@ impl Driver {
     pub(crate) fn report_state(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
         self.compact = compact;
         if let (Command::Ax { .. }, Some(Value::String(tree))) = (command, result.as_ref()) {
-            self.look = Some(Look { command: command.clone(), tree: tree.clone(), page: self.session.page_identity() });
+            self.look =
+                Some(Look::new(command.clone(), tree.clone(), self.session.page_identity(), self.session.journal_id()));
         }
         let Some(value) = result.as_ref() else { return };
         let (own, state) = split_state(value);
@@ -3359,7 +3380,7 @@ impl Driver {
         }
         self.look = match self.run_op_inner(&whole) {
             Ok(Outcome { result: Value::String(tree), .. }) => {
-                Some(Look { command: whole, tree, page: self.session.page_identity() })
+                Some(Look::new(whole, tree, self.session.page_identity(), self.session.journal_id()))
             }
             _ => None,
         };
@@ -3386,20 +3407,33 @@ impl Driver {
         {
             return None;
         }
-        let look = self.look.take()?;
+        let mut look = self.look.take()?;
         if look.page != self.session.page_identity() {
             return None;
         }
         // Read after what the action started, not before it: once its
         // requests show, the read waits for them as an `ax` after an action
         // does (else it would catch the page's "Loading…" in between).
-        self.session.action_traffic_settled(ACTION_TRAFFIC_GRACE);
+        let traffic = self.session.action_traffic_settled(ACTION_TRAFFIC_GRACE);
+        // Text entered into a field that changed nothing else the tree shows,
+        // as the journal armed with the last read can prove: the report is
+        // what a read would say (nothing beyond the entry), without reading
+        // a large page again. The entry waits in `typed` for the next read.
+        if let (Some(v), Some(id), false) = (typed.filter(|v| !v.is_empty()), look.journal, traffic) {
+            if self.session.journal_unchanged(id, v) {
+                look.typed.push(v.to_string());
+                self.look = Some(look);
+                return None;
+            }
+        }
+        let mut entered: Vec<&str> = look.typed.iter().map(String::as_str).collect();
+        entered.extend(typed);
         let read = |me: &mut Self| match me.run_op_inner(&look.command) {
             Ok(Outcome { result: Value::String(tree), .. }) => Some(tree),
             _ => None,
         };
         let mut tree = read(self)?;
-        let mut change = tree_change(&look.tree, &tree, typed);
+        let mut change = tree_change(&look.tree, &tree, &entered);
         // The page is between states: the action put up a placeholder
         // ("Loading…", a progress bar) for work it starts a moment later (a
         // timer, a frame, an effect after paint). Reporting it would cost the
@@ -3413,7 +3447,7 @@ impl Driver {
                     // Read once more after counting starts: a change that came
                     // just before it would otherwise go unseen until the deadline.
                     tree = read(self)?;
-                    change = tree_change(&look.tree, &tree, typed);
+                    change = tree_change(&look.tree, &tree, &entered);
                     let left = deadline.saturating_duration_since(std::time::Instant::now());
                     if !change.as_deref().is_some_and(shows_transition) || left.is_zero() {
                         break;
@@ -3427,7 +3461,8 @@ impl Driver {
                 self.session.stop_counting_changes();
             }
         }
-        self.look = Some(Look { tree, ..look });
+        let journal = self.session.journal_id();
+        self.look = Some(Look { tree, journal, typed: Vec::new(), ..look });
         let change = change?;
         Some(Value::String(match short {
             Value::String(ok) if ok == "ok" => change,
@@ -3779,6 +3814,15 @@ impl Driver {
         }
         if command.is_action() {
             self.session.mark_action();
+        }
+        // A text entry after a look: the journal takes the state it will be
+        // judged against (see `page_change`).
+        if self.compact && matches!(command, Command::Fill { .. } | Command::Type { .. } | Command::InsertText { .. }) {
+            if let Some(id) =
+                self.look.as_ref().filter(|l| l.page == self.session.page_identity()).and_then(|l| l.journal)
+            {
+                self.session.journal_prime(id);
+            }
         }
         let result = self.dispatch(command).map_err(|e| {
             let msg = format!("{e:#}");
@@ -4305,6 +4349,7 @@ impl Driver {
                     limit: limit.unwrap_or(DEFAULT_AX_LIMIT),
                     scope: scope.optional("ax")?,
                     full_text: *full_text,
+                    journal: self.compact && change_journal(),
                 };
                 let mut tree = s.ax(&opts, *timeout_ms).map_err(|e| e.context("ax"))?;
                 if let (Value::Array(nodes), Some(n)) = (&mut tree, limit) {
@@ -5597,7 +5642,7 @@ fn reports_page_change(command: &Command) -> bool {
 /// value just typed, while anything else the fill changed (a live count, a
 /// suggestion list) is shown. None when nothing differs; past
 /// [`CHANGE_LINES`] the rest is counted, not shown.
-fn tree_change(before: &str, after: &str, typed: Option<&str>) -> Option<String> {
+fn tree_change(before: &str, after: &str, typed: &[&str]) -> Option<String> {
     use std::collections::HashMap;
     // `ref=N` as the tree prints it, in the element's own bracket tag
     // (`[ref=3]`, `[checked, ref=3]`): not inside a quoted name and not in
@@ -5676,8 +5721,8 @@ fn tree_change(before: &str, after: &str, typed: Option<&str>) -> Option<String>
     for line in &added {
         let was = node_ref(line).and_then(|r| gone_refs.get(r));
         let changed = was.is_some();
-        if let (Some(was), Some(v)) = (was, typed.filter(|v| !v.is_empty())) {
-            if line.contains(v) && !was.contains(v) {
+        if let Some(was) = was {
+            if typed.iter().any(|v| !v.is_empty() && line.contains(v) && !was.contains(v)) {
                 continue;
             }
         }
@@ -6075,14 +6120,14 @@ mod tests {
     fn an_action_says_which_lines_of_the_tree_it_changed() {
         let before = "page \"Shop\" http://x/\n- form:\n  - textbox \"Name\" [ref=2]\n  - checkbox \"I agree\" [ref=3]\n  - button \"Send\" [ref=4]";
         // Nothing a reader could see changed: no change, so the action says `ok`.
-        assert_eq!(super::tree_change(before, before, None), None);
+        assert_eq!(super::tree_change(before, before, &[]), None);
         // A node re-rendered as it was (new ref, same text) is not a change.
         let rerendered = before.replace("[ref=4]", "[ref=9]");
-        assert_eq!(super::tree_change(before, &rerendered, None), None);
+        assert_eq!(super::tree_change(before, &rerendered, &[]), None);
         // A flag inside a bracket with the ref: one changed element, `~`.
         let checked = before.replace("\"I agree\" [ref=3]", "\"I agree\" [checked, ref=3]");
         assert_eq!(
-            super::tree_change(before, &checked, None).as_deref(),
+            super::tree_change(before, &checked, &[]).as_deref(),
             Some("~ checkbox \"I agree\" [checked, ref=3]")
         );
         // New text and a removed button; bare containers and list markers are left out.
@@ -6091,30 +6136,30 @@ mod tests {
             before.replace("\n  - button \"Send\" [ref=4]", "")
         );
         assert_eq!(
-            super::tree_change(before, &after, None).as_deref(),
+            super::tree_change(before, &after, &[]).as_deref(),
             Some("+ status: Sent\n+ text: one\n- button \"Send\" [ref=4]")
         );
         // After a fill, the field's own line is the value just typed.
         let filled = before.replace("\"Name\" [ref=2]", "\"Name\" [ref=2]: Ada");
-        assert_eq!(super::tree_change(before, &filled, Some("Ada")), None);
-        assert_eq!(super::tree_change(before, &filled, None).as_deref(), Some("~ textbox \"Name\" [ref=2]: Ada"));
+        assert_eq!(super::tree_change(before, &filled, &["Ada"]), None);
+        assert_eq!(super::tree_change(before, &filled, &[]).as_deref(), Some("~ textbox \"Name\" [ref=2]: Ada"));
         // ...but what else the fill changed is shown (a live count).
         let live_before = "- textbox \"q\" [ref=2]\n- status [ref=5]: Results: 0";
         let live_after = "- textbox \"q\" [ref=2]: shoes\n- status [ref=5]: Results: 12";
         assert_eq!(
-            super::tree_change(live_before, live_after, Some("shoes")).as_deref(),
+            super::tree_change(live_before, live_after, &["shoes"]).as_deref(),
             Some("~ status [ref=5]: Results: 12")
         );
         // A page's own text that reads like a ref is text, not a ref.
         let quoted_before = "- text: \"x [ref=2] y\"\n- button \"B\" [ref=2]";
         let quoted_after = "- text: \"x [ref=2] y2\"";
         assert_eq!(
-            super::tree_change(quoted_before, quoted_after, None).as_deref(),
+            super::tree_change(quoted_before, quoted_after, &[]).as_deref(),
             Some("+ text: \"x [ref=2] y2\"\n- text: \"x [ref=2] y\"\n- button \"B\" [ref=2]")
         );
         // Past the cap the rest is counted.
         let many: String = (0..50).map(|i| format!("\n- text: row {i}")).collect();
-        let out = super::tree_change(before, &format!("{before}{many}"), None).unwrap();
+        let out = super::tree_change(before, &format!("{before}{many}"), &[]).unwrap();
         assert_eq!(out.lines().count(), super::CHANGE_LINES + 1);
         assert!(out.ends_with("... and 10 more changed lines (`ax` reads the page)"));
     }

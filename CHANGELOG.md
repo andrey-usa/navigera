@@ -28,6 +28,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Typing into a field on a large page reports in the time of the typing,
+  not of a page read: a `fill`, `type` or `insert-text` that changed
+  nothing else the tree shows answers `ok` without reading the page again
+  (10,000 table rows: 574 to 27 ms; 1,000 rows: 63 to 12 ms, local, Chrome
+  153). A journal kept in the page since the last read proves nothing
+  else changed: the DOM of every document and open shadow root, form
+  values a script set, popovers, and the style rules that follow an
+  element's state (`:focus`, `:invalid`, `:has()` and the like), each
+  checked against what it matched before the entry. When it can't prove
+  it (a change, a style sheet of another origin) the page is read as
+  before. Reports are the same either way; `NAVIGERA_CHANGE_JOURNAL=0`
+  reads after every entry, to compare.
 - Actions are faster where they used to sit out fixed waits. Saying what
   an action changed no longer waits 50 ms for a request the action might
   have started: one turn of the page's event loop shows whether it started

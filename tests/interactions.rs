@@ -1528,6 +1528,101 @@ fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
     assert!(reported < plain + 40.0, "saying what a fill changed took {reported:.0} ms against {plain:.0} ms");
 }
 
+/// On a large page, text entered into a field that changes nothing else
+/// is reported without reading the page again: the journal armed with the
+/// last read proves it. The report is what a read after the entry says,
+/// entry by entry and for the click after them (the typed text stays out
+/// of it), whichever way the page changed: its DOM, a style that follows
+/// focus, a `:has()` rule. Compared against a session that reads the page
+/// after every entry (`NAVIGERA_CHANGE_JOURNAL=0`), and timed against it.
+#[test]
+fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let page = format!("{}/journal", site.url);
+    let sessions: Vec<(String, &str)> = ["1", "0"]
+        .iter()
+        .map(|on| {
+            let name = std::env::temp_dir()
+                .join(format!("nv-interactions-journal{on}-{}.sock", std::process::id()))
+                .display()
+                .to_string();
+            let out = Command::new(tool_exe())
+                .env("NAVIGERA_CHANGE_JOURNAL", on)
+                .args(["--session", &name, "start"])
+                .stdin(Stdio::null())
+                .output()
+                .expect("run navigera");
+            assert!(out.status.success(), "start failed: {}", String::from_utf8_lossy(&out.stdout));
+            (name, *on)
+        })
+        .collect();
+    let compact = |name: &str, args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .args(["--session", name])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let steps: [&[&str]; 7] = [
+        &["fill", "--selector", "#name", "Ada Lovelace"],
+        &["fill", "--selector", "#note", "first note"],
+        &["fill", "--selector", "#count", "abc"],
+        &["fill", "--selector", "#tipped", "Grace"],
+        &["fill", "--selector", "#code", "X1"],
+        &["fill", "--selector", "#name", "Ada"],
+        &["click", "--selector", "#go"],
+    ];
+    let mut reports: Vec<Vec<String>> = Vec::new();
+    for (name, _) in &sessions {
+        compact(name, &["goto", &page]);
+        compact(name, &["ax"]);
+        reports.push(steps.iter().map(|a| compact(name, a)).collect());
+    }
+    // Refs are node ids: each browser numbers its own.
+    let unref = |r: &Vec<String>| -> Vec<String> {
+        r.iter()
+            .map(|l| {
+                l.split("ref=")
+                    .enumerate()
+                    .map(|(i, p)| if i == 0 { p } else { p.trim_start_matches(|c: char| c.is_ascii_digit()) })
+                    .collect()
+            })
+            .collect()
+    };
+    assert_eq!(unref(&reports[0]), unref(&reports[1]), "the journal changed what an entry reported");
+    let r = &reports[0];
+    assert_eq!(r[0], "ok", "{r:?}");
+    assert_eq!(r[1], "ok", "{r:?}");
+    assert!(r[2].contains("+ text: 3 chars"), "a live count is the entry's change: {r:?}");
+    assert!(r[3].contains("Use your full name"), "a style that follows focus: {r:?}");
+    assert!(r[4].contains("- text: Type a code"), "a :has() rule: {r:?}");
+    // "Ada" after "Ada Lovelace": the field showed it already, so it changed.
+    assert!(r[5].contains("~ textbox \"Name\""), "{r:?}");
+    assert!(r[6].contains("clicked 1") && !r[6].contains("Lovelace") && !r[6].contains("first note"), "{r:?}");
+    let best = |name: &str| {
+        (0..3)
+            .map(|i| {
+                compact(name, &["goto", &page]);
+                compact(name, &["ax"]);
+                let t = std::time::Instant::now();
+                assert_eq!(compact(name, &["fill", "--selector", "#name", &format!("v{i}")]), "ok");
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let (journal, read) = (best(&sessions[0].0), best(&sessions[1].0));
+    assert!(
+        journal < read * 0.75,
+        "an entry with the journal took {journal:.0} ms, reading the page again {read:.0} ms"
+    );
+    for (name, _) in &sessions {
+        compact(name, &["quit"]);
+    }
+}
+
 /// After a click whose fetch has started, the snapshot waits for that fetch
 /// and a short settle, not the whole quiet window: the list is there, well
 /// before the 200 ms fetch plus 500 ms of quiet it used to take. A window

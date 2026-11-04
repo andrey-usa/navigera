@@ -2423,6 +2423,21 @@ impl BrowserSession {
         self.action_traffic_seen()
     }
 
+    /// [`cdp::Page::journal_id`] on the active tab.
+    pub fn journal_id(&self) -> Option<u64> {
+        self.active_tab().journal_id()
+    }
+
+    /// [`cdp::Page::journal_prime`] on the active tab.
+    pub fn journal_prime(&self, id: u64) -> bool {
+        self.active_tab().journal_prime(id, self.timeout(None))
+    }
+
+    /// [`cdp::Page::journal_unchanged`] on the active tab.
+    pub fn journal_unchanged(&self, id: u64, typed: &str) -> bool {
+        self.active_tab().journal_unchanged(id, typed, self.timeout(None))
+    }
+
     /// [`cdp::Page::count_changes`] on the active tab.
     pub fn count_changes(&self) -> Option<u64> {
         self.active_tab().count_changes(self.timeout(None))

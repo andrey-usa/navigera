@@ -680,6 +680,239 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     return { synthetic: true, covered: !!hit && !force, covered_by: hit && hit !== el ? describe(hit) : null, nav: mayNavigate(el) };
 }"#;
 
+/// The change journal, armed in the top document just before a tree read
+/// so that a later text entry can be shown to have changed nothing else
+/// the tree shows, and the read need not be taken again (see
+/// [`Page::journal_unchanged`]). What can change the tree: the DOM of every
+/// document and open shadow root (observed from the read on), events that
+/// change no DOM (a popover's toggle, a hash change, media play/pause),
+/// and, from just before the entry ([`JOURNAL_PRIME`]), form values and
+/// states a script sets and styles that follow an element's state:
+/// `:focus`, `:hover`, `:invalid`, `:has()` and the like. Each such rule
+/// that sets a property the tree reads (display, visibility, opacity,
+/// content, cursor, pointer-events, or a custom property) has its selector
+/// kept with what it matched. What can't be watched (a style sheet of
+/// another origin, `:host` rules, nested selectors, more than the caps)
+/// leaves the journal broken: the page is read again. Arming costs a walk
+/// for shadow roots; the rest is paid only before an entry.
+const JOURNAL_ARM: &str = r#"(id) => {
+    const W = window, ROOTS_MAX = 2000;
+    const old = W.__nvJournal;
+    if (old) { try { old.stop(); } catch (_) {} }
+    const j = { id, m: 0, e: 0, broken: '', obs: [], offs: [], typedAttr: [], inputs: [], primed: false };
+    j.stop = () => { for (const o of j.obs) o.disconnect(); for (const off of j.offs) off(); };
+    j.docsOf = () => {
+        const out = [];
+        const visit = (d) => {
+            if (!d || out.includes(d)) return;
+            out.push(d);
+            for (const f of d.querySelectorAll('iframe, frame')) {
+                let fd = null;
+                try { fd = f.contentDocument; } catch (_) {}
+                if (fd) visit(fd);
+            }
+        };
+        visit(document);
+        return out;
+    };
+    j.rootsOf = (docs) => {
+        const roots = [];
+        const walk = (scope) => {
+            const all = scope.getElementsByTagName ? scope.getElementsByTagName('*') : scope.querySelectorAll('*');
+            for (let i = 0; i < all.length; i++) {
+                const r = all[i].shadowRoot;
+                if (r) { roots.push(r); if (roots.length > ROOTS_MAX) return; walk(r); }
+            }
+        };
+        for (const d of docs) walk(d);
+        return roots;
+    };
+    j.sheetsOf = (scope) => [...(scope.styleSheets || []), ...(scope.adoptedStyleSheets || [])];
+    j.docs = j.docsOf();
+    j.roots = j.rootsOf(j.docs);
+    if (j.roots.length > ROOTS_MAX) j.broken = 'shadow roots';
+    j.scopes = [...j.docs, ...j.roots];
+    const counted = (r) => {
+        // A framework writing a field's value attribute as it is typed.
+        if (r.type === 'attributes' && r.attributeName === 'value' && r.target.tagName === 'INPUT') j.typedAttr.push(r.target);
+        else j.m++;
+    };
+    j.flush = () => { for (const o of j.obs) for (const r of o.takeRecords()) counted(r); };
+    for (const scope of j.scopes) {
+        const o = new MutationObserver((recs) => { for (const r of recs) counted(r); });
+        o.observe(scope, { subtree: true, childList: true, attributes: true, characterData: true });
+        j.obs.push(o);
+    }
+    for (const d of j.docs) {
+        const v = d.defaultView;
+        if (!v) continue;
+        const onEvent = () => { j.e++; };
+        const onInput = (e) => { if (j.inputs.length < 64) j.inputs.push(e.target); else j.e++; };
+        for (const t of ['toggle', 'beforetoggle', 'hashchange', 'play', 'pause', 'fullscreenchange']) {
+            v.addEventListener(t, onEvent, true);
+            j.offs.push(() => v.removeEventListener(t, onEvent, true));
+        }
+        for (const t of ['input', 'change']) {
+            v.addEventListener(t, onInput, true);
+            j.offs.push(() => v.removeEventListener(t, onInput, true));
+        }
+    }
+    Object.defineProperty(W, '__nvJournal', { value: j, configurable: true, enumerable: false, writable: true });
+    return { id, docs: j.docs.length, broken: j.broken };
+}"#;
+
+/// Just before a text entry, what the journal (see [`JOURNAL_ARM`]) needs
+/// to judge it by: the state-dependent style rules and what each matches,
+/// and every form control's value and state. "" when primed, else why not.
+const JOURNAL_PRIME: &str = r#"(id) => {
+    const W = window, CONTROLS_MAX = 5000, SELECTORS_MAX = 400, MATCHED_MAX = 20000;
+    const j = W.__nvJournal;
+    if (!j || j.id !== id) return 'gone';
+    if (j.broken) return j.broken;
+    // What happened before the entry is the read's to show, not the entry's.
+    j.flush();
+    if (j.m || j.e || j.typedAttr.length || j.inputs.length) return 'changed before the entry';
+    const DYN = /:(focus|focus-within|focus-visible|hover|active|checked|indeterminate|invalid|valid|user-invalid|user-valid|placeholder-shown|blank|in-range|out-of-range|autofill|has|defined|popover-open|open|modal|state|target|default|read-write|read-only|enabled|disabled|required|optional|playing|paused|fullscreen|picture-in-picture|empty)\b/;
+    const PROPS = ['display', 'visibility', 'opacity', 'content', 'cursor', 'pointer-events'];
+    // Pseudo-elements, which querySelectorAll can't match (`:placeholder-shown`
+    // is a state, not `::placeholder`: a name ends at neither a letter nor a dash).
+    const ELEMENT_PSEUDO = /::(before|after|marker|placeholder|selection|backdrop|file-selector-button|first-line|first-letter|cue|spelling-error|grammar-error|target-text)(?![\w-])|:(before|after|first-line|first-letter)(?![\w-])/g;
+    const cache = W.__nvJournalSheets || new WeakMap();
+    try { Object.defineProperty(W, '__nvJournalSheets', { value: cache, configurable: true, enumerable: false, writable: true }); } catch (_) {}
+    const sheetSelectors = (sheet) => {
+        let rules;
+        try { rules = sheet.cssRules; } catch (_) { return null; }
+        if (!rules) return [];
+        const hit = cache.get(sheet);
+        if (hit && hit.n === rules.length) return hit.sel;
+        const sel = [];
+        let bad = false;
+        const walk = (list) => {
+            for (const r of list) {
+                const text = r.selectorText;
+                if (text !== undefined && DYN.test(text)) {
+                    const st = r.style;
+                    let relevant = PROPS.some((p) => st.getPropertyValue(p));
+                    for (let i = 0; !relevant && i < st.length; i++) if (st[i].startsWith('--')) relevant = true;
+                    if (relevant) {
+                        if (/&|:host|::part|::slotted|:scope/.test(text)) bad = true;
+                        else sel.push(text.replace(ELEMENT_PSEUDO, ''));
+                    }
+                }
+                if (r.cssRules && r.cssRules.length) walk(r.cssRules);
+            }
+        };
+        walk(rules);
+        const out = bad ? null : sel;
+        cache.set(sheet, { n: rules.length, sel: out });
+        return out;
+    };
+    // Per sheet: its rule count and whether it is switched off; a sheet a
+    // script builds (adopted) can be rewritten whole, so its text too.
+    const adopted = (scope) => new Set(scope.adoptedStyleSheets || []);
+    j.sheetCount = (scope) => {
+        const own = adopted(scope);
+        return j.sheetsOf(scope).map((sh) => {
+            let n = -1;
+            try { n = sh.cssRules.length; } catch (_) {}
+            let text = '';
+            if (own.has(sh)) { try { for (const r of sh.cssRules) text += r.cssText; } catch (_) {} }
+            return n + (sh.disabled ? 'off' : 'on') + text;
+        });
+    };
+    j.matches = (scope, sel) => { try { return [...scope.querySelectorAll(sel)]; } catch (_) { return null; } };
+    j.sig = (c) => {
+        let s = c.value + '\u0001' + c.checked + c.indeterminate + c.selectedIndex;
+        if (c.multiple && c.selectedOptions) for (const o of c.selectedOptions) s += ',' + o.index;
+        return s;
+    };
+    j.tracked = [];
+    j.inventory = [];
+    for (const scope of j.scopes) {
+        j.inventory.push([scope, j.sheetsOf(scope), j.sheetCount(scope)]);
+        for (const sheet of j.sheetsOf(scope)) {
+            const sel = sheetSelectors(sheet);
+            if (sel === null) return 'style sheet';
+            for (const x of sel) j.tracked.push([scope, x]);
+        }
+    }
+    if (j.tracked.length > SELECTORS_MAX) return 'state styles';
+    j.matched = [];
+    let total = 0;
+    for (const [scope, sel] of j.tracked) {
+        const m = j.matches(scope, sel);
+        if (m === null) return 'selector';
+        total += m.length;
+        if (total > MATCHED_MAX) return 'state styles';
+        j.matched.push(m);
+    }
+    j.controls = [];
+    for (const scope of j.scopes) {
+        const cs = scope.querySelectorAll('input, textarea, select');
+        for (let i = 0; i < cs.length; i++) j.controls.push([cs[i], j.sig(cs[i])]);
+        if (j.controls.length > CONTROLS_MAX) return 'form controls';
+    }
+    j.primed = true;
+    return '';
+}"#;
+
+/// Asks the journal (see [`JOURNAL_ARM`]) whether anything the tree shows
+/// changed since it was armed, other than `typed` entered into the focused
+/// text field: "" for nothing, else what did (or "gone").
+const JOURNAL_CHECK: &str = r#"(id, typed) => {
+    const j = window.__nvJournal;
+    if (!j || j.id !== id) return 'gone';
+    if (j.broken) return j.broken;
+    if (!j.primed) return 'not primed';
+    j.primed = false;
+    j.flush();
+    if (j.m) return 'dom';
+    if (j.e) return 'event';
+    let t = document.activeElement;
+    for (;;) {
+        let n = t && t.shadowRoot && t.shadowRoot.activeElement;
+        if (!n && t && (t.tagName === 'IFRAME' || t.tagName === 'FRAME')) { try { n = t.contentDocument && t.contentDocument.activeElement; } catch (_) { n = null; } }
+        if (!n) break;
+        t = n;
+    }
+    const type = t && t.tagName === 'INPUT' ? (t.getAttribute('type') || 'text').toLowerCase() : '';
+    const text = t && (t.tagName === 'TEXTAREA' || ['text', 'search', 'email', 'url', 'tel'].includes(type));
+    if (!text || !String(t.value).includes(typed)) return 'target';
+    // The diff leaves out a field that shows the typed text and did not
+    // before; one that showed it already is reported as changed.
+    const own = j.controls.find((x) => x[0] === t);
+    if (!own) return 'target';
+    const before = own[1].slice(0, own[1].indexOf('\u0001'));
+    if (before !== String(t.value) && before.includes(typed)) return 'target';
+    // An element named by its content shows the field's value too.
+    const NAMED = 'td, th, button, a[href], summary, option, h1, h2, h3, h4, h5, h6, '
+        + ['button', 'cell', 'gridcell', 'link', 'heading', 'option', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+            'treeitem', 'checkbox', 'radio', 'switch', 'columnheader', 'rowheader', 'tooltip', 'row', 'term']
+            .map((r) => `[role="${r}"]`).join(', ');
+    for (let e = t; e; e = e.getRootNode().host) {
+        if (e.parentElement && e.parentElement.closest(NAMED)) return 'named';
+    }
+    if (j.typedAttr.some((x) => x !== t) || j.inputs.some((x) => x !== t)) return 'event';
+    const docs = j.docsOf();
+    if (docs.length !== j.docs.length || docs.some((d, i) => d !== j.docs[i])) return 'frames';
+    if (j.rootsOf(docs).length !== j.roots.length) return 'shadow roots';
+    for (const [scope, sheets, counts] of j.inventory) {
+        const now = j.sheetsOf(scope);
+        if (now.length !== sheets.length || now.some((sh, i) => sh !== sheets[i])) return 'style sheet';
+        const n = j.sheetCount(scope);
+        if (n.some((c, i) => c !== counts[i])) return 'style sheet';
+    }
+    for (let i = 0; i < j.tracked.length; i++) {
+        const m = j.matches(j.tracked[i][0], j.tracked[i][1]);
+        const was = j.matched[i];
+        if (!m || m.length !== was.length || m.some((e, k) => e !== was[k])) return 'state style';
+    }
+    for (const [c, s] of j.controls) if (c !== t && j.sig(c) !== s) return 'form state';
+    j.inputs = [];
+    j.typedAttr = [];
+    return '';
+}"#;
+
 /// A script sent to a document that a navigation then replaced gets this
 /// long after the new document commits to answer (see `Page::send`).
 const ABANDON_AFTER_COMMIT: Duration = Duration::from_secs(1);
@@ -1969,6 +2202,10 @@ pub struct AxOptions {
     pub scope: Option<Target>,
     /// Texts, names and values uncut (`ax --full-text`).
     pub full_text: bool,
+    /// Arm the change journal before a read from the DOM snapshot (see
+    /// [`JOURNAL_ARM`]): what an agent's next text entry changed can then
+    /// be told without reading the page again.
+    pub journal: bool,
 }
 
 /// Where the mouse is and which buttons it holds (bits: 1 left, 2 right,
@@ -1996,6 +2233,10 @@ pub struct Page {
     stalled: Arc<std::sync::atomic::AtomicBool>,
     /// What each ref a snapshot printed was (see [`Page::refind`]).
     seen_refs: Arc<std::sync::Mutex<std::collections::HashMap<u64, SeenRef>>>,
+    /// The change journal the last tree read armed (see [`JOURNAL_ARM`]):
+    /// its id, when that read could be watched whole. None after a read
+    /// that armed none.
+    journal: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 /// A ref as a snapshot printed it: its element's role and full name, its
@@ -2033,6 +2274,7 @@ impl Page {
             pointer: Default::default(),
             stalled: Default::default(),
             seen_refs: Default::default(),
+            journal: Default::default(),
         }
     }
 
@@ -2187,6 +2429,80 @@ impl Page {
         .ok()
         .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
         .unwrap_or(false)
+    }
+
+    /// Arm the change journal in the top document (see [`JOURNAL_ARM`]):
+    /// its id and how many documents it watches, or None when it could
+    /// not watch the page whole (it says what it could not, e.g. a style
+    /// sheet of another origin).
+    fn arm_journal(&self, timeout: Duration) -> Option<(u64, u64)> {
+        static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let r = self
+            .send(
+                "Runtime.evaluate",
+                json!({ "expression": format!("({JOURNAL_ARM})({id})"), "returnByValue": true }),
+                timeout,
+            )
+            .ok();
+        crate::timing::record("journal_arm", started);
+        let v = r?.pointer("/result/value").cloned()?;
+        let broken = v.get("broken").and_then(Value::as_str).unwrap_or("?");
+        if !broken.is_empty() {
+            crate::timing::log(&format!("[journal] not armed: {broken}"));
+            return None;
+        }
+        Some((id, v.get("docs").and_then(Value::as_u64)?))
+    }
+
+    /// Take what the journal needs to judge the text entry about to run
+    /// (see [`JOURNAL_PRIME`]); false when it can't judge one.
+    pub fn journal_prime(&self, id: u64, timeout: Duration) -> bool {
+        let started = std::time::Instant::now();
+        let r = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": format!("({JOURNAL_PRIME})({id})"), "returnByValue": true }),
+            timeout,
+        );
+        crate::timing::record("journal_prime", started);
+        let verdict = r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_str).map(str::to_string));
+        match verdict.as_deref() {
+            Some("") => true,
+            other => {
+                crate::timing::log(&format!("[journal] not primed: {}", other.unwrap_or("no answer")));
+                false
+            }
+        }
+    }
+
+    /// The journal the last tree read armed and could watch whole.
+    pub fn journal_id(&self) -> Option<u64> {
+        *self.journal.lock().unwrap()
+    }
+
+    /// Nothing the tree shows has changed since journal `id` was armed, but
+    /// for `typed` entered into the focused text field (see
+    /// [`JOURNAL_ARM`]). False when anything did, or can't be told.
+    pub fn journal_unchanged(&self, id: u64, typed: &str, timeout: Duration) -> bool {
+        let started = std::time::Instant::now();
+        let r = self.send(
+            "Runtime.evaluate",
+            json!({
+                "expression": format!("({JOURNAL_CHECK})({id}, {})", serde_json::to_string(typed).unwrap_or_default()),
+                "returnByValue": true,
+            }),
+            timeout,
+        );
+        crate::timing::record("journal_check", started);
+        let verdict = r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_str).map(str::to_string));
+        match verdict.as_deref() {
+            Some("") => true,
+            other => {
+                crate::timing::log(&format!("[journal] read again: {}", other.unwrap_or("no answer")));
+                false
+            }
+        }
     }
 
     /// Start counting the top document's DOM changes (one observer, kept
@@ -4991,6 +5307,8 @@ impl Page {
     }
 
     fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        // Only a read that arms a journal leaves one standing for itself.
+        *self.journal.lock().unwrap() = None;
         let tree_opts = !opts.json && opts.max_depth.is_none() && !self.shared.is_single_target();
         // A large page's tree is built from the DOM snapshot; anything that
         // path can't serve falls back to Chrome's tree below.
@@ -5015,7 +5333,9 @@ impl Page {
                 None => nodes.is_some_and(|n| n > DOM_TREE_NODES),
             };
         if from_dom {
-            match self.ax_tree_dom(timeout, opts) {
+            // A journal pays where reading again costs more than keeping it.
+            let journal = opts.journal && nodes.is_some_and(|n| n > JOURNAL_NODES);
+            match self.ax_tree_dom(timeout, &AxOptions { journal, ..opts.clone() }) {
                 Ok(text) => return Ok(text),
                 Err(e) => crate::timing::log(&format!("[ax] DOM snapshot tree failed, reading Chrome's: {e:#}")),
             }
@@ -5060,9 +5380,17 @@ impl Page {
             Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
             None => None,
         };
+        // Armed before the capture: a change between the two leaves the
+        // journal dirty (a read again), never unseen.
+        let armed = if opts.journal { self.arm_journal(timeout) } else { None };
         let started = std::time::Instant::now();
         let snap = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
         crate::timing::record("ax_dom_snapshot", started);
+        // It speaks for the read only if it watched every document the
+        // snapshot holds (a frame of another origin in the page's process
+        // can't be watched from the page).
+        let docs = snap.get("documents").and_then(Value::as_array).map_or(0, Vec::len) as u64;
+        *self.journal.lock().unwrap() = armed.filter(|&(_, watched)| watched >= docs).map(|(id, _)| id);
         let started = std::time::Instant::now();
         // The clickable elements and the tree read the same snapshot, side
         // by side.
@@ -5380,6 +5708,11 @@ const LAZY_CALLS_PER_NODE: f64 = 0.25;
 /// canvas role since mapped). Small pages, where the difference is a few
 /// ms, keep Chrome's tree.
 const DOM_TREE_NODES: u64 = 800;
+
+/// Past this many DOM nodes a tree read arms the change journal (see
+/// [`JOURNAL_ARM`]): reading again costs tens of milliseconds there, and
+/// keeping the journal a few. Below it, a read is about as cheap.
+const JOURNAL_NODES: u64 = 2500;
 
 /// How long `close_target` waits for the page to go after `Page.close`.
 const CLOSE_WAIT: Duration = Duration::from_millis(1500);
