@@ -493,7 +493,9 @@ fn a_batch_runs_steps_in_one_call() {
 
 /// The default output (compact): an action that left the page as it was
 /// prints `ok`, one that moved it only what changed (after a look, the
-/// changed lines of the tree); reads print their value; errors as `--raw`. `--output json` gives the full line.
+/// changed lines of the tree), in a batch too; reads print their value
+/// (`text` without the page's scripts); errors as `--raw`. `--output json`
+/// gives the full line.
 #[test]
 fn compact_output_says_only_what_changed() {
     let Some(site) = edge_site() else { return };
@@ -531,6 +533,23 @@ fn compact_output_says_only_what_changed() {
         // Again: nothing it could see changed, so `ok`.
         assert_eq!(compact(&["click", "--testid", "save-btn"]).1, "ok", "[{engine}]");
         assert_eq!(compact(&["text", "--selector", "#out"]).1, "saved", "[{engine}]");
+        // A batch's actions say what they changed, as each does alone; a
+        // step that changed nothing says nothing.
+        let batch = |steps: &str| {
+            let mut cmd = Command::new(tool_exe());
+            cmd.env_remove("NAVIGERA_OUTPUT");
+            cmd.args(["--session", &a.session, "batch", "-"]);
+            let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("run navigera");
+            std::io::Write::write_all(&mut child.stdin.take().unwrap(), steps.as_bytes()).unwrap();
+            let out = child.wait_with_output().expect("batch");
+            (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        let (ok, out) = batch("fill --label 'Email address' z\nclick --text Cancel\n");
+        assert!(ok && out.contains("cancel") && !out.lines().any(|l| l == "ok"), "[{engine}] {out}");
+        assert_eq!(batch("fill --label 'Email address' y\n"), (true, "ok".to_string()), "[{engine}]");
+        // The page's own script isn't text it shows.
+        let (ok, out, _) = compact(&["text", "--selector", "body"]);
+        assert!(ok && out.contains("I accept the terms") && !out.contains("addEventListener"), "[{engine}] {out}");
         let (ok, out, err) = compact(&["click", "--text", "Nowhere", "--timeout-ms", "300"]);
         assert!(!ok && out.is_empty() && err.contains("error: click"), "[{engine}] {out} {err}");
         // The full line for programs (this harness runs with NAVIGERA_OUTPUT=json).

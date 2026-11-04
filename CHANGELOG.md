@@ -59,6 +59,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A `batch` says what its actions changed, as each action does alone:
+  `fill` and `click` in one batch printed only the page state, so an
+  agent read the page again to learn how the batch ended (the LLM bench's
+  form and search sessions all did). Steps that changed nothing say
+  nothing, and a batch that changed nothing prints `ok`.
+- `text --selector <css>` leaves out the scripts and styles inside the
+  element: `text --selector body` on a page with an inline script printed
+  its code after the text (565 characters for 78 of text on the bench's
+  order form).
 - A click that came before the page wired its element up (a script that
   clicks right after `goto`, hydration, a handler a timer or a script
   loaded after load sets) is sent again once the page wires it, instead

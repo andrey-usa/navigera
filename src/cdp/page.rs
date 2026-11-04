@@ -4889,7 +4889,18 @@ impl Page {
 
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
-        let value = self.evaluate_raw(&format!("({DEEP}.first({sel}) || {{}}).textContent ?? null"), timeout)?;
+        // Code and styles inside the element aren't text a user reads (an
+        // element that is itself a script, e.g. a JSON blob, keeps its own).
+        let value = self.evaluate_raw(
+            &format!(
+                "(() => {{ const el = {DEEP}.first({sel}); if (!el) return null; \
+                 if (!el.querySelector || !el.querySelector('script, style, template, noscript')) return el.textContent; \
+                 const c = el.cloneNode(true); \
+                 for (const n of c.querySelectorAll('script, style, template, noscript')) n.remove(); \
+                 return c.textContent; }})()"
+            ),
+            timeout,
+        )?;
         Ok(value.as_str().map(str::to_string))
     }
 

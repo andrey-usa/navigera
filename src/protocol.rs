@@ -5806,7 +5806,8 @@ pub fn batch_response(steps: &[BatchStep], responses: &[Value], elapsed_ms: f64)
             continue;
         }
         let (own, st) = split_state(r.get("result").unwrap_or(&Value::Null));
-        if let Some(own) = own {
+        // A compact step that changed nothing says `ok`: nothing to print.
+        if let Some(own) = own.filter(|o| o.as_str() != Some("ok")) {
             results.push(json!({ "step": n, "do": step.text, "result": own }));
         }
         if let Some(st) = st {
@@ -5843,8 +5844,9 @@ pub fn batch_response(steps: &[BatchStep], responses: &[Value], elapsed_ms: f64)
 }
 
 /// How a batch prints: the whole response as JSON, or (`--raw`) each
-/// result on its own line (the page state when no step read anything),
-/// notes and the failure on stderr.
+/// result on its own line (the page state when no step read anything; in
+/// compact output, what each action changed and any title or URL a step
+/// changed), notes and the failure on stderr.
 pub fn print_batch(output: &mut dyn Write, response: &Value, config: &SessionConfig) -> bool {
     let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
     if !config.raw {
@@ -5864,10 +5866,17 @@ pub fn print_batch(output: &mut dyn Write, response: &Value, config: &SessionCon
             }
         }
     }
-    if results.is_empty() {
-        if let Some(state) = response.pointer("/result/state") {
+    // Compact: the state holds only what changed (a navigation's title and
+    // URL), so it is printed whenever a step changed it; a batch that
+    // changed nothing says `ok`.
+    match response.pointer("/result/state") {
+        Some(state) if results.is_empty() || config.compact => {
             let _ = writeln!(output, "{state}");
         }
+        None if results.is_empty() && ok && config.compact => {
+            let _ = writeln!(output, "ok");
+        }
+        _ => {}
     }
     if let Some(e) = response.get("error").and_then(Value::as_str) {
         eprintln!("error: {e}");
@@ -5909,10 +5918,11 @@ fn run_batch(source: Option<&str>, keep_going: bool, config: &SessionConfig, out
     for (i, step) in steps.iter().enumerate() {
         let t = Instant::now();
         let id = json!(i + 1);
-        let response = match driver.run_op(&step.command) {
+        let mut response = match driver.run_op(&step.command) {
             Ok(outcome) => outcome_response(id, outcome, t),
             Err(e) => err_response(id, format!("{e:#}"), t),
         };
+        driver.report_state(&step.command, &mut response.result, config.compact);
         let response = serde_json::to_value(&response).unwrap_or(Value::Null);
         let failed = response["ok"] != true;
         responses.push(response);

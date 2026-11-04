@@ -547,6 +547,11 @@ pub fn batch(
         if let Some(caller) = &caller {
             request[CALLER] = json!(caller);
         }
+        // An action in a batch says what it changed, as it does alone: the
+        // agent needs no look after the batch to see how it ended.
+        if config.compact {
+            request["compact"] = json!(true);
+        }
         localize_request(&mut request, config);
         let mut writer = &stream;
         if writer.write_all(format!("{request}\n").as_bytes()).and_then(|_| writer.flush()).is_err() {
