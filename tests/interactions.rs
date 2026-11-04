@@ -1417,6 +1417,56 @@ fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
     assert!(r["result"].as_str().unwrap_or("").contains("Alpha"));
 }
 
+/// What an action changed is read after the requests it started, also one
+/// a timer starts a turn later with nothing shown first (typing that asks
+/// for suggestions): the report has the answer, not the page as it was. The
+/// page has been quiet for longer than the quiet window (an agent that
+/// thought before typing), so the quiet wait alone would read it at once.
+#[test]
+fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("turn-fetch", &[]);
+    let compact = |args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .arg("--session")
+            .arg(&s.name)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    for word in ["ab", "cd", "ef"] {
+        s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+        compact(&["ax"]);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let out = compact(&["fill", "--selector", "#q", word]);
+        assert!(out.contains(&format!("suggested {word}")), "{out}");
+    }
+    // An action that starts nothing isn't held for a request that never
+    // comes: saying what it changed costs a read of the page, not a fixed
+    // wait (it was 50 ms).
+    let best = |report: bool| {
+        (0..3)
+            .map(|i| {
+                s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+                compact(&["ax"]);
+                let value = format!("v{i}");
+                let t = std::time::Instant::now();
+                if report {
+                    compact(&["fill", "--selector", "[name=x]", &value]);
+                } else {
+                    s.ok(&["fill", "--selector", "[name=x]", &value]);
+                }
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let (plain, reported) = (best(false), best(true));
+    assert!(reported < plain + 40.0, "saying what a fill changed took {reported:.0} ms against {plain:.0} ms");
+}
+
 /// After a click whose fetch has started, the snapshot waits for that fetch
 /// and a short settle, not the whole quiet window: the list is there, well
 /// before the 200 ms fetch plus 500 ms of quiet it used to take. A window

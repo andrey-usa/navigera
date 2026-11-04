@@ -234,6 +234,30 @@ document.getElementById('go').onclick = () => {
 };
 </script>""")
 
+PAGES["/nav-intent"] = ("nav intent", "", """
+<div id=out>idle</div>
+<button id=plain>Plain</button>
+<form id=f1><input name=x value=1><button>Handled submit</button></form>
+<form id=f2 action=/posted><input name=y value=2><button>Real submit</button></form>
+<form id=f3 action=/posted><input name=z required><button>Invalid submit</button></form>
+<form id=f4 action=/posted><input name=w value=4><button>Script submit</button></form>
+<a id=routed href=/posted>Routed link</a> <a id=real href=/posted>Real link</a>
+<input id=q aria-label=Query>
+<script>
+const out = document.getElementById('out');
+document.getElementById('plain').onclick = () => { out.textContent = 'plain ' + Date.now(); };
+f1.onsubmit = (e) => { e.preventDefault(); out.textContent = 'handled ' + Date.now(); };
+f4.onsubmit = (e) => { e.preventDefault(); f4.submit(); };
+routed.onclick = (e) => { e.preventDefault(); history.pushState({}, '', '/routed'); out.textContent = 'routed'; };
+// Typing asks for suggestions a timer turn later, after 20 ms of work,
+// with nothing shown first.
+q.oninput = () => setTimeout(() => {
+  const end = performance.now() + 20;
+  while (performance.now() < end);
+  fetch('/slow-echo?ms=150').then(() => { out.textContent = 'suggested ' + q.value; });
+}, 0);
+</script>""")
+
 PAGES["/two-fetch"] = ("two fetch", "", """
 <ul id=list><li>Loading...</li></ul>
 <script>

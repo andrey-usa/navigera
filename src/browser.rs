@@ -2365,6 +2365,24 @@ impl BrowserSession {
         self.active_tab().action_traffic_seen()
     }
 
+    /// [`Self::action_traffic_seen`] once the action's own requests can
+    /// have shown: after one turn of the page's event loop (handlers,
+    /// their microtasks and zero-delay timers have run, see
+    /// [`cdp::Page::event_loop_turn`]) and the event watcher has caught up
+    /// with what arrived before it. About a millisecond, where a fixed wait
+    /// for a request that never comes cost every action `grace`; the fixed
+    /// wait is kept for a page that can't run the turn.
+    pub fn action_traffic_settled(&self, grace: Duration) -> bool {
+        if self.action_traffic_seen() {
+            return true;
+        }
+        if !self.active_tab().event_loop_turn(grace) {
+            return self.action_traffic_within(grace);
+        }
+        self.browser.caught_up();
+        self.action_traffic_seen()
+    }
+
     /// [`Self::action_traffic_seen`], given up to `grace` for the action's
     /// first request to show: a click handler's fetch starts at once, but
     /// the browser's word of it can trail the click's own reply.

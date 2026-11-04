@@ -2605,7 +2605,8 @@ struct Look {
 const CHANGE_LINES: usize = 40;
 
 /// How long an action's first request may take to show before the page is
-/// read again to say what the action changed.
+/// read again to say what the action changed, on a page that can't run
+/// the event-loop turn that normally stands in for it.
 const ACTION_TRAFFIC_GRACE: Duration = Duration::from_millis(50);
 
 /// How often the storage snapshot is retaken (the tab list is kept on every op).
@@ -3305,7 +3306,7 @@ impl Driver {
         // Read after what the action started, not before it: once its
         // requests show, the read waits for them as an `ax` after an action
         // does (else it would catch the page's "Loading…" in between).
-        self.session.action_traffic_within(ACTION_TRAFFIC_GRACE);
+        self.session.action_traffic_settled(ACTION_TRAFFIC_GRACE);
         let tree = match self.run_op_inner(&look.command) {
             Ok(Outcome { result: Value::String(tree), .. }) => tree,
             _ => return None,

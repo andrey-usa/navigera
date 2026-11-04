@@ -2109,6 +2109,25 @@ impl Page {
         .unwrap_or(false)
     }
 
+    /// One turn of the page's event loop: a zero-delay timer queued now,
+    /// awaited. By its answer the handlers an action ran, their microtasks
+    /// (framework re-renders) and the zero-delay timers they queued have
+    /// run, and Chrome has sent every request they started before the
+    /// answer on the same connection. False when no script could run (the
+    /// page is gone or busy past `max`).
+    pub fn event_loop_turn(&self, max: Duration) -> bool {
+        let ms = max.as_millis();
+        let js = format!("new Promise(r => {{ setTimeout(() => r(true), 0); setTimeout(() => r(false), {ms}); }})");
+        self.send(
+            "Runtime.evaluate",
+            json!({ "expression": js, "awaitPromise": true, "returnByValue": true }),
+            max + Duration::from_secs(1),
+        )
+        .ok()
+        .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
+        .unwrap_or(false)
+    }
+
     /// Wait until no fetch/XHR is in flight and none started or ended for
     /// `quiet`, at most `max`. A single-page app usually renders what it
     /// fetched right after the response: reading the page earlier shows
