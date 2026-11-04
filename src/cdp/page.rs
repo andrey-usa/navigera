@@ -284,11 +284,33 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             return Number.isFinite(t.endTime);
         });
     };
+    // The end event of a CSS transition or animation (`transitionend`,
+    // `animationend`, or its cancel) for one property on its own element:
+    // pages wire a dialog's buttons in such a handler, which can run after
+    // `finished` resolves. Listening from here, after the page's own
+    // listener, means the page's handler has run when this resolves. Web
+    // Animations (`el.animate`) have no end event: nothing to wait for.
+    const ended = (a) => new Promise((res) => {
+        const t = a.effect.target, kind = a.transitionProperty !== undefined ? 'transition'
+            : a.animationName !== undefined ? 'animation' : null;
+        if (!kind || !t || !t.addEventListener) return res();
+        const done = (e) => {
+            if (e.target !== t) return;
+            if (kind === 'transition' ? e.propertyName !== a.transitionProperty : e.animationName !== a.animationName) return;
+            t.removeEventListener(kind + 'end', done);
+            t.removeEventListener(kind + 'cancel', done);
+            res();
+        };
+        t.addEventListener(kind + 'end', done);
+        t.addEventListener(kind + 'cancel', done);
+        // Never held past a moment after `finished` (an event a page stopped).
+        a.finished.then(() => setTimeout(() => { t.removeEventListener(kind + 'end', done); t.removeEventListener(kind + 'cancel', done); res(); }, 100), () => res());
+    });
     const settle = async () => {
         const anims = moving();
         if (!anims.length) return;
         await Promise.race([
-            Promise.all(anims.map((a) => a.finished.catch(() => null))),
+            Promise.all(anims.map((a) => a.finished.catch(() => null).then(() => null)).concat(anims.map(ended))),
             new Promise((res) => setTimeout(res, Math.max(0, deadline - Date.now()))),
         ]);
         // A frame, but not forever: a renderer that paints nothing (a

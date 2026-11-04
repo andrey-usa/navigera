@@ -423,6 +423,13 @@ fn a_click_waits_for_a_sliding_modal_to_settle() {
     for _ in 0..2 {
         s.ok(&["goto", &format!("{}/entry-modal", site.url)]);
         s.ok(&["click", "--role", "button", "--name", "Close"]);
+        // The press came after the page's own `transitionend` handler that
+        // wires the button, not merely after the slide stopped.
+        let order = s.ok(&["eval", "[window.wiredAt, window.pressedAt]"]);
+        assert!(
+            order[0].as_f64().unwrap_or(f64::MAX) <= order[1].as_f64().unwrap_or(0.0),
+            "pressed before wired: {order}"
+        );
         s.ok(&["wait", "--gone", "#modal"]);
     }
 }

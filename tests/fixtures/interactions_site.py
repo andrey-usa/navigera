@@ -541,8 +541,10 @@ setTimeout(() => {
   modal.classList.add('show');
   // The page's script wires the button once the modal has finished opening.
   modal.addEventListener('transitionend', () => {
+    window.wiredAt = performance.now();
     document.getElementById('close').onclick = () => { modal.classList.remove('show'); modal.style.display = 'none'; };
   }, { once: true });
+  document.addEventListener('pointerdown', () => { window.pressedAt = window.pressedAt || performance.now(); }, true);
 }, 100);
 </script>""")
 
