@@ -269,9 +269,13 @@ pub const DEEP: &str = r#"(() => {
 /// with no box at all always gets those.
 ///
 /// With `effects`, it also starts watching what the click will change (see
-/// [`Page::click_effect`]).
-const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects) {
+/// [`Page::click_effect`]), and on a page younger than `youngMs` keeps the
+/// element and its ancestors (`__nvPath`), to tell whether anything
+/// listened for the click (see [`Page::wired_later`]).
+const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects, youngMs) {
     const deadline = Date.now() + (force ? 0 : settleMs);
+    // navigera's own listeners, told from the page's by PATH_LISTENERS.
+    const ours = (f) => { f.__nv = true; return f; };
     // The element's ancestors through shadow hosts: what can move it.
     const chain = new Set();
     for (let n = el; n; n = n.parentElement || (n.getRootNode && n.getRootNode().host) || null) chain.add(n);
@@ -362,7 +366,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     const armNav = (w, form) => {
         const n = { click: null, submit: null, invalid: false, planned: false, offs: [] };
         const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
-        on(w, 'click', (e) => { if (!n.click) n.click = e; });
+        on(w, 'click', ours((e) => { if (!n.click) n.click = e; }));
         on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
         on(w, 'invalid', () => { n.invalid = true; });
         // A handler that navigates by script (`location`, `form.submit()`).
@@ -495,10 +499,12 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         const unwatched = () => partial || docs.some((d) => [...d.querySelectorAll('iframe, frame')].some((f) => {
             try { const fd = f.contentDocument; return !!(fd && !seen.has(fd) && fd.body && fd.body.childElementCount); } catch (_) { return false; }
         }));
-        const done = () => {
+        // The path is kept only after a click that changed nothing: then
+        // `Page::wired_later` reads it, and removes it.
+        const done = (keepPath) => {
             for (const o of fx.obs) o.disconnect();
             for (const off of fx.offs) off();
-            try { delete top.__nvFx; delete top.__nvSeen; } catch (_) {}
+            try { delete top.__nvFx; delete top.__nvSeen; if (!keepPath && top.__nvPath) top.__nvPath.end(); } catch (_) {}
         };
         fx.check = (last) => {
             for (const o of fx.obs) fx.m += o.takeRecords().length;
@@ -509,7 +515,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             }
             if (!what && !skip && state() !== before) what = 'state';
             const unsure = !what && !skip && !!last && unwatched();
-            if (what || skip || last) done();
+            if (what || skip || last) done(!what && !skip && !unsure);
             return { what, skip, unsure };
         };
         Object.defineProperty(top, '__nvFx', { value: fx, configurable: true, enumerable: false, writable: true });
@@ -620,11 +626,24 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 const w = doc.defaultView;
                 w.top.__nvSeen = 0;
                 for (const t of ['pointerdown', 'mousedown', 'mouseup', 'click'])
-                    w.addEventListener(t, () => { w.top.__nvSeen++; }, { capture: true, once: true });
+                    w.addEventListener(t, ours(() => { w.top.__nvSeen++; }), { capture: true, once: true });
                 if (effects) armEffects(w);
+                // A page that loaded a moment ago may not have wired the
+                // element up yet: keep the element and its ancestors
+                // through shadow hosts, and apart from them its document
+                // and window, where analytics and delegating scripts listen.
+                const young = !!effects && youngMs > 0 && w.performance.now() < youngMs;
+                if (young) {
+                    const nodes = [], d = el.ownerDocument;
+                    for (let n = el; n && n.nodeType !== 9; n = n.parentNode || (n.nodeType === 11 && n.host) || null) nodes.push(n);
+                    const path = { nodes, outer: [d, w], docs: d === w.top.document ? [d] : [w.top.document, d] };
+                    path.end = () => { if (path.mo) path.mo.disconnect(); if (w.top.__nvPath === path) delete w.top.__nvPath; };
+                    Object.defineProperty(w.top, '__nvPath', { value: path, configurable: true, enumerable: false, writable: true });
+                    setTimeout(path.end, 10000);
+                }
                 const nav = mayNavigate(el);
                 if (nav) armNav(w, !el.closest('a[href]'));
-                return Object.assign(p, { nav, check: true, effects: !!effects });
+                return Object.assign(p, { nav, check: true, effects: !!effects, young });
             }
             // Inside a cross-origin frame: our coordinates are frame-local;
             // the caller asks CDP for the box instead.
@@ -999,6 +1018,96 @@ const EFFECT_WINDOW: Duration = Duration::from_millis(200);
 /// watches the page for [`AFTER_RESPONSE`] more.
 const REQUEST_WAIT: Duration = Duration::from_millis(1500);
 const AFTER_RESPONSE: Duration = Duration::from_millis(150);
+
+/// A click on a page whose document started loading less than this long
+/// ago checks whether anything on the element or its ancestors listened
+/// for it: a page often wires its controls a moment after load (hydration,
+/// a script it loads then), and a click before that reaches nothing (see
+/// [`Page::wired_later`]).
+const YOUNG_PAGE: Duration = Duration::from_secs(10);
+
+/// After a click that changed nothing and that nothing on the element or
+/// its ancestors listened for: the page is believed not to wire the
+/// element up once it has had no script or data request in flight for
+/// this long since the click, or after [`WIRING_MAX`] in all (and never
+/// past the element wait).
+const WIRING_QUIET: Duration = Duration::from_millis(500);
+const WIRING_MAX: Duration = Duration::from_secs(5);
+
+/// When something on the document heard the click and the element is
+/// wired later, the page is watched this much longer before the click is
+/// sent again: a script that recorded the click may replay it once the
+/// page is wired, and then the page changes.
+const REPLAY_GRACE: Duration = Duration::from_millis(150);
+
+/// How many times a click nothing listened for is sent again: a page can
+/// wire its analytics first (a document listener) and the element after.
+const CLICK_AGAIN: u8 = 2;
+
+/// Whether a click nothing listened for is sent again once the page wires
+/// the element up (`NAVIGERA_CLICK_AGAIN=0` turns it off, to compare).
+fn wiring_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_CLICK_AGAIN").map_or(true, |v| v.trim() != "0"))
+}
+
+/// What listens on the path a young page's click kept (`__nvPath`, see
+/// CLICK_PREP) for the events a click sends, counted with DevTools'
+/// `getEventListeners` (needs `includeCommandLineAPI`), so a handler set
+/// as a property or an attribute counts too, and navigera's own don't:
+/// `[on the element and its ancestors, on its document and window,
+/// whether the page changed]`. Null when there is no path, its element
+/// left the page, or the page has a `getEventListeners` of its own.
+///
+/// `GUARD` starts watching the page on the first call: text or elements
+/// added or removed (not attributes or comments, which hydration
+/// touches), or the URL. A replay of the click by a script that heard it
+/// at the document shows there. `DROP` ends the path when something on
+/// the element's own path listens: there is nothing to wait for.
+const PATH_LISTENERS: &str = r#"((guard, drop) => {
+    const p = window.__nvPath;
+    if (!p) return null;
+    // A page's own global of that name hides DevTools' one: no count then.
+    if (typeof getEventListeners !== 'function' || !String(getEventListeners).includes('[Command Line API]')) { p.end(); return null; }
+    if (!p.nodes[0].isConnected) { p.end(); return null; }
+    const count = (nodes) => {
+        let n = 0;
+        for (const node of nodes) {
+            const l = getEventListeners(node);
+            for (const t of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend'])
+                for (const x of l[t] || []) if (!(x.listener && x.listener.__nv)) n++;
+        }
+        return n;
+    };
+    const own = count(p.nodes), outer = count(p.outer);
+    if (drop && own) p.end();
+    const real = (recs) => recs.filter((r) => r.type === 'characterData' ? r.target.nodeType === 3
+        : [...r.addedNodes, ...r.removedNodes].some((n) => n.nodeType !== 8)).length;
+    if (guard && !p.mo) {
+        p.changes = 0;
+        p.url = location.href;
+        p.mo = new MutationObserver((recs) => { p.changes += real(recs); });
+        for (const d of p.docs) p.mo.observe(d, { subtree: true, childList: true, characterData: true });
+    }
+    if (p.mo) p.changes += real(p.mo.takeRecords());
+    return [own, outer, !!p.mo && (p.changes > 0 || location.href !== p.url)];
+})(GUARD, DROP)"#;
+
+/// [`PATH_LISTENERS`] with its two flags.
+fn path_listeners(guard: bool, drop: bool) -> String {
+    PATH_LISTENERS.replace("GUARD", &guard.to_string()).replace("DROP", &drop.to_string())
+}
+
+/// What [`Page::wired_later`] watches for after a click: since the press,
+/// until when, whether only the element's own path being wired counts
+/// (something on its document or window heard the click), and the
+/// browser's activity counters at the press (see `Shared::activity`).
+struct Wiring {
+    pressed_at: Instant,
+    until: Instant,
+    element_only: bool,
+    activity: [u64; 5],
+}
 
 /// What a delivered click did, as far as navigera can see.
 #[derive(Debug, PartialEq)]
@@ -3540,7 +3649,27 @@ impl Page {
     /// or `force` says so (see [`CLICK_PREP`]). An element that stays under
     /// another one is an error naming that one, not a click a user couldn't
     /// make. Returns `{synthetic: true}` when DOM events were used.
+    ///
+    /// A click that changed nothing, on a page that loaded a moment ago,
+    /// with nothing on the element or its ancestors listening for it when
+    /// it came, is sent again if the page wires the element up while it
+    /// settles (see [`Page::wired_later`]): `clicked_again` says how long
+    /// after the first press the page did.
     pub fn click(&self, target: &Target, opts: &ClickOptions, wait: Duration, timeout: Duration) -> Result<Value> {
+        self.click_once(target, opts, wait, timeout, CLICK_AGAIN, None)
+    }
+
+    /// One click; `again` more may follow it (see [`Page::click`]), and
+    /// `first` is when the first of them pressed.
+    fn click_once(
+        &self,
+        target: &Target,
+        opts: &ClickOptions,
+        wait: Duration,
+        timeout: Duration,
+        again: u8,
+        first: Option<Instant>,
+    ) -> Result<Value> {
         let settle = json!(self.hit_settle_ms(wait));
         let strict = json!(!self.shared.is_single_target());
         let button = json!(opts.button);
@@ -3560,13 +3689,14 @@ impl Page {
         // Watch what the click changes (not on Lightpanda: no layout, so its
         // clicks are DOM events anyway).
         let effects = !self.shared.is_single_target() && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none();
+        let young_ms = if again > 0 && wiring_check() { YOUNG_PAGE.as_millis() as u64 } else { 0 };
         let started = std::time::Instant::now();
         let prep = |settle: &Value| {
             self.on_element(
                 target,
                 "click",
                 CLICK_PREP,
-                &[json!(false), settle.clone(), strict.clone(), button.clone(), json!(effects)],
+                &[json!(false), settle.clone(), strict.clone(), button.clone(), json!(effects), json!(young_ms)],
                 wait,
                 timeout,
             )
@@ -3654,8 +3784,10 @@ impl Page {
             }
         }
         let armed = point.get("effects").and_then(Value::as_bool) == Some(true);
+        let young = point.get("young").and_then(Value::as_bool) == Some(true);
         let nav = point.get("nav").and_then(Value::as_bool) == Some(true);
         let before = (self.shared.activity(&self.session_id), self.shared.logs.lock().unwrap().requests_started());
+        let pressed_at = Instant::now();
         match self.mouse_click(&point, &opts.button, timeout) {
             Ok(true) => {}
             other => {
@@ -3670,9 +3802,15 @@ impl Page {
                 return dom(self);
             }
         }
+        // What listened for the click (on the element's path, and on its
+        // document and window), read with the press's arrival in the same
+        // round trip: the press has been handled by then, so a listener
+        // the page adds later isn't counted. A handler the click itself
+        // added is, which only ever stops another click.
         let check = point.get("check").and_then(Value::as_bool) == Some(true)
             && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none(); // diagnostic knob
-        if check && !self.press_arrived(timeout) {
+        let (arrived, heard) = if check { self.press_arrived(young, timeout) } else { (true, None) };
+        if !arrived {
             eprintln!(
                 "[click] the browser did not deliver the mouse events at ({}, {}); sending them again",
                 point["x"], point["y"]
@@ -3684,7 +3822,7 @@ impl Page {
             // happened on the page, so sending it again can't double-click.
             self.wait_frame(Duration::from_millis(500));
             self.mouse_click(&point, &opts.button, timeout)?;
-            if !self.press_arrived(timeout) {
+            if !self.press_arrived(false, timeout).0 {
                 eprintln!("[click] still not delivered; dispatching DOM events");
                 if armed {
                     self.drop_effects(timeout);
@@ -3710,10 +3848,96 @@ impl Page {
                 point["effect_trace"] = json!(format!("{effect:?}")); // diagnostic knob
             }
             if let Effect::Nothing { watched_ms, requests } = effect {
+                // Nothing on the element's path heard it. When nothing on
+                // its document or window did either, no script of the page
+                // ran for it: any listener later is the page wiring up.
+                // Otherwise one did (analytics, a delegating script that may
+                // replay it later): only the element's own path being wired,
+                // with no change on the page meanwhile, counts.
+                if let Some((0, outer)) = heard {
+                    let until = (started + wait).min(pressed_at + WIRING_MAX);
+                    let watch = Wiring { pressed_at, until, element_only: outer > 0, activity: before.0 };
+                    if let Some(seen) = self.wired_later(&watch, timeout) {
+                        let first = first.unwrap_or(pressed_at);
+                        // The element is there and was hittable a moment
+                        // ago: what is left of the wait, enough to settle.
+                        let left = wait.saturating_sub(started.elapsed()).max(Duration::from_secs(1));
+                        let mut point = self.click_once(target, opts, left, timeout, again - 1, Some(first))?;
+                        if point.get("clicked_again").is_none() {
+                            point["clicked_again"] = json!(seen.duration_since(first).as_millis() as u64);
+                        }
+                        return Ok(point);
+                    }
+                }
                 point["no_effect"] = json!({ "watched_ms": watched_ms, "requests": requests });
             }
         }
         Ok(point)
+    }
+
+    /// After a click that changed nothing and that nothing on the element
+    /// or its ancestors listened for (`__nvPath`, see [`PATH_LISTENERS`]):
+    /// does the page wire it up while it settles? When it saw that, or
+    /// None when the page stayed without a script or data request in
+    /// flight for [`WIRING_QUIET`] since the press, the time ran out, the
+    /// element left the page, or (`element_only`) the page changed, up to
+    /// [`REPLAY_GRACE`] after it was wired.
+    fn wired_later(&self, watch: &Wiring, timeout: Duration) -> Option<Instant> {
+        let expression = path_listeners(watch.element_only, false);
+        let mut quiet_from = watch.pressed_at;
+        let mut seen: Option<Instant> = None;
+        let wired = loop {
+            let read = self
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": expression, "includeCommandLineAPI": true, "returnByValue": true }),
+                    timeout,
+                )
+                .ok()
+                .and_then(|r| r.pointer("/result/value").cloned())
+                .filter(Value::is_array);
+            let Some(read) = read else { break None };
+            let count = |i: usize| read.get(i).and_then(Value::as_u64).unwrap_or(0);
+            let changed = read.get(2).and_then(Value::as_bool) == Some(true)
+                || self.shared.activity(&self.session_id) != watch.activity;
+            if changed {
+                break None;
+            }
+            if let Some(at) = seen {
+                if at.elapsed() >= REPLAY_GRACE {
+                    break Some(at);
+                }
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            if count(0) > 0 || (!watch.element_only && count(1) > 0) {
+                if !watch.element_only {
+                    break Some(Instant::now());
+                }
+                seen = Some(Instant::now());
+                continue;
+            }
+            if self.shared.net_state(&self.session_id).0 > 0
+                || self.shared.logs.lock().unwrap().scripts_loading(&self.session_id) > 0
+            {
+                quiet_from = Instant::now();
+            }
+            if quiet_from.elapsed() >= WIRING_QUIET || Instant::now() >= watch.until {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        self.forget_path(timeout);
+        wired
+    }
+
+    /// End the path a young page's click kept (see CLICK_PREP).
+    fn forget_path(&self, timeout: Duration) {
+        let _ = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": "window.__nvPath && window.__nvPath.end()", "returnByValue": true }),
+            timeout,
+        );
     }
 
     /// Did a delivered click change anything? Polls what CLICK_PREP set up
@@ -3809,7 +4033,10 @@ impl Page {
     fn drop_effects(&self, timeout: Duration) {
         let _ = self.send(
             "Runtime.evaluate",
-            json!({ "expression": "window.__nvFx && window.__nvFx.check(true), 0", "returnByValue": true }),
+            json!({
+                "expression": "window.__nvFx && window.__nvFx.check(true), window.__nvPath && window.__nvPath.end(), 0",
+                "returnByValue": true,
+            }),
             timeout,
         );
     }
@@ -3832,17 +4059,39 @@ impl Page {
     /// arrived: only a definite "nothing came" triggers a resend.
     /// A slow page gets 300 ms to process the events before "nothing came"
     /// is believed (a dropped event never arrives; a queued one does).
-    fn press_arrived(&self, timeout: Duration) -> bool {
+    /// With `listeners`, the first look also counts what listens for the
+    /// click ([`PATH_LISTENERS`]): on the element's path, and on its
+    /// document and window.
+    fn press_arrived(&self, listeners: bool, timeout: Duration) -> (bool, Option<(u64, u64)>) {
         let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        let mut heard = None;
+        let mut first = listeners;
         loop {
+            let (expression, api) = if first {
+                (format!("[window.__nvSeen, {}]", path_listeners(false, true)), true)
+            } else {
+                ("[window.__nvSeen]".to_string(), false)
+            };
             let seen = self
-                .send("Runtime.evaluate", json!({ "expression": "window.__nvSeen", "returnByValue": true }), timeout)
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": expression, "includeCommandLineAPI": api, "returnByValue": true }),
+                    timeout,
+                )
                 .ok()
-                .map(|r| r.pointer("/result/value").and_then(Value::as_u64));
+                .map(|r| {
+                    let v = r.pointer("/result/value");
+                    if first {
+                        let n = |i: usize| v.and_then(|v| v.pointer(&format!("/1/{i}"))).and_then(Value::as_u64);
+                        heard = n(0).zip(n(1));
+                    }
+                    v.and_then(|v| v.get(0)).and_then(Value::as_u64)
+                });
+            first = false;
             match seen {
                 Some(Some(0)) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-                Some(Some(0)) => return false,
-                _ => return true,
+                Some(Some(0)) => return (false, heard),
+                _ => return (true, heard),
             }
         }
     }

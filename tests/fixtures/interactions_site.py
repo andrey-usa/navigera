@@ -58,6 +58,13 @@ getting wrong, one page each, built the way those sites behave:
 /cookie-banner  a button under a banner with Accept and Reject that stays
 /loading-cover  a button under an overlay with a Cancel button, removed when
                 a 2.5 s fetch returns
+/wired-late     a button wired only after load: by a timer (?ms=N), by a
+                script the page loads then (?script=N), by a listener its
+                container gets (?root=N) or the document gets (?doc=N);
+                ?analytics: a document listener from the start; ?replay=N:
+                clicks recorded at the document before Go is wired, replayed
+                once it is (&late: 50 ms after); ?quiet: a button that works
+                from the start and shows nothing, beside a late listener
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
 
@@ -742,6 +749,56 @@ customElements.define('x-panel', class extends HTMLElement {
 </script>""")
 
 
+PAGES["/wired-late"] = ("wired late", "", """
+<button id=go>Go</button>
+<div id=root><span><button id=inner>Inner</button></span></div>
+<p id=out>idle</p>
+<script>
+// What a page that wires its controls after load does (hydration, a
+// widget that starts later): until then a click on Go reaches nothing.
+window.hits = 0;
+const q = new URLSearchParams(location.search);
+const out = (t) => { document.getElementById('out').textContent = t; };
+function wireGo() { document.getElementById('go').onclick = () => { hits++; out('went ' + hits); }; }
+addEventListener('load', () => {
+  if (q.has('ms')) setTimeout(wireGo, +q.get('ms'));
+  if (q.has('script')) setTimeout(() => {
+    const s = document.createElement('script');
+    s.src = '/late-script?ms=' + q.get('script');
+    document.head.appendChild(s);
+  }, 0);
+  if (q.has('root')) setTimeout(() => document.getElementById('root').addEventListener('click', (e) => {
+    if (e.target.closest('#inner')) { hits++; out('inner ' + hits); }
+  }), +q.get('root'));
+  // A framework that hydrates the whole document listens there.
+  if (q.has('doc')) setTimeout(() => document.addEventListener('click', (e) => {
+    if (e.target.closest('#go')) { hits++; out('went ' + hits); }
+  }), +q.get('doc'));
+});
+// Analytics listen on the document from the start.
+if (q.has('analytics')) document.addEventListener('click', () => { window.beacons = (window.beacons || 0) + 1; }, true);
+// An early event contract: clicks on Go before it is wired are recorded,
+// and replayed once it is (the click counts, later).
+if (q.has('replay')) {
+  const early = [];
+  const contract = (e) => { if (e.target.closest('#go')) early.push(e); };
+  document.addEventListener('click', contract, true);
+  addEventListener('load', () => setTimeout(() => {
+    wireGo();
+    document.removeEventListener('click', contract, true);
+    const replay = () => { for (const e of early.splice(0)) document.getElementById('go').onclick(e); };
+    if (q.has('late')) setTimeout(replay, 50); else replay();
+  }, +q.get('replay')));
+}
+// Go counts from the start but shows nothing; a widget then listens on the
+// body. The click was heard, so it must not be sent again.
+if (q.has('quiet')) {
+  document.getElementById('go').onclick = () => { hits++; };
+  addEventListener('load', () => setTimeout(() => document.body.addEventListener('pointerdown', () => {}), 300));
+}
+</script>""")
+
+
 def twin_frames(port):
     """Frames that hold the same ids: two of this origin, two of another
     (localhost in a 127.0.0.1 page), and one inside another."""
@@ -906,6 +963,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send("{}", "application/json")
         if u.path == "/journal-import.css":
             return self.send(".itip{display:none} #imported:focus ~ .itip{display:inline}", "text/css")
+        if u.path == "/late-script":
+            import time
+            time.sleep(int(q.get("ms", ["300"])[0]) / 1000)
+            return self.send("wireGo();", "text/javascript")
         if u.path == "/slow-echo":
             import time
             time.sleep(int(q.get("ms", ["100"])[0]) / 1000)

@@ -274,7 +274,9 @@ only there.
   value, URL, request, dialog, tab; analytics don't count), the response
   carries `"no_effect"`. The page is often not wired up yet, or slow: `wait`
   for what the click should show, and click again only if it never comes.
-  Don't assume the click worked.
+  Don't assume the click worked. A click that came before a page that just
+  loaded wired the element up is sent again by navigera once it does
+  (`"clicked_again"`): don't click it again yourself.
 - **Iframes and shadow DOM:** refs work in any iframe. `--selector`, `--text`
   and the locators also search iframes (cross-origin ones included) and open
   shadow roots when the page itself has no match. `--selector "#app >>> x-card

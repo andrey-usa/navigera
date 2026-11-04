@@ -299,6 +299,30 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     middle clicks aren't judged, nor pages with same-origin frames it
     doesn't watch. `NAVIGERA_TRACE_EFFECT=1` on `start` adds an
     `effect_trace` to click results (what was seen).
+  - **A click before the page wired the element up is sent again.** On a
+    page whose document started loading less than 10 s ago, the click
+    also counts what listens for it (click, mouse, pointer and touch
+    listeners, handlers set as properties or attributes included,
+    navigera's own left out): on the element and its ancestors, and on
+    its document and window. When nothing on the element's path did and
+    the click changed nothing, it watches the page while it has scripts
+    or data requests in flight, and until 500 ms after the click without
+    any (never past the element wait, at most 5 s). If nothing on the
+    document or window heard the click either, no script of the page ran
+    for it, and any listener the page adds there or on the path (a script
+    after load, hydration of a container or of the whole document) means
+    the click is sent again. If something there did (analytics, a script
+    that delegates or records clicks to replay them), only a listener on
+    the element's own path counts, the page must show no other change
+    meanwhile (text or elements added or removed, the URL), and it is
+    watched 150 ms longer first, so a recorded click a script replays once
+    the element is wired is not sent twice. At most two more clicks; the
+    result carries `clicked_again` with how long after the first press
+    the page was wired. A click something on the element's path heard is
+    never sent again. A dead button on a page that just loaded reports
+    `no_effect` about 300 ms later than before. A handler delegated from
+    the document late, on a page with document listeners from the start,
+    still gets `no_effect`.
 - **Page errors are reported.** An uncaught exception while a command ran
   adds one line to its `notes` (`the page threw TypeError: …; \`errors\`
   lists them`), so a click whose handler crashed doesn't look like a click
@@ -752,8 +776,9 @@ machine without a GPU still reports a software renderer).
 - Off switches, for telling a navigera behaviour from the page's:
   `NAVIGERA_NO_NETWORK=1` (no Network domain: `network` stays empty and ops
   don't wait for data), `NAVIGERA_NO_CLICK_CHECK=1` (clicks don't watch what
-  they changed: no `no_effect`), `NAVIGERA_NO_DISCOVER=1` (popups aren't
-  adopted as tabs).
+  they changed: no `no_effect`), `NAVIGERA_CLICK_AGAIN=0` (a click nothing
+  listened for isn't sent again once the page wires it up),
+  `NAVIGERA_NO_DISCOVER=1` (popups aren't adopted as tabs).
 
 ## agent-browser → navigera
 

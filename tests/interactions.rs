@@ -781,6 +781,63 @@ fn a_click_that_changes_nothing_says_so() {
     assert!(r.get("no_effect").is_none(), "checkbox: {r}");
 }
 
+/// A script that clicks right after `goto` can beat the page to wiring the
+/// button up: a timer after load, a script the page loads then, a listener
+/// on the button's container or on the document. Nothing listened for that
+/// click, so once the page wires the element up it is clicked again, and
+/// counts once; analytics on the document don't change that. A click
+/// something heard is not sent again when the page adds a listener later,
+/// nor one a script on the document recorded and replays once the button
+/// is wired, and a button never wired still says the click did nothing.
+#[test]
+fn a_click_before_the_page_wired_the_element_is_sent_again() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("wired-late", &[]);
+    let steps = std::env::temp_dir().join(format!("nv-wired-late-{}.txt", std::process::id()));
+    let steps_arg = steps.display().to_string();
+    // `again`: Some(true) the click must have been sent again (the script
+    // that wires the button takes 1.5 s to load, so the click is always
+    // first), Some(false) it must not have been, None either way: a click
+    // that lands after a timer already wired the button (a loaded runner)
+    // just works. Whatever the path, it counts once.
+    for (query, target, out, hits, again) in [
+        ("script=1500", "#go", "went 1", 1, Some(true)),
+        ("ms=400", "#go", "went 1", 1, None),
+        ("ms=150", "#go", "went 1", 1, None),
+        ("root=400", "#inner", "inner 1", 1, None),
+        ("doc=400", "#go", "went 1", 1, None),
+        ("analytics&ms=400", "#go", "went 1", 1, None),
+        ("replay=400", "#go", "went 1", 1, Some(false)),
+        ("replay=400&late", "#go", "went 1", 1, Some(false)),
+        ("quiet", "#go", "idle", 1, Some(false)),
+        ("ms=99999", "#go", "idle", 0, Some(false)),
+    ] {
+        // goto and click in one call: no pause between them.
+        std::fs::write(&steps, format!("goto {}/wired-late?{query}\nclick --selector {target}\n", site.url)).unwrap();
+        let r = s.ok(&["batch", &steps_arg]);
+        let click = r["results"]
+            .as_array()
+            .and_then(|rs| rs.iter().find(|x| x["do"].as_str().is_some_and(|d| d.starts_with("click"))))
+            .map(|x| x["result"].clone())
+            .unwrap_or_default();
+        let sent_again = click.get("clicked_again").is_some();
+        if let Some(expected) = again {
+            assert_eq!(sent_again, expected, "{query}: {r}");
+        }
+        // A click sent again reports the second one's effect; one that
+        // never had any says so. (A replayed click is seen only later.)
+        if sent_again {
+            assert!(click.get("no_effect").is_none(), "{query}: {r}");
+        }
+        if out == "idle" {
+            assert!(click.get("no_effect").is_some(), "{query}: {r}");
+        }
+        assert_eq!(s.text(&["get", "text", "--selector", "#out"]), out, "{query}: {r}");
+        assert_eq!(s.ok(&["eval", "window.hits"]), hits, "{query}: {r}");
+    }
+    let _ = std::fs::remove_file(&steps);
+}
+
 #[test]
 fn reset_starts_clean_in_the_same_browser() {
     let (true, Some(site)) = (chrome(), site()) else { return };

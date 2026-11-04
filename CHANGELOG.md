@@ -59,6 +59,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A click that came before the page wired its element up (a script that
+  clicks right after `goto`, hydration, a handler a timer or a script
+  loaded after load sets) is sent again once the page wires it, instead
+  of reporting `no_effect`. On a page loaded less than 10 s ago, a click
+  that changed nothing, with no click, mouse, pointer or touch listener
+  on the element or its ancestors when it came, waits while the page
+  loads scripts or data and up to 500 ms after the click for one to
+  appear, then clicks again (`clicked_again` says how long the page
+  took). When nothing on the document or window heard it either, a
+  listener the page adds there counts too (a framework that hydrates
+  the whole document); when something there did (analytics, a script
+  that records clicks to replay them), only the element's own path being
+  wired counts, with no other change on the page meanwhile and 150 ms
+  more of watching, so a replayed click is not sent twice. A click
+  something on the element's path heard is never sent again. A dead
+  button on a page that just loaded reports `no_effect` about 300 ms
+  later. `NAVIGERA_CLICK_AGAIN=0` turns it off.
 - A wait on something only a property shows (`wait --js` on a field's
   value, focus or a checkbox; assertions built on the same wait) ends when
   the page fires `input`, `change`, `focusin` or `focusout` for that change,

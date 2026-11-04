@@ -4080,6 +4080,14 @@ impl Driver {
                 if let Some(trace) = point.get("effect_trace") {
                     state["effect_trace"] = trace.clone();
                 }
+                if let Some(ms) = point.get("clicked_again").and_then(Value::as_u64) {
+                    // A script that clicks right after `goto` should know
+                    // why this click took longer.
+                    state["clicked_again"] = json!(format!(
+                        "nothing on the page listened for the click yet; the page wired the element up \
+                         {ms} ms later, and it was clicked again"
+                    ));
+                }
                 if let Some(fx) = point.get("no_effect") {
                     // Clicked, but the page did nothing: often a control
                     // the page hasn't wired up yet.
