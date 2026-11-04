@@ -73,9 +73,14 @@ All notable changes to this project are documented here. The format follows
   that records clicks to replay them), only the element's own path being
   wired counts, with no other change on the page meanwhile and 150 ms
   more of watching, so a replayed click is not sent twice. A click
-  something on the element's path heard is never sent again. A dead
-  button on a page that just loaded reports `no_effect` about 300 ms
-  later. `NAVIGERA_CLICK_AGAIN=0` turns it off.
+  something on the element's path heard is never sent again. Goto and
+  click in one batch, 3 reps each of 7 late-wiring pages (local, release,
+  Chrome 153): 0/21 to 21/21 clicked once; pages that replay a recorded
+  click: one hit, never two; a button wired 400 ms after load answers in
+  421 ms instead of a `no_effect` in 221 ms. A handled click costs the
+  same (40 in a batch: 16.8 vs 16.6 ms each); a dead button on a page
+  that just loaded reports `no_effect` in 521 ms instead of 221 ms.
+  `NAVIGERA_CLICK_AGAIN=0` turns it off.
 - A wait on something only a property shows (`wait --js` on a field's
   value, focus or a checkbox; assertions built on the same wait) ends when
   the page fires `input`, `change`, `focusin` or `focusout` for that change,
