@@ -194,7 +194,11 @@ fn url_host(url: &str) -> Host {
         _ => {}
     }
     let Some(after) = rest.strip_prefix("//") else {
-        return Host::None;
+        return if matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https" | "ws" | "wss") {
+            Host::Missing
+        } else {
+            Host::None
+        };
     };
     let authority = after.split(['/', '?', '#']).next().unwrap_or("");
     let authority = authority.rsplit('@').next().unwrap_or("");
@@ -288,6 +292,23 @@ mod tests {
             assert!(DomainPolicy::parse(bad, false).is_err(), "{bad:?} must be rejected");
         }
         assert!(DomainPolicy::parse("example.com,", false).is_ok());
+    }
+
+    #[test]
+    fn network_schemes_without_an_authority_fail_closed() {
+        let p = policy("example.com");
+        for url in [
+            "http:",
+            "https:example.com",
+            "http:/example.com",
+            "ws:socket",
+            "wss:/socket",
+            "HTTP:example.com",
+        ] {
+            assert!(!p.allows_url(url), "{url:?} has no network authority");
+        }
+        assert!(p.allows_url("custom:opaque"));
+        assert!(p.allows_url("https://example.com/"));
     }
 
     #[test]
