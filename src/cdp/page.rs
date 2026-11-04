@@ -3437,20 +3437,47 @@ impl Page {
             "middle" => ("middle", 4),
             _ => ("left", 1),
         };
+        let event = |kind: &str, button: &str, buttons: u32| {
+            json!({
+                "type": kind, "x": x, "y": y,
+                "button": button, "buttons": buttons, "clickCount": 1,
+            })
+        };
+        if !self.shared.is_single_target() {
+            // Chrome: all three at once. They reach the page in the order
+            // sent, the move first (its handlers run before the press is hit
+            // tested), but no round trip waits for the move's frame-aligned
+            // dispatch before the press goes out: one wait for the three.
+            let session = Some(self.session_id.as_str());
+            let send = |params: Value| self.client.send("Input.dispatchMouseEvent", params, session, timeout);
+            let (moved, pressed, released) = self.block_on(async {
+                tokio::join!(
+                    send(event("mouseMoved", "none", 0)),
+                    send(event("mousePressed", button, held)),
+                    send(event("mouseReleased", button, 0))
+                )
+            });
+            use std::sync::atomic::Ordering;
+            let unanswered = |r: &Result<Value>| {
+                r.as_ref().err().is_some_and(|e| format!("{e:#}").contains(super::client::NO_ANSWER))
+            };
+            let stalled = unanswered(&moved) || unanswered(&pressed) || unanswered(&released);
+            self.stalled.store(stalled, Ordering::SeqCst);
+            // Refused outright, all three (no Input domain): nothing was
+            // pressed, so the caller's DOM-event click can't double it.
+            if !stalled && moved.is_err() && pressed.is_err() && released.is_err() {
+                return Ok(false);
+            }
+            pressed?;
+            released?;
+            return Ok(true);
+        }
         for (i, (kind, button, buttons)) in
             [("mouseMoved", "none", 0), ("mousePressed", button, held), ("mouseReleased", button, 0)]
                 .into_iter()
                 .enumerate()
         {
-            let sent = self.send(
-                "Input.dispatchMouseEvent",
-                json!({
-                    "type": kind, "x": x, "y": y,
-                    "button": button, "buttons": buttons, "clickCount": 1,
-                }),
-                timeout,
-            );
-            match sent {
+            match self.send("Input.dispatchMouseEvent", event(kind, button, buttons), timeout) {
                 Ok(_) => {}
                 Err(_) if i == 0 => return Ok(false),
                 Err(e) => return Err(e),
