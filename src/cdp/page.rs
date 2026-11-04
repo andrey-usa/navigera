@@ -330,6 +330,43 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         if (!(c && c.form && (c.type === 'submit' || c.type === 'image'))) return false;
         return here(c.getAttribute('formtarget') || c.form.getAttribute('target'), e);
     };
+    // Whether the click then loads a new document is up to the page: a
+    // router cancels a link's click and pushes a route instead, a script
+    // cancels a submit and sends the form itself, a form fails validation.
+    // Watched from before the press, and read after it
+    // (`Page::nav_planned`), so a click waits for a navigation only when
+    // one was planned. Unknown (null) when a listener ahead of these hid
+    // the events: then the click waits, as before.
+    const armNav = (w, form) => {
+        const n = { click: null, submit: null, invalid: false, planned: false, offs: [] };
+        const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
+        on(w, 'click', (e) => { if (!n.click) n.click = e; });
+        on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
+        on(w, 'invalid', () => { n.invalid = true; });
+        // A handler that navigates by script (`location`, `form.submit()`).
+        const api = w.navigation;
+        if (api && api.addEventListener) {
+            on(api, 'navigate', (e) => { if (!(e.destination && e.destination.sameDocument)) n.planned = true; });
+        }
+        const F = w.HTMLFormElement && w.HTMLFormElement.prototype, submit = F && F.submit;
+        if (typeof submit === 'function') {
+            F.submit = function () { n.planned = true; return submit.apply(this, arguments); };
+            n.offs.push(() => { if (F.submit !== submit) F.submit = submit; });
+        }
+        n.off = () => { for (const off of n.offs.splice(0)) off(); };
+        // Never left behind, whatever happens to the click.
+        setTimeout(n.off, 10000);
+        n.verdict = () => {
+            n.off();
+            if (n.planned) return true;
+            if (!n.click) return null;
+            if (n.click.defaultPrevented) return false;
+            if (!form) return true;
+            if (n.submit) return !n.submit.defaultPrevented;
+            return n.invalid ? false : null;
+        };
+        Object.defineProperty(w.top, '__nvNav', { value: n, configurable: true, enumerable: false, writable: true });
+    };
     // A styled checkbox/radio is often a hidden or covered <input> inside a
     // visible <label>: clicking the label is what a user does and toggles it.
     const labels = (el.labels ? [...el.labels] : []);
@@ -563,7 +600,9 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 for (const t of ['pointerdown', 'mousedown', 'mouseup', 'click'])
                     w.addEventListener(t, () => { w.top.__nvSeen++; }, { capture: true, once: true });
                 if (effects) armEffects(w);
-                return Object.assign(p, { nav: mayNavigate(el), check: true, effects: !!effects });
+                const nav = mayNavigate(el);
+                if (nav) armNav(w, !el.closest('a[href]'));
+                return Object.assign(p, { nav, check: true, effects: !!effects });
             }
             // Inside a cross-origin frame: our coordinates are frame-local;
             // the caller asks CDP for the box instead.
@@ -3175,12 +3214,16 @@ impl Page {
             }
         }
         let armed = point.get("effects").and_then(Value::as_bool) == Some(true);
+        let nav = point.get("nav").and_then(Value::as_bool) == Some(true);
         let before = (self.shared.activity(&self.session_id), self.shared.logs.lock().unwrap().requests_started());
         match self.mouse_click(&point, &opts.button, timeout) {
             Ok(true) => {}
             other => {
                 if armed {
                     self.drop_effects(timeout);
+                }
+                if nav {
+                    self.nav_planned(timeout);
                 }
                 // Engine without the Input domain: DOM events.
                 other?;
@@ -3206,11 +3249,20 @@ impl Page {
                 if armed {
                     self.drop_effects(timeout);
                 }
+                if nav {
+                    self.nav_planned(timeout);
+                }
                 let mut res = dom(self)?;
                 res["dropped"] = json!(true);
                 return Ok(res);
             }
             point["redelivered"] = json!(true);
+        }
+        if nav && self.nav_planned(timeout) == Some(false) {
+            // The page cancelled what the click would have loaded (a
+            // router's link, a submit a script handles) or the form failed
+            // validation: no navigation to wait for.
+            point["nav"] = json!(false);
         }
         if armed {
             let effect = self.click_effect(&before, timeout);
@@ -3296,6 +3348,21 @@ impl Page {
             }
             std::thread::sleep(Duration::from_millis(15));
         }
+    }
+
+    /// Did the click on a link or a submit button plan a navigation (see
+    /// `armNav` in CLICK_PREP)? Stops watching. None when it can't be told.
+    fn nav_planned(&self, timeout: Duration) -> Option<bool> {
+        self.send(
+            "Runtime.evaluate",
+            json!({
+                "expression": "(() => { const n = window.__nvNav; if (!n) return null; delete window.__nvNav; return n.verdict(); })()",
+                "returnByValue": true,
+            }),
+            timeout,
+        )
+        .ok()
+        .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
     }
 
     /// Stop watching a click's effects (see [`Page::click_effect`]).

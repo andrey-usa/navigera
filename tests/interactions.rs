@@ -1417,6 +1417,51 @@ fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
     assert!(r["result"].as_str().unwrap_or("").contains("Alpha"));
 }
 
+/// A click on a link or a submit button waits for the page it loads only
+/// when the page lets it load one: a router that cancels the link's click,
+/// a script that handles the submit, or a form that fails validation leave
+/// nothing to wait for, so such a click costs what a plain click costs, not
+/// a navigation's grace on top. A script that submits the form itself is a
+/// navigation and is waited for. Nothing navigera watched is left behind.
+#[test]
+fn a_click_waits_for_a_navigation_only_when_the_page_plans_one() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("nav-intent", &[]);
+    let page = format!("{}/nav-intent", site.url);
+    for name in ["Real submit", "Script submit", "Real link"] {
+        s.ok(&["goto", &page]);
+        let r = s.ok(&["click", "--text", name]);
+        assert!(r["url"].as_str().unwrap_or_default().contains("/posted"), "{name}: {r}");
+    }
+    for (name, out, path) in [
+        ("Handled submit", "handled", "/nav-intent"),
+        ("Routed link", "routed", "/routed"),
+        ("Invalid submit", "idle", "/nav-intent"),
+    ] {
+        s.ok(&["goto", &page]);
+        s.ok(&["click", "--text", name]);
+        assert_eq!(s.ok(&["eval", "location.pathname"]), path, "{name}");
+        let shown = s.ok(&["text", "--selector", "#out"]);
+        assert!(shown.as_str().unwrap_or_default().starts_with(out), "{name}: {shown}");
+        let clean =
+            "window.__nvNav === undefined && HTMLFormElement.prototype.submit.toString().includes('[native code]')";
+        assert_eq!(s.ok(&["eval", clean]), true, "{name}: watchers left behind");
+    }
+    let best = |name: &str| {
+        (0..3)
+            .map(|_| {
+                s.ok(&["goto", &page]);
+                timed(&s, &["click", "--text", name]).0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let (plain, handled) = (best("Plain"), best("Handled submit"));
+    assert!(
+        handled < plain + 100.0,
+        "a handled submit waited for a navigation: {handled:.0} ms against {plain:.0} ms for a plain click"
+    );
+}
+
 /// What an action changed is read after the requests it started, also one
 /// a timer starts a turn later with nothing shown first (typing that asks
 /// for suggestions): the report has the answer, not the page as it was. The
