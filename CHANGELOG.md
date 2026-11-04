@@ -61,9 +61,11 @@ All notable changes to this project are documented here. The format follows
 
 - A `batch` says what its actions changed, as each action does alone:
   `fill` and `click` in one batch printed only the page state, so an
-  agent read the page again to learn how the batch ended (the LLM bench's
-  form and search sessions all did). Steps that changed nothing say
-  nothing, and a batch that changed nothing prints `ok`.
+  agent had to read the page again to learn how the batch ended. Steps
+  that changed nothing say nothing, and a batch that changed nothing
+  prints `ok`. The LLM bench's model still looks once more before it
+  answers (search and form, 5 of 6 sessions each), so its tokens didn't
+  change (8,716 vs 8,764 per session, 6 reps, same window).
 - `text --selector <css>` leaves out the scripts and styles inside the
   element: `text --selector body` on a page with an inline script printed
   its code after the text (565 characters for 78 of text on the bench's
