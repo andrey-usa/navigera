@@ -1215,8 +1215,56 @@ fn wrapped(prefix: &str, text: &str, indent: usize) -> String {
     out
 }
 
-/// Help text for `--help` / argument errors.
+/// The commands an agent needs first, one line each, for the short `--help`.
+const FIRST_COMMANDS: &[(&str, &str, &str)] = &[
+    ("goto", "<url>", "open a page"),
+    ("ax", "[<ref> | --selector <css>]", "read the page, [ref=N] to act on"),
+    ("click", "<ref> | --selector <css> | --text <t>", "click; prints what changed"),
+    ("fill", "<ref> <value>", "set a field's value"),
+    ("select", "<ref> <option>...", "choose a <select> option"),
+    ("check", "<target>", "check a checkbox, radio, switch"),
+    ("press", "<key>", "Enter, Tab, Control+a"),
+    ("text", "[--selector <css>]", "the text of an element or page"),
+    ("eval", "<js>", "run JavaScript, print the result"),
+    ("wait", "--selector <css> | --text <t>", "wait until the page shows it"),
+    ("batch", "[<file> | -]", "several steps in one call"),
+];
+
+/// Short help text for `--help` and for no arguments: one screen. Every
+/// command stays reachable by name; `help <command>` has its flags and
+/// examples and `help --all` the full list ([`usage_full`]).
 pub fn usage(program: &str) -> String {
+    let mut out = format!(
+        "navigera {}: drive Chrome from the shell, one command per step.\n\n\
+         LOOP (-s <name> keeps a warm browser between commands):\n  \
+         {program} -s s start\n  \
+         {program} -s s goto https://example.com\n  \
+         {program} -s s ax                     # read: tree with [ref=N]\n  \
+         {program} -s s click 12               # act on a ref\n  \
+         {program} -s s quit\n\n\
+         FIRST COMMANDS:\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    for (name, args, what) in FIRST_COMMANDS {
+        out.push_str(&format!("  {name:<7}{args:<38}{what}\n"));
+    }
+    let first: Vec<&str> = FIRST_COMMANDS.iter().map(|(n, ..)| *n).collect();
+    let others: Vec<&str> = OPS.iter().map(|(n, ..)| *n).filter(|n| !first.contains(n)).collect();
+    out.push_str("\nOTHER COMMANDS:\n");
+    out.push_str(&wrapped("  ", &others.join(" "), 2));
+    out.push_str("\nFLAGS: -s <name> session; --output compact|raw|json; --timeout-ms <ms>;\n");
+    out.push_str("  --headed; --attach, --profile, --electron with `start` (`help --all`).\n\n");
+    for paragraph in [
+        format!("`{program} help <command>`: its usage, flags and examples."),
+        format!("`{program} help --all`: every command and flag. `{program} skill`: the agent guide."),
+    ] {
+        out.push_str(&wrapped("", &paragraph, 0));
+    }
+    out.trim_end().to_string()
+}
+
+/// The full help text: every command and global flag (`help --all`).
+pub fn usage_full(program: &str) -> String {
     let mut out = format!(
         "navigera {}: drive Chrome from the shell, one command per step, over the\n\
          Chrome DevTools Protocol (CDP).\n\n\
@@ -1762,7 +1810,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             "-V" | "--version" => {
                 return Ok(ParsedArgs { config, command: None, start: false, local: Some(Local::Version), mcp: false })
             }
-            "-h" | "--help" => return Err(ArgsError::Help(usage(&program))),
+            "-h" | "--help" => {
+                let all = args.front().is_some_and(|a| a == "--all");
+                return Err(ArgsError::Help(if all { usage_full(&program) } else { usage(&program) }));
+            }
             other => {
                 return invalid(format!("unknown flag {other:?} (see `{program} --help`)"));
             }
@@ -1774,6 +1825,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     };
     if op == "-h" || op == "--help" || op == "help" {
         return match args.front() {
+            Some(topic) if topic == "--all" || topic == "all" => Err(ArgsError::Help(usage_full(&program))),
             Some(topic) => op_help(&program, topic).map(ArgsError::Help).map(Err).unwrap_or_else(|| {
                 let hint = suggest(topic).map(|s| format!(" — did you mean `{s}`?")).unwrap_or_default();
                 invalid(format!("unknown command {topic:?}{hint}\n(`{program} --help` lists them)"))
@@ -6941,7 +6993,7 @@ mod tests {
         }
         // The help fits 80 columns, names each command once and lists the
         // flags the skill uses.
-        let help = usage("navigera");
+        let help = usage_full("navigera");
         assert!(help.lines().all(|l| l.chars().count() <= 80 && !l.ends_with(' ')), "{help}");
         assert_eq!(help.lines().filter(|l| l.starts_with("  check ")).count(), 1, "{help}");
         for flag in ["-s, --session", "--wait-ms", "--version"] {
@@ -6952,6 +7004,30 @@ mod tests {
         assert!(matches!(missing, ArgsError::Invalid(_)));
         let extra = parse_args(argv(&["navigera", "title", "x"])).expect_err("extra");
         assert!(matches!(extra, ArgsError::Invalid(m) if m.contains("unexpected argument")));
+    }
+
+    #[test]
+    fn short_help_is_one_screen_and_every_command_is_reachable() {
+        let short = usage("navigera");
+        assert!(short.len() <= 3072, "{} bytes: {short}", short.len());
+        assert!(short.lines().all(|l| l.chars().count() <= 80 && !l.ends_with(' ')), "{short}");
+        for (name, ..) in FIRST_COMMANDS {
+            assert!(short.lines().any(|l| l.starts_with(&format!("  {name} "))), "first command {name}: {short}");
+            assert!(OPS.iter().any(|(n, ..)| n == name), "{name} is not a command");
+        }
+        for (name, ..) in OPS {
+            assert!(short.split_whitespace().any(|w| w == *name), "{name} not named in the short help: {short}");
+        }
+        let all = usage_full("navigera");
+        assert!(all.len() > 10_000, "the full help is kept: {} bytes", all.len());
+        for argv_ in [vec!["navigera", "help", "--all"], vec!["navigera", "--help", "--all"]] {
+            match parse_args(argv(&argv_)).expect_err("help --all") {
+                ArgsError::Help(text) => assert_eq!(text, all, "{argv_:?}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(matches!(parse_args(argv(&["navigera", "--help"])), Err(ArgsError::Help(t)) if t == short));
+        assert!(matches!(parse_args(argv(&["navigera"])), Err(ArgsError::Help(t)) if t == short));
     }
 
     #[test]
