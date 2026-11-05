@@ -21,7 +21,7 @@ use super::domax;
 use super::events::Shared;
 use super::fxhash::{FxMap, FxSet};
 use super::logs::Report;
-use super::snap::{Child, NewLayout, NewNode, Op, Snap, STYLES};
+use super::snap::{Child, NewLayout, NewNode, Op, Snap, CAPTURE_STYLES, STYLES};
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1145,7 +1145,8 @@ const JOURNAL_PRIME: &str = r#"(id, entry) => {
 /// `content-visibility: auto`, or more than `max` nodes to read. Content a
 /// display lock skips (a closed `<details>`) is listed without a box and
 /// its style is never read: reading it would lay it out, and the next
-/// capture would show it.
+/// capture would show it. A capture drops the boxes Chrome keeps for such
+/// content by the same rule ([`Snap::from_value`]), so the two agree.
 ///
 /// Not seen, as a capture would: a box outside the subtrees read that
 /// grows from nothing or shrinks to it with no DOM change (an image that
@@ -5883,12 +5884,12 @@ impl Page {
 
     /// `DOMSnapshot.captureSnapshot` with the styles [`clickables_from`]
     /// and the tree built from the snapshot read (cursor, pointer-events,
-    /// opacity, visibility, display, content). No `includeDOMRects`: `layout.bounds`
+    /// opacity, visibility, display, content), and `content-visibility`
+    /// to drop what a display lock skips. No `includeDOMRects`: `layout.bounds`
     /// is always there, and the extra offset/client/scroll rects were about
     /// two thirds of the call's time on a 2,000-row table.
     fn dom_snapshot(&self, timeout: Duration) -> Option<Value> {
-        let params =
-            json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility", "display", "content"] });
+        let params = json!({ "computedStyles": CAPTURE_STYLES });
         self.send("DOMSnapshot.captureSnapshot", params, timeout).ok()
     }
 }

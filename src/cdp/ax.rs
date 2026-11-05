@@ -204,6 +204,15 @@ impl Node {
     }
 }
 
+/// The end of the line that closes a tree cut at its line limit (after
+/// "… N more lines" or "… more lines").
+const CUT_TAIL: &str = " (scope with `ax --selector <css>`, or raise `--limit`)";
+
+/// Whether a line is the one that closes a tree cut at its line limit.
+pub fn is_cut_line(line: &str) -> bool {
+    line.starts_with("… ") && line.ends_with(CUT_TAIL) && line.contains("more lines")
+}
+
 pub struct Rendered {
     pub text: String,
     /// Lines emitted before truncation.
@@ -1131,7 +1140,7 @@ fn render_inner<'a>(
         // lines the whole tree has is not known: no count, rather than a
         // wrong one ("1 more lines" on a 3,000-line page).
         let more = if lazy || tree_stopped { "more lines".to_string() } else { format!("{truncated} more lines") };
-        lines.push(format!("… {more} (scope with `ax --selector <css>`, or raise `--limit`)"));
+        lines.push(format!("… {more}{CUT_TAIL}"));
     }
     // Cut text said once, at the top, with how to read it all: an agent
     // that reads on without following the cut marks misses what they hide.

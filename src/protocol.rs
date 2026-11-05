@@ -5861,6 +5861,45 @@ fn tree_change(before: &str, after: &str, typed: &[&str]) -> Option<String> {
             }
         }
     }
+    // A tree cut at its line limit: a change above the cut moves lines
+    // across it, and those are not changes. Lines gone from the end of
+    // `before` while `after` is cut too may only have moved past the cut,
+    // and lines new at the end of `after` while `before` was cut may have
+    // been past it: both are left out (a change right at the cut with
+    // them). The line that says the tree is cut is never a change.
+    fn drop_tail(list: &mut Vec<&str>, tree: &str) {
+        let mut left: HashMap<String, usize> = HashMap::new();
+        for line in list.iter() {
+            *left.entry(key(line)).or_default() += 1;
+        }
+        let mut gone: HashMap<String, usize> = HashMap::new();
+        for line in tree.lines().rev().skip_while(|l| crate::cdp::ax::is_cut_line(l)) {
+            match left.get_mut(&key(line)) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    *gone.entry(key(line)).or_default() += 1;
+                }
+                _ => break,
+            }
+        }
+        for i in (0..list.len()).rev() {
+            if let Some(n) = gone.get_mut(&key(list[i])) {
+                if *n > 0 {
+                    *n -= 1;
+                    list.remove(i);
+                }
+            }
+        }
+    }
+    let is_cut = |tree: &str| tree.lines().next_back().is_some_and(crate::cdp::ax::is_cut_line);
+    if is_cut(after) {
+        drop_tail(&mut removed, before);
+    }
+    if is_cut(before) {
+        drop_tail(&mut added, after);
+    }
+    added.retain(|l| !crate::cdp::ax::is_cut_line(l));
+    removed.retain(|l| !crate::cdp::ax::is_cut_line(l));
     let gone_refs: HashMap<&str, &str> = removed.iter().filter_map(|l| node_ref(l).map(|r| (r, *l))).collect();
     let new_refs: HashMap<&str, ()> = added.iter().filter_map(|l| node_ref(l)).map(|r| (r, ())).collect();
     // A bare container (`listitem:`) or a list marker says nothing a reader
@@ -6329,6 +6368,32 @@ mod tests {
         let out = super::tree_change(before, &format!("{before}{many}"), &[]).unwrap();
         assert_eq!(out.lines().count(), super::CHANGE_LINES + 1);
         assert!(out.ends_with("... and 10 more changed lines (`ax` reads the page)"));
+    }
+
+    #[test]
+    fn lines_that_only_moved_across_a_cut_are_not_changes() {
+        let cut = "… more lines (scope with `ax --selector <css>`, or raise `--limit`)";
+        let before = format!("- button \"Go\" [ref=1]\n- row:\n  - cell \"a\"\n  - cell \"b\"\n{cut}");
+        // A line added above the cut pushes the last one past it.
+        let opened = format!("- button \"Go\" [ref=1]\n- text: body\n- row:\n  - cell \"a\"\n{cut}");
+        assert_eq!(super::tree_change(&before, &opened, &[]).as_deref(), Some("+ text: body"));
+        // A line gone above it brings the next one in.
+        assert_eq!(super::tree_change(&opened, &before, &[]).as_deref(), Some("- text: body"));
+        // A tree no longer cut is whole: what left its end is gone...
+        let whole = "- button \"Go\" [ref=1]\n- row:\n  - cell \"a\"";
+        assert_eq!(super::tree_change(&before, whole, &[]).as_deref(), Some("- cell \"b\""));
+        // ...and one cut now that wasn't: what came in at its end is new.
+        assert_eq!(super::tree_change(whole, &before, &[]).as_deref(), Some("+ cell \"b\""));
+        // A count on the cut line that changed is not a change either.
+        let counted = |n: usize, body: &str| {
+            format!(
+                "- text: {body}\n- cell \"a\"\n… {n} more lines (scope with `ax --selector <css>`, or raise `--limit`)"
+            )
+        };
+        assert_eq!(
+            super::tree_change(&counted(9, "x"), &counted(8, "y"), &[]).as_deref(),
+            Some("+ text: y\n- text: x")
+        );
     }
 
     #[test]

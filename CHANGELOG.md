@@ -90,6 +90,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `ax` no longer shows content the page hides behind a display lock
+  once it has been shown: the body of a `<details>` opened and closed
+  again, or what is under `content-visibility: hidden` or
+  `hidden=until-found` after it was visible. Chrome keeps such content's
+  boxes and its DOM snapshot lists them, so the tree showed text and
+  links nobody can see, and a click that closed a `<details>` reported
+  no change. No slower: a 10,000-row read within 1% (interleaved, local).
+- What an action changed no longer lists lines that only moved across the
+  end of a tree cut at its line limit: on a page longer than `ax` shows,
+  opening a section above the cut used to report the rows it pushed past
+  the cut as removed (and closing it, the rows it brought in as added).
 - A click no longer presses whatever took its element's place between
   the hit test and the press: an overlay a mouse move or a timer opened
   just then, or an element that moves every frame. Such a press is kept

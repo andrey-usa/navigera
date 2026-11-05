@@ -925,7 +925,8 @@ PAGES["/clicks"] = ("clicks", ".menu{display:none} [aria-expanded=true] + .menu{
 <nav><button id=menu aria-expanded=false onclick="this.setAttribute('aria-expanded', 'true')">Menu</button><ul class=menu><li><a href=#a>Alpha</a></li></ul></nav>
 <button id=show onclick="document.getElementById('box').classList.remove('hidden')">Show</button>
 <div id=box class=hidden><h2>Hidden section</h2><a href=#h>hidden link</a></div>
-<details><summary>More</summary><p>Details body</p></details>
+<details id=more><summary>More</summary><p>Details body</p></details>
+<button id=det onclick="const d = document.getElementById('more'); d.open = !d.open">Toggle details</button>
 <button id=dlg onclick="document.getElementById('dialog').show()">Dialog</button>
 <dialog id=dialog><p>Dialog text</p></dialog>
 <button id=pop onclick="document.getElementById('popover').showPopover()">Popover</button>

@@ -1778,7 +1778,10 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
 /// a session that captures the page every time says
 /// (`NAVIGERA_DELTA_READ=0`), and the closed `<details>` stays closed
 /// (reading the style of content a display lock skips would lay it out for
-/// the next capture). Timed against that session.
+/// the next capture). Opened and closed again, its body is reported shown
+/// and then gone in both sessions, though Chrome keeps the boxes it had.
+/// No report lists rows that only moved across the cut of the 2,000-line
+/// tree. Timed against that session.
 #[test]
 fn a_click_on_a_large_page_reads_only_what_it_changed() {
     let _alone = timed_alone();
@@ -1813,7 +1816,7 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
     };
     let buttons = [
         "#edit", "#add", "#remove", "#menu", "#show", "#dlg", "#pop", "#redraw", "#wire", "#val", "#fade", "#ol",
-        "#edit",
+        "#edit", "#det", "#det",
     ];
     let mut reports: Vec<Vec<String>> = Vec::new();
     for name in &sessions {
@@ -1866,7 +1869,24 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
     assert!(r[9].contains("set by script"), "a value a script set: {r:?}");
     assert!(r[11].contains("zeroth"), "{r:?}");
     assert!(r[12].contains("edited 2"), "{r:?}");
-    assert!(r.iter().all(|l| !l.contains("Details body")), "a closed <details> showed its body: {r:?}");
+    assert!(r[..13].iter().all(|l| !l.contains("Details body")), "a closed <details> showed its body: {r:?}");
+    assert!(r[13].contains("+ paragraph: Details body"), "a <details> opened: {r:?}");
+    assert!(r[14].contains("- paragraph: Details body"), "a <details> closed again: {r:?}");
+    assert!(!r[15].contains("Details body"), "a <details> closed again showed its body: {r:?}");
+    // The changes are all near the top: a row past the first hundred in a
+    // report only moved across the cut.
+    let past_top = |line: &str| {
+        ["SKU-", "\"Item "].iter().any(|tag| {
+            line.split(tag).skip(1).any(|p| {
+                let n: String = p.chars().take_while(char::is_ascii_digit).collect();
+                n.parse::<u32>().is_ok_and(|n| n >= 100)
+            })
+        })
+    };
+    assert!(
+        r[..15].iter().all(|l| !l.lines().any(past_top)),
+        "a report listed rows that only moved across the cut: {r:?}"
+    );
     let best = |name: &str| {
         compact(name, &["goto", &page]);
         compact(name, &["ax"]);
