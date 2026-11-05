@@ -2010,6 +2010,57 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
     assert_eq!(patched_caps, 0, "patched reads captured the page whole {patched_caps} times in 3 clicks and reads");
 }
 
+/// A read on a page whose style rules far outnumber its elements doesn't
+/// walk them for the next read (walking costs more than capturing that
+/// page): the plain `ax` after it captures again. The first action's prime
+/// walks them, as it did before reads primed, and from then on the read
+/// after an action and the plain `ax` after that are patched (no
+/// `DOMSnapshot.captureSnapshot` in the session's CDP trace).
+#[test]
+fn a_read_leaves_walking_a_large_style_sheet_to_the_first_action() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let trace = std::env::temp_dir().join(format!("nv-interactions-rules-{}.jsonl", std::process::id()));
+    let name =
+        std::env::temp_dir().join(format!("nv-interactions-rules-{}.sock", std::process::id())).display().to_string();
+    let _ = std::fs::remove_file(&trace);
+    let out = Command::new(tool_exe())
+        .env("NAVIGERA_CDP_TRACE", &trace)
+        .env_remove("NAVIGERA_REST_PRIME")
+        .args(["--session", &name, "start"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run navigera");
+    assert!(out.status.success(), "start failed: {}", String::from_utf8_lossy(&out.stdout));
+    let run = |args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .args(["--session", &name])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let captures = || {
+        std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
+            .count()
+    };
+    run(&["goto", &format!("{}/many-rules", site.url)]);
+    assert!(run(&["ax"]).contains("Row 0"));
+    let first = captures();
+    assert!(run(&["ax"]).contains("Row 0"));
+    assert_eq!(captures(), first + 1, "the read after a read that walked no rules captures the page");
+    let report = run(&["click", "--selector", "#add"]);
+    assert!(report.contains("Added row"), "{report}");
+    assert!(run(&["ax"]).contains("Added row"));
+    assert_eq!(captures(), first + 1, "after the action walked the rules, its read and the next are patched");
+    run(&["quit"]);
+    let _ = std::fs::remove_file(&trace);
+}
+
 /// After a click whose fetch has started, the snapshot waits for that fetch
 /// and a short settle, not the whole quiet window: the list is there, well
 /// before the 200 ms fetch plus 500 ms of quiet it used to take. A window

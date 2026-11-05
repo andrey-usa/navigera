@@ -67,6 +67,15 @@ All notable changes to this project are documented here. The format follows
   `<head>`, or a change bigger than an eighth of the page is captured
   whole, as before. Reports are the same either way;
   `NAVIGERA_DELTA_READ=0` captures every time, to compare.
+- A plain `ax` after a read or an action is patched the same way (10,000
+  rows, the `ax` after a click: 652 to 58 ms; medians of 15, interleaved,
+  local); `NAVIGERA_REST_PRIME=0` turns that off. Not on a page whose
+  style rules far outnumber its elements (a site's whole CSS bundle, as
+  on GitHub: 26,000 to 42,000 rules): walking them for the next read
+  costs more than the capture it saves, so a read leaves them to the
+  first action, as before (github.com, first `ax` 193 to 72 ms; medians
+  of 5, interleaved, live). A walk also stops as soon as it finds more
+  state-dependent rules than the journal tracks.
 - Building a large page's tree costs less on navigera's side (10,000 rows,
   from a saved snapshot: tree 85 to 51 ms, text 49 to 26 ms, clickable
   elements 34 to 20 ms): the snapshot is read into columns once, per-node

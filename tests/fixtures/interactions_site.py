@@ -917,6 +917,16 @@ if (location.search.includes('closed')) {
 """ + "".join(f"<p>row {i} of the long page</p>" for i in range(1300)))
 
 
+# Many more style rules than elements (a site's whole CSS bundle on a small
+# page): a read leaves walking them to the first action.
+PAGES["/many-rules"] = ("many rules",
+    "".join(f".p{i}{{color:#{i % 4096:03x}}}" for i in range(12000)) + " .row:hover{cursor:pointer}", """
+<button id=add onclick="const li = document.createElement('li'); li.className = 'row'; li.textContent = 'Added row'; rows.prepend(li)">Add</button>
+<ul id=rows></ul>
+<script>
+rows.innerHTML = Array.from({length: 2000}, (_, i) => `<li class=row>Row ${i}</li>`).join('');
+</script>""")
+
 PAGES["/clicks"] = ("clicks", ".menu{display:none} [aria-expanded=true] + .menu{display:block} .hidden{display:none} "
     ".fade{opacity:0;transition:opacity 100ms} .fade.in{opacity:1} .arrow::before{content:\"\\2192  \"}", """
 <button id=edit onclick="document.querySelector('#r5 td:nth-child(2)').textContent = 'edited ' + (++window.k)">Edit</button>

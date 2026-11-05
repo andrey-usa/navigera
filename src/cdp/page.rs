@@ -999,7 +999,16 @@ const JOURNAL_ARM: &str = r#"(id) => {
 /// watch on style rule writes then stand until that read: another
 /// action keeps them (what changed since the read is the read's to
 /// show), and a text entry is judged from the read only if nothing a
-/// rule styles changed in between. No timer takes these hooks off.
+/// rule styles changed in between. No timer takes these hooks off. Not
+/// when the style rules it would walk first outnumber twice the page's
+/// elements: walking one costs about half what capturing an element does
+/// (2.8 us a rule, GitHub's 42,000), so the walk would cost more than the
+/// capture it saves; the first action's prime walks them then, as before.
+///
+/// The walk stops once the state-dependent selectors pass the cap (the
+/// prime fails then, whatever comes after), and a sheet it stopped in
+/// remembers how many it had, so a later prime in the document fails
+/// without walking it again.
 const JOURNAL_PRIME: &str = r#"(id, entry, rest) => {
     const W = window, SELECTORS_MAX = 400, MATCHED_MAX = 20000;
     const j = W.__nvJournal;
@@ -1041,16 +1050,22 @@ const JOURNAL_PRIME: &str = r#"(id, entry, rest) => {
     const ELEMENT_PSEUDO = /::(before|after|marker|placeholder|selection|backdrop|file-selector-button|first-line|first-letter|cue|spelling-error|grammar-error|target-text)(?![\w-])|:(before|after|first-line|first-letter)(?![\w-])/g;
     const cache = W.__nvJournalSheets || new WeakMap();
     try { Object.defineProperty(W, '__nvJournalSheets', { value: cache, configurable: true, enumerable: false, writable: true }); } catch (_) {}
-    const sheetSelectors = (sheet) => {
+    // A sheet's selectors (null: one this can't track), or false when it
+    // has more than `room` (it is not walked past that).
+    const sheetSelectors = (sheet, room) => {
         let rules;
         try { rules = sheet.cssRules; } catch (_) { return null; }
         if (!rules) return [];
         const hit = cache.get(sheet);
-        if (hit && hit.n === rules.length) return hit.sel;
+        if (hit && hit.n === rules.length) {
+            if (hit.over === undefined) return hit.sel;
+            if (hit.over > room) return false;
+        }
         const sel = [];
-        let bad = false;
+        let bad = false, over = false;
         const walk = (list) => {
             for (const r of list) {
+                if (over) return;
                 const text = r.selectorText;
                 if (text !== undefined && (DYN.test(text) || REACH.test(text))) {
                     const st = r.style;
@@ -1058,13 +1073,17 @@ const JOURNAL_PRIME: &str = r#"(id, entry, rest) => {
                     for (let i = 0; !relevant && i < st.length; i++) if (st[i].startsWith('--')) relevant = true;
                     if (relevant) {
                         if (/&|:host|::part|::slotted|:scope/.test(text)) bad = true;
-                        else sel.push(text.replace(ELEMENT_PSEUDO, ''));
+                        else if (sel.push(text.replace(ELEMENT_PSEUDO, '')) > room) over = true;
                     }
                 }
                 if (r.cssRules && r.cssRules.length) walk(r.cssRules);
             }
         };
         walk(rules);
+        if (over) {
+            cache.set(sheet, { n: rules.length, over: sel.length });
+            return false;
+        }
         const out = bad ? null : sel;
         cache.set(sheet, { n: rules.length, sel: out });
         return out;
@@ -1072,15 +1091,27 @@ const JOURNAL_PRIME: &str = r#"(id, entry, rest) => {
     j.matches = (scope, sel) => { try { return [...scope.querySelectorAll(sel)]; } catch (_) { return null; } };
     j.tracked = [];
     j.inventory = [];
+    const sheets = [];
     for (const scope of j.scopes) {
         j.inventory.push([scope, j.sheetsOf(scope), j.sheetCount(scope)]);
-        for (const sheet of j.sheetsOf(scope)) {
-            const sel = sheetSelectors(sheet);
-            if (sel === null) return 'style sheet';
-            for (const x of sel) j.tracked.push([scope, x]);
-        }
+        for (const sheet of j.sheetsOf(scope)) sheets.push([scope, sheet]);
     }
-    if (j.tracked.length > SELECTORS_MAX) return 'state styles';
+    if (rest) {
+        let rules = 0, elements = 0;
+        for (const [, sheet] of sheets) {
+            const hit = cache.get(sheet);
+            try { if (!hit || hit.n !== sheet.cssRules.length) rules += sheet.cssRules.length; } catch (_) {}
+        }
+        for (const d of j.docs) elements += d.getElementsByTagName('*').length;
+        if (rules > 2 * elements) return 'style rules';
+    }
+    for (const [scope, sheet] of sheets) {
+        const sel = sheetSelectors(sheet, SELECTORS_MAX - j.tracked.length);
+        if (sel === null) return 'style sheet';
+        if (sel === false) return 'state styles';
+        for (const x of sel) j.tracked.push([scope, x]);
+        if (j.tracked.length > SELECTORS_MAX) return 'state styles';
+    }
     j.matched = [];
     let total = 0;
     for (const [scope, sel] of j.tracked) {
