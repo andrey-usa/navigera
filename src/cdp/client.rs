@@ -699,7 +699,9 @@ mod tests {
                 let v: Value = serde_json::from_slice(frame).unwrap();
                 let id = v["id"].as_u64().unwrap();
                 if v["method"] == TEXT_RESULT[0] {
-                    captures.push((id, v["params"]["fail"] == true));
+                    // The one to fail asks for a style (a real parameter: CI checks
+                    // every traced call against the browser's protocol).
+                    captures.push((id, v["params"]["computedStyles"] != json!([])));
                 } else {
                     eval = id;
                 }
@@ -719,9 +721,9 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         });
-        let capture = client.send(TEXT_RESULT[0], json!({}), None, T);
+        let capture = client.send(TEXT_RESULT[0], json!({ "computedStyles": [] }), None, T);
         let eval = client.send("Runtime.evaluate", json!({ "expression": "2" }), None, T);
-        let failed = client.send(TEXT_RESULT[0], json!({ "fail": true }), None, T);
+        let failed = client.send(TEXT_RESULT[0], json!({ "computedStyles": ["display"] }), None, T);
         let (capture, eval, failed) = tokio::join!(capture, eval, failed);
         let Value::String(text) = capture.unwrap() else { panic!("not text") };
         assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), json!({"strings": ["a\"b\u{e9}"], "documents": []}));
