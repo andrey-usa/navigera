@@ -653,6 +653,21 @@ def exec_command(command, arm, sess, b, cwd, mcp):
     return run_cli(argv, stdin, cwd)
 
 
+def command_op(command, mcp):
+    """The browser operation a command performs: the MCP tool name for the
+    MCP arm (`mcp <tool> <json>`), else the navigera subcommand after the
+    session flags. `batch` stays one entry: its steps share the shell
+    call's gap, so it never counts as a goto for the gate metric."""
+    s = command.strip()
+    if mcp is not None:
+        return s[4:].strip().partition(" ")[0] if s.startswith("mcp ") else ""
+    t = s.split()
+    i = 1
+    while i < len(t) and t[i].startswith("-"):
+        i += 2 if t[i] in ("-s", "--session", "--output") else 1
+    return t[i] if i < len(t) else ""
+
+
 # ---------------------------------------------------------------- loop
 
 def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
@@ -669,6 +684,8 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
     answer = ""
     stop = "max-turns"
     transcript = []
+    pauses = []
+    prev_end = None
     try:
         mcp = setup_arm(arm, sess, b, cwd)
         block = vocab(arm, sess)
@@ -705,13 +722,24 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
                                  "Continue with run_shell_command, or "
                                  "reply `DONE: <answer>`."})
                 continue
-            for call in calls:
+            for i, call in enumerate(calls):
                 try:
                     args = json.loads(call["function"].get("arguments") or "{}")
                 except Exception:
                     args = {}
                 command = str(args.get("command", ""))
+                t_start = time.monotonic()
                 out = exec_command(command, arm, sess, b, cwd, mcp)
+                t_end = time.monotonic()
+                pauses.append({
+                    "op": command_op(command, mcp),
+                    "cmd": " ".join(command.split())[:TRANSCRIPT_ARG_MAX],
+                    "pause_ms": (round((t_start - prev_end) * 1000)
+                                 if prev_end is not None else None),
+                    "wall_ms": round((t_end - t_start) * 1000),
+                    "shared_turn": i > 0,
+                })
+                prev_end = t_end
                 transcript.append(
                     f"T{turns:02d} "
                     + " ".join(command.split())[:TRANSCRIPT_ARG_MAX]
@@ -740,7 +768,8 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
     rec = {"arm": arm, "task": task, "rep": rep, "success": success,
            "turns": turns, "prompt_tokens": prompt_t,
            "completion_tokens": completion_t, "cached_tokens": cached_t,
-           "cost_usd": round(cost, 6), "wall_ms": wall_ms, "stop": stop}
+           "cost_usd": round(cost, 6), "wall_ms": wall_ms, "stop": stop,
+           "pauses": pauses}
     with open(os.path.join(out_dir, f"{sess}.json"), "w") as f:
         json.dump(rec, f, indent=2)
     line = (f"RESULT arm={arm} task={task} rep={rep} success={int(success)} "
@@ -758,6 +787,56 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
                     f"{int(success)}, turns={turns}, stop={stop}\n\n```\n")
             f.write("\n".join(transcript) + "\n```\n")
     return rec
+
+
+def pct(xs, q):
+    if not xs:
+        return 0
+    xs = sorted(xs)
+    k = (len(xs) - 1) * q
+    lo = int(k)
+    return round(xs[lo] + (xs[hi := min(lo + 1, len(xs) - 1)] - xs[lo])
+                 * (k - lo))
+
+
+def pause_lines(records, arms):
+    """Per-arm agent pace: how long the model pauses between browser
+    commands, and how often the read-ahead gate would have fired."""
+    out = []
+    for arm in arms:
+        rs = [r for r in records if r["arm"] == arm]
+        gaps = [p["pause_ms"] for r in rs for p in r.get("pauses", [])
+                if p["pause_ms"] is not None]
+        if not gaps:
+            continue
+        shares = {t: sum(g >= t for g in gaps) / len(gaps)
+                  for t in (500, 1000, 2000)}
+        # The gate reads the three most recent gaps INCLUDING the current
+        # command's (the driver pushes the elapsed time before checking),
+        # so the window ends at the goto itself. Gaps are shell-call level,
+        # not server-observed per browser step (a `batch`'s steps share one
+        # gap); setup and the first command (no previous answer) are out.
+        gates = {1000: [0, 0], 500: [0, 0]}
+        for r in rs:
+            ps = r.get("pauses", [])
+            for i, p in enumerate(ps):
+                if p["op"] not in ("goto", "browser_navigate"):
+                    continue
+                for t in gates:
+                    gates[t][1] += 1
+                    win = [q["pause_ms"] for q in ps[max(0, i - 2):i + 1]]
+                    if len(win) == 3 and all(g is not None and g >= t
+                                             for g in win):
+                        gates[t][0] += 1
+        out.append(
+            f"PAUSES arm={arm} n={len(gaps)} "
+            f"min={min(gaps)} p10={pct(gaps, 0.10)} p50={pct(gaps, 0.50)} "
+            f"p90={pct(gaps, 0.90)} "
+            f">=0.5s={shares[500]:.2f} >=1s={shares[1000]:.2f} "
+            f">=2s={shares[2000]:.2f} "
+            f"goto_gate@1s={gates[1000][0]}/{gates[1000][1]} "
+            f"goto_gate@0.5s={gates[500][0]}/{gates[500][1]}")
+    return out
 
 
 def med(xs):
@@ -823,6 +902,9 @@ def main():
                    "total_cost_usd": round(budget.spent, 6)}, f, indent=2)
     t = table(records, arms, tasks)
     print(t, flush=True)
+    for line in pause_lines(records, arms):
+        print(line, flush=True)
+        print(f"::notice::{line}", flush=True)
     for row in t.split("\n")[2:]:
         print(f"::notice::{row}", flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
