@@ -85,7 +85,7 @@ pub fn build_scoped(snap: &Snap, scope_backend: u64) -> Option<Built> {
 }
 
 fn build_from(snap: &Snap, scope: Option<u64>) -> Option<Built> {
-    let strings: Vec<&str> = snap.strings.iter().map(String::as_str).collect();
+    let strings = strings(snap);
     let docs: Vec<Doc> = snap.docs.iter().map(|d| Doc::new(d, &strings)).collect();
     let main = docs.first()?;
     let mut frames = Vec::new();
@@ -1247,9 +1247,120 @@ impl<'a> Doc<'a> {
 
     /// Emit the AX nodes of document `d` from its root, or from `from` (a
     /// scoped snapshot's element) down.
+    /// Where the tree starts in this document: `from`, else its root.
+    fn root(&self, from: Option<usize>) -> Option<usize> {
+        from.or_else(|| (0..self.ty.len()).find(|&i| self.ty[i] == 9))
+    }
+
+    /// The tree node of DOM node `i` (one [`Doc::shown`] keeps), without
+    /// its children, and the text of the child it gets: generated
+    /// content's text, or a form field's (below).
+    fn node(&self, d: usize, i: usize) -> (Node, Option<String>) {
+        let mut node = Node { id: node_id(d, i), ..Node::default() };
+        // A text child the node gets: generated content's text, or a
+        // form field's (below).
+        let mut generated: Option<String> = None;
+        match self.ty[i] {
+            9 => {
+                node.role = "RootWebArea".to_string();
+                node.name = self.title.to_string();
+                node.props = vec![
+                    ("focusable".to_string(), Some(Value::Bool(true))),
+                    ("url".to_string(), Some(Value::String(self.url.to_string()))),
+                ];
+            }
+            3 => {
+                node.role = "StaticText".to_string();
+                node.name = squash(self.text_of_node(i));
+            }
+            _ if self.is_marker(i) => {
+                node.role = "ListMarker".to_string();
+                node.name = squash(self.text_of_node(i));
+            }
+            // Generated content: Chrome's ignored box around its text.
+            _ if self.pseudo.contains(&i) => {
+                node.role = "none".to_string();
+                generated = Some(squash(&self.generated_text(i)));
+            }
+            // `visibility: hidden`: not there for a user, though a
+            // child that sets it visible is.
+            _ if self.invisible(i) => node.role = "generic".to_string(),
+            _ => {
+                let role = self.role(i);
+                // What a form field's text child would be: its name
+                // (a button) or value (a field), when it has one.
+                let mut value_given = None;
+                if role != "generic" && role != "none" {
+                    node.name = self.name(i, &role);
+                    if let Some(v) = self.value_of(i, &role) {
+                        value_given = Some(v.clone());
+                        node.value = v;
+                    }
+                } else {
+                    let named = self
+                        .attr(i, "aria-labelledby")
+                        .map(|ids| self.idref_text(ids))
+                        .filter(|t| !t.is_empty())
+                        .or_else(|| self.attr(i, "aria-label").map(squash).filter(|t| !t.is_empty()))
+                        .or_else(|| {
+                            // A custom element's title (a `<relative-time>`'s
+                            // date); Chrome names no plain <span> by it.
+                            self.attr(i, "title")
+                                .filter(|_| self.tag[i].contains('-'))
+                                .map(squash)
+                                .filter(|t| !t.is_empty() && !self.holds_controls(i))
+                        });
+                    if let Some(t) = named {
+                        node.name = t;
+                    }
+                }
+                if let Some(desc) = self.attr(i, "aria-describedby").map(|ids| self.idref_text(ids)) {
+                    node.description = desc;
+                }
+                node.props = self.properties(i, &role);
+                // A form field's text (a button's label, a field's
+                // value) is a text node inside it in Chrome's tree, as
+                // names compare with.
+                if self.tag[i] == "INPUT" {
+                    generated = match role.as_str() {
+                        "button" if self.input_type(i) != "image" && !node.name.is_empty() => Some(node.name.clone()),
+                        "textbox" | "searchbox" | "spinbutton" | "combobox" => value_given,
+                        _ => None,
+                    };
+                }
+                node.role = role;
+            }
+        }
+        if self.backend[i] > 0 {
+            node.backend = Some(self.backend[i] as u64);
+        }
+        (node, generated)
+    }
+
+    /// The DOM nodes whose tree nodes may be `i`'s children, in order, each
+    /// still to pass [`Doc::shown`]. The options of a closed select are its
+    /// children; a text node, a frame or generated content has none here.
+    fn tree_kids(&self, i: usize) -> Vec<usize> {
+        if self.ty[i] == 3 || self.content_doc.contains_key(&i) || self.pseudo.contains(&i) {
+            return Vec::new();
+        }
+        let mut kids = self.kids(i);
+        if self.tag[i] == "OPTION" {
+            kids.retain(|&k| self.ty[k] != 3);
+        }
+        kids
+    }
+
+    /// The document a shown frame element holds, by its owner's backend id.
+    fn frame_of(&self, i: usize) -> Option<(u64, usize)> {
+        if self.ty[i] != 1 || self.backend[i] <= 0 {
+            return None;
+        }
+        self.content_doc.get(&i).map(|&doc| (self.backend[i] as u64, doc))
+    }
+
     fn emit(&self, d: usize, from: Option<usize>, out: &mut Vec<Node>, frames: &mut Vec<(u64, usize)>) {
-        let Some(root) = from.or_else(|| (0..self.ty.len()).find(|&i| self.ty[i] == 9)) else { return };
-        let id = |i: usize| format!("d{d}n{i}");
+        let Some(root) = self.root(from) else { return };
         // Iterative walk: (node, its parent's place in `out`). Each node is
         // added to its parent's children as the walk reaches it.
         let mut stack: Vec<(usize, Option<usize>)> = vec![(root, None)];
@@ -1257,124 +1368,105 @@ impl<'a> Doc<'a> {
             if !self.shown(i) {
                 continue;
             }
-            let mut node = Node { id: id(i), ..Node::default() };
-            // A text child the node gets: generated content's text, or a
-            // form field's (below).
-            let mut generated: Option<String> = None;
-            match self.ty[i] {
-                9 => {
-                    node.role = "RootWebArea".to_string();
-                    node.name = self.title.to_string();
-                    node.props = vec![
-                        ("focusable".to_string(), Some(Value::Bool(true))),
-                        ("url".to_string(), Some(Value::String(self.url.to_string()))),
-                    ];
-                }
-                3 => {
-                    node.role = "StaticText".to_string();
-                    node.name = squash(self.text_of_node(i));
-                }
-                _ if self.is_marker(i) => {
-                    node.role = "ListMarker".to_string();
-                    node.name = squash(self.text_of_node(i));
-                }
-                // Generated content: Chrome's ignored box around its text.
-                _ if self.pseudo.contains(&i) => {
-                    node.role = "none".to_string();
-                    generated = Some(squash(&self.generated_text(i)));
-                }
-                // `visibility: hidden`: not there for a user, though a
-                // child that sets it visible is.
-                _ if self.invisible(i) => node.role = "generic".to_string(),
-                _ => {
-                    let role = self.role(i);
-                    // What a form field's text child would be: its name
-                    // (a button) or value (a field), when it has one.
-                    let mut value_given = None;
-                    if role != "generic" && role != "none" {
-                        node.name = self.name(i, &role);
-                        if let Some(v) = self.value_of(i, &role) {
-                            value_given = Some(v.clone());
-                            node.value = v;
-                        }
-                    } else {
-                        let named = self
-                            .attr(i, "aria-labelledby")
-                            .map(|ids| self.idref_text(ids))
-                            .filter(|t| !t.is_empty())
-                            .or_else(|| self.attr(i, "aria-label").map(squash).filter(|t| !t.is_empty()))
-                            .or_else(|| {
-                                // A custom element's title (a `<relative-time>`'s
-                                // date); Chrome names no plain <span> by it.
-                                self.attr(i, "title")
-                                    .filter(|_| self.tag[i].contains('-'))
-                                    .map(squash)
-                                    .filter(|t| !t.is_empty() && !self.holds_controls(i))
-                            });
-                        if let Some(t) = named {
-                            node.name = t;
-                        }
-                    }
-                    if let Some(desc) = self.attr(i, "aria-describedby").map(|ids| self.idref_text(ids)) {
-                        node.description = desc;
-                    }
-                    node.props = self.properties(i, &role);
-                    // A form field's text (a button's label, a field's
-                    // value) is a text node inside it in Chrome's tree, as
-                    // names compare with.
-                    if self.tag[i] == "INPUT" {
-                        generated = match role.as_str() {
-                            "button" if self.input_type(i) != "image" && !node.name.is_empty() => {
-                                Some(node.name.clone())
-                            }
-                            "textbox" | "searchbox" | "spinbutton" | "combobox" => value_given,
-                            _ => None,
-                        };
-                    }
-                    node.role = role;
-                }
-            }
-            if self.backend[i] > 0 {
-                node.backend = Some(self.backend[i] as u64);
-            }
+            let (mut node, generated) = self.node(d, i);
             if let Some(p) = parent {
                 node.parent = Some(out[p].id.clone());
                 out[p].children.push(node.id.clone());
             }
-            if self.ty[i] == 1 {
-                if let Some(&doc) = self.content_doc.get(&i) {
-                    if self.backend[i] > 0 {
-                        frames.push((self.backend[i] as u64, doc));
-                    }
-                }
-            }
+            frames.extend(self.frame_of(i));
             let at = out.len();
-            let my = node.id.clone();
             out.push(node);
             if let Some(text) = generated {
-                let text_id = format!("{my}t");
-                out[at].children.push(text_id.clone());
-                out.push(Node {
-                    id: text_id,
-                    parent: Some(my),
-                    role: "StaticText".to_string(),
-                    name: text,
-                    ..Node::default()
-                });
+                let text = text_child(&mut out[at], text);
+                out.push(text);
             }
-            // The options of a closed select are its children; a text node
-            // or a frame has none here.
-            if self.ty[i] == 3 || self.content_doc.contains_key(&i) || self.pseudo.contains(&i) {
-                continue;
-            }
-            let kids = self.kids(i);
-            for &k in kids.iter().rev() {
-                if self.tag[i] == "OPTION" && self.ty[k] == 3 {
-                    continue;
-                }
+            for &k in self.tree_kids(i).iter().rev() {
                 stack.push((k, Some(at)));
             }
         }
+    }
+}
+
+/// A tree node's id: its document and its index there.
+fn node_id(d: usize, i: usize) -> String {
+    format!("d{d}n{i}")
+}
+
+/// The document and index a [`node_id`] names (`None` for a text child's).
+fn parse_id(id: &str) -> Option<(usize, usize)> {
+    let (d, i) = id.strip_prefix('d')?.split_once('n')?;
+    Some((d.parse().ok()?, i.parse().ok()?))
+}
+
+/// The text node a form field or generated content holds in Chrome's
+/// tree, named `node`'s first child.
+fn text_child(node: &mut Node, text: String) -> Node {
+    let id = format!("{}t", node.id);
+    node.children.push(id.clone());
+    Node { id, parent: Some(node.id.clone()), role: "StaticText".to_string(), name: text, ..Node::default() }
+}
+
+/// The tree of a snapshot, built as the printer reaches it (see
+/// [`super::ax::Source`]): a read of a large page costs the lines it
+/// prints, not the page. Node for node what [`build`] makes.
+pub struct Lazy<'a> {
+    docs: Vec<Doc<'a>>,
+    pub title: String,
+    pub url: String,
+}
+
+impl<'a> Lazy<'a> {
+    /// `strings` is [`strings`] of the same snapshot.
+    pub fn new(snap: &'a Snap, strings: &'a [&'a str]) -> Option<Lazy<'a>> {
+        let docs: Vec<Doc> = snap.docs.iter().map(|d| Doc::new(d, strings)).collect();
+        let main = docs.first()?;
+        let (title, url) = (main.title.to_string(), main.url.to_string());
+        Some(Lazy { docs, title, url })
+    }
+
+    /// Shown node `i` of document `d` and the text child it holds.
+    fn push(&self, d: usize, i: usize, parent: Option<&str>, out: &mut Vec<Node>) {
+        let (mut node, generated) = self.docs[d].node(d, i);
+        node.parent = parent.map(str::to_string);
+        let text = generated.map(|t| text_child(&mut node, t));
+        out.push(node);
+        out.extend(text);
+    }
+}
+
+/// A snapshot's strings, borrowed, as the tree reads them.
+pub fn strings(snap: &Snap) -> Vec<&str> {
+    snap.strings.iter().map(String::as_str).collect()
+}
+
+impl super::ax::Source for Lazy<'_> {
+    fn root(&self) -> Vec<Node> {
+        let mut out = Vec::new();
+        let main = &self.docs[0];
+        if let Some(root) = main.root(None).filter(|&r| main.shown(r)) {
+            self.push(0, root, None, &mut out);
+        }
+        out
+    }
+
+    fn children(&self, id: &str) -> (Vec<Node>, Vec<Node>) {
+        let (mut kids, mut frame) = (Vec::new(), Vec::new());
+        let Some((d, i)) = parse_id(id) else { return (kids, frame) };
+        let Some(doc) = self.docs.get(d) else { return (kids, frame) };
+        for k in doc.tree_kids(i) {
+            if doc.shown(k) {
+                self.push(d, k, Some(id), &mut kids);
+            }
+        }
+        // A frame's document hangs under its owner, a tree of its own.
+        if let Some((_, fd)) = doc.frame_of(i).filter(|&(_, fd)| fd != d) {
+            if let Some(f) = self.docs.get(fd) {
+                if let Some(root) = f.root(None).filter(|&r| f.shown(r)) {
+                    self.push(fd, root, None, &mut frame);
+                }
+            }
+        }
+        (kids, frame)
     }
 }
 

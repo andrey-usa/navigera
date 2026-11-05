@@ -72,6 +72,16 @@ All notable changes to this project are documented here. The format follows
   elements 34 to 20 ms): the snapshot is read into columns once, per-node
   facts are indexed by node, and maps keyed by node numbers use a faster
   hash. A full read is still mostly Chrome's capture.
+- A read of a large page makes only the part of its tree it prints. The
+  tree built from the DOM snapshot was made whole before it was printed,
+  and the printer stops a line past its limit (2,000 by default): on a
+  10,000-row table most nodes were made, named and indexed for nothing.
+  Nodes are now made as the printer reaches them (10,000 rows, from a
+  saved snapshot: tree and text 147 to 31 ms; a click's report, a cell
+  edited 292 to 219 ms, a row added 375 to 308 ms; `ax` 938 to 883 ms;
+  1,000 rows: a click 74 to 60 ms; medians of 10 interleaved, local,
+  Chrome 153). The text is the same; `NAVIGERA_LAZY_BUILD=0` makes the
+  whole tree first, to compare.
 - Actions are faster where they used to sit out fixed waits. Saying what
   an action changed no longer waits 50 ms for a request the action might
   have started: one turn of the page's event loop shows whether it started

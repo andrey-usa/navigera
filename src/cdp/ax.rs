@@ -337,6 +337,8 @@ struct Tree<'a> {
     opts: &'a Options,
     lines: Vec<String>,
     fetch: Option<AxFetch>,
+    /// Where nodes come from as the walk reaches them (see [`Source`]).
+    source: Option<&'a dyn Source>,
     /// Nodes whose children the lazy fetch already asked for (a node the
     /// browser answered without is not asked again).
     fetched: FxSet<usize>,
@@ -409,7 +411,10 @@ impl<'a> Tree<'a> {
                 return kids.clone();
             }
         }
-        let kids: std::rc::Rc<[usize]> = self.children_uncached(idx).into();
+        let kids: std::rc::Rc<[usize]> = match self.source {
+            Some(source) => self.expand(source, idx).into(),
+            None => self.children_uncached(idx).into(),
+        };
         if self.fetch.is_none() {
             if self.kids.len() < self.nodes.len() {
                 self.kids.resize(self.nodes.len(), None);
@@ -417,6 +422,30 @@ impl<'a> Tree<'a> {
             self.kids[idx] = Some(kids.clone());
         }
         kids
+    }
+
+    /// `idx`'s children from the source: the text child it came with,
+    /// then the ones the source makes now, then a frame's root.
+    fn expand(&mut self, source: &'a dyn Source, idx: usize) -> Vec<usize> {
+        let id = self.nodes[idx].id.clone();
+        let mut out: Vec<usize> = self.nodes[idx].children.iter().filter_map(|c| self.by_id.get(c).copied()).collect();
+        let (kids, frame) = source.children(&id);
+        for n in kids {
+            let direct = n.parent.as_deref() == Some(id.as_str());
+            let at = self.insert(std::borrow::Cow::Owned(n));
+            if direct {
+                out.push(at);
+            }
+        }
+        for n in frame {
+            let root = n.parent.is_none();
+            let at = self.insert(std::borrow::Cow::Owned(n));
+            if root {
+                self.frame_root_ids.insert(at);
+                out.push(at);
+            }
+        }
+        out
     }
 
     fn children_uncached(&mut self, idx: usize) -> Vec<usize> {
@@ -1033,11 +1062,35 @@ fn read_nodes(nodes: &[Value], frames: &[Frame]) -> (Vec<Node>, Vec<Frame<Node>>
 
 /// [`render`] of [`Node`]s.
 pub fn render_nodes(header: &str, nodes: &[Node], frames: &[Frame<Node>], opts: &Options) -> Rendered {
-    let rendered = render_inner(header, nodes, frames, opts, None).0;
+    let rendered = render_inner(header, nodes, frames, opts, None, None).0;
     // What the cuts saved is small: the whole text costs less than the
     // agent's next call to read it.
     if !opts.full_text && rendered.cuts > 0 && rendered.text.len() + rendered.cut_chars <= FULL_TEXT_BUDGET {
-        return render_inner(header, nodes, frames, &Options { full_text: true, ..opts.clone() }, None).0;
+        return render_inner(header, nodes, frames, &Options { full_text: true, ..opts.clone() }, None, None).0;
+    }
+    rendered
+}
+
+/// Nodes made as the walk reaches them, for a tree that is costly to make
+/// whole (one built from a DOM snapshot): the walk stops a line past the
+/// limit, so a large page costs the lines printed, not its size.
+pub trait Source {
+    /// The root, then the text child it holds, if any (the node's
+    /// `children` name it).
+    fn root(&self) -> Vec<Node>;
+    /// The children of the node `id`, in order, each followed by the text
+    /// child it holds; then, for a frame's owner, the frame's root (with
+    /// no parent) and its text child. The nodes' own children come when
+    /// asked for.
+    fn children(&self, id: &str) -> (Vec<Node>, Vec<Node>);
+}
+
+/// [`render_nodes`] of the tree `source` makes: the same text, made
+/// only as far as the walk goes.
+pub fn render_source(header: &str, source: &dyn Source, opts: &Options) -> Rendered {
+    let rendered = render_inner(header, &[], &[], opts, None, Some(source)).0;
+    if !opts.full_text && rendered.cuts > 0 && rendered.text.len() + rendered.cut_chars <= FULL_TEXT_BUDGET {
+        return render_inner(header, &[], &[], &Options { full_text: true, ..opts.clone() }, None, Some(source)).0;
     }
     rendered
 }
@@ -1056,7 +1109,7 @@ pub const FULL_TEXT_BUDGET: usize = 32_000;
 /// cut (the full walk would have decided it from those children).
 pub fn render_lazy(header: &str, seed: &[Value], frames: &[Frame], opts: &Options, fetch: AxFetch) -> (Rendered, bool) {
     let (seed, frames) = read_nodes(seed, frames);
-    render_inner(header, &seed, &frames, opts, Some(fetch))
+    render_inner(header, &seed, &frames, opts, Some(fetch), None)
 }
 
 fn render_inner<'a>(
@@ -1065,6 +1118,7 @@ fn render_inner<'a>(
     frames: &'a [Frame<Node>],
     opts: &'a Options,
     fetch: Option<AxFetch>,
+    source: Option<&'a dyn Source>,
 ) -> (Rendered, bool) {
     let mut tree = Tree {
         nodes: Vec::new(),
@@ -1075,6 +1129,7 @@ fn render_inner<'a>(
         opts,
         lines: Vec::new(),
         fetch,
+        source,
         fetched: FxSet::default(),
         fetch_failed: false,
         calls: 0,
@@ -1088,6 +1143,9 @@ fn render_inner<'a>(
     };
     for n in nodes.iter().chain(frames.iter().flat_map(|f| f.nodes.iter())) {
         tree.insert(std::borrow::Cow::Borrowed(n));
+    }
+    for n in source.map(|s| s.root()).unwrap_or_default() {
+        tree.insert(std::borrow::Cow::Owned(n));
     }
     for f in frames {
         if let Some(root) = f.nodes.iter().find(|n| n.parent.is_none()) {

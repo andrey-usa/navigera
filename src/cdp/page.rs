@@ -5913,6 +5913,14 @@ fn delta_reads() -> bool {
     *ON.get_or_init(|| std::env::var("NAVIGERA_DELTA_READ").map_or(true, |v| v.trim() != "0"))
 }
 
+/// Whether a read from the DOM snapshot makes only the tree nodes its
+/// printer reaches (see [`domax::Lazy`]); `NAVIGERA_LAZY_BUILD=0` makes
+/// the whole tree first, to compare against.
+fn lazy_build() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_LAZY_BUILD").map_or(true, |v| v.trim() != "0"))
+}
+
 /// Whether element `i` of document `d` is `isClickable` without a
 /// listener, as Chrome tells it: a link with an address, an enabled
 /// field, a label of one, the summary that opens its `<details>`,
@@ -6741,53 +6749,68 @@ impl Page {
         let journal = armed.filter(|&(_, watched)| watched >= docs && !closed).map(|(id, _)| id);
         *self.journal.lock().unwrap() = journal;
         let started = std::time::Instant::now();
+        // The whole page's tree is made only for a scope (which must be
+        // found in it) or to compare against; else the printer makes the
+        // nodes it reaches, and stops at its limit.
+        let whole = root_backend_id.is_some() || !lazy_build();
+        let strings = domax::strings(&snap);
         // The clickable elements and the tree read the same snapshot, side
         // by side.
-        let (clicks, built) = std::thread::scope(|s| {
+        let (clicks, built, source) = std::thread::scope(|s| {
             let clicks = s.spawn(|| clickables_from(&snap));
-            let built = match root_backend_id {
-                Some(backend) => domax::build_scoped(&snap, backend),
-                None => domax::build(&snap),
+            let (built, source) = match root_backend_id {
+                Some(backend) => (domax::build_scoped(&snap, backend), None),
+                None if whole => (domax::build(&snap), None),
+                None => (None, domax::Lazy::new(&snap, &strings)),
             };
-            (clicks.join(), built)
+            (clicks.join(), built, source)
         });
         let clicks = clicks.map_err(|_| anyhow::anyhow!("reading the snapshot's clickable elements failed"))?;
-        let built = built.ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
-        match journal {
-            Some(journal) => *self.kept.lock().unwrap() = Some(Kept { journal, snap }),
-            // Freeing a large snapshot takes milliseconds: not on the way to
-            // the answer.
-            None => drop(std::thread::spawn(move || drop(snap))),
+        if built.is_none() && source.is_none() {
+            bail!("the snapshot has no document");
         }
         crate::timing::record("ax_dom_build", started);
-        if let Some(backend) = root_backend_id {
+        if let (Some(backend), Some(built)) = (root_backend_id, &built) {
             let has = |nodes: &[ax::Node]| nodes.iter().any(|n| n.backend == Some(backend));
             if !has(&built.nodes) && !built.frames.iter().any(|f| has(&f.nodes)) {
                 bail!("the scope is not in the snapshot's tree");
             }
         }
-        let url = built.url.clone();
+        let (title, url) = match (&built, &source) {
+            (Some(b), _) => (b.title.clone(), b.url.clone()),
+            (None, Some(l)) => (l.title.clone(), l.url.clone()),
+            (None, None) => unreachable!(),
+        };
         let origin = url
             .find("://")
             .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
             .unwrap_or_default();
         let started = std::time::Instant::now();
-        let rendered = ax::render_nodes(
-            &format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default()),
-            &built.nodes,
-            &built.frames,
-            &ax::Options {
-                full_text: opts.full_text,
-                all_refs: opts.all_refs,
-                limit: opts.limit,
-                root_backend_id,
-                origin,
-                clicks,
-                lazy_budget: None,
-            },
-        );
+        let header = format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default());
+        let render_opts = ax::Options {
+            full_text: opts.full_text,
+            all_refs: opts.all_refs,
+            limit: opts.limit,
+            root_backend_id,
+            origin,
+            clicks,
+            lazy_budget: None,
+        };
+        let rendered = match (&built, &source) {
+            (Some(b), _) => ax::render_nodes(&header, &b.nodes, &b.frames, &render_opts),
+            (None, Some(l)) => ax::render_source(&header, l, &render_opts),
+            (None, None) => unreachable!(),
+        };
         crate::timing::record("ax_render", started);
-        std::thread::spawn(move || drop(built));
+        drop(source);
+        drop(strings);
+        // Freeing a large tree or snapshot takes milliseconds: not on the
+        // way to the answer.
+        std::thread::spawn(move || drop((built, render_opts)));
+        match journal {
+            Some(journal) => *self.kept.lock().unwrap() = Some(Kept { journal, snap }),
+            None => drop(std::thread::spawn(move || drop(snap))),
+        }
         self.remember_refs(&rendered.refs, &url, root_backend_id);
         Ok(Value::String(rendered.text))
     }
@@ -7453,6 +7476,19 @@ mod tests {
         let built = domax::build(&snap).unwrap();
         let opts = ax::Options { limit: 2000, ..Default::default() };
         time("render", &mut || drop(ax::render_nodes("page", &built.nodes, &built.frames, &opts)));
+        let strings = domax::strings(&snap);
+        time("lazy", &mut || {
+            let source = domax::Lazy::new(&snap, &strings).unwrap();
+            drop(ax::render_source("page", &source, &opts))
+        });
+        time("lazy index", &mut || drop(domax::Lazy::new(&snap, &strings)));
+        let source = domax::Lazy::new(&snap, &strings).unwrap();
+        time("lazy walk", &mut || drop(ax::render_source("page", &source, &opts)));
+        for limit in [0, 10, 2000] {
+            let opts = ax::Options { limit, ..opts.clone() };
+            let whole = ax::render_nodes("page", &built.nodes, &built.frames, &opts).text;
+            assert!(whole == ax::render_source("page", &source, &opts).text, "lazy differs at limit {limit}");
+        }
         let d = &snap.docs[0];
         let text = (0..d.parent.len()).rev().find(|&i| d.ty[i] == 3).unwrap();
         let backend = d.backend[text];
