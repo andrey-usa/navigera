@@ -2416,3 +2416,29 @@ fn event_wakes_cover_fill_shadow_roots_and_frame_documents() {
         assert_eq!(row[0], row[1], "listeners leaked: {counts}");
     }
 }
+
+/// What a click puts in the page to watch it (a form's `submit`, for a
+/// navigation it plans; the clipboard's writes, for an effect) is taken
+/// out only while it is there: a method the page put in during the click
+/// stays.
+#[test]
+fn a_click_leaves_the_methods_the_page_put_in_meanwhile() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("own-methods", &[]);
+    s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+    s.ok(&[
+        "eval",
+        "document.querySelector('#f1').addEventListener('submit', () => { window.mine = function submit() {}; \
+         HTMLFormElement.prototype.submit = window.mine; }); true",
+    ]);
+    s.ok(&["click", "--text", "Handled submit"]);
+    assert_eq!(s.ok(&["eval", "HTMLFormElement.prototype.submit === window.mine"]), true);
+    s.ok(&["goto", &format!("{}/effects", site.url)]);
+    s.ok(&[
+        "eval",
+        "document.getElementById('copy').addEventListener('click', () => { window.mine = function writeText() \
+         { return Promise.resolve(); }; Clipboard.prototype.writeText = window.mine; }); true",
+    ]);
+    s.ok(&["click", "--selector", "#copy"]);
+    assert_eq!(s.ok(&["eval", "Clipboard.prototype.writeText === window.mine"]), true);
+}

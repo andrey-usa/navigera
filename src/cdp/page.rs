@@ -417,8 +417,11 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         }
         const F = w.HTMLFormElement && w.HTMLFormElement.prototype, submit = F && F.submit;
         if (typeof submit === 'function') {
-            F.submit = function () { n.planned = true; return submit.apply(this, arguments); };
-            n.offs.push(() => { if (F.submit !== submit) F.submit = submit; });
+            // Put back only while ours is there: a method the page put in
+            // meanwhile stays.
+            const mine = function () { n.planned = true; return submit.apply(this, arguments); };
+            F.submit = mine;
+            n.offs.push(() => { if (F.submit === mine) F.submit = submit; });
         }
         n.off = () => { for (const off of n.offs.splice(0)) off(); };
         // Never left behind, whatever happens to the click.
@@ -512,8 +515,9 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 for (const k of ['writeText', 'write']) {
                     const orig = C[k];
                     if (typeof orig !== 'function') continue;
-                    C[k] = { [k](...a) { fx.e++; return orig.apply(this, a); } }[k];
-                    fx.offs.push(() => { C[k] = orig; });
+                    const mine = { [k](...a) { fx.e++; return orig.apply(this, a); } }[k];
+                    C[k] = mine;
+                    fx.offs.push(() => { if (C[k] === mine) C[k] = orig; });
                 }
             }
         }

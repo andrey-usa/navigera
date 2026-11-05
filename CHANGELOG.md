@@ -101,6 +101,9 @@ All notable changes to this project are documented here. The format follows
   end of a tree cut at its line limit: on a page longer than `ax` shows,
   opening a section above the cut used to report the rows it pushed past
   the cut as removed (and closing it, the rows it brought in as added).
+- A click no longer takes out a form `submit` or clipboard method the
+  page put in while handling it: what navigera puts in to watch the
+  click is taken out only while it is still there.
 - A click no longer presses whatever took its element's place between
   the hit test and the press: an overlay a mouse move or a timer opened
   just then, or an element that moves every frame. Such a press is kept
