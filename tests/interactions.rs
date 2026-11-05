@@ -1654,12 +1654,16 @@ fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
 /// controls' own lines, rewritten; a state a script set after the read is
 /// reported with the next entry. Compared against a session that reads
 /// the page after every entry (`NAVIGERA_CHANGE_JOURNAL=0`), and timed
-/// against it.
+/// against it. A plain `ax` after an entry the journal answered is
+/// patched (no `DOMSnapshot.captureSnapshot` in the session's CDP trace)
+/// and says what the other session's says.
 #[test]
 fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
     let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
     let page = format!("{}/journal", site.url);
+    let trace_of =
+        |on: &str| std::env::temp_dir().join(format!("nv-interactions-journal{on}-{}.jsonl", std::process::id()));
     let sessions: Vec<(String, &str)> = ["1", "0"]
         .iter()
         .map(|on| {
@@ -1667,8 +1671,10 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
                 .join(format!("nv-interactions-journal{on}-{}.sock", std::process::id()))
                 .display()
                 .to_string();
+            let _ = std::fs::remove_file(trace_of(on));
             let out = Command::new(tool_exe())
                 .env("NAVIGERA_CHANGE_JOURNAL", on)
+                .env("NAVIGERA_CDP_TRACE", trace_of(on))
                 .args(["--session", &name, "start"])
                 .stdin(Stdio::null())
                 .output()
@@ -1764,9 +1770,55 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
         journal < read * 0.75,
         "an entry with the journal took {journal:.0} ms, reading the page again {read:.0} ms"
     );
+    // A read after each entry the journal answered.
+    let captures = |on: &str| {
+        std::fs::read_to_string(trace_of(on))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
+            .count()
+    };
+    let entries: [&[&str]; 4] = [
+        &["fill", "--selector", "#name", "Ada Lovelace"],
+        &["check", "--selector", "#agree"],
+        &["select", "--selector", "#size", "Large"],
+        &["fill", "--selector", "#note", "a note"],
+    ];
+    let mut reads: Vec<Vec<String>> = Vec::new();
+    let mut caps = Vec::new();
+    for (name, on) in &sessions {
+        compact(name, &["goto", &page]);
+        compact(name, &["ax"]);
+        let before = captures(on);
+        reads.push(
+            entries
+                .iter()
+                .flat_map(|a| {
+                    let report = compact(name, a);
+                    [report, compact(name, &["ax"])]
+                })
+                .collect(),
+        );
+        caps.push(captures(on) - before);
+    }
     for (name, _) in &sessions {
         compact(name, &["quit"]);
     }
+    if let Some(ci) = std::env::var_os("NAVIGERA_CDP_TRACE") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ci) {
+            for on in ["1", "0"] {
+                let _ = f.write_all(std::fs::read_to_string(trace_of(on)).unwrap_or_default().as_bytes());
+            }
+        }
+    }
+    for on in ["1", "0"] {
+        let _ = std::fs::remove_file(trace_of(on));
+    }
+    assert_eq!(unref(&reads[0]), unref(&reads[1]), "a read after an entry the journal answered differs");
+    assert!(reads[0].iter().step_by(2).all(|r| !r.is_empty()), "{:?}", reads[0]);
+    assert_eq!(caps[0], 0, "reads after entries the journal answered captured the page {} times", caps[0]);
+    assert_eq!(caps[1], 8, "the session without the journal captured the page {} times", caps[1]);
 }
 
 /// On a large page, the read that says what a click changed patches the

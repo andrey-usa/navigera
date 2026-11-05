@@ -3155,14 +3155,32 @@ type Arming = Option<(u64, u64, bool)>;
 /// commands. Not with `--natural` (a page can see the watch), nor with
 /// `NAVIGERA_REST_PRIME=0` (to compare against).
 fn arm_expression(id: u64) -> String {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let rest = *ON.get_or_init(|| {
-        !crate::browser::natural() && std::env::var("NAVIGERA_REST_PRIME").map_or(true, |v| v.trim() != "0")
-    });
-    if rest {
+    if rest_prime() {
         format!("(() => {{ const a = ({JOURNAL_ARM})({id}); if (a && !a.broken) a.rest = ({JOURNAL_PRIME})({id}, false, true); return a; }})()")
     } else {
         format!("({JOURNAL_ARM})({id})")
+    }
+}
+
+/// Whether a journal is primed for the next read as it is armed, and
+/// again after a check that answered an entry (see [`arm_expression`]).
+fn rest_prime() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !crate::browser::natural() && std::env::var("NAVIGERA_REST_PRIME").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// The check of an entry against journal `id` (see [`JOURNAL_CHECK`]);
+/// one that answers leaves the journal primed for the next read, which
+/// is then patched as after an arming.
+fn check_expression(id: u64, typed: &str) -> String {
+    if rest_prime() {
+        format!(
+            "(() => {{ const r = ({JOURNAL_CHECK})({id}, {typed});              if (r === '' || (r !== null && typeof r === 'object')) ({JOURNAL_PRIME})({id}, false, true); return r; }})()"
+        )
+    } else {
+        format!("({JOURNAL_CHECK})({id}, {typed})")
     }
 }
 
@@ -3441,7 +3459,7 @@ impl Page {
         let r = self.send(
             "Runtime.evaluate",
             json!({
-                "expression": format!("({JOURNAL_CHECK})({id}, {})", serde_json::to_string(typed).unwrap_or_default()),
+                "expression": check_expression(id, &serde_json::to_string(typed).unwrap_or_default()),
                 "returnByValue": true,
             }),
             timeout,
@@ -3466,7 +3484,7 @@ impl Page {
         let started = std::time::Instant::now();
         let r = self.send(
             "Runtime.evaluate",
-            json!({ "expression": format!("({JOURNAL_CHECK})({id}, null)"), "returnByValue": true }),
+            json!({ "expression": check_expression(id, "null"), "returnByValue": true }),
             timeout,
         );
         let verdict = r.ok().and_then(|r| r.pointer("/result/value").cloned());
