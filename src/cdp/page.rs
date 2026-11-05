@@ -19,7 +19,9 @@ use super::ax;
 use super::client::CdpClient;
 use super::domax;
 use super::events::Shared;
+use super::fxhash::{FxMap, FxSet};
 use super::logs::Report;
+use super::snap::{Child, NewLayout, NewNode, Op, Snap, STYLES};
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -841,10 +843,12 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
 /// leaves the journal broken: the page is read again. Arming costs a walk
 /// for shadow roots; the rest is paid only before an entry.
 const JOURNAL_ARM: &str = r#"(id) => {
-    const W = window, ROOTS_MAX = 2000, CONTROLS_MAX = 5000;
+    const W = window, ROOTS_MAX = 2000, CONTROLS_MAX = 5000, RECORDS_MAX = 5000;
     const old = W.__nvJournal;
     if (old) { try { old.stop(); } catch (_) {} }
-    const j = { id, m: 0, e: 0, broken: '', obs: [], offs: [], typedAttr: [], inputs: [], primed: false };
+    // `recs`, `toggled`, `e2`, `controls0`, `inv0`, `view0` and `anim0`
+    // serve a read after an action (see JOURNAL_DELTA); the rest a text entry.
+    const j = { id, m: 0, e: 0, e2: 0, broken: '', obs: [], offs: [], typedAttr: [], inputs: [], primed: false, recs: [], over: false, toggled: [] };
     j.unhook = () => false;
     j.stop = () => { for (const o of j.obs) o.disconnect(); for (const off of j.offs) off(); j.unhook(); };
     j.docsOf = () => {
@@ -913,7 +917,42 @@ const JOURNAL_ARM: &str = r#"(id) => {
         return out;
     };
     j.controls = j.formOf();
+    j.controls0 = j.controls;
+    // Per sheet: its rule count and whether it is switched off; a sheet a
+    // script builds (adopted) can be rewritten whole, so its text too.
+    j.sheetCount = (scope) => {
+        const own = new Set(scope.adoptedStyleSheets || []);
+        return j.sheetsOf(scope).map((sh) => {
+            let n = -1;
+            try { n = sh.cssRules.length; } catch (_) {}
+            let text = '';
+            if (own.has(sh)) { try { for (const r of sh.cssRules) text += r.cssText; } catch (_) {} }
+            return n + (sh.disabled ? 'off' : 'on') + text;
+        });
+    };
+    j.inv0 = j.scopes.map((scope) => [scope, j.sheetsOf(scope), j.sheetCount(scope)]);
+    j.view = () => innerWidth + 'x' + innerHeight + 'x' + devicePixelRatio;
+    j.view0 = j.view();
+    // Elements whose animation or transition moves what the tree reads.
+    const ANIMATED = new Set(['opacity', 'visibility', 'display', 'content', 'cursor', 'pointerEvents', 'textTransform', 'contentVisibility']);
+    j.animated = () => {
+        const out = [];
+        for (const d of j.docs) {
+            let list = [];
+            try { list = d.getAnimations(); } catch (_) {}
+            for (const a of list) {
+                const ef = a.effect;
+                if (!ef || !ef.target) continue;
+                let keys = [];
+                try { keys = ef.getKeyframes().flatMap((k) => Object.keys(k)); } catch (_) {}
+                if (keys.some((k) => ANIMATED.has(k))) out.push(ef.target);
+            }
+        }
+        return out;
+    };
+    j.anim0 = j.animated();
     const counted = (r) => {
+        if (j.recs.length < RECORDS_MAX) j.recs.push(r); else j.over = true;
         // A framework writing a field's value attribute as it is typed.
         if (r.type === 'attributes' && r.attributeName === 'value' && r.target.tagName === 'INPUT') j.typedAttr.push(r.target);
         else j.m++;
@@ -927,11 +966,16 @@ const JOURNAL_ARM: &str = r#"(id) => {
     for (const d of j.docs) {
         const v = d.defaultView;
         if (!v) continue;
-        const onEvent = () => { j.e++; };
+        const onEvent = () => { j.e++; j.e2++; };
+        const onToggle = (e) => { j.e++; if (j.toggled.length < 64) j.toggled.push(e.target); else j.e2++; };
         const onInput = (e) => { if (j.inputs.length < 64) j.inputs.push(e.target); else j.e++; };
-        for (const t of ['toggle', 'beforetoggle', 'hashchange', 'play', 'pause', 'fullscreenchange']) {
+        for (const t of ['hashchange', 'play', 'pause', 'fullscreenchange']) {
             v.addEventListener(t, onEvent, true);
             j.offs.push(() => v.removeEventListener(t, onEvent, true));
+        }
+        for (const t of ['toggle', 'beforetoggle']) {
+            v.addEventListener(t, onToggle, true);
+            j.offs.push(() => v.removeEventListener(t, onToggle, true));
         }
         for (const t of ['input', 'change']) {
             v.addEventListener(t, onInput, true);
@@ -945,22 +989,31 @@ const JOURNAL_ARM: &str = r#"(id) => {
 /// Just before a text entry, what the journal (see [`JOURNAL_ARM`]) needs
 /// to judge it by: the state-dependent style rules and what each matches,
 /// and every form control's value and state. "" when primed, else why not.
-const JOURNAL_PRIME: &str = r#"(id) => {
+const JOURNAL_PRIME: &str = r#"(id, entry) => {
     const W = window, SELECTORS_MAX = 400, MATCHED_MAX = 20000;
     const j = W.__nvJournal;
     if (!j || j.id !== id) return 'gone';
     if (j.broken) return j.broken;
     if (!j.controls) return 'form controls';
-    // What happened before the entry is the read's to show, not the entry's:
-    // the DOM, an event, or a value or state a script set since the read.
+    // What happened before a text entry is the read's to show, not the
+    // entry's: the DOM, an event, or a value or state a script set since
+    // the read. Before any other action, the records since the read are
+    // what the next read is patched from (see JOURNAL_DELTA).
     j.flush();
-    if (j.m || j.e || j.typedAttr.length || j.inputs.length) return 'changed before the entry';
-    const form = j.formOf();
-    if (!form || form.length !== j.controls.length || form.some((x, i) => x[0] !== j.controls[i][0] || x[1] !== j.controls[i][1])) {
-        return 'changed before the entry';
+    if (entry) {
+        if (j.m || j.e || j.typedAttr.length || j.inputs.length) return 'changed before the entry';
+        const form = j.formOf();
+        if (!form || form.length !== j.controls.length || form.some((x, i) => x[0] !== j.controls[i][0] || x[1] !== j.controls[i][1])) {
+            return 'changed before the entry';
+        }
     }
     const DYN = /:(focus|focus-within|focus-visible|hover|active|checked|indeterminate|invalid|valid|user-invalid|user-valid|placeholder-shown|blank|in-range|out-of-range|autofill|has|defined|popover-open|open|modal|state|target|default|read-write|read-only|enabled|disabled|required|optional|playing|paused|fullscreen|picture-in-picture|empty)\b/;
-    const PROPS = ['display', 'visibility', 'opacity', 'content', 'cursor', 'pointer-events'];
+    // Rules that reach past the changed element's subtree: through a
+    // sibling, a child's place among its siblings, or `:has()`. Kept like
+    // the state-dependent ones, so a read after an action knows which
+    // elements they now style (see JOURNAL_DELTA).
+    const REACH = /[+~]|:nth-|:(first|last|only)-(child|of-type)|:empty\b|:has\(/;
+    const PROPS = ['display', 'visibility', 'opacity', 'content', 'cursor', 'pointer-events', 'text-transform', 'list-style-type', 'list-style-image', 'content-visibility', '-webkit-text-security'];
     // Pseudo-elements, which querySelectorAll can't match (`:placeholder-shown`
     // is a state, not `::placeholder`: a name ends at neither a letter nor a dash).
     const ELEMENT_PSEUDO = /::(before|after|marker|placeholder|selection|backdrop|file-selector-button|first-line|first-letter|cue|spelling-error|grammar-error|target-text)(?![\w-])|:(before|after|first-line|first-letter)(?![\w-])/g;
@@ -977,7 +1030,7 @@ const JOURNAL_PRIME: &str = r#"(id) => {
         const walk = (list) => {
             for (const r of list) {
                 const text = r.selectorText;
-                if (text !== undefined && DYN.test(text)) {
+                if (text !== undefined && (DYN.test(text) || REACH.test(text))) {
                     const st = r.style;
                     let relevant = PROPS.some((p) => st.getPropertyValue(p));
                     for (let i = 0; !relevant && i < st.length; i++) if (st[i].startsWith('--')) relevant = true;
@@ -993,19 +1046,6 @@ const JOURNAL_PRIME: &str = r#"(id) => {
         const out = bad ? null : sel;
         cache.set(sheet, { n: rules.length, sel: out });
         return out;
-    };
-    // Per sheet: its rule count and whether it is switched off; a sheet a
-    // script builds (adopted) can be rewritten whole, so its text too.
-    const adopted = (scope) => new Set(scope.adoptedStyleSheets || []);
-    j.sheetCount = (scope) => {
-        const own = adopted(scope);
-        return j.sheetsOf(scope).map((sh) => {
-            let n = -1;
-            try { n = sh.cssRules.length; } catch (_) {}
-            let text = '';
-            if (own.has(sh)) { try { for (const r of sh.cssRules) text += r.cssText; } catch (_) {} }
-            return n + (sh.disabled ? 'off' : 'on') + text;
-        });
     };
     j.matches = (scope, sel) => { try { return [...scope.querySelectorAll(sel)]; } catch (_) { return null; } };
     j.tracked = [];
@@ -1076,6 +1116,479 @@ const JOURNAL_PRIME: &str = r#"(id) => {
     return '';
 }"#;
 
+/// What changed since the journal (see [`JOURNAL_ARM`]) was armed with a
+/// tree read, for patching that read's snapshot instead of capturing the
+/// page again (see [`Page::read_delta`]). Run just before the next
+/// arming, in the same task, so nothing happens in between. The journal
+/// must have been primed before the action (see [`JOURNAL_PRIME`]), which
+/// keeps the state-dependent style rules' matches and watches style rule
+/// writes. Returns why not as a string, or `{ ops, n }`: `ops` are
+/// `{ k: 'r', d, f }` (node `d` of `window.__nvDeltaRoots` and its
+/// subtree, read again as facts `f`) and `{ k: 'c', d, ch, gone }` (node
+/// `d`'s children are now `ch`: `{ d, f }` for a new one, `{ ws: f }` for
+/// new whitespace text; of the read's own, a run length when none was
+/// taken away (`gone` 0), else its name, or `{ w }` for whitespace text,
+/// and `{ ws: f, old }` for whitespace text of its own read again, its
+/// neighbour having changed), `n` the facts in all.
+///
+/// Which subtrees: the target of each attribute change, each changed text
+/// node, each parent whose children changed (its whole subtree when small;
+/// a numbered list whole, its markers count its items), each control whose
+/// value or state a script set, each element a state-dependent rule or one
+/// reaching past its subtree (a sibling, a child's place, `:has()`) now
+/// matches or no longer does, each popover or `<details>` that toggled, and
+/// each element animated in what the tree reads (a listener added or taken
+/// off is told apart by [`Page::read_delta`]). Why not: a container query
+/// or a first letter or line in any sheet, a new style sheet, a style rule
+/// a script wrote, a new or gone frame or shadow root, a changed viewport,
+/// a change inside `<head>`, a shadow tree or a frame, content under
+/// `content-visibility: auto`, or more than `max` nodes to read. Content a
+/// display lock skips (a closed `<details>`) is listed without a box and
+/// its style is never read: reading it would lay it out, and the next
+/// capture would show it.
+///
+/// Not seen, as a capture would: a box outside the subtrees read that
+/// grows from nothing or shrinks to it with no DOM change (an image that
+/// finishes loading; only whether a box has an area is read, for the
+/// clickable elements), and whitespace text whose neighbour's style, not
+/// its DOM, changed (whether it has a box follows what comes before it).
+///
+/// The facts per node, in preorder (`p` its parent's place, -1 for the
+/// root): type `t`, name `n`, value `v`, `w` for whitespace text (which
+/// `DOM.describeNode` leaves out), laid out `l`, layout text `lt`, the six
+/// styles `s` (a text node has its parent's), box `b`, clickable `c` (by
+/// Chrome's rules but listeners, which `getEventListeners` gives), form
+/// state `iv`/`tv`/`ck`/`sel`, and pseudo-elements `ps` (before, after,
+/// marker: each `{ pt, s, lt }`). Anything this can't state as the
+/// snapshot would (generated content from counters, a marker other than
+/// disc, circle, square, decimal or a disclosure triangle, a text
+/// transform but upper or lower case, text security, a frame, a slot, a
+/// shadow root) is why not.
+const JOURNAL_DELTA: &str = r#"(id, max) => {
+    const j = window.__nvJournal;
+    if (!j || j.id !== id) return 'gone';
+    if (j.broken) return j.broken;
+    let cssom;
+    if (j.primed) { cssom = j.unhook(); j.primed = false; }
+    else if (j.used) cssom = j.used.cssom || j.unhook();
+    else return 'not primed';
+    j.used = null;
+    if (cssom) return 'style rule';
+    if (!j.controls0 || !j.tracked) return 'form controls';
+    j.flush();
+    if (j.over) return 'records';
+    if (j.e2) return 'event';
+    const docs = j.docsOf();
+    if (docs.length !== j.docs.length || docs.some((d, i) => d !== j.docs[i])) return 'frames';
+    if (j.rootsOf(docs).length !== j.roots.length) return 'shadow roots';
+    for (const [scope, sheets, counts] of j.inv0) {
+        const now = j.sheetsOf(scope);
+        if (now.length !== sheets.length || now.some((sh, i) => sh !== sheets[i])) return 'style sheet';
+        const n = j.sheetCount(scope);
+        if (n.some((c, i) => c !== counts[i])) return 'style sheet';
+    }
+    if (j.view() !== j.view0) return 'viewport';
+    // Container queries follow a box's size, which no record shows.
+    const W = window;
+    const PROPS = ['display', 'visibility', 'opacity', 'content', 'cursor', 'pointer-events', 'text-transform', 'list-style-type', 'list-style-image', 'content-visibility', '-webkit-text-security', 'white-space'];
+    const shapes = W.__nvDeltaShapes || new WeakMap();
+    try { Object.defineProperty(W, '__nvDeltaShapes', { value: shapes, configurable: true, enumerable: false, writable: true }); } catch (_) {}
+    const shapeOf = (sheet) => {
+        let rules;
+        try { rules = sheet.cssRules; } catch (_) { return null; }
+        if (!rules) return { container: false, letter: false, generated: false };
+        const hit = shapes.get(sheet);
+        if (hit && hit.n === rules.length) return hit.v;
+        const v = { container: false, letter: false, generated: false };
+        const walk = (list, inContainer) => {
+            for (const r of list) {
+                const text = r.selectorText;
+                if (text !== undefined) {
+                    // A first letter or line is a layout object of its own.
+                    if (/:first-(letter|line)/.test(text)) v.letter = true;
+                    if (/:(before|after)\b/.test(text)) v.generated = true;
+                }
+                if (inContainer && r.style) {
+                    const st = r.style;
+                    let relevant = PROPS.some((p) => st.getPropertyValue(p));
+                    for (let i = 0; !relevant && i < st.length; i++) if (st[i].startsWith('--')) relevant = true;
+                    if (relevant) v.container = true;
+                }
+                if (r.cssRules && r.cssRules.length) walk(r.cssRules, inContainer || r.type === 17 || (r.constructor && r.constructor.name === 'CSSContainerRule'));
+            }
+        };
+        walk(rules, false);
+        shapes.set(sheet, { n: rules.length, v });
+        return v;
+    };
+    // Generated content is looked for only where a sheet could set it
+    // (and in <q>, whose quotes are the browser's own).
+    let anyGenerated = false;
+    for (const scope of j.scopes) {
+        for (const sheet of j.sheetsOf(scope)) {
+            const v = shapeOf(sheet);
+            if (!v) return 'style sheet';
+            if (v.container) return 'container';
+            if (v.letter) return 'first letter';
+            anyGenerated = anyGenerated || v.generated;
+        }
+    }
+    const WS = /^[\t\n\v\f\r \u1680\u2000-\u200a\u2028\u2029\u205f\u3000]*$/;
+    const styling = (n) => n.nodeType === 1 && (n.matches('style, link') || !!n.querySelector('style, link'));
+    const rep = new Set(), kids = new Set(), added = new Set(), lost = new Set(), touched = new Set();
+    for (const r of j.recs) {
+        const t = r.target;
+        if (t.nodeType !== 9 && t.ownerDocument !== document) return 'frame';
+        if (r.type === 'childList') {
+            for (const a of r.addedNodes) { added.add(a); if (styling(a)) return 'style sheet'; }
+            for (const a of r.removedNodes) if (styling(a)) return 'style sheet';
+            if (r.removedNodes.length) lost.add(t);
+            if (r.nextSibling) touched.add(r.nextSibling);
+            kids.add(t);
+        } else if (r.type === 'attributes') {
+            if (t.tagName === 'STYLE' || t.tagName === 'LINK') return 'style sheet';
+            rep.add(t);
+        } else {
+            const p = t.parentNode;
+            if (p && p.nodeName === 'STYLE') return 'style sheet';
+            rep.add(WS.test(t.data) || !p ? p : t);
+        }
+    }
+    for (const [c, sig] of j.controls0) if (j.sig(c) !== sig) rep.add(c);
+    for (let i = 0; i < j.tracked.length; i++) {
+        const m = j.matches(j.tracked[i][0], j.tracked[i][1]);
+        if (!m) return 'selector';
+        const was = new Set(j.matched[i]), now = new Set(m);
+        for (const e of m) if (!was.has(e)) rep.add(e);
+        for (const e of j.matched[i]) if (!now.has(e)) rep.add(e);
+    }
+    for (const t of j.toggled) rep.add(t);
+    for (const t of j.anim0) rep.add(t);
+    for (const t of j.animated()) rep.add(t);
+    const head = document.head;
+    const placed = (n) => {
+        if (n.nodeType === 9 || n.nodeType === 11) return 'document';
+        if (n.getRootNode() !== document) return 'shadow';
+        if (head && head.contains(n)) return 'head';
+        return '';
+    };
+    // A list's markers count its items: a change to one renumbers the rest.
+    const widen = (n) => {
+        const p = n.parentElement;
+        return p && p.tagName === 'OL' ? p : n;
+    };
+    const all = new Set();
+    for (const n0 of rep) {
+        if (!n0 || !n0.isConnected) continue;
+        const n = widen(n0);
+        const why = placed(n);
+        if (why) return why;
+        all.add(n);
+    }
+    const parents = [];
+    for (const p0 of kids) {
+        if (!p0.isConnected) continue;
+        const why = placed(p0);
+        if (why) return why;
+        const p = widen(p0);
+        if (p !== p0 || p.tagName === 'OL' || p.getElementsByTagName('*').length <= 200) all.add(p);
+        else parents.push(p);
+    }
+    const isNew = (n) => added.has(n) && n.isConnected;
+    const under = (n, set) => { for (let a = n.parentNode; a; a = a.parentNode) if (set.has(a)) return true; return false; };
+    const inNew = (n) => { for (let a = n; a; a = a.parentNode) if (isNew(a)) return true; return false; };
+    const reps = [...all].filter((n) => !inNew(n) && !under(n, all));
+    const repSet = new Set(reps);
+    const lists = parents.filter((p) => !inNew(p) && !under(p, repSet) && !repSet.has(p));
+    // The facts.
+    const STY = ['cursor', 'pointer-events', 'opacity', 'visibility', 'display', 'content'];
+    const styleOf = (cs) => STY.map((p) => cs.getPropertyValue(p));
+    const REPLACED = new Set(['INPUT', 'IMG', 'SELECT', 'TEXTAREA', 'VIDEO', 'AUDIO', 'CANVAS', 'IFRAME', 'OBJECT', 'EMBED', 'FRAME', 'METER', 'PROGRESS', 'HR', 'BR', 'WBR']);
+    const FRAMED = new Set(['IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'PORTAL', 'FENCEDFRAME', 'SLOT']);
+    const csOf = new Map(), box = new Map(), wsLaid = new Map();
+    // Content a display lock skips (a closed <details>' body,
+    // `content-visibility: hidden`, `hidden=until-found`) has no box in a
+    // snapshot, and reading its style or box from script lays it out:
+    // the next snapshot would show it. Told from the parent's style only.
+    const skips = (p, child) => {
+        const c = getComputedStyle(p);
+        if (c.contentVisibility === 'auto') return null;
+        if (c.contentVisibility === 'hidden') return true;
+        if (p.tagName === 'DETAILS' && !p.open) return !(child.nodeType === 1 && child.tagName === 'SUMMARY' && p.querySelector(':scope > summary') === child);
+        return false;
+    };
+    const skippedAt = (n) => {
+        const up = [];
+        for (let a = n.parentElement; a; a = a.parentElement) up.push(a);
+        up.reverse();
+        for (let i = 0; i < up.length; i++) {
+            const v = skips(up[i], up[i + 1] || n);
+            if (v === null) return null;
+            if (v) return true;
+            if (getComputedStyle(up[i]).display === 'none') return false;
+        }
+        return false;
+    };
+    const cs = (el) => { let c = csOf.get(el); if (!c) { c = getComputedStyle(el); csOf.set(el, c); } return c; };
+    const elLayout = (el) => {
+        let v = box.get(el);
+        if (v !== undefined) return v;
+        const c = cs(el);
+        v = c.display !== 'none' && c.display !== 'contents'
+            && (el.tagName === 'WBR' ? !!layoutParent(el) : el.checkVisibility() && el.getClientRects().length > 0);
+        box.set(el, v);
+        return v;
+    };
+    const layoutParent = (n) => {
+        for (let p = n.parentElement; p; p = p.parentElement) {
+            if (elLayout(p)) return p;
+            if (cs(p).display !== 'contents') return null;
+        }
+        return null;
+    };
+    const preserves = (c) => /pre|break-spaces/.test(c.whiteSpace) || /preserve|break-spaces/.test(c.whiteSpaceCollapse || '');
+    const inlineLevel = (c) => c.display.startsWith('inline') || c.display === 'ruby';
+    // The in-flow box before `n` among its siblings, through
+    // `display: contents` parents: a text node, an element, or null.
+    const before = (n) => {
+        for (let at = n; at; at = at.parentNode) {
+            for (let s = at.previousSibling; s; s = s.previousSibling) {
+                if (s.nodeType === 3) { if (textLayout(s)) return s; continue; }
+                if (s.nodeType !== 1) continue;
+                const c = cs(s);
+                if (c.display === 'contents') { const last = lastIn(s); if (last) return last; continue; }
+                if (!elLayout(s) || c.position === 'absolute' || c.position === 'fixed') continue;
+                return s;
+            }
+            const p = at.parentNode;
+            if (!p || p.nodeType !== 1 || cs(p).display !== 'contents') return null;
+        }
+        return null;
+    };
+    const lastIn = (el) => {
+        for (let s = el.lastChild; s; s = s.previousSibling) {
+            if (s.nodeType === 3) { if (textLayout(s)) return s; continue; }
+            if (s.nodeType !== 1) continue;
+            const c = cs(s);
+            if (c.display === 'contents') { const last = lastIn(s); if (last) return last; continue; }
+            if (elLayout(s) && c.position !== 'absolute' && c.position !== 'fixed') return s;
+        }
+        return null;
+    };
+    const textLayout = (t) => {
+        let v = wsLaid.get(t);
+        if (v !== undefined) return v;
+        v = textLaid(t);
+        wsLaid.set(t, v);
+        return v;
+    };
+    const textLaid = (t) => {
+        const p = t.parentElement;
+        if (!p || !t.data.length) return false;
+        const lp = layoutParent(t);
+        if (!lp || REPLACED.has(lp.tagName) || p.closest('option, optgroup')) return false;
+        if (cs(p).contentVisibility === 'hidden' || (p.tagName === 'DETAILS' && !p.open)) return false;
+        if (p !== lp && !p.checkVisibility() && cs(p).display !== 'contents') return false;
+        if (!WS.test(t.data)) return true;
+        const pd = cs(lp).display;
+        if (/table|flex|grid/.test(pd) && !/table-cell|table-caption/.test(pd)) return false;
+        if (preserves(cs(p))) return true;
+        const b = before(t);
+        if (!b) return inlineLevel(cs(lp));
+        if (b.nodeType === 3) return !/[ \t\n\r\f]$/.test(b.data);
+        if (b.tagName === 'BR') return false;
+        const bc = cs(b);
+        return inlineLevel(bc) && bc.float === 'none';
+    };
+    const clickable = (n) => {
+        if (n.nodeType === 3) return !!(n.parentElement && n.parentElement.isContentEditable);
+        if (n.nodeType !== 1) return false;
+        if (n.isContentEditable) return true;
+        if ((n.localName === 'a' || n.localName === 'area') && (n.hasAttribute('href') || n.hasAttributeNS('http://www.w3.org/1999/xlink', 'href'))) return true;
+        if (n.tagName === 'INPUT') return !n.matches(':disabled');
+        if (n.tagName === 'LABEL') return !!(n.control && n.control !== n && clickable(n.control));
+        const d = n.parentElement;
+        return n.tagName === 'SUMMARY' && !!d && d.tagName === 'DETAILS' && d.querySelector(':scope > summary') === n;
+    };
+    const rect = (r) => [r.left + scrollX, r.top + scrollY, r.width, r.height];
+    const marker = (li, pc) => {
+        if (pc.content !== 'normal') return null;
+        const t = pc.listStyleType;
+        const glyphs = { disc: '\u2022 ', circle: '\u25e6 ', square: '\u25a0 ', 'disclosure-closed': '\u25b8 ', 'disclosure-open': '\u25be ' };
+        if (glyphs[t]) return glyphs[t];
+        if (t !== 'decimal') return null;
+        const list = li.parentElement;
+        const items = list ? [...list.children].filter((e) => cs(e).display === 'list-item') : [li];
+        const ol = list && list.tagName === 'OL' ? list : null;
+        const rev = !!(ol && ol.reversed);
+        let v = ol && ol.hasAttribute('start') ? ol.start : (rev ? items.length : 1);
+        for (const e of items) {
+            if (e.tagName === 'LI' && e.hasAttribute('value') && !isNaN(parseInt(e.getAttribute('value')))) v = parseInt(e.getAttribute('value'));
+            if (e === li) return v + '. ';
+            v += rev ? -1 : 1;
+        }
+        return null;
+    };
+    // Generated content made of quoted strings only (before any "/ alt").
+    const generated = (c) => {
+        let out = '', i = 0;
+        while (i < c.length) {
+            if (c[i] === ' ') { i++; continue; }
+            if (c[i] === '/') return out;
+            if (c[i] !== '"') return null;
+            let k = i + 1;
+            while (k < c.length && c[k] !== '"') { if (c[k] === '\\') k++; out += c[k]; k++; }
+            if (k >= c.length) return null;
+            i = k + 1;
+        }
+        return out;
+    };
+    let total = 0, why = '';
+    const facts = (root) => {
+        const list = [];
+        const top = skippedAt(root);
+        if (top === null) { why = 'content visibility'; return null; }
+        const stack = [[root, -1, top]];
+        while (stack.length) {
+            const [n, p, skipped] = stack.pop();
+            if (++total > max) { why = 'large'; return null; }
+            const f = { t: n.nodeType, n: n.nodeName, p };
+            if (skipped) {
+                // As the snapshot has it: no box, no style.
+                if (n.nodeType === 1 && (FRAMED.has(n.tagName) || n.shadowRoot)) { why = 'frame or shadow root'; return null; }
+                if (n.nodeType === 3 || n.nodeType === 8) f.v = n.data;
+                if (n.nodeType === 3 && WS.test(n.data)) f.w = 1;
+                if (n.nodeType === 1) {
+                    if (n.closest('[contenteditable]:not([contenteditable=false])')) { why = 'editable'; return null; }
+                    f.c = (n.localName === 'a' || n.localName === 'area') ? n.hasAttribute('href') : n.tagName === 'INPUT' ? !n.matches(':disabled') : false;
+                    if (n.tagName === 'INPUT') { if (n.value !== '') f.iv = n.value; if (n.checked) f.ck = 1; }
+                    if (n.tagName === 'TEXTAREA' && n.value !== '') f.tv = n.value;
+                    if (n.tagName === 'OPTION' && n.selected) f.sel = 1;
+                }
+                const at = list.length;
+                list.push(f);
+                if (n.nodeName !== 'TEMPLATE') {
+                    const ks = n.childNodes;
+                    for (let i = ks.length - 1; i >= 0; i--) stack.push([ks[i], at, true]);
+                }
+                continue;
+            }
+            if (n.nodeType === 1) {
+                if (FRAMED.has(n.tagName) || n.shadowRoot) { why = 'frame or shadow root'; return null; }
+                if (n.tagName === 'SELECT' && cs(n).appearance === 'base-select') { why = 'customizable select'; return null; }
+                f.l = elLayout(n);
+                if (f.l) { f.s = styleOf(cs(n)); f.b = rect(n.getBoundingClientRect()); }
+                f.c = clickable(n);
+                if (n.tagName === 'INPUT') { if (n.value !== '') f.iv = n.value; if (n.checked) f.ck = 1; }
+                if (n.tagName === 'TEXTAREA' && n.value !== '') f.tv = n.value;
+                if (n.tagName === 'OPTION' && n.selected) f.sel = 1;
+                if (f.l) {
+                    const ps = [];
+                    for (const pt of ['before', 'after', 'marker']) {
+                        if (pt !== 'marker' && !anyGenerated && n.tagName !== 'Q') continue;
+                        if (pt === 'marker' && cs(n).display !== 'list-item') continue;
+                        const pc = getComputedStyle(n, '::' + pt);
+                        if (pt === 'marker') {
+                            if (cs(n).display !== 'list-item' || (pc.listStyleType === 'none' && cs(n).listStyleImage === 'none' && pc.content === 'normal')) continue;
+                        } else if (pc.content === 'none' || pc.content === 'normal' || pc.display === 'none') continue;
+                        const lt = pt === 'marker' ? marker(n, pc) : generated(pc.content);
+                        if (lt === null) { why = 'generated content'; return null; }
+                        ps.push({ pt, s: styleOf(pc), lt });
+                    }
+                    // A modal dialog's or an open popover's backdrop, in the top layer.
+                    if (n.matches(':modal, :popover-open')) ps.push({ pt: 'backdrop', s: styleOf(getComputedStyle(n, '::backdrop')), lt: null });
+                    if (ps.length) f.ps = ps;
+                }
+            } else if (n.nodeType === 3) {
+                f.v = n.data;
+                if (WS.test(n.data)) f.w = 1;
+                f.l = textLayout(n);
+                const pe = n.parentElement;
+                if (f.l) {
+                    const pc = cs(pe);
+                    const tt = pc.textTransform;
+                    if (!/^(none|uppercase|lowercase)$/.test(tt) || (pc.webkitTextSecurity && pc.webkitTextSecurity !== 'none')) { why = 'text transform'; return null; }
+                    const lang = (pe.closest('[lang]') || {}).lang || undefined;
+                    f.lt = tt === 'uppercase' ? n.data.toLocaleUpperCase(lang) : tt === 'lowercase' ? n.data.toLocaleLowerCase(lang) : n.data;
+                    f.s = styleOf(pc);
+                    const r = document.createRange();
+                    r.selectNodeContents(n);
+                    f.b = rect(r.getBoundingClientRect());
+                }
+                f.c = clickable(n);
+            } else if (n.nodeType === 8) {
+                f.v = n.data;
+            }
+            const at = list.length;
+            list.push(f);
+            if (n.nodeName !== 'TEMPLATE') {
+                const ks = n.childNodes;
+                for (let i = ks.length - 1; i >= 0; i--) {
+                    const k = ks[i];
+                    let sk = false;
+                    if (n.nodeType === 1) {
+                        sk = skips(n, k);
+                        if (sk === null) { why = 'content visibility'; return null; }
+                    }
+                    stack.push([k, at, sk]);
+                }
+            }
+        }
+        return list;
+    };
+    // What reading would cost, counted cheaply first (elements and about
+    // as many text nodes): a change past `max` is captured whole without
+    // reading any of it.
+    let guess = 0;
+    for (const r of reps) guess += r.nodeType === 1 ? 2 * r.getElementsByTagName('*').length + 1 : 1;
+    for (const p of lists) for (const c of p.childNodes) if (added.has(c)) guess += c.nodeType === 1 ? 2 * c.getElementsByTagName('*').length + 1 : 1;
+    if (guess > max) return 'large';
+    const objs = [], ops = [];
+    for (const r of reps) {
+        const f = facts(r);
+        if (!f) return why;
+        objs.push(r);
+        ops.push({ k: 'r', d: objs.length - 1, f });
+    }
+    // A parent's children: new ones read; the rest are the read's own.
+    // Where none was taken away, the rest are its old children in order,
+    // given as run lengths. Else each is named (its id comes from
+    // describeNode), and old whitespace text, which describeNode leaves
+    // out, is the old child after the last one named.
+    for (const p of lists) {
+        if (p.shadowRoot) return 'shadow root';
+        objs.push(p);
+        const d = objs.length - 1, ch = [], gone = lost.has(p);
+        let run = 0;
+        for (const c of p.childNodes) {
+            const ws = c.nodeType === 3 && WS.test(c.data);
+            if (added.has(c)) {
+                if (run) { ch.push(run); run = 0; }
+                const f = facts(c);
+                if (!f) return why;
+                if (ws) ch.push({ ws: f });
+                else { objs.push(c); ch.push({ d: objs.length - 1, f }); }
+            } else if (ws && (touched.has(c) || (c.previousSibling && added.has(c.previousSibling)))) {
+                // Whether whitespace has a box follows what comes before it.
+                if (run) { ch.push(run); run = 0; }
+                const f = facts(c);
+                if (!f) return why;
+                ch.push({ ws: f, old: c.data });
+            } else if (!gone) {
+                run++;
+            } else if (c.nodeType === 3 && WS.test(c.data)) {
+                ch.push({ w: c.data });
+            } else {
+                ch.push(c.nodeName);
+            }
+        }
+        if (run) ch.push(run);
+        ops.push({ k: 'c', d, ch, gone: gone ? 1 : 0 });
+    }
+    Object.defineProperty(W, '__nvDeltaRoots', { value: objs, configurable: true, enumerable: false, writable: true });
+    return { ops, n: total };
+}"#;
+
 /// Asks the journal (see [`JOURNAL_ARM`]) whether anything the tree shows
 /// changed since it was armed, other than what the entry itself did: with
 /// `typed`, that text entered into the focused text field ("" for nothing
@@ -1091,6 +1604,9 @@ const JOURNAL_CHECK: &str = r#"(id, typed) => {
     const cssom = j.unhook();
     if (!j.primed) return 'not primed';
     j.primed = false;
+    // A read follows a check that can't answer: it is patched from the
+    // records (see JOURNAL_DELTA), and the style rules seen written count.
+    j.used = { cssom };
     j.flush();
     if (j.m) return 'dom';
     if (cssom) return 'style rule';
@@ -1185,6 +1701,7 @@ const JOURNAL_CHECK: &str = r#"(id, typed) => {
     }
     for (const [c, s] of j.controls) if (!own.has(c) && j.sig(c) !== s) return 'form state';
     // The entry is the read's now: the next one is judged from here.
+    j.used = null;
     j.inputs = [];
     j.typedAttr = [];
     j.controls = j.formOf();
@@ -2581,7 +3098,32 @@ pub struct Page {
     /// its id, when that read could be watched whole. None after a read
     /// that armed none.
     journal: Arc<std::sync::Mutex<Option<u64>>>,
+    /// That read's snapshot, for the next read to patch (see
+    /// [`Page::read_delta`]).
+    kept: Arc<std::sync::Mutex<Option<Kept>>>,
+    /// The journal an action primed (see [`JOURNAL_PRIME`]): only a read
+    /// after one can be patched.
+    primed: Arc<std::sync::Mutex<Option<u64>>>,
 }
+
+/// A tree read's snapshot, kept with the journal armed with it.
+struct Kept {
+    journal: u64,
+    snap: Snap,
+}
+
+/// A journal armed in the page: its id and how many documents it watches.
+type Arming = Option<(u64, u64)>;
+
+/// Change journal ids, one per arming.
+static JOURNAL_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Ids for whitespace text read by [`JOURNAL_DELTA`], which
+/// `DOM.describeNode` leaves out: never a ref, so any id no node has.
+static SYNTHETIC_IDS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1 << 40);
+
+/// The listener types that make a node `isClickable` in a snapshot.
+const CLICK_LISTENERS: [&str; 3] = ["click", "mousedown", "mouseup"];
 
 /// A ref as a snapshot printed it: its element's role and full name, its
 /// place among the snapshot's elements of that role and name (and how many
@@ -2619,6 +3161,8 @@ impl Page {
             stalled: Default::default(),
             seen_refs: Default::default(),
             journal: Default::default(),
+            kept: Default::default(),
+            primed: Default::default(),
         }
     }
 
@@ -2780,8 +3324,7 @@ impl Page {
     /// not watch the page whole (it says what it could not, e.g. a style
     /// sheet of another origin).
     fn arm_journal(&self, timeout: Duration) -> Option<(u64, u64)> {
-        static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let id = IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = JOURNAL_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();
         let r = self
             .send(
@@ -2801,16 +3344,18 @@ impl Page {
     }
 
     /// Take what the journal needs to judge the text entry about to run
-    /// (see [`JOURNAL_PRIME`]); false when it can't judge one.
-    pub fn journal_prime(&self, id: u64, timeout: Duration) -> bool {
+    /// (`entry`), or to patch the read after another action (see
+    /// [`JOURNAL_PRIME`]); false when it can't.
+    pub fn journal_prime(&self, id: u64, entry: bool, timeout: Duration) -> bool {
         let started = std::time::Instant::now();
         let r = self.send(
             "Runtime.evaluate",
-            json!({ "expression": format!("({JOURNAL_PRIME})({id})"), "returnByValue": true }),
+            json!({ "expression": format!("({JOURNAL_PRIME})({id}, {entry})"), "returnByValue": true }),
             timeout,
         );
         crate::timing::record("journal_prime", started);
         let verdict = r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_str).map(str::to_string));
+        *self.primed.lock().unwrap() = verdict.as_deref().filter(|v| v.is_empty()).map(|_| id);
         match verdict.as_deref() {
             Some("") => true,
             other => {
@@ -5330,7 +5875,7 @@ impl Page {
     /// `.class` for each element, to tell apart actionable elements that
     /// have no name or text.
     fn clickables(&self, timeout: Duration) -> ax::Clickables {
-        match self.dom_snapshot(timeout) {
+        match self.dom_snapshot(timeout).as_ref().and_then(Snap::from_value) {
             Some(snap) => clickables_from(&snap),
             None => ax::Clickables::default(),
         }
@@ -5351,61 +5896,258 @@ impl Page {
 /// Whether a DOM snapshot holds a closed shadow root: the page's scripts
 /// can't reach one, so neither can the change journal (see
 /// [`JOURNAL_ARM`]).
-fn has_closed_shadow_root(snap: &Value) -> bool {
-    let Some(closed) =
-        snap.get("strings").and_then(Value::as_array).and_then(|s| s.iter().position(|x| x.as_str() == Some("closed")))
-    else {
-        return false;
+fn has_closed_shadow_root(snap: &Snap) -> bool {
+    snap.has_closed_shadow_root()
+}
+
+/// Whether a read after an action patches the last read's snapshot (see
+/// [`Page::read_delta`]); `NAVIGERA_DELTA_READ=0` captures the page whole
+/// every time, to compare against.
+fn delta_reads() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_DELTA_READ").map_or(true, |v| v.trim() != "0"))
+}
+
+/// Whether element `i` of document `d` is `isClickable` without a
+/// listener, as Chrome tells it: a link with an address, an enabled
+/// field, a label of one, the summary that opens its `<details>`,
+/// editable content. None where the snapshot can't tell (a field in a
+/// disabled fieldset).
+fn clickable_by_rule(snap: &Snap, d: usize, i: usize) -> Option<bool> {
+    let doc = &snap.docs[d];
+    let attr = |k: usize, name: &str| {
+        doc.attrs[k]
+            .chunks(2)
+            .find(|p| snap.at(p[0]).eq_ignore_ascii_case(name))
+            .map(|p| snap.at(p.get(1).copied().unwrap_or(-1)))
     };
-    snap.get("documents").and_then(Value::as_array).into_iter().flatten().any(|d| {
-        d.pointer("/nodes/shadowRootType/value")
+    let has = |k: usize, name: &str| attr(k, name).is_some();
+    let tag = snap.at(doc.name[i]);
+    // The nearest `contenteditable` decides.
+    let mut at = i as i64;
+    for _ in 0..256 {
+        if at < 0 {
+            break;
+        }
+        if let Some(v) = attr(at as usize, "contenteditable") {
+            if !v.trim().eq_ignore_ascii_case("false") {
+                return Some(true);
+            }
+            break;
+        }
+        at = doc.parent[at as usize];
+    }
+    let within = |k: usize, root: usize| {
+        let mut at = doc.parent[k];
+        for _ in 0..256 {
+            if at < 0 {
+                return false;
+            }
+            if at as usize == root {
+                return true;
+            }
+            at = doc.parent[at as usize];
+        }
+        false
+    };
+    match tag {
+        "A" | "AREA" | "a" | "area" => Some(has(i, "href") || has(i, "xlink:href")),
+        "LABEL" => {
+            // Its control: the element `for` names, else the first field inside.
+            let control = match attr(i, "for") {
+                Some(id) => (0..doc.parent.len()).find(|&k| doc.ty[k] == 1 && attr(k, "id") == Some(id)),
+                None => (i + 1..doc.parent.len()).take_while(|&k| within(k, i)).find(|&k| {
+                    matches!(
+                        snap.at(doc.name[k]),
+                        "INPUT" | "SELECT" | "TEXTAREA" | "BUTTON" | "METER" | "OUTPUT" | "PROGRESS"
+                    )
+                }),
+            };
+            match control {
+                Some(c) if snap.at(doc.name[c]) == "INPUT" => clickable_by_rule(snap, d, c),
+                _ => Some(false),
+            }
+        }
+        "INPUT" => {
+            if has(i, "disabled") {
+                return Some(false);
+            }
+            let mut at = doc.parent[i];
+            for _ in 0..256 {
+                if at < 0 {
+                    return Some(true);
+                }
+                if snap.at(doc.name[at as usize]) == "FIELDSET" && has(at as usize, "disabled") {
+                    return None;
+                }
+                at = doc.parent[at as usize];
+            }
+            None
+        }
+        "SUMMARY" => {
+            let p = doc.parent[i];
+            if p < 0 || snap.at(doc.name[p as usize]) != "DETAILS" {
+                return Some(false);
+            }
+            let first = (0..doc.parent.len()).find(|&k| doc.parent[k] == p && snap.at(doc.name[k]) == "SUMMARY");
+            Some(first == Some(i))
+        }
+        _ => Some(false),
+    }
+}
+
+/// The nodes of one subtree as [`Snap::patch`] takes them: the page's
+/// facts ([`JOURNAL_DELTA`], preorder, each with its parent's place) with
+/// the ids, names, values and attributes of `DOM.describeNode` of the same
+/// subtree (`desc`, Null for a lone whitespace text node, which it leaves
+/// out). Fails where the two don't line up: the page changed between them.
+fn zip_facts(
+    desc: &Value,
+    facts: &[Value],
+    listened: &dyn Fn(i64) -> bool,
+) -> std::result::Result<Vec<NewNode>, &'static str> {
+    let str_of = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let mut kids: Vec<Vec<usize>> = vec![Vec::new(); facts.len()];
+    for (i, f) in facts.iter().enumerate() {
+        match f.get("p").and_then(Value::as_i64) {
+            Some(p) if p >= 0 && (p as usize) < i => kids[p as usize].push(i),
+            Some(-1) if i == 0 => {}
+            _ => return Err("facts out of order"),
+        }
+    }
+    let layout_of = |f: &Value, text: Option<String>, bounds: Option<&Value>| -> Option<NewLayout> {
+        if f.get("l").and_then(Value::as_bool) != Some(true) && f.get("pt").is_none() {
+            return None;
+        }
+        let mut styles: [String; STYLES] = Default::default();
+        for (slot, v) in styles.iter_mut().zip(f.get("s").and_then(Value::as_array).into_iter().flatten()) {
+            *slot = v.as_str().unwrap_or("").to_string();
+        }
+        let mut b = [0.0; 4];
+        for (slot, v) in b.iter_mut().zip(bounds.or(f.get("b")).and_then(Value::as_array).into_iter().flatten()) {
+            *slot = v.as_f64().unwrap_or(0.0);
+        }
+        Some(NewLayout { text, styles, bounds: b })
+    };
+    let mut out: Vec<NewNode> = Vec::new();
+    let mut stack: Vec<(usize, Option<&Value>, usize)> = vec![(0, (!desc.is_null()).then_some(desc), usize::MAX)];
+    while let Some((fi, d, parent)) = stack.pop() {
+        let f = facts.get(fi).ok_or("facts")?;
+        let ty = f.get("t").and_then(Value::as_i64).ok_or("facts")?;
+        let name = str_of(f, "n").ok_or("facts")?;
+        let whitespace = f.get("w").is_some();
+        let backend = match d {
+            Some(d) => {
+                if d.get("nodeName").and_then(Value::as_str) != Some(name.as_str()) {
+                    return Err("the page moved under the read");
+                }
+                if d.get("contentDocument").is_some() {
+                    return Err("a frame");
+                }
+                let shadowed = d.get("shadowRoots").and_then(Value::as_array).into_iter().flatten();
+                if shadowed.into_iter().any(|r| r.get("shadowRootType").and_then(Value::as_str) != Some("user-agent")) {
+                    return Err("a shadow root");
+                }
+                d.get("backendNodeId").and_then(Value::as_i64).ok_or("no id")?
+            }
+            None if whitespace => SYNTHETIC_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            None => return Err("the page moved under the read"),
+        };
+        let attrs: Vec<(String, String)> = d
+            .and_then(|d| d.get("attributes"))
             .and_then(Value::as_array)
-            .is_some_and(|v| v.iter().any(|x| x.as_u64() == Some(closed as u64)))
-    })
+            .map(|a| {
+                a.chunks(2)
+                    .map(|p| {
+                        (
+                            p[0].as_str().unwrap_or("").to_string(),
+                            p.get(1).and_then(Value::as_str).unwrap_or("").to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let text = (ty == 3).then(|| str_of(f, "lt")).flatten();
+        let at = out.len();
+        out.push(NewNode {
+            parent,
+            ty,
+            value: if ty == 3 || ty == 8 { Some(str_of(f, "v").unwrap_or_default()) } else { None },
+            name,
+            backend,
+            attrs,
+            pseudo: None,
+            input_value: str_of(f, "iv"),
+            text_value: str_of(f, "tv"),
+            checked: f.get("ck").is_some(),
+            selected: f.get("sel").is_some(),
+            clickable: f.get("c").and_then(Value::as_bool) == Some(true) || (ty == 1 && listened(backend)),
+            layout: layout_of(f, text, None),
+        });
+        // Pseudo-elements come first among an element's children, in
+        // the order both the snapshot and describeNode give them.
+        let shown: &[Value] =
+            d.and_then(|d| d.get("pseudoElements")).and_then(Value::as_array).map_or(&[], Vec::as_slice);
+        let read: &[Value] = f.get("ps").and_then(Value::as_array).map_or(&[], Vec::as_slice);
+        if shown.len() != read.len() {
+            return Err("pseudo-elements");
+        }
+        for dp in shown {
+            let pt = dp.get("pseudoType").and_then(Value::as_str).ok_or("pseudo-elements")?.to_string();
+            let fp = read
+                .iter()
+                .find(|fp| fp.get("pt").and_then(Value::as_str) == Some(pt.as_str()))
+                .ok_or("pseudo-elements")?;
+            out.push(NewNode {
+                parent: at,
+                ty: 1,
+                name: str_of(dp, "nodeName").unwrap_or_else(|| format!("::{pt}")),
+                backend: dp.get("backendNodeId").and_then(Value::as_i64).ok_or("no id")?,
+                layout: layout_of(fp, str_of(fp, "lt"), f.get("b")),
+                pseudo: Some(pt),
+                ..NewNode::default()
+            });
+        }
+        let shown: &[Value] = d.and_then(|d| d.get("children")).and_then(Value::as_array).map_or(&[], Vec::as_slice);
+        let mut shown = shown.iter();
+        let mut items = Vec::new();
+        for &k in &kids[fi] {
+            if facts[k].get("w").is_some() {
+                items.push((k, None, at));
+            } else {
+                items.push((k, Some(shown.next().ok_or("the page moved under the read")?), at));
+            }
+        }
+        if shown.next().is_some() {
+            return Err("the page moved under the read");
+        }
+        stack.extend(items.into_iter().rev());
+    }
+    Ok(out)
 }
 
 /// What a snapshot shows a user could click (see [`Page::clickables`]).
-fn clickables_from(snap: &Value) -> ax::Clickables {
+fn clickables_from(snap: &Snap) -> ax::Clickables {
     {
         let mut out = ax::Clickables::default();
-        let strings: Vec<&str> = snap
-            .get("strings")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|v| v.as_str().unwrap_or(""))
-            .collect();
-        let text =
-            |i: Option<&Value>| i.and_then(Value::as_u64).and_then(|i| strings.get(i as usize).copied()).unwrap_or("");
-        let documents: &[Value] = snap.get("documents").and_then(Value::as_array).map_or(&[], Vec::as_slice);
-        let page_origin = documents.first().and_then(|d| http_origin(text(d.get("documentURL"))));
-        for doc in documents {
-            let nodes = &doc["nodes"];
-            let foreign = match (&page_origin, http_origin(text(doc.get("documentURL")))) {
+        let text = |i: i64| snap.at(i);
+        let page_origin = snap.docs.first().and_then(|d| http_origin(text(d.url)));
+        for doc in &snap.docs {
+            let foreign = match (&page_origin, http_origin(text(doc.url))) {
                 (Some(page), Some(own)) => *page != own,
                 _ => false,
             };
-            let ints = |key: &str| -> Vec<i64> {
-                nodes
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .map(|v| v.as_i64().unwrap_or(-1))
-                    .collect()
-            };
-            let (parents, types, backends, names, values) =
-                (ints("parentIndex"), ints("nodeType"), ints("backendNodeId"), ints("nodeName"), ints("nodeValue"));
-            let mut children: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+            let (parents, types, backends, names, values) = (&doc.parent, &doc.ty, &doc.backend, &doc.name, &doc.value);
+            let mut children: FxMap<i64, Vec<i64>> = FxMap::default();
             // Each element's own text nodes, in order.
-            let mut own_text: std::collections::HashMap<i64, Vec<&str>> = std::collections::HashMap::new();
+            let mut own_text: FxMap<i64, Vec<&str>> = FxMap::default();
             // Elements with text of their own somewhere inside.
-            let mut texted = std::collections::HashSet::new();
+            let mut texted = FxSet::default();
             for (i, &parent) in parents.iter().enumerate() {
                 if types.get(i) == Some(&1) && parent >= 0 {
                     children.entry(parent).or_default().push(i as i64);
                 }
-                let value = values.get(i).and_then(|&v| strings.get(v as usize)).copied().unwrap_or("");
+                let value = values.get(i).map_or("", |&v| text(v));
                 if types.get(i) == Some(&3) && !value.trim().is_empty() {
                     own_text.entry(parent).or_default().push(value);
                     let mut at = parent;
@@ -5417,28 +6159,14 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                     }
                 }
             }
-            let listening: std::collections::HashSet<i64> = nodes
-                .get("isClickable")
-                .and_then(|c| c.get("index"))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_i64)
-                .collect();
-            let layout = &doc["layout"];
+            let listening: FxSet<i64> = doc.clickable.iter().map(|&i| i as i64).collect();
             // Per laid-out node: (cursor, pointer-events, opacity, has an area,
             // visibility).
-            let mut boxes = std::collections::HashMap::new();
-            let styles = layout.get("styles").and_then(Value::as_array);
-            let bounds = layout.get("bounds").and_then(Value::as_array);
-            for (i, node) in layout.get("nodeIndex").and_then(Value::as_array).into_iter().flatten().enumerate() {
-                let style = |k: usize| text(styles.and_then(|s| s.get(i)).and_then(|s| s.get(k)));
-                let area = bounds
-                    .and_then(|b| b.get(i))
-                    .and_then(Value::as_array)
-                    .map(|r| r.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
-                    .is_some_and(|r| r.len() == 4 && r[2] > 0.0 && r[3] > 0.0);
-                boxes.insert(node.as_i64().unwrap_or(-1), (style(0), style(1), style(2), area, style(3)));
+            let mut boxes = FxMap::default();
+            for l in &doc.layout {
+                let style = |k: usize| text(l.styles[k]);
+                let area = l.bounds[2] > 0.0 && l.bounds[3] > 0.0;
+                boxes.insert(l.node as i64, (style(0), style(1), style(2), area, style(3)));
             }
             let pointer = |i: i64| boxes.get(&i).is_some_and(|b| b.0 == "pointer");
             let transparent = |mut i: i64| {
@@ -5453,12 +6181,10 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                 }
                 false
             };
-            let tag_of = |i: i64| names.get(i as usize).and_then(|&n| strings.get(n as usize)).copied().unwrap_or("");
-            let attributes = nodes.get("attributes").and_then(Value::as_array);
+            let tag_of = |i: i64| names.get(i as usize).map_or("", |&n| text(n));
+            let pairs_of = |i: i64| -> &[i64] { doc.attrs.get(i as usize).map_or(&[], Vec::as_slice) };
             let attr_of = |i: i64, name: &str| -> &str {
-                let pairs = attributes.and_then(|a| a.get(i as usize)).and_then(Value::as_array);
-                let pairs = pairs.map(|a| a.as_slice()).unwrap_or(&[]);
-                pairs.chunks(2).find(|p| text(p.first()) == name).map(|p| text(p.get(1))).unwrap_or("")
+                pairs_of(i).chunks(2).find(|p| text(p[0]) == name).map_or("", |p| text(p.get(1).copied().unwrap_or(-1)))
             };
             let first_class = |i: i64| attr_of(i, "class").split_whitespace().next().unwrap_or("");
             // A list item or table row by its tag or role. The parts of one
@@ -5503,12 +6229,9 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                 }
                 None
             };
-            let has_attr = |i: i64, name: &str| {
-                let pairs = attributes.and_then(|a| a.get(i as usize)).and_then(Value::as_array);
-                pairs.map(|a| a.as_slice()).unwrap_or(&[]).chunks(2).any(|p| text(p.first()) == name)
-            };
+            let has_attr = |i: i64, name: &str| pairs_of(i).chunks(2).any(|p| text(p[0]) == name);
             // `i` and its ancestors, nearest first.
-            let parent_of: &[i64] = &parents;
+            let parent_of: &[i64] = parents;
             let up = move |mut i: i64| {
                 std::iter::from_fn(move || {
                     let at = i;
@@ -5680,10 +6403,11 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                 }
                 let index = i as i64;
                 let backend = backend as u64;
-                let attrs = attributes.and_then(|a| a.get(i)).and_then(Value::as_array);
                 let attr = |name: &str| {
-                    let pairs = attrs.map(|a| a.as_slice()).unwrap_or(&[]);
-                    pairs.chunks(2).find(|p| text(p.first()) == name).map(|p| text(p.get(1)).trim().to_string())
+                    pairs_of(index)
+                        .chunks(2)
+                        .find(|p| text(p[0]) == name)
+                        .map(|p| text(p.get(1).copied().unwrap_or(-1)).trim().to_string())
                 };
                 let selector = if let Some(id) = attr("id").filter(|id| !id.is_empty()) {
                     Some(format!("#{id}"))
@@ -5887,8 +6611,10 @@ impl Page {
     }
 
     fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
-        // Only a read that arms a journal leaves one standing for itself.
+        // Only a read that arms a journal leaves one standing for itself,
+        // and its snapshot.
         *self.journal.lock().unwrap() = None;
+        let prior = self.kept.lock().unwrap().take();
         let tree_opts = !opts.json && opts.max_depth.is_none() && !self.shared.is_single_target();
         // A large page's tree is built from the DOM snapshot; anything that
         // path can't serve falls back to Chrome's tree below.
@@ -5899,7 +6625,7 @@ impl Page {
         // the same page load (for checking one against the other).
         if tree_opts && forced.as_deref().map(str::trim) == Some("both") {
             let chrome = self.ax_tree_full(timeout, opts, None)?;
-            let dom = self.ax_tree_dom(timeout, opts)?;
+            let dom = self.ax_tree_dom(timeout, opts, None)?;
             return Ok(Value::String(format!(
                 "{}\n=== DOM snapshot tree ===\n{}",
                 chrome.as_str().unwrap_or(""),
@@ -5915,7 +6641,7 @@ impl Page {
         if from_dom {
             // A journal pays where reading again costs more than keeping it.
             let journal = opts.journal && nodes.is_some_and(|n| n > JOURNAL_NODES);
-            match self.ax_tree_dom(timeout, &AxOptions { journal, ..opts.clone() }) {
+            match self.ax_tree_dom(timeout, &AxOptions { journal, ..opts.clone() }, prior) {
                 Ok(text) => return Ok(text),
                 Err(e) => crate::timing::log(&format!("[ax] DOM snapshot tree failed, reading Chrome's: {e:#}")),
             }
@@ -5954,26 +6680,61 @@ impl Page {
 
     /// The text tree built from the DOM snapshot (see `domax`): one
     /// snapshot serves the tree and the clickable elements.
-    fn ax_tree_dom(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+    fn ax_tree_dom(&self, timeout: Duration, opts: &AxOptions, prior: Option<Kept>) -> Result<Value> {
         // A scope is found first: only its subtree is built.
         let root_backend_id = match &opts.scope {
             Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
             None => None,
         };
-        // Armed before the capture: a change between the two leaves the
-        // journal dirty (a read again), never unseen.
-        let armed = if opts.journal { self.arm_journal(timeout) } else { None };
-        let started = std::time::Instant::now();
-        let snap = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
-        crate::timing::record("ax_dom_snapshot", started);
+        // After an action, the last read's snapshot with what changed
+        // since read again; else the page captured whole.
+        let mut armed = None;
+        let mut patched = None;
+        let primed = self.primed.lock().unwrap().take();
+        let prior = prior.filter(|k| opts.journal && primed == Some(k.journal) && delta_reads());
+        if let Some(prior) = prior {
+            let started = std::time::Instant::now();
+            match self.read_delta(prior, timeout) {
+                Ok((snap, arming)) => {
+                    patched = Some(snap);
+                    armed = arming;
+                }
+                Err((why, arming)) => {
+                    crate::timing::log(&format!("[delta] captured whole: {why}"));
+                    armed = arming;
+                }
+            }
+            crate::timing::record("ax_delta", started);
+        }
+        let snap = match patched {
+            Some(snap) => snap,
+            None => {
+                // Armed before the capture: a change between the two leaves the
+                // journal dirty (a read again), never unseen.
+                if opts.journal && armed.is_none() {
+                    armed = self.arm_journal(timeout);
+                }
+                let started = std::time::Instant::now();
+                let value = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
+                crate::timing::record("ax_dom_snapshot", started);
+                let started = std::time::Instant::now();
+                let snap = Snap::from_value(&value).ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
+                // Freeing a large snapshot takes milliseconds: not on the way to
+                // the answer.
+                std::thread::spawn(move || drop(value));
+                crate::timing::record("ax_dom_columns", started);
+                snap
+            }
+        };
         // It speaks for the read only if it watched every document the
         // snapshot holds (a frame of another origin in the page's process
         // can't be watched from the page).
-        let docs = snap.get("documents").and_then(Value::as_array).map_or(0, Vec::len) as u64;
+        let docs = snap.docs.len() as u64;
         // Nor can it watch inside a closed shadow root, which the snapshot
         // reads.
         let closed = armed.is_some() && has_closed_shadow_root(&snap);
-        *self.journal.lock().unwrap() = armed.filter(|&(_, watched)| watched >= docs && !closed).map(|(id, _)| id);
+        let journal = armed.filter(|&(_, watched)| watched >= docs && !closed).map(|(id, _)| id);
+        *self.journal.lock().unwrap() = journal;
         let started = std::time::Instant::now();
         // The clickable elements and the tree read the same snapshot, side
         // by side.
@@ -5987,9 +6748,12 @@ impl Page {
         });
         let clicks = clicks.map_err(|_| anyhow::anyhow!("reading the snapshot's clickable elements failed"))?;
         let built = built.ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
-        // Freeing a large snapshot takes milliseconds: not on the way to
-        // the answer.
-        std::thread::spawn(move || drop(snap));
+        match journal {
+            Some(journal) => *self.kept.lock().unwrap() = Some(Kept { journal, snap }),
+            // Freeing a large snapshot takes milliseconds: not on the way to
+            // the answer.
+            None => drop(std::thread::spawn(move || drop(snap))),
+        }
         crate::timing::record("ax_dom_build", started);
         if let Some(backend) = root_backend_id {
             let has = |nodes: &[ax::Node]| nodes.iter().any(|n| n.backend == Some(backend));
@@ -6021,6 +6785,304 @@ impl Page {
         std::thread::spawn(move || drop(built));
         self.remember_refs(&rendered.refs, &url, root_backend_id);
         Ok(Value::String(rendered.text))
+    }
+
+    /// The elements with a click, mousedown or mouseup listener of their
+    /// own (what `isClickable` counts besides links, fields and editable
+    /// text), in every document: one call, ~5 ms on a 10,000-row page.
+    fn listeners(&self, timeout: Duration) -> Option<std::collections::HashSet<i64>> {
+        let started = std::time::Instant::now();
+        let doc = self
+            .send("Runtime.evaluate", json!({ "expression": "document", "objectGroup": "nv-listen" }), timeout)
+            .ok()?;
+        let object = doc.pointer("/result/objectId").and_then(Value::as_str)?.to_string();
+        let got = self.send(
+            "DOMDebugger.getEventListeners",
+            json!({ "objectId": object, "depth": -1, "pierce": true }),
+            timeout,
+        );
+        let _ = self.send("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-listen" }), timeout);
+        crate::timing::record("ax_listeners", started);
+        let got = got.ok()?;
+        Some(
+            got.get("listeners")?
+                .as_array()?
+                .iter()
+                .filter(|l| l.get("type").and_then(Value::as_str).is_some_and(|t| CLICK_LISTENERS.contains(&t)))
+                .filter_map(|l| l.get("backendNodeId").and_then(Value::as_i64))
+                .collect(),
+        )
+    }
+
+    /// The tree read after an action, as the last read's snapshot (`prior`)
+    /// with what changed since read again from the page (see
+    /// [`JOURNAL_DELTA`]): the cost of the change, not of the page. The new
+    /// journal is armed in the same evaluation (its id and documents come
+    /// back either way, for the whole capture to reuse). Why not when the
+    /// journal can't say what changed, the change is too big to read
+    /// faster than a capture, or the page moved under the reading.
+    fn read_delta(&self, prior: Kept, timeout: Duration) -> std::result::Result<(Snap, Arming), (String, Arming)> {
+        if prior.snap.docs.is_empty() {
+            return Err(("no document".into(), None));
+        }
+        // A listener added or taken off since the read changes no DOM: the
+        // elements with one now, against what the snapshot marked.
+        let listened = self.listeners(timeout).ok_or_else(|| ("no listeners".to_string(), None))?;
+        let mut ops = Vec::new();
+        // Clickable then, not listened now, and not by its kind: fine where
+        // the node is read again or gone, else a listener came off.
+        let mut unsure = Vec::new();
+        for (d, doc) in prior.snap.docs.iter().enumerate() {
+            let mut was = vec![false; doc.parent.len()];
+            for &i in &doc.clickable {
+                was[i] = true;
+            }
+            for (i, &b) in doc.backend.iter().enumerate() {
+                if doc.ty[i] != 1 {
+                    continue;
+                }
+                // Listened now: clickable. Not clickable then, nor listened
+                // now: still not (what else makes it clickable is its kind,
+                // and a change to that is read again). Clickable then and
+                // not listened now: still, if its kind makes it so; else a
+                // listener came off, or it is a kind this can't tell.
+                let now = if listened.contains(&b) {
+                    true
+                } else if !was[i] || clickable_by_rule(&prior.snap, d, i) == Some(true) {
+                    continue;
+                } else if d == 0 {
+                    unsure.push(b);
+                    continue;
+                } else {
+                    return Err(("a listener taken off in a frame".into(), None));
+                };
+                if now != was[i] {
+                    if d > 0 {
+                        return Err(("a listener in a frame".into(), None));
+                    }
+                    ops.push(Op::Clickable { backend: b, on: now });
+                }
+            }
+        }
+        let doc = &prior.snap.docs[0];
+        // Reading a node here costs more than capturing one does (about
+        // 10 us against 6.5 on a 10,000-row page, Chrome 153), and both
+        // then build the whole tree: past an eighth of the page, capture.
+        let max = (doc.parent.len() / 8).max(500);
+        let id = JOURNAL_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let r = self.send(
+            "Runtime.evaluate",
+            json!({
+                "expression": format!(
+                    "(() => {{ const d = ({JOURNAL_DELTA})({}, {max}); const a = ({JOURNAL_ARM})({id}); return {{ d, a }}; }})()",
+                    prior.journal
+                ),
+                "returnByValue": true,
+            }),
+            timeout,
+        );
+        crate::timing::record("delta_read", started);
+        let v = r.map_err(|e| (format!("{e:#}"), None))?;
+        if let Some(details) = v.get("exceptionDetails") {
+            return Err((exception_message(details), None));
+        }
+        let v = v.pointer("/result/value").ok_or_else(|| ("no answer".to_string(), None))?;
+        let arm = &v["a"];
+        let armed = match arm.get("broken").and_then(Value::as_str) {
+            Some("") => arm.get("docs").and_then(Value::as_u64).map(|docs| (id, docs)),
+            _ => None,
+        };
+        let fail = |why: String| (why, armed);
+        let d = &v["d"];
+        if let Some(why) = d.as_str() {
+            return Err(fail(why.to_string()));
+        }
+        let js_ops = d.get("ops").and_then(Value::as_array).ok_or_else(|| fail("no ops".into()))?;
+        let started = std::time::Instant::now();
+        let described = self.describe_roots(js_ops, timeout).map_err(|e| fail(format!("{e:#}")))?;
+        crate::timing::record("delta_describe", started);
+        let listened_now = |b: i64| listened.contains(&b);
+        let mut index: Option<FxMap<i64, usize>> = None;
+        for op in js_ops {
+            let at = |key: &str| op.get(key).and_then(Value::as_u64).map(|i| i as usize);
+            let desc = |i: usize| described.get(&i).ok_or_else(|| fail("a root not described".into()));
+            match op.get("k").and_then(Value::as_str) {
+                Some("r") => {
+                    let d = desc(at("d").ok_or_else(|| fail("op".into()))?)?;
+                    let facts = op.get("f").and_then(Value::as_array).ok_or_else(|| fail("facts".into()))?;
+                    let nodes = zip_facts(d, facts, &listened_now).map_err(|e| fail(e.into()))?;
+                    let backend = d.get("backendNodeId").and_then(Value::as_i64).ok_or_else(|| fail("id".into()))?;
+                    ops.push(Op::Replace { backend, nodes });
+                }
+                Some("c") => {
+                    let parent = desc(at("d").ok_or_else(|| fail("op".into()))?)?;
+                    let backend =
+                        parent.get("backendNodeId").and_then(Value::as_i64).ok_or_else(|| fail("id".into()))?;
+                    let gone = op.get("gone").and_then(Value::as_u64) == Some(1);
+                    let index =
+                        index.get_or_insert_with(|| doc.backend.iter().enumerate().map(|(i, &b)| (b, i)).collect());
+                    let at_old = *index.get(&backend).ok_or_else(|| fail("parent not in the snapshot".into()))?;
+                    // Its children in the read, in order (not its pseudo-elements).
+                    let old = doc.dom_children(at_old).ok_or_else(|| fail("a shadow tree".into()))?;
+                    let old_at: FxMap<i64, usize> = if gone {
+                        old.iter().enumerate().map(|(k, &o)| (doc.backend[o], k)).collect()
+                    } else {
+                        FxMap::default()
+                    };
+                    // The next old whitespace text with this value, from `pos`.
+                    let old_text = |pos: usize, value: &str| {
+                        (pos..old.len()).find(|&k| doc.ty[old[k]] == 3 && prior.snap.at(doc.value[old[k]]) == value)
+                    };
+                    let shown: &[Value] = parent.get("children").and_then(Value::as_array).map_or(&[], Vec::as_slice);
+                    let mut shown = shown.iter();
+                    let mut pos = 0usize;
+                    let mut children = Vec::new();
+                    for c in op.get("ch").and_then(Value::as_array).into_iter().flatten() {
+                        if let Some(run) = c.as_u64() {
+                            if gone {
+                                return Err(fail("op".into()));
+                            }
+                            for _ in 0..run {
+                                let o = old.get(pos).ok_or_else(|| fail("children moved".into()))?;
+                                children.push(Child::Keep(doc.backend[*o]));
+                                pos += 1;
+                            }
+                        } else if let Some(ws) = c.get("ws").and_then(Value::as_array) {
+                            // Whitespace text read again in place of the read's own.
+                            if let Some(value) = c.get("old").and_then(Value::as_str) {
+                                pos = if gone {
+                                    old_text(pos, value).ok_or_else(|| fail("children moved".into()))? + 1
+                                } else if old.get(pos).is_some_and(|&o| doc.ty[o] == 3) {
+                                    pos + 1
+                                } else {
+                                    return Err(fail("children moved".into()));
+                                };
+                            }
+                            children.push(Child::New(
+                                zip_facts(&Value::Null, ws, &listened_now).map_err(|e| fail(e.into()))?,
+                            ));
+                        } else if let Some(value) = c.get("w").and_then(Value::as_str) {
+                            let k = old_text(pos, value).ok_or_else(|| fail("children moved".into()))?;
+                            children.push(Child::Keep(doc.backend[old[k]]));
+                            pos = k + 1;
+                        } else if let Some(name) = c.as_str() {
+                            let d = shown.next().ok_or_else(|| fail("children".into()))?;
+                            if d.get("nodeName").and_then(Value::as_str) != Some(name) {
+                                return Err(fail("children moved".into()));
+                            }
+                            let b = d.get("backendNodeId").and_then(Value::as_i64).ok_or_else(|| fail("id".into()))?;
+                            let k = *old_at.get(&b).ok_or_else(|| fail("children moved".into()))?;
+                            if k < pos {
+                                return Err(fail("children moved".into()));
+                            }
+                            pos = k + 1;
+                            children.push(Child::Keep(b));
+                        } else {
+                            let root =
+                                desc(c.get("d").and_then(Value::as_u64).ok_or_else(|| fail("op".into()))? as usize)?;
+                            if gone {
+                                let d = shown.next().ok_or_else(|| fail("children".into()))?;
+                                if d.get("backendNodeId") != root.get("backendNodeId") {
+                                    return Err(fail("children moved".into()));
+                                }
+                            }
+                            let facts = c.get("f").and_then(Value::as_array).ok_or_else(|| fail("facts".into()))?;
+                            children
+                                .push(Child::New(zip_facts(root, facts, &listened_now).map_err(|e| fail(e.into()))?));
+                        }
+                    }
+                    if (!gone && pos != old.len()) || shown.next().is_some() {
+                        return Err(fail("children moved".into()));
+                    }
+                    ops.push(Op::Children { backend, children });
+                }
+                _ => return Err(fail("op".into())),
+            }
+        }
+        let mut read: FxSet<i64> = FxSet::default();
+        if !unsure.is_empty() {
+            for op in &ops {
+                let nodes: Box<dyn Iterator<Item = &NewNode>> = match op {
+                    Op::Replace { nodes, .. } => Box::new(nodes.iter()),
+                    Op::Children { children, .. } => Box::new(children.iter().flat_map(|c| match c {
+                        Child::New(nodes) => nodes.as_slice(),
+                        Child::Keep(_) => &[],
+                    })),
+                    Op::Clickable { .. } => Box::new(std::iter::empty()),
+                };
+                read.extend(nodes.map(|n| n.backend));
+            }
+        }
+        let started = std::time::Instant::now();
+        let snap = prior.snap.patch(ops).map_err(|e| fail(e.into()))?;
+        crate::timing::record("delta_patch", started);
+        if !unsure.is_empty() {
+            let kept: FxSet<i64> = snap.docs[0].backend.iter().copied().collect();
+            if unsure.iter().any(|b| kept.contains(b) && !read.contains(b)) {
+                return Err(fail("a listener taken off".into()));
+            }
+        }
+        crate::timing::log(&format!("[delta] read {} nodes", d.get("n").and_then(Value::as_u64).unwrap_or(0)));
+        Ok((snap, armed))
+    }
+
+    /// `DOM.describeNode` of each root [`JOURNAL_DELTA`] left in
+    /// `window.__nvDeltaRoots`, by its place there: a parent whose children
+    /// changed one level deep, the rest whole.
+    fn describe_roots(&self, ops: &[Value], timeout: Duration) -> Result<std::collections::HashMap<usize, Value>> {
+        let mut depth: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+        for op in ops {
+            let Some(d) = op.get("d").and_then(Value::as_u64) else { continue };
+            let list = op.get("k").and_then(Value::as_str) == Some("c");
+            let gone = op.get("gone").and_then(Value::as_u64) == Some(1);
+            depth.insert(
+                d as usize,
+                if !list {
+                    -1
+                } else if gone {
+                    1
+                } else {
+                    0
+                },
+            );
+            for c in op.get("ch").and_then(Value::as_array).into_iter().flatten() {
+                if let Some(d) = c.get("d").and_then(Value::as_u64) {
+                    depth.insert(d as usize, -1);
+                }
+            }
+        }
+        let group = json!({ "objectGroup": "nv-delta" });
+        let result = (|| -> Result<std::collections::HashMap<usize, Value>> {
+            let list = self.send(
+                "Runtime.evaluate",
+                json!({ "expression": "window.__nvDeltaRoots", "objectGroup": "nv-delta" }),
+                timeout,
+            )?;
+            let list = list.pointer("/result/objectId").and_then(Value::as_str).context("no roots")?.to_string();
+            let props =
+                self.send("Runtime.getProperties", json!({ "objectId": list, "ownProperties": true }), timeout)?;
+            let mut out = std::collections::HashMap::new();
+            for p in props.get("result").and_then(Value::as_array).into_iter().flatten() {
+                let Some(i) = p.get("name").and_then(Value::as_str).and_then(|n| n.parse::<usize>().ok()) else {
+                    continue;
+                };
+                let Some(&depth) = depth.get(&i) else { continue };
+                let object = p.pointer("/value/objectId").and_then(Value::as_str).context("a root is gone")?;
+                let node = self.send(
+                    "DOM.describeNode",
+                    json!({ "objectId": object, "depth": depth, "pierce": true }),
+                    timeout,
+                )?;
+                out.insert(i, node.get("node").cloned().context("no node")?);
+            }
+            if out.len() != depth.len() {
+                bail!("a root not described");
+            }
+            Ok(out)
+        })();
+        let _ = self.send("Runtime.releaseObjectGroup", group, timeout);
+        result
     }
 
     /// The page's DOM node count (`Memory.getDOMCounters`), what one full
@@ -6359,6 +7421,50 @@ fn flat_ax(nodes: &[Value], all: bool) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// Phase times of a read from a captured snapshot (`NAVIGERA_SNAP_FILE`,
+    /// a `DOMSnapshot.captureSnapshot` answer saved as JSON).
+    #[test]
+    #[ignore]
+    fn read_phases_of_a_saved_snapshot() {
+        use super::*;
+        let path = std::env::var("NAVIGERA_SNAP_FILE").expect("NAVIGERA_SNAP_FILE");
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let reps: usize = std::env::var("REPS").ok().and_then(|r| r.parse().ok()).unwrap_or(5);
+        let time = |label: &str, f: &mut dyn FnMut()| {
+            let mut ts: Vec<f64> = (0..reps)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    f();
+                    t.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            ts.sort_by(f64::total_cmp);
+            eprintln!("{label:14} median {:8.2} ms  min {:8.2}", ts[ts.len() / 2], ts[0]);
+        };
+        let snap = Snap::from_value(&value).unwrap();
+        time("columns", &mut || drop(Snap::from_value(&value)));
+        time("clickables", &mut || drop(clickables_from(&snap)));
+        time("build", &mut || drop(domax::build(&snap)));
+        let built = domax::build(&snap).unwrap();
+        let opts = ax::Options { limit: 2000, ..Default::default() };
+        time("render", &mut || drop(ax::render_nodes("page", &built.nodes, &built.frames, &opts)));
+        let d = &snap.docs[0];
+        let text = (0..d.parent.len()).rev().find(|&i| d.ty[i] == 3).unwrap();
+        let backend = d.backend[text];
+        time("patch", &mut || {
+            let node = NewNode {
+                parent: usize::MAX,
+                ty: 3,
+                name: "#text".into(),
+                value: Some("x".into()),
+                backend,
+                ..Default::default()
+            };
+            drop(snap.clone().patch(vec![Op::Replace { backend, nodes: vec![node] }]).unwrap())
+        });
+        time("clone", &mut || drop(snap.clone()));
+    }
+
     #[test]
     fn http_origin_names_the_site_and_nothing_else() {
         assert_eq!(super::http_origin("https://Shop.Example:8443/a?b#c").as_deref(), Some("https://shop.example:8443"));

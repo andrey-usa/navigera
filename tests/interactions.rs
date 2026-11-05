@@ -1769,6 +1769,122 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
     }
 }
 
+/// On a large page, the read that says what a click changed patches the
+/// last read's snapshot with the subtrees the change journal names, read
+/// from the page, instead of capturing the page whole. Whatever the click
+/// changed (a cell, a row added or removed, a menu a sibling rule shows, a
+/// dialog, a popover, a list drawn again, a listener, a value a script set,
+/// a fade, a numbered list), each report and the look after them are what
+/// a session that captures the page every time says
+/// (`NAVIGERA_DELTA_READ=0`), and the closed `<details>` stays closed
+/// (reading the style of content a display lock skips would lay it out for
+/// the next capture). Timed against that session.
+#[test]
+fn a_click_on_a_large_page_reads_only_what_it_changed() {
+    let _alone = timed_alone();
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let page = format!("{}/clicks", site.url);
+    let sessions: Vec<String> = ["1", "0"]
+        .iter()
+        .map(|on| {
+            let name = std::env::temp_dir()
+                .join(format!("nv-interactions-delta{on}-{}.sock", std::process::id()))
+                .display()
+                .to_string();
+            let out = Command::new(tool_exe())
+                .env("NAVIGERA_DELTA_READ", on)
+                .args(["--session", &name, "start"])
+                .stdin(Stdio::null())
+                .output()
+                .expect("run navigera");
+            assert!(out.status.success(), "start failed: {}", String::from_utf8_lossy(&out.stdout));
+            name
+        })
+        .collect();
+    let compact = |name: &str, args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .args(["--session", name])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let buttons = [
+        "#edit", "#add", "#remove", "#menu", "#show", "#dlg", "#pop", "#redraw", "#wire", "#val", "#fade", "#ol",
+        "#edit",
+    ];
+    let mut reports: Vec<Vec<String>> = Vec::new();
+    for name in &sessions {
+        compact(name, &["goto", &page]);
+        compact(name, &["ax"]);
+        let mut r: Vec<String> = buttons.iter().map(|b| compact(name, &["click", "--selector", b])).collect();
+        r.push(compact(name, &["ax"]));
+        reports.push(r);
+    }
+    // Refs are node ids: each browser numbers its own.
+    let unref = |r: &Vec<String>| -> Vec<String> {
+        r.iter()
+            .map(|l| {
+                l.split("ref=")
+                    .enumerate()
+                    .map(|(i, p)| if i == 0 { p } else { p.trim_start_matches(|c: char| c.is_ascii_digit()) })
+                    .collect()
+            })
+            .collect()
+    };
+    // A click that changed nothing says how long it watched.
+    let unms = |r: Vec<String>| -> Vec<String> {
+        r.iter()
+            .map(|l| {
+                let parts: Vec<&str> = l.split(" ms").collect();
+                let last = parts.len() - 1;
+                parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| if i < last { p.trim_end_matches(|c: char| c.is_ascii_digit()) } else { p })
+                    .collect::<Vec<_>>()
+                    .join(" ms")
+            })
+            .collect()
+    };
+    assert_eq!(
+        unms(unref(&reports[0])),
+        unms(unref(&reports[1])),
+        "patching the snapshot changed what a click reported"
+    );
+    let r = &reports[0];
+    assert!(r[0].contains("edited 1"), "{r:?}");
+    assert!(r[1].contains("Inserted"), "a row added: {r:?}");
+    assert!(r[2].contains("- cell \"SKU-00004\""), "a row removed: {r:?}");
+    assert!(r[3].contains("Alpha"), "a menu a sibling rule shows: {r:?}");
+    assert!(r[4].contains("Hidden section"), "{r:?}");
+    assert!(r[5].contains("Dialog text"), "{r:?}");
+    assert!(r[6].contains("Popover body"), "{r:?}");
+    assert!(r[7].contains("Item 0"), "a list drawn again: {r:?}");
+    assert!(r[9].contains("set by script"), "a value a script set: {r:?}");
+    assert!(r[11].contains("zeroth"), "{r:?}");
+    assert!(r[12].contains("edited 2"), "{r:?}");
+    assert!(r.iter().all(|l| !l.contains("Details body")), "a closed <details> showed its body: {r:?}");
+    let best = |name: &str| {
+        compact(name, &["goto", &page]);
+        compact(name, &["ax"]);
+        (0..3)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                assert!(compact(name, &["click", "--selector", "#edit"]).contains("edited"));
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let (patched, read) = (best(&sessions[0]), best(&sessions[1]));
+    assert!(patched < read * 0.75, "a click's report took {patched:.0} ms patched, {read:.0} ms captured whole");
+    for name in &sessions {
+        compact(name, &["quit"]);
+    }
+}
+
 /// After a click whose fetch has started, the snapshot waits for that fetch
 /// and a short settle, not the whole quiet window: the list is there, well
 /// before the 200 ms fetch plus 500 ms of quiet it used to take. A window

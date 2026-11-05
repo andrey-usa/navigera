@@ -23,6 +23,7 @@
 //! only printed on nodes an agent can act on, so a 500-card listing stays a
 //! fraction of the raw tree's size.
 
+use super::fxhash::{FxMap, FxSet};
 use std::collections::HashMap;
 
 use serde_json::Value;
@@ -320,23 +321,23 @@ struct Tree<'a> {
     /// invalidate a node the walk already holds. The caller's nodes are
     /// borrowed; only fetched ones are owned.
     nodes: Vec<std::borrow::Cow<'a, Node>>,
-    by_id: HashMap<String, usize>,
-    by_backend: HashMap<u64, usize>,
-    frame_roots: HashMap<u64, Vec<usize>>,
-    frame_root_ids: std::collections::HashSet<usize>,
+    by_id: FxMap<String, usize>,
+    by_backend: FxMap<u64, usize>,
+    frame_roots: FxMap<u64, Vec<usize>>,
+    frame_root_ids: FxSet<usize>,
     opts: &'a Options,
     lines: Vec<String>,
     fetch: Option<AxFetch>,
     /// Nodes whose children the lazy fetch already asked for (a node the
     /// browser answered without is not asked again).
-    fetched: std::collections::HashSet<usize>,
+    fetched: FxSet<usize>,
     fetch_failed: bool,
     /// Child fetches so far, and the fetched nodes the walk has reached
     /// (see [`Options::lazy_budget`]): fetches run ahead of the walk by up
     /// to a window of siblings, so the lines per fetch are read off the
     /// fetches it has used.
     calls: usize,
-    used: std::collections::HashSet<usize>,
+    used: FxSet<usize>,
     /// The output limit was reached mid-walk: no more lines are printed.
     stopped: bool,
     /// Line indices whose node's children were cut off by the limit (the
@@ -1058,17 +1059,17 @@ fn render_inner<'a>(
 ) -> (Rendered, bool) {
     let mut tree = Tree {
         nodes: Vec::new(),
-        by_id: HashMap::new(),
-        by_backend: HashMap::new(),
-        frame_roots: HashMap::new(),
-        frame_root_ids: std::collections::HashSet::new(),
+        by_id: FxMap::default(),
+        by_backend: FxMap::default(),
+        frame_roots: FxMap::default(),
+        frame_root_ids: FxSet::default(),
         opts,
         lines: Vec::new(),
         fetch,
-        fetched: std::collections::HashSet::new(),
+        fetched: FxSet::default(),
         fetch_failed: false,
         calls: 0,
-        used: std::collections::HashSet::new(),
+        used: FxSet::default(),
         stopped: false,
         boundary: Vec::new(),
         cuts: std::cell::Cell::new(0),

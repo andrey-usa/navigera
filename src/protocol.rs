@@ -3830,22 +3830,22 @@ impl Driver {
         if command.is_action() {
             self.session.mark_action();
         }
-        // An entry after a look (text, a check, a choice): the journal takes
-        // the state it will be judged against (see `page_change`).
-        if self.compact
-            && matches!(
-                command,
-                Command::Fill { .. }
-                    | Command::Type { .. }
-                    | Command::InsertText { .. }
-                    | Command::Select { .. }
-                    | Command::SetChecked { .. }
-            )
-        {
+        // An action after a look: the journal takes the state an entry
+        // (text, a check, a choice) will be judged against, or the read
+        // after any other action patched from (see `page_change`).
+        if self.compact && reports_page_change(command) {
             if let Some(id) =
                 self.look.as_ref().filter(|l| l.page == self.session.page_identity()).and_then(|l| l.journal)
             {
-                self.session.journal_prime(id);
+                let entry = matches!(
+                    command,
+                    Command::Fill { .. }
+                        | Command::Type { .. }
+                        | Command::InsertText { .. }
+                        | Command::Select { .. }
+                        | Command::SetChecked { .. }
+                );
+                self.session.journal_prime(id, entry);
             }
         }
         let result = self.dispatch(command).map_err(|e| {

@@ -21,11 +21,13 @@ mod client;
 mod domax;
 pub mod downloads;
 mod events;
+mod fxhash;
 pub mod import;
 pub mod logs;
 mod page;
 mod procjob;
 mod profile;
+mod snap;
 pub(crate) mod transport;
 
 pub use browser::{Browser, LaunchOptions};

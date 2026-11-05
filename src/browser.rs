@@ -2429,8 +2429,8 @@ impl BrowserSession {
     }
 
     /// [`cdp::Page::journal_prime`] on the active tab.
-    pub fn journal_prime(&self, id: u64) -> bool {
-        self.active_tab().journal_prime(id, self.timeout(None))
+    pub fn journal_prime(&self, id: u64, entry: bool) -> bool {
+        self.active_tab().journal_prime(id, entry, self.timeout(None))
     }
 
     /// [`cdp::Page::journal_unchanged`] on the active tab.

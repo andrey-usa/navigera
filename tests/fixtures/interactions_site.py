@@ -38,6 +38,10 @@ getting wrong, one page each, built the way those sites behave:
                 clause long enough to be cut in a snapshot
 /two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
+/clicks         a 2,000-row page with a button per kind of change a click makes
+                (a cell, a row added or removed, a menu a sibling rule shows, a
+                dialog, a popover, a list drawn again, a listener, a value, a
+                fade, a numbered list), and a closed <details>
 /journal        a 1,300-row page with fields whose typing changes nothing
                 else, a live count, a tip a style shows on focus, a hint a
                 :has() rule hides once the field is filled, a field whose
@@ -911,6 +915,34 @@ if (location.search.includes('closed')) {
 }
 </script>
 """ + "".join(f"<p>row {i} of the long page</p>" for i in range(1300)))
+
+
+PAGES["/clicks"] = ("clicks", ".menu{display:none} [aria-expanded=true] + .menu{display:block} .hidden{display:none} "
+    ".fade{opacity:0;transition:opacity 100ms} .fade.in{opacity:1} .arrow::before{content:\"\\2192  \"}", """
+<button id=edit onclick="document.querySelector('#r5 td:nth-child(2)').textContent = 'edited ' + (++window.k)">Edit</button>
+<button id=add onclick="const tr = document.createElement('tr'); tr.innerHTML = '<td>NEW</td><td>Inserted</td><td><button>Act</button></td>'; document.querySelector('#rows tbody').insertBefore(tr, document.getElementById('r3'))">Add</button>
+<button id=remove onclick="document.getElementById('r4').remove()">Remove</button>
+<nav><button id=menu aria-expanded=false onclick="this.setAttribute('aria-expanded', 'true')">Menu</button><ul class=menu><li><a href=#a>Alpha</a></li></ul></nav>
+<button id=show onclick="document.getElementById('box').classList.remove('hidden')">Show</button>
+<div id=box class=hidden><h2>Hidden section</h2><a href=#h>hidden link</a></div>
+<details><summary>More</summary><p>Details body</p></details>
+<button id=dlg onclick="document.getElementById('dialog').show()">Dialog</button>
+<dialog id=dialog><p>Dialog text</p></dialog>
+<button id=pop onclick="document.getElementById('popover').showPopover()">Popover</button>
+<div id=popover popover><p>Popover body</p></div>
+<button id=redraw onclick="document.getElementById('list').innerHTML = Array.from({length: 20}, (_, i) => '<p class=arrow>Item ' + i + ' <a href=#' + i + '>open</a></p>').join('')">Redraw</button>
+<div id=list></div>
+<button id=wire onclick="document.getElementById('wired').addEventListener('click', () => {})">Wire</button>
+<div id=wired>Wire me</div>
+<button id=val onclick="document.getElementById('field').value = 'set by script'">Value</button>
+<input id=field aria-label=Field>
+<button id=fade onclick="document.getElementById('faded').classList.add('in')">Fade</button>
+<div id=faded class=fade><button>Faded</button></div>
+<button id=ol onclick="const li = document.createElement('li'); li.textContent = 'zeroth'; document.getElementById('steps').prepend(li)">List</button>
+<ol id=steps><li>first</li><li>second</li></ol>
+<script>window.k = 0;</script>
+<table id=rows><tbody>
+""" + "\n".join(f"<tr id=r{i}><td>SKU-{i:05d}</td><td>Item {i}</td><td>{i % 97}.99</td></tr>" for i in range(2000)) + "</tbody></table>")
 
 
 PAGES["/xo-child"] = ("card frame", "", """

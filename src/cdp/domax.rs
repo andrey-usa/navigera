@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{json, Value};
 
 use super::ax::{Frame, Node};
+use super::snap::{Snap, SnapDoc};
 
 /// The tree of a snapshot's main document, and of each same-process frame.
 pub struct Built {
@@ -70,7 +71,7 @@ const FROM_CONTENT: &[&str] = &[
 const SKIP: &[&str] =
     &["HEAD", "SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "TITLE", "META", "LINK", "BASE", "BR", "WBR", "DATALIST"];
 
-pub fn build(snap: &Value) -> Option<Built> {
+pub fn build(snap: &Snap) -> Option<Built> {
     build_from(snap, None)
 }
 
@@ -79,14 +80,13 @@ pub fn build(snap: &Value) -> Option<Built> {
 /// scope keeps a scoped snapshot of a large page from paying for the
 /// whole page's tree. `None` when the element is not in the snapshot;
 /// no nodes when it is hidden (it, or an ancestor, is not exposed).
-pub fn build_scoped(snap: &Value, scope_backend: u64) -> Option<Built> {
+pub fn build_scoped(snap: &Snap, scope_backend: u64) -> Option<Built> {
     build_from(snap, Some(scope_backend))
 }
 
-fn build_from(snap: &Value, scope: Option<u64>) -> Option<Built> {
-    let strings: Vec<&str> = snap.get("strings")?.as_array()?.iter().map(|v| v.as_str().unwrap_or("")).collect();
-    let documents = snap.get("documents")?.as_array()?;
-    let docs: Vec<Doc> = documents.iter().map(|d| Doc::new(d, &strings)).collect();
+fn build_from(snap: &Snap, scope: Option<u64>) -> Option<Built> {
+    let strings: Vec<&str> = snap.strings.iter().map(String::as_str).collect();
+    let docs: Vec<Doc> = snap.docs.iter().map(|d| Doc::new(d, &strings)).collect();
     let main = docs.first()?;
     let mut frames = Vec::new();
     let mut nodes = Vec::new();
@@ -129,6 +129,59 @@ fn build_from(snap: &Value, scope: Option<u64>) -> Option<Built> {
     Some(Built { nodes, frames, title: main.title.to_string(), url: main.url.to_string() })
 }
 
+/// Nodes of one document by index: a flag each (and a list of the set
+/// ones, for walking them).
+struct NodeSet {
+    on: Vec<bool>,
+    list: Vec<usize>,
+}
+
+impl NodeSet {
+    fn new(n: usize) -> Self {
+        NodeSet { on: vec![false; n], list: Vec::new() }
+    }
+    fn insert(&mut self, i: usize) {
+        if let Some(slot) = self.on.get_mut(i) {
+            if !*slot {
+                *slot = true;
+                self.list.push(i);
+            }
+        }
+    }
+    fn contains(&self, i: &usize) -> bool {
+        self.on.get(*i).copied().unwrap_or(false)
+    }
+    fn iter(&self) -> std::slice::Iter<'_, usize> {
+        self.list.iter()
+    }
+}
+
+/// A value per node of one document, by index.
+struct NodeMap<T>(Vec<Option<T>>);
+
+impl<T> NodeMap<T> {
+    fn new(n: usize) -> Self {
+        NodeMap((0..n).map(|_| None).collect())
+    }
+    fn insert(&mut self, i: usize, v: T) {
+        if let Some(slot) = self.0.get_mut(i) {
+            *slot = Some(v);
+        }
+    }
+    fn get(&self, i: &usize) -> Option<&T> {
+        self.0.get(*i).and_then(Option::as_ref)
+    }
+    fn contains_key(&self, i: &usize) -> bool {
+        self.get(i).is_some()
+    }
+}
+
+impl<T: Default> NodeMap<T> {
+    fn get_or_default(&mut self, i: usize) -> &mut T {
+        self.0[i].get_or_insert_with(T::default)
+    }
+}
+
 struct Doc<'a> {
     s: &'a [&'a str],
     parent: Vec<i64>,
@@ -139,43 +192,39 @@ struct Doc<'a> {
     attrs: Vec<Vec<(&'a str, &'a str)>>,
     children: Vec<Vec<usize>>,
     /// Nodes inside a shadow tree.
-    shadow: HashSet<usize>,
-    input_value: HashMap<usize, &'a str>,
-    text_value: HashMap<usize, &'a str>,
-    checked: HashSet<usize>,
-    selected: HashSet<usize>,
-    content_doc: HashMap<usize, usize>,
-    pseudo: HashSet<usize>,
+    shadow: NodeSet,
+    input_value: NodeMap<&'a str>,
+    text_value: NodeMap<&'a str>,
+    checked: NodeSet,
+    selected: NodeSet,
+    content_doc: NodeMap<usize>,
+    pseudo: NodeSet,
     /// node -> (layout text, visibility, display)
-    layout: HashMap<usize, (Option<&'a str>, &'a str, &'a str)>,
+    layout: NodeMap<(Option<&'a str>, &'a str, &'a str)>,
     /// Generated content's alternative text (`content: "→" / "next"`).
-    content_alt: HashMap<usize, String>,
+    content_alt: NodeMap<String>,
     /// Generated content made of counters (a footnote's "a", "b"): shown,
     /// but Chrome leaves it out of names.
-    counters: HashSet<usize>,
+    counters: NodeSet,
     /// Elements with a click listener (`isClickable`).
-    listening: HashSet<usize>,
+    listening: NodeSet,
     /// Has a laid-out node somewhere inside (a `display: contents` box).
     rendered_inside: Vec<bool>,
     by_id: HashMap<&'a str, usize>,
     /// control -> `<label for>` elements naming it.
-    labels_for: HashMap<usize, Vec<usize>>,
+    labels_for: NodeMap<Vec<usize>>,
     /// Tables Chrome reads as layout, not data (see `data_table`).
-    layout_tables: HashSet<usize>,
+    layout_tables: NodeSet,
     /// `<label>`s of a checkbox or radio: Chrome leaves them (and their
     /// text) out, the control carries the name.
-    check_labels: HashSet<usize>,
+    check_labels: NodeSet,
     url: &'a str,
     base: &'a str,
     title: &'a str,
 }
 
-fn ints(v: &Value, key: &str) -> Vec<i64> {
-    v.get(key).and_then(Value::as_array).into_iter().flatten().map(|x| x.as_i64().unwrap_or(-1)).collect()
-}
-
 impl<'a> Doc<'a> {
-    fn new(doc: &'a Value, s: &'a [&'a str]) -> Doc<'a> {
+    fn new(doc: &'a SnapDoc, s: &'a [&'a str]) -> Doc<'a> {
         let at = |i: i64| -> &'a str {
             if i >= 0 {
                 s.get(i as usize).copied().unwrap_or("")
@@ -183,40 +232,40 @@ impl<'a> Doc<'a> {
                 ""
             }
         };
-        let n = &doc["nodes"];
-        let parent = ints(n, "parentIndex");
+        let parent = doc.parent.clone();
         let count = parent.len();
-        let ty = ints(n, "nodeType");
-        let tag: Vec<&str> = ints(n, "nodeName").into_iter().map(at).collect();
-        let value = ints(n, "nodeValue");
-        let backend = ints(n, "backendNodeId");
+        let ty = doc.ty.clone();
+        let tag: Vec<&str> = doc.name.iter().map(|&i| at(i)).collect();
+        let value = doc.value.clone();
+        let backend = doc.backend.clone();
         let attrs: Vec<Vec<(&str, &str)>> = (0..count)
             .map(|i| {
-                let raw = n.get("attributes").and_then(|a| a.get(i)).and_then(Value::as_array);
-                raw.map(|r| {
-                    r.chunks(2)
-                        .map(|p| (at(p[0].as_i64().unwrap_or(-1)), at(p.get(1).and_then(Value::as_i64).unwrap_or(-1))))
-                        .collect()
-                })
-                .unwrap_or_default()
+                doc.attrs
+                    .get(i)
+                    .map(|r| r.chunks(2).map(|p| (at(p[0]), at(p.get(1).copied().unwrap_or(-1)))).collect())
+                    .unwrap_or_default()
             })
             .collect();
-        let rare_str = |key: &str| -> HashMap<usize, &'a str> {
-            let idx = ints(&n[key], "index");
-            let val = ints(&n[key], "value");
-            idx.into_iter().zip(val).filter(|(i, _)| *i >= 0).map(|(i, v)| (i as usize, at(v))).collect()
+        let rare_str = |pairs: &[(usize, i64)]| -> NodeMap<&'a str> {
+            let mut m = NodeMap::new(count);
+            for &(i, v) in pairs {
+                m.insert(i, at(v));
+            }
+            m
         };
-        let rare_int = |key: &str| -> HashMap<usize, usize> {
-            let idx = ints(&n[key], "index");
-            let val = ints(&n[key], "value");
-            idx.into_iter()
-                .zip(val)
-                .filter(|(i, v)| *i >= 0 && *v >= 0)
-                .map(|(i, v)| (i as usize, v as usize))
-                .collect()
+        let rare_int = |pairs: &[(usize, i64)]| -> NodeMap<usize> {
+            let mut m = NodeMap::new(count);
+            for &(i, v) in pairs.iter().filter(|(_, v)| *v >= 0) {
+                m.insert(i, v as usize);
+            }
+            m
         };
-        let rare_bool = |key: &str| -> HashSet<usize> {
-            ints(&n[key], "index").into_iter().filter(|i| *i >= 0).map(|i| i as usize).collect()
+        let rare_bool = |list: &[usize]| -> NodeSet {
+            let mut m = NodeSet::new(count);
+            for &i in list {
+                m.insert(i);
+            }
+            m
         };
         let mut children = vec![Vec::new(); count];
         for (i, &p) in parent.iter().enumerate() {
@@ -224,32 +273,20 @@ impl<'a> Doc<'a> {
                 children[p as usize].push(i);
             }
         }
-        let l = &doc["layout"];
-        let styles = l.get("styles").and_then(Value::as_array);
-        let ltext = ints(l, "text");
-        let mut layout = HashMap::new();
-        let mut content_alt = HashMap::new();
-        let mut counters = HashSet::new();
-        for (k, node) in ints(l, "nodeIndex").into_iter().enumerate() {
-            if node < 0 {
-                continue;
-            }
-            let content = at(styles
-                .and_then(|s| s.get(k))
-                .and_then(|s| s.get(STYLE_CONTENT))
-                .and_then(Value::as_i64)
-                .unwrap_or(-1));
+        let mut layout = NodeMap::new(count);
+        let mut content_alt = NodeMap::new(count);
+        let mut counters = NodeSet::new(count);
+        for l in &doc.layout {
+            let node = l.node;
+            let content = at(l.styles[STYLE_CONTENT]);
             if let Some(alt) = content_alt_text(content) {
-                content_alt.insert(node as usize, alt);
+                content_alt.insert(node, alt);
             }
             if content.contains("counter") {
-                counters.insert(node as usize);
+                counters.insert(node);
             }
-            let style = |j: usize| {
-                at(styles.and_then(|s| s.get(k)).and_then(|s| s.get(j)).and_then(Value::as_i64).unwrap_or(-1))
-            };
-            let text = ltext.get(k).copied().filter(|t| *t >= 0).map(at);
-            layout.insert(node as usize, (text, style(STYLE_VISIBILITY), style(STYLE_DISPLAY)));
+            let text = Some(l.text).filter(|t| *t >= 0).map(at);
+            layout.insert(node, (text, at(l.styles[STYLE_VISIBILITY]), at(l.styles[STYLE_DISPLAY])));
         }
         let mut rendered_inside = vec![false; count];
         for i in (0..count).rev() {
@@ -263,11 +300,11 @@ impl<'a> Doc<'a> {
                 by_id.entry(*id).or_insert(i);
             }
         }
-        let mut labels_for: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut labels_for: NodeMap<Vec<usize>> = NodeMap::new(count);
         for (i, a) in attrs.iter().enumerate() {
             if tag[i] == "LABEL" {
                 if let Some(target) = a.iter().find(|(k, _)| *k == "for").and_then(|(_, f)| by_id.get(f)) {
-                    labels_for.entry(*target).or_default().push(i);
+                    labels_for.get_or_default(*target).push(i);
                 }
             }
         }
@@ -279,26 +316,26 @@ impl<'a> Doc<'a> {
             backend,
             attrs,
             children,
-            shadow: rare_str("shadowRootType").into_keys().collect(),
-            input_value: rare_str("inputValue"),
-            text_value: rare_str("textValue"),
-            checked: rare_bool("inputChecked"),
-            selected: rare_bool("optionSelected"),
-            content_doc: rare_int("contentDocumentIndex"),
-            pseudo: rare_str("pseudoType").into_keys().collect(),
+            shadow: rare_bool(&doc.shadow_root_type.iter().map(|&(i, _)| i).collect::<Vec<_>>()),
+            input_value: rare_str(&doc.input_value),
+            text_value: rare_str(&doc.text_value),
+            checked: rare_bool(&doc.input_checked),
+            selected: rare_bool(&doc.option_selected),
+            content_doc: rare_int(&doc.content_document),
+            pseudo: rare_bool(&doc.pseudo_type.iter().map(|&(i, _)| i).collect::<Vec<_>>()),
             layout,
             content_alt,
             counters,
-            listening: rare_bool("isClickable"),
+            listening: rare_bool(&doc.clickable),
             rendered_inside,
             by_id,
             labels_for,
-            url: at(doc.get("documentURL").and_then(Value::as_i64).unwrap_or(-1)),
-            base: at(doc.get("baseURL").and_then(Value::as_i64).unwrap_or(-1)),
-            title: at(doc.get("title").and_then(Value::as_i64).unwrap_or(-1)),
+            url: at(doc.url),
+            base: at(doc.base),
+            title: at(doc.title),
             parent,
-            layout_tables: HashSet::new(),
-            check_labels: HashSet::new(),
+            layout_tables: NodeSet::new(count),
+            check_labels: NodeSet::new(count),
         };
         for i in 0..count {
             match doc.tag[i] {
@@ -1388,7 +1425,7 @@ mod tests {
     type Spec<'a> = (&'a str, i64, &'a [(&'a str, &'a str)], Option<&'a str>, bool);
 
     /// A snapshot of one document from node specs.
-    fn snap(nodes: &[Spec]) -> Value {
+    fn snap(nodes: &[Spec]) -> Snap {
         let mut strings: Vec<String> = Vec::new();
         let mut idx = |s: &str| -> i64 {
             match strings.iter().position(|x| x == s) {
@@ -1426,7 +1463,7 @@ mod tests {
             }
         }
         let (url, title) = (idx("http://x.test/a/b"), idx("T"));
-        json!({
+        let value = json!({
             "strings": strings,
             "documents": [{
                 "documentURL": url,
@@ -1438,7 +1475,8 @@ mod tests {
                 },
                 "layout": { "nodeIndex": layout_nodes, "styles": styles, "text": texts },
             }],
-        })
+        });
+        Snap::from_value(&value).unwrap()
     }
 
     fn render(nodes: &[Spec]) -> String {
@@ -1507,8 +1545,8 @@ mod tests {
     #[test]
     fn urls_resolve_against_the_document() {
         let s = snap(&[]);
-        let strings: Vec<&str> = s["strings"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-        let doc = Doc::new(&s["documents"][0], &strings);
+        let strings: Vec<&str> = s.strings.iter().map(String::as_str).collect();
+        let doc = Doc::new(&s.docs[0], &strings);
         assert_eq!(doc.resolve("/x"), "http://x.test/x");
         assert_eq!(doc.resolve("y"), "http://x.test/a/y");
         assert_eq!(doc.resolve("../z/"), "http://x.test/z/");

@@ -51,6 +51,27 @@ All notable changes to this project are documented here. The format follows
   select inside a label of another control, a table cell or anything that
   names by its text, an option the line doesn't list whole, or a required
   radio group is read as before.
+- A click on a large page reports in the time of what it changed, not of
+  a page capture: the read that says what an action changed takes the
+  last read's snapshot and reads again from the page only the subtrees
+  the change journal names (10,000 table rows: a cell edited 588 to 159 ms,
+  a row added 1,071 to 315 ms; 1,000 rows: 74 to 42 ms; medians of 10 and
+  8 interleaved, local, Chrome 153). Named: each element whose attributes,
+  text or children changed, each control a script set, each element a
+  state-dependent rule (`:hover`, `:focus`, ...) or one reaching past its
+  subtree (a sibling, a child's place, `:has()`) now styles differently,
+  each popover, dialog and `<details>` that toggled, each element animated
+  in what the tree reads, and each element that gained or lost a click
+  listener. A new style sheet, a style rule a script wrote, a container
+  query, a first-letter rule, a frame or shadow root, a change in
+  `<head>`, or a change bigger than an eighth of the page is captured
+  whole, as before. Reports are the same either way;
+  `NAVIGERA_DELTA_READ=0` captures every time, to compare.
+- Building a large page's tree costs less on navigera's side (10,000 rows,
+  from a saved snapshot: tree 85 to 51 ms, text 49 to 26 ms, clickable
+  elements 34 to 20 ms): the snapshot is read into columns once, per-node
+  facts are indexed by node, and maps keyed by node numbers use a faster
+  hash. A full read is still mostly Chrome's capture.
 - Actions are faster where they used to sit out fixed waits. Saying what
   an action changed no longer waits 50 ms for a request the action might
   have started: one turn of the page's event loop shows whether it started
