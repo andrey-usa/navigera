@@ -98,6 +98,25 @@ impl Snap {
     pub fn from_value(snap: &Value) -> Option<Snap> {
         let strings: Vec<String> =
             snap.get("strings")?.as_array()?.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect();
+        let words = Self::words(&strings);
+        let docs = snap.get("documents")?.as_array()?.iter().map(|d| SnapDoc::from_value(d, words[0])).collect();
+        Some(Self::unlocked(strings, docs, words))
+    }
+
+    /// [`Snap::from_value`] from the answer's JSON text, read straight
+    /// into the columns: no JSON value per number on the way (a
+    /// 10,000-row table's 7 MB: ~50 ms as values, see `wire`). None when
+    /// the text isn't a capture.
+    pub fn from_json(text: &str) -> Option<Snap> {
+        let capture: wire::Capture = serde_json::from_str(text).ok()?;
+        let words = Self::words(&capture.strings);
+        let docs = capture.documents.into_iter().map(|d| SnapDoc::from_wire(d, words[0])).collect();
+        Some(Self::unlocked(capture.strings, docs, words))
+    }
+
+    /// The string indices of "hidden", "DETAILS", "SUMMARY" and "open"
+    /// (-1 for none).
+    fn words(strings: &[String]) -> [i64; 4] {
         let mut words = [-1i64; 4];
         for (i, s) in strings.iter().enumerate() {
             let slot = match s.as_str() {
@@ -111,13 +130,15 @@ impl Snap {
                 words[slot] = i as i64;
             }
         }
-        let [hidden, details, summary, open] = words;
-        let docs = snap
-            .get("documents")?
-            .as_array()?
-            .iter()
-            .map(|d| {
-                let (mut doc, cv_hidden) = SnapDoc::from_value(d, hidden);
+        words
+    }
+
+    /// The documents without the layout of what a display lock skips.
+    fn unlocked(strings: Vec<String>, docs: Vec<(SnapDoc, Vec<usize>)>, words: [i64; 4]) -> Snap {
+        let [_, details, summary, open] = words;
+        let docs = docs
+            .into_iter()
+            .map(|(mut doc, cv_hidden)| {
                 if details >= 0 || !cv_hidden.is_empty() {
                     let locked = doc.locked(&cv_hidden, details, summary, open);
                     doc.layout.retain(|l| !locked[l.node]);
@@ -125,7 +146,7 @@ impl Snap {
                 doc
             })
             .collect();
-        Some(Snap { strings, docs })
+        Snap { strings, docs }
     }
 
     /// The string at `i` ("" for none).
@@ -640,6 +661,55 @@ impl SnapDoc {
         locked
     }
 
+    /// [`SnapDoc::from_value`] from the typed answer: the same columns,
+    /// moved instead of copied.
+    fn from_wire(doc: wire::Doc, hidden: i64) -> (SnapDoc, Vec<usize>) {
+        let wire::Doc { document_url, base_url, title, nodes: n, layout: l } = doc;
+        let count = n.parent_index.len();
+        let mut attrs = n.attributes;
+        attrs.resize_with(count, Vec::new);
+        let mut cv_hidden = Vec::new();
+        let (styles, bounds) = (l.styles.0, l.bounds.0);
+        let layout = l
+            .node_index
+            .into_iter()
+            .enumerate()
+            .filter(|(_, node)| *node >= 0)
+            .map(|(k, node)| {
+                let mut st = [-1; STYLES];
+                if let Some(s) = styles.get(k) {
+                    st.copy_from_slice(&s[..STYLES]);
+                    if hidden >= 0 && s[STYLES] == hidden {
+                        cv_hidden.push(node as usize);
+                    }
+                }
+                let b = bounds.get(k).copied().unwrap_or([0.0; 4]);
+                Layout { node: node as usize, text: l.text.get(k).copied().unwrap_or(-1), styles: st, bounds: b }
+            })
+            .collect();
+        let doc = SnapDoc {
+            url: document_url,
+            base: base_url,
+            title,
+            ty: n.node_type,
+            name: n.node_name,
+            value: n.node_value,
+            backend: n.backend_node_id,
+            attrs,
+            shadow_root_type: n.shadow_root_type.pairs(),
+            input_value: n.input_value.pairs(),
+            text_value: n.text_value.pairs(),
+            pseudo_type: n.pseudo_type.pairs(),
+            content_document: n.content_document_index.pairs(),
+            input_checked: n.input_checked.nodes(),
+            option_selected: n.option_selected.nodes(),
+            clickable: n.is_clickable.nodes(),
+            layout,
+            parent: n.parent_index,
+        };
+        (doc, cv_hidden)
+    }
+
     /// The document's columns, and the elements whose `content-visibility`
     /// (the style after [`STYLES`]) is the string `hidden`.
     fn from_value(doc: &Value, hidden: i64) -> (SnapDoc, Vec<usize>) {
@@ -756,6 +826,152 @@ pub enum Child {
     New(Vec<NewNode>),
 }
 
+/// The parts of a `DOMSnapshot.captureSnapshot` answer [`Snap`] keeps,
+/// typed, so the JSON text is read straight into them: as JSON values, a
+/// 10,000-row table's 7 MB took ~50 ms to read and as much again to copy
+/// out of. What isn't named here (text boxes) is skipped unread. A field
+/// that isn't there is empty, as [`Snap::from_value`] reads it; a value of
+/// another type fails the read (the caller then reads values).
+mod wire {
+    use serde::de::{Deserializer, IgnoredAny, SeqAccess, Visitor};
+    use serde::Deserialize;
+
+    use super::STYLES;
+
+    #[derive(Deserialize)]
+    pub struct Capture {
+        pub documents: Vec<Doc>,
+        pub strings: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Doc {
+        #[serde(rename = "documentURL", default = "none")]
+        pub document_url: i64,
+        #[serde(rename = "baseURL", default = "none")]
+        pub base_url: i64,
+        #[serde(default = "none")]
+        pub title: i64,
+        #[serde(default)]
+        pub nodes: Nodes,
+        #[serde(default)]
+        pub layout: Layout,
+    }
+
+    fn none() -> i64 {
+        -1
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub struct Nodes {
+        pub parent_index: Vec<i64>,
+        pub node_type: Vec<i64>,
+        pub node_name: Vec<i64>,
+        pub node_value: Vec<i64>,
+        pub backend_node_id: Vec<i64>,
+        pub attributes: Vec<Vec<i64>>,
+        pub shadow_root_type: Rare,
+        pub input_value: Rare,
+        pub text_value: Rare,
+        pub pseudo_type: Rare,
+        pub content_document_index: Rare,
+        pub input_checked: Rare,
+        pub option_selected: Rare,
+        pub is_clickable: Rare,
+    }
+
+    /// Sparse data: the nodes that have it, and (not for flags) its value.
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct Rare {
+        index: Vec<i64>,
+        value: Vec<i64>,
+    }
+
+    impl Rare {
+        pub fn pairs(self) -> Vec<(usize, i64)> {
+            self.index.into_iter().zip(self.value).filter(|(i, _)| *i >= 0).map(|(i, v)| (i as usize, v)).collect()
+        }
+
+        pub fn nodes(self) -> Vec<usize> {
+            self.index.into_iter().filter(|i| *i >= 0).map(|i| i as usize).collect()
+        }
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    pub struct Layout {
+        pub node_index: Vec<i64>,
+        pub styles: Rows<i64, { STYLES + 1 }>,
+        pub bounds: Rows<f64, 4>,
+        pub text: Vec<i64>,
+    }
+
+    /// What a row's missing places hold.
+    pub trait Fill: Copy {
+        const FILL: Self;
+    }
+
+    impl Fill for i64 {
+        const FILL: i64 = -1;
+    }
+
+    impl Fill for f64 {
+        const FILL: f64 = 0.0;
+    }
+
+    /// A list of short lists, each held as a fixed row: no allocation per
+    /// row. Places past `W` are skipped, missing ones hold [`Fill::FILL`].
+    #[derive(Default)]
+    pub struct Rows<T, const W: usize>(pub Vec<[T; W]>);
+
+    impl<'de, T: Fill + Deserialize<'de>, const W: usize> Deserialize<'de> for Rows<T, W> {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct Outer<T, const W: usize>(std::marker::PhantomData<T>);
+            struct Row<T, const W: usize>(std::marker::PhantomData<T>);
+            struct Cells<T, const W: usize>([T; W]);
+            impl<'de, T: Fill + Deserialize<'de>, const W: usize> Visitor<'de> for Row<T, W> {
+                type Value = Cells<T, W>;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a list")
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                    let mut row = [T::FILL; W];
+                    for slot in row.iter_mut() {
+                        match seq.next_element()? {
+                            Some(v) => *slot = v,
+                            None => return Ok(Cells(row)),
+                        }
+                    }
+                    while seq.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(Cells(row))
+                }
+            }
+            impl<'de, T: Fill + Deserialize<'de>, const W: usize> Deserialize<'de> for Cells<T, W> {
+                fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                    d.deserialize_seq(Row::<T, W>(std::marker::PhantomData))
+                }
+            }
+            impl<'de, T: Fill + Deserialize<'de>, const W: usize> Visitor<'de> for Outer<T, W> {
+                type Value = Rows<T, W>;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a list of lists")
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                    let mut rows = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                    while let Some(Cells(row)) = seq.next_element::<Cells<T, W>>()? {
+                        rows.push(row);
+                    }
+                    Ok(Rows(rows))
+                }
+            }
+            d.deserialize_seq(Outer::<T, W>(std::marker::PhantomData))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// A patch copying untouched subtrees whole is node for node the one
@@ -843,6 +1059,49 @@ mod tests {
     use serde_json::json;
 
     /// html > body > [div#a > "x", p > "y"]
+    /// The snapshot read from values and from its text, which must agree.
+    fn read_both(v: &Value) -> Snap {
+        let from_value = Snap::from_value(v).unwrap();
+        let from_json = Snap::from_json(&v.to_string()).expect("typed read");
+        assert_eq!(format!("{from_json:?}"), format!("{from_value:?}"), "typed read differs");
+        from_json
+    }
+
+    /// What the typed read fills in or skips, as the value read does: no
+    /// attributes or layout, short and long style rows, a missing row.
+    #[test]
+    fn the_typed_read_takes_what_the_value_read_takes() {
+        let v = json!({
+            "strings": ["#document", "HTML", "hidden", "x"],
+            "documents": [{
+                "nodes": {
+                    "parentIndex": [-1, 0, 1],
+                    "nodeType": [9, 1, 1],
+                    "nodeName": [0, 1, 1],
+                    "backendNodeId": [1, 2, 3],
+                    "attributes": [[], [3, 3]],
+                    "inputChecked": { "index": [2] },
+                    "textValue": { "index": [1, -1], "value": [3, 3] }
+                },
+                "layout": {
+                    "nodeIndex": [0, 1, -1, 2],
+                    "styles": [[0], [0, 1, 2, 3, 0, 1, 2, 9, 9], [], [3, 3, 3, 3, 3, 3, 2]],
+                    "bounds": [[1, 2.5, 3, 4, 5]],
+                    "text": [3]
+                },
+                "textBoxes": { "layoutIndex": [0], "bounds": [[0, 0, 1, 1]], "start": [0], "length": [1] }
+            }, { "documentURL": 3 }]
+        });
+        let s = read_both(&v);
+        // Node 1's `content-visibility` is "hidden": node 2's layout goes.
+        assert_eq!(s.docs[0].layout.iter().map(|l| l.node).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(s.docs[0].layout[0].bounds, [1.0, 2.5, 3.0, 4.0]);
+        assert_eq!(s.docs[0].attrs, [vec![], vec![3, 3], vec![]]);
+        assert_eq!(s.docs[1].url, 3);
+        // Not a capture's shape: the typed read declines.
+        assert!(Snap::from_json(r#"{"strings": ["a"], "documents": [{"nodes": {"parentIndex": ["x"]}}]}"#).is_none());
+    }
+
     fn base() -> Snap {
         let v = json!({
             "strings": ["#document", "HTML", "BODY", "DIV", "#text", "x", "P", "y", "id", "a", "block", "auto"],
@@ -865,7 +1124,7 @@ mod tests {
                 }
             }]
         });
-        Snap::from_value(&v).unwrap()
+        read_both(&v)
     }
 
     fn text(parent: usize, backend: i64, value: &str) -> NewNode {
@@ -962,7 +1221,7 @@ mod tests {
                 }
             }]
         });
-        Snap::from_value(&v).unwrap()
+        read_both(&v)
     }
 
     #[test]

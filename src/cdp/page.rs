@@ -5956,7 +5956,7 @@ impl Page {
     /// `.class` for each element, to tell apart actionable elements that
     /// have no name or text.
     fn clickables(&self, timeout: Duration) -> ax::Clickables {
-        match self.dom_snapshot(timeout).as_ref().and_then(Snap::from_value) {
+        match self.dom_snapshot(timeout).as_deref().and_then(snap_from_text) {
             Some(snap) => clickables_from(&snap),
             None => ax::Clickables::default(),
         }
@@ -5968,10 +5968,22 @@ impl Page {
     /// to drop what a display lock skips. No `includeDOMRects`: `layout.bounds`
     /// is always there, and the extra offset/client/scroll rects were about
     /// two thirds of the call's time on a 2,000-row table.
-    fn dom_snapshot(&self, timeout: Duration) -> Option<Value> {
+    /// The answer comes as its JSON text ([`super::client::TEXT_RESULT`]):
+    /// read it with [`snap_from_text`].
+    fn dom_snapshot(&self, timeout: Duration) -> Option<String> {
         let params = json!({ "computedStyles": CAPTURE_STYLES });
-        self.send("DOMSnapshot.captureSnapshot", params, timeout).ok()
+        match self.send("DOMSnapshot.captureSnapshot", params, timeout).ok()? {
+            Value::String(text) => Some(text),
+            value => Some(value.to_string()),
+        }
     }
+}
+
+/// A capture's columns from its JSON text: read straight into them, or,
+/// if Chrome's answer has a shape the typed read doesn't take, through
+/// JSON values as before.
+fn snap_from_text(text: &str) -> Option<Snap> {
+    Snap::from_json(text).or_else(|| Snap::from_value(&serde_json::from_str(text).ok()?))
 }
 
 /// Whether a DOM snapshot holds a closed shadow root: the page's scripts
@@ -6826,13 +6838,10 @@ impl Page {
                     armed = self.arm_journal(timeout);
                 }
                 let started = std::time::Instant::now();
-                let value = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
+                let text = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
                 crate::timing::record("ax_dom_snapshot", started);
                 let started = std::time::Instant::now();
-                let snap = Snap::from_value(&value).ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
-                // Freeing a large snapshot takes milliseconds: not on the way to
-                // the answer.
-                std::thread::spawn(move || drop(value));
+                let snap = snap_from_text(&text).ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
                 crate::timing::record("ax_dom_columns", started);
                 snap
             }
@@ -7552,7 +7561,8 @@ mod tests {
     fn read_phases_of_a_saved_snapshot() {
         use super::*;
         let path = std::env::var("NAVIGERA_SNAP_FILE").expect("NAVIGERA_SNAP_FILE");
-        let value: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let raw = std::fs::read_to_string(path).unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
         let reps: usize = std::env::var("REPS").ok().and_then(|r| r.parse().ok()).unwrap_or(5);
         let time = |label: &str, f: &mut dyn FnMut()| {
             let mut ts: Vec<f64> = (0..reps)
@@ -7565,6 +7575,13 @@ mod tests {
             ts.sort_by(f64::total_cmp);
             eprintln!("{label:14} median {:8.2} ms  min {:8.2}", ts[ts.len() / 2], ts[0]);
         };
+        time("parse", &mut || drop(serde_json::from_str::<Value>(&raw).unwrap()));
+        time("typed", &mut || drop(Snap::from_json(&raw).unwrap()));
+        assert_eq!(
+            format!("{:?}", Snap::from_json(&raw).unwrap()),
+            format!("{:?}", Snap::from_value(&value).unwrap()),
+            "typed read differs"
+        );
         let snap = Snap::from_value(&value).unwrap();
         time("columns", &mut || drop(Snap::from_value(&value)));
         time("clickables", &mut || drop(clickables_from(&snap)));
