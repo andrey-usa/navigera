@@ -1781,8 +1781,10 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
 /// the next capture). Opened and closed again, its body is reported shown
 /// and then gone in both sessions, though Chrome keeps the boxes it had.
 /// No report lists rows that only moved across the cut of the 2,000-line
-/// tree. While a click on that page is timed, the patching session sends
-/// no `DOMSnapshot.captureSnapshot` and the other sends one per click (the
+/// tree. A plain `ax` after each click (what an agent reads next) is
+/// patched too, and says what that session says. While clicks on that
+/// page, each with an `ax` after it, are timed, the patching session sends
+/// no `DOMSnapshot.captureSnapshot` and the other sends one per read (the
 /// CDP trace of each session); the times are printed, not asserted, as a
 /// shared runner's debug build can't tell them apart reliably.
 #[test]
@@ -1826,12 +1828,22 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
         "#edit", "#det", "#det",
     ];
     let mut reports: Vec<Vec<String>> = Vec::new();
+    let mut rereads: Vec<Vec<String>> = Vec::new();
     for name in &sessions {
         compact(name, &["goto", &page]);
         compact(name, &["ax"]);
-        let mut r: Vec<String> = buttons.iter().map(|b| compact(name, &["click", "--selector", b])).collect();
+        let mut again = Vec::new();
+        let mut r: Vec<String> = buttons
+            .iter()
+            .map(|b| {
+                let report = compact(name, &["click", "--selector", b]);
+                again.push(compact(name, &["ax"]));
+                report
+            })
+            .collect();
         r.push(compact(name, &["ax"]));
         reports.push(r);
+        rereads.push(again);
     }
     // Refs are node ids: each browser numbers its own.
     let unref = |r: &Vec<String>| -> Vec<String> {
@@ -1863,6 +1875,11 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
         unms(unref(&reports[0])),
         unms(unref(&reports[1])),
         "patching the snapshot changed what a click reported"
+    );
+    assert_eq!(
+        unms(unref(&rereads[0])),
+        unms(unref(&rereads[1])),
+        "patching the snapshot changed what a read after a click said"
     );
     let r = &reports[0];
     assert!(r[0].contains("edited 1"), "{r:?}");
@@ -1901,7 +1918,8 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
             .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
             .count()
     };
-    // Best of 3 clicks, and the full captures sent while they ran.
+    // Best of 3 clicks, each with a read after it, and the full captures
+    // sent while they ran.
     let best = |name: &str, on: &str| {
         compact(name, &["goto", &page]);
         compact(name, &["ax"]);
@@ -1910,13 +1928,14 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
             .map(|_| {
                 let t = std::time::Instant::now();
                 assert!(compact(name, &["click", "--selector", "#edit"]).contains("edited"));
+                assert!(compact(name, &["ax"]).contains("edited"));
                 t.elapsed().as_secs_f64() * 1000.0
             })
             .fold(f64::MAX, f64::min);
         (ms, captures(on) - before)
     };
     let ((patched, patched_caps), (read, read_caps)) = (best(&sessions[0], "1"), best(&sessions[1], "0"));
-    eprintln!("a click's report: {patched:.0} ms patched, {read:.0} ms captured whole");
+    eprintln!("a click's report and a read: {patched:.0} ms patched, {read:.0} ms captured whole");
     for name in &sessions {
         compact(name, &["quit"]);
     }
@@ -1932,8 +1951,11 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
     for on in ["1", "0"] {
         let _ = std::fs::remove_file(trace_of(on));
     }
-    assert_eq!(read_caps, 3, "the session capturing every read captured the page {read_caps} times for 3 clicks");
-    assert_eq!(patched_caps, 0, "a patched click's report captured the page whole {patched_caps} times in 3 clicks");
+    assert_eq!(
+        read_caps, 6,
+        "the session capturing every read captured the page {read_caps} times for 3 clicks and reads"
+    );
+    assert_eq!(patched_caps, 0, "patched reads captured the page whole {patched_caps} times in 3 clicks and reads");
 }
 
 /// After a click whose fetch has started, the snapshot waits for that fetch

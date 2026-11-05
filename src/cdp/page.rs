@@ -993,12 +993,30 @@ const JOURNAL_ARM: &str = r#"(id) => {
 /// Just before a text entry, what the journal (see [`JOURNAL_ARM`]) needs
 /// to judge it by: the state-dependent style rules and what each matches,
 /// and every form control's value and state. "" when primed, else why not.
-const JOURNAL_PRIME: &str = r#"(id, entry) => {
+///
+/// `rest`: with the arming, in the same evaluation, so the next read can
+/// be patched whether an action comes first or not. Its matches and its
+/// watch on style rule writes then stand until that read: another
+/// action keeps them (what changed since the read is the read's to
+/// show), and a text entry is judged from the read only if nothing a
+/// rule styles changed in between. No timer takes these hooks off.
+const JOURNAL_PRIME: &str = r#"(id, entry, rest) => {
     const W = window, SELECTORS_MAX = 400, MATCHED_MAX = 20000;
     const j = W.__nvJournal;
     if (!j || j.id !== id) return 'gone';
     if (j.broken) return j.broken;
     if (!j.controls) return 'form controls';
+    if (j.primed && !rest) {
+        // Primed at the read: its matches and watch speak for everything
+        // since, the action included.
+        if (!entry) return '';
+        if (j.cssom) return 'changed before the entry';
+        for (let i = 0; i < j.tracked.length; i++) {
+            const m = j.matches(j.tracked[i][0], j.tracked[i][1]);
+            const was = j.matched[i];
+            if (!m || m.length !== was.length || m.some((e, k) => e !== was[k])) return 'changed before the entry';
+        }
+    }
     // What happened before a text entry is the read's to show, not the
     // entry's: the DOM, an event, or a value or state a script set since
     // the read. Before any other action, the records since the read are
@@ -1077,9 +1095,11 @@ const JOURNAL_PRIME: &str = r#"(id, entry) => {
     // change no rule count, and reading every rule's text costs ms per
     // thousand rules: the ways in are watched instead, in every document's
     // realm, from here to the check, which takes them off (as does the
-    // next arming, or a timer for an entry that never comes back). Not
-    // seen: a declaration a script kept from before and writes by property
-    // name (`st.display = ...`, which no prototype carries in Chrome).
+    // next arming, or a timer for an entry that never comes back; primed
+    // with the read, until the next read). Not seen: a declaration a
+    // script kept from before and writes by property name (`st.display =
+    // ...`, which no prototype carries in Chrome), now or while no command
+    // runs.
     j.unhook();
     j.cssom = false;
     const hooks = [];
@@ -1096,7 +1116,12 @@ const JOURNAL_PRIME: &str = r#"(id, entry) => {
             if (d.set) { const st = d.set; w.set = function (v) { if (!when || when(this)) flag(); return st.call(this, v); }; }
         }
         Object.defineProperty(proto, k, w);
-        hooks.push(() => Object.defineProperty(proto, k, d));
+        // Put back only while ours is in place: a script that put its own
+        // there meanwhile keeps it.
+        hooks.push(() => {
+            const now = Object.getOwnPropertyDescriptor(proto, k);
+            if (now && now.value === w.value && now.get === w.get && now.set === w.set) Object.defineProperty(proto, k, d);
+        });
     };
     const ofRule = (st) => !!st.parentRule;
     for (const d of j.docs) {
@@ -1115,7 +1140,7 @@ const JOURNAL_PRIME: &str = r#"(id, entry) => {
     }
     const unhook = () => { for (const off of hooks.splice(0)) { try { off(); } catch (_) {} } return j.cssom; };
     j.unhook = unhook;
-    setTimeout(() => { if (hooks.length) { unhook(); j.cssom = true; } }, 10000);
+    if (!rest) setTimeout(() => { if (hooks.length) { unhook(); j.cssom = true; } }, 10000);
     j.primed = true;
     return '';
 }"#;
@@ -3106,8 +3131,9 @@ pub struct Page {
     /// That read's snapshot, for the next read to patch (see
     /// [`Page::read_delta`]).
     kept: Arc<std::sync::Mutex<Option<Kept>>>,
-    /// The journal an action primed (see [`JOURNAL_PRIME`]): only a read
-    /// after one can be patched.
+    /// The journal an action primed (see [`JOURNAL_PRIME`]): a read after
+    /// one can be patched, as can any read after a journal primed with its
+    /// arming ([`Kept::rested`]).
     primed: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
@@ -3115,10 +3141,46 @@ pub struct Page {
 struct Kept {
     journal: u64,
     snap: Snap,
+    /// The journal was primed with its arming (see [`JOURNAL_PRIME`]'s
+    /// `rest`): the next read is patched, an action before it or not.
+    rested: bool,
 }
 
-/// A journal armed in the page: its id and how many documents it watches.
-type Arming = Option<(u64, u64)>;
+/// A journal armed in the page: its id, how many documents it watches,
+/// and whether it was primed with its arming.
+type Arming = Option<(u64, u64, bool)>;
+
+/// The arming expression for journal `id`: armed, and primed for the
+/// next read, whose style rule watch then stays in the page between
+/// commands. Not with `--natural` (a page can see the watch), nor with
+/// `NAVIGERA_REST_PRIME=0` (to compare against).
+fn arm_expression(id: u64) -> String {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let rest = *ON.get_or_init(|| {
+        !crate::browser::natural() && std::env::var("NAVIGERA_REST_PRIME").map_or(true, |v| v.trim() != "0")
+    });
+    if rest {
+        format!("(() => {{ const a = ({JOURNAL_ARM})({id}); if (a && !a.broken) a.rest = ({JOURNAL_PRIME})({id}, false, true); return a; }})()")
+    } else {
+        format!("({JOURNAL_ARM})({id})")
+    }
+}
+
+/// What an arming evaluation returned (see [`arm_expression`]).
+fn arming_of(id: u64, a: &Value) -> Arming {
+    match a.get("broken").and_then(Value::as_str) {
+        Some("") => {
+            let rested = a.get("rest").and_then(Value::as_str) == Some("");
+            if !rested {
+                if let Some(why) = a.get("rest").and_then(Value::as_str) {
+                    crate::timing::log(&format!("[journal] not primed with the read: {why}"));
+                }
+            }
+            a.get("docs").and_then(Value::as_u64).map(|docs| (id, docs, rested))
+        }
+        _ => None,
+    }
+}
 
 /// Change journal ids, one per arming.
 static JOURNAL_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -3328,15 +3390,11 @@ impl Page {
     /// its id and how many documents it watches, or None when it could
     /// not watch the page whole (it says what it could not, e.g. a style
     /// sheet of another origin).
-    fn arm_journal(&self, timeout: Duration) -> Option<(u64, u64)> {
+    fn arm_journal(&self, timeout: Duration) -> Arming {
         let id = JOURNAL_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();
         let r = self
-            .send(
-                "Runtime.evaluate",
-                json!({ "expression": format!("({JOURNAL_ARM})({id})"), "returnByValue": true }),
-                timeout,
-            )
+            .send("Runtime.evaluate", json!({ "expression": arm_expression(id), "returnByValue": true }), timeout)
             .ok();
         crate::timing::record("journal_arm", started);
         let v = r?.pointer("/result/value").cloned()?;
@@ -3345,7 +3403,7 @@ impl Page {
             crate::timing::log(&format!("[journal] not armed: {broken}"));
             return None;
         }
-        Some((id, v.get("docs").and_then(Value::as_u64)?))
+        arming_of(id, &v)
     }
 
     /// Take what the journal needs to judge the text entry about to run
@@ -6724,7 +6782,9 @@ impl Page {
         let mut armed = None;
         let mut patched = None;
         let primed = self.primed.lock().unwrap().take();
-        let prior = prior.filter(|k| opts.journal && primed == Some(k.journal) && delta_reads());
+        // An action primed the journal, or its arming did: patched.
+        let prior = prior
+            .filter(|k| opts.journal && delta_reads() && (primed == Some(k.journal) || (primed.is_none() && k.rested)));
         if let Some(prior) = prior {
             let started = std::time::Instant::now();
             match self.read_delta(prior, timeout) {
@@ -6766,8 +6826,8 @@ impl Page {
         // Nor can it watch inside a closed shadow root, which the snapshot
         // reads.
         let closed = armed.is_some() && has_closed_shadow_root(&snap);
-        let journal = armed.filter(|&(_, watched)| watched >= docs && !closed).map(|(id, _)| id);
-        *self.journal.lock().unwrap() = journal;
+        let journal = armed.filter(|&(_, watched, _)| watched >= docs && !closed).map(|(id, _, rested)| (id, rested));
+        *self.journal.lock().unwrap() = journal.map(|(id, _)| id);
         let started = std::time::Instant::now();
         // The whole page's tree is made only for a scope (which must be
         // found in it) or to compare against; else the printer makes the
@@ -6828,7 +6888,7 @@ impl Page {
         // way to the answer.
         std::thread::spawn(move || drop((built, render_opts)));
         match journal {
-            Some(journal) => *self.kept.lock().unwrap() = Some(Kept { journal, snap }),
+            Some((journal, rested)) => *self.kept.lock().unwrap() = Some(Kept { journal, snap, rested }),
             None => drop(std::thread::spawn(move || drop(snap))),
         }
         self.remember_refs(&rendered.refs, &url, root_backend_id);
@@ -6923,8 +6983,9 @@ impl Page {
             "Runtime.evaluate",
             json!({
                 "expression": format!(
-                    "(() => {{ const d = ({JOURNAL_DELTA})({}, {max}); const a = ({JOURNAL_ARM})({id}); return {{ d, a }}; }})()",
-                    prior.journal
+                    "(() => {{ const d = ({JOURNAL_DELTA})({}, {max}); const a = {}; return {{ d, a }}; }})()",
+                    prior.journal,
+                    arm_expression(id)
                 ),
                 "returnByValue": true,
             }),
@@ -6937,10 +6998,7 @@ impl Page {
         }
         let v = v.pointer("/result/value").ok_or_else(|| ("no answer".to_string(), None))?;
         let arm = &v["a"];
-        let armed = match arm.get("broken").and_then(Value::as_str) {
-            Some("") => arm.get("docs").and_then(Value::as_u64).map(|docs| (id, docs)),
-            _ => None,
-        };
+        let armed = arming_of(id, arm);
         let fail = |why: String| (why, armed);
         let d = &v["d"];
         if let Some(why) = d.as_str() {
