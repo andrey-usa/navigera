@@ -7524,6 +7524,26 @@ mod tests {
             drop(snap.clone().patch(vec![Op::Replace { backend, nodes: vec![node] }]).unwrap())
         });
         time("clone", &mut || drop(snap.clone()));
+        time("patch rows", &mut || {
+            // A row added near the top: a table body's children, one new.
+            let d = &snap.docs[0];
+            let Some(body) = (0..d.parent.len()).find(|&i| snap.at(d.name[i]) == "TBODY") else { return };
+            let mut children: Vec<Child> = (0..d.parent.len())
+                .filter(|&k| d.parent[k] == body as i64)
+                .map(|k| Child::Keep(d.backend[k]))
+                .collect();
+            children.insert(
+                2.min(children.len()),
+                Child::New(vec![NewNode {
+                    parent: usize::MAX,
+                    ty: 1,
+                    name: "TR".into(),
+                    backend: -5,
+                    ..Default::default()
+                }]),
+            );
+            drop(snap.clone().patch(vec![Op::Children { backend: d.backend[body], children }]).unwrap())
+        });
     }
 
     /// The clickable elements of every snapshot in `NAVIGERA_SNAP_DIR`, one

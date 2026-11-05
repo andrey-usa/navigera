@@ -83,7 +83,9 @@ All notable changes to this project are documented here. The format follows
   Chrome 153). The text is the same; `NAVIGERA_LAZY_BUILD=0` makes the
   whole tree first, to compare. Finding the clickable elements, which
   runs beside it, went from 37 to 8 ms on the same snapshot (the same
-  elements on 103 saved pages).
+  elements on 103 saved pages), and a click's patch of the kept snapshot
+  copies the subtrees it doesn't touch as runs of nodes: 19 to 9 ms for a
+  cell edited.
 - Actions are faster where they used to sit out fixed waits. Saying what
   an action changed no longer waits 50 ms for a request the action might
   have started: one turn of the page's event loop shows whether it started

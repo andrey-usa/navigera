@@ -147,14 +147,45 @@ impl Snap {
     /// read from the page again, the rest kept. An error when an op names
     /// a node the snapshot doesn't hold, or the ops overlap; the caller
     /// then captures the page whole.
-    pub fn patch(mut self, ops: Vec<Op>) -> Result<Snap, &'static str> {
+    pub fn patch(self, ops: Vec<Op>) -> Result<Snap, &'static str> {
+        self.patch_with(ops, true)
+    }
+
+    /// [`Snap::patch`]; `bulk`: a subtree no op reaches is copied as one
+    /// run of nodes (each subtree is one run when the document is in
+    /// preorder, as a capture and a patch are; else node by node).
+    fn patch_with(mut self, ops: Vec<Op>, bulk: bool) -> Result<Snap, &'static str> {
         if self.docs.is_empty() {
             return Err("no document");
         }
         let mut old = std::mem::take(&mut self.docs[0]);
         let n = old.parent.len();
-        let by_backend: FxMap<i64, usize> = old.backend.iter().enumerate().map(|(i, &b)| (b, i)).collect();
         let kids = Kids::of(&old.parent)?;
+        let preorder = bulk && is_preorder(&old.parent);
+        // Nodes by backend id: only the ones the ops name, found in one pass.
+        let mut by_backend: FxMap<i64, usize> = FxMap::default();
+        for op in &ops {
+            match op {
+                Op::Replace { backend, .. } | Op::Clickable { backend, .. } => {
+                    by_backend.insert(*backend, usize::MAX);
+                }
+                Op::Children { backend, children } => {
+                    by_backend.insert(*backend, usize::MAX);
+                    for c in children {
+                        if let Child::Keep(b) = c {
+                            by_backend.insert(*b, usize::MAX);
+                        }
+                    }
+                }
+            }
+        }
+        for (i, b) in old.backend.iter().enumerate() {
+            if let Some(slot) = by_backend.get_mut(b) {
+                // The last node with the id, as a map of every node keeps.
+                *slot = i;
+            }
+        }
+        by_backend.retain(|_, i| *i != usize::MAX);
         // Sparse columns by node, for copying.
         let column = |pairs: &[(usize, i64)]| {
             let mut v = vec![None; n];
@@ -181,7 +212,7 @@ impl Snap {
         let content_document = column(&old.content_document);
         let checked = flags(&old.input_checked);
         let selected = flags(&old.option_selected);
-        let mut clickable = flags(&old.clickable);
+        let clickable = flags(&old.clickable);
         // Layout objects by node (most nodes have none or one).
         let mut first_layout = vec![usize::MAX; n];
         let mut more_layout: FxMap<usize, Vec<usize>> = FxMap::default();
@@ -195,6 +226,18 @@ impl Snap {
                 more_layout.entry(l.node).or_default().push(k);
             }
         }
+        let mut facts = Facts {
+            shadow,
+            input_value,
+            text_value,
+            pseudo,
+            content_document,
+            checked,
+            selected,
+            clickable,
+            first_layout,
+            more_layout,
+        };
         let mut replace: FxMap<usize, Vec<NewNode>> = FxMap::default();
         let mut children: FxMap<usize, Vec<Child>> = FxMap::default();
         for op in ops {
@@ -213,12 +256,31 @@ impl Snap {
                 }
                 Op::Clickable { backend, on } => {
                     let i = *by_backend.get(&backend).ok_or("listener node not in the snapshot")?;
-                    clickable[i] = on;
+                    facts.clickable[i] = on;
                 }
             }
         }
         let (ops_replace, ops_children) = (replace.len(), children.len());
+        // What a node's subtree holds that an op names: such a subtree is
+        // walked node by node, any other copied as one run.
+        let mut dirty = vec![false; if preorder { n } else { 0 }];
+        for &t in replace.keys().chain(children.keys()).filter(|_| preorder) {
+            let mut at = t as i64;
+            while at >= 0 && !dirty[at as usize] {
+                dirty[at as usize] = true;
+                at = old.parent[at as usize];
+            }
+        }
         let mut out = SnapDoc { url: old.url, base: old.base, title: old.title, ..SnapDoc::default() };
+        if preorder {
+            out.parent.reserve(n);
+            out.ty.reserve(n);
+            out.name.reserve(n);
+            out.value.reserve(n);
+            out.backend.reserve(n);
+            out.attrs.reserve(n);
+            out.layout.reserve(old.layout.len());
+        }
         let mut interned: HashMap<String, i64> = HashMap::new();
         let strings = &mut self.strings;
         let mut intern = |s: &str| -> i64 {
@@ -239,6 +301,25 @@ impl Snap {
         let mut stack = vec![Item::Old(0, -1)];
         while let Some(item) = stack.pop() {
             match item {
+                Item::Old(i, parent) if preorder && i < n && !dirty[i] => {
+                    let end = kids.end(i);
+                    if emitted[i..end].iter().any(|&e| e) {
+                        return Err("a node twice");
+                    }
+                    emitted[i..end].fill(true);
+                    let at = out.parent.len();
+                    let offset = at as i64 - i as i64;
+                    out.parent.push(parent);
+                    out.parent.extend(old.parent[i + 1..end].iter().map(|&p| p + offset));
+                    out.ty.extend_from_slice(&old.ty[i..end]);
+                    out.name.extend_from_slice(&old.name[i..end]);
+                    out.value.extend((i..end).map(|k| old.value.get(k).copied().unwrap_or(-1)));
+                    out.backend.extend_from_slice(&old.backend[i..end]);
+                    out.attrs.extend((i..end).map(|k| old.attrs.get_mut(k).map(std::mem::take).unwrap_or_default()));
+                    for k in i..end {
+                        facts.copy(k, (k as i64 + offset) as usize, &old.layout, &mut out);
+                    }
+                }
                 Item::Old(i, parent) => {
                     if i >= n || std::mem::replace(&mut emitted[i], true) {
                         return Err("a node twice");
@@ -257,40 +338,7 @@ impl Snap {
                     out.value.push(old.value.get(i).copied().unwrap_or(-1));
                     out.backend.push(old.backend[i]);
                     out.attrs.push(old.attrs.get_mut(i).map(std::mem::take).unwrap_or_default());
-                    if let Some(v) = shadow[i] {
-                        out.shadow_root_type.push((at, v));
-                    }
-                    if let Some(v) = input_value[i] {
-                        out.input_value.push((at, v));
-                    }
-                    if let Some(v) = text_value[i] {
-                        out.text_value.push((at, v));
-                    }
-                    if let Some(v) = pseudo[i] {
-                        out.pseudo_type.push((at, v));
-                    }
-                    if let Some(v) = content_document[i] {
-                        out.content_document.push((at, v));
-                    }
-                    if checked[i] {
-                        out.input_checked.push(at);
-                    }
-                    if selected[i] {
-                        out.option_selected.push(at);
-                    }
-                    if clickable[i] {
-                        out.clickable.push(at);
-                    }
-                    if first_layout[i] != usize::MAX {
-                        let mut l = old.layout[first_layout[i]].clone();
-                        l.node = at;
-                        out.layout.push(l);
-                        for &k in more_layout.get(&i).into_iter().flatten() {
-                            let mut l = old.layout[k].clone();
-                            l.node = at;
-                            out.layout.push(l);
-                        }
-                    }
+                    facts.copy(i, at, &old.layout, &mut out);
                     let at = at as i64;
                     match children.remove(&i) {
                         Some(list) => {
@@ -299,7 +347,7 @@ impl Snap {
                             let mut items: Vec<Item> = kids
                                 .of_node(i)
                                 .iter()
-                                .filter(|&&k| pseudo[k].is_some())
+                                .filter(|&&k| facts.pseudo[k].is_some())
                                 .map(|&k| Item::Old(k, at))
                                 .collect();
                             for child in list {
@@ -319,7 +367,7 @@ impl Snap {
                                 })
                                 .collect();
                             for &k in kids.of_node(i) {
-                                if pseudo[k].is_none() && !kept.contains(&k) {
+                                if facts.pseudo[k].is_none() && !kept.contains(&k) {
                                     if emitted[k] {
                                         return Err("a node twice");
                                     }
@@ -391,6 +439,84 @@ impl Snap {
     }
 }
 
+/// A document's per-node facts besides its columns, by node index.
+struct Facts {
+    shadow: Vec<Option<i64>>,
+    input_value: Vec<Option<i64>>,
+    text_value: Vec<Option<i64>>,
+    pseudo: Vec<Option<i64>>,
+    content_document: Vec<Option<i64>>,
+    checked: Vec<bool>,
+    selected: Vec<bool>,
+    clickable: Vec<bool>,
+    /// Layout objects by node (most nodes have none or one).
+    first_layout: Vec<usize>,
+    more_layout: FxMap<usize, Vec<usize>>,
+}
+
+impl Facts {
+    /// Old node `i`'s facts, as new node `at`'s.
+    fn copy(&self, i: usize, at: usize, layout: &[Layout], out: &mut SnapDoc) {
+        if let Some(v) = self.shadow[i] {
+            out.shadow_root_type.push((at, v));
+        }
+        if let Some(v) = self.input_value[i] {
+            out.input_value.push((at, v));
+        }
+        if let Some(v) = self.text_value[i] {
+            out.text_value.push((at, v));
+        }
+        if let Some(v) = self.pseudo[i] {
+            out.pseudo_type.push((at, v));
+        }
+        if let Some(v) = self.content_document[i] {
+            out.content_document.push((at, v));
+        }
+        if self.checked[i] {
+            out.input_checked.push(at);
+        }
+        if self.selected[i] {
+            out.option_selected.push(at);
+        }
+        if self.clickable[i] {
+            out.clickable.push(at);
+        }
+        if self.first_layout[i] != usize::MAX {
+            let mut l = layout[self.first_layout[i]].clone();
+            l.node = at;
+            out.layout.push(l);
+            for &k in self.more_layout.get(&i).into_iter().flatten() {
+                let mut l = layout[k].clone();
+                l.node = at;
+                out.layout.push(l);
+            }
+        }
+    }
+}
+
+/// Whether parent indices list the tree in preorder: each node's parent
+/// is the nearest node before it still open, so every subtree is one run
+/// of indices, its children in index order.
+fn is_preorder(parent: &[i64]) -> bool {
+    let mut open: Vec<i64> = Vec::new();
+    for (i, &p) in parent.iter().enumerate() {
+        if p < 0 {
+            if i > 0 {
+                return false;
+            }
+        } else {
+            while open.last().is_some_and(|&top| top != p) {
+                open.pop();
+            }
+            if open.is_empty() {
+                return false;
+            }
+        }
+        open.push(i as i64);
+    }
+    true
+}
+
 /// Each node's children, in order, in one array.
 struct Kids {
     start: Vec<usize>,
@@ -426,6 +552,14 @@ impl Kids {
 
     fn of_node(&self, i: usize) -> &[usize] {
         &self.list[self.start[i]..self.start[i + 1]]
+    }
+
+    /// One past the last node of `i`'s subtree, in a preorder document.
+    fn end(&self, mut i: usize) -> usize {
+        while let Some(&last) = self.of_node(i).last() {
+            i = last;
+        }
+        i + 1
     }
 
     /// Mark the subtree under `i` (not `i`) as done with.
@@ -624,6 +758,87 @@ pub enum Child {
 
 #[cfg(test)]
 mod tests {
+    /// A patch copying untouched subtrees whole is node for node the one
+    /// walking every node, errors included: random ops on every snapshot
+    /// in `NAVIGERA_SNAP_DIR`.
+    #[test]
+    #[ignore]
+    fn bulk_patch_is_the_node_walk() {
+        use super::*;
+        let dir = std::env::var("NAVIGERA_SNAP_DIR").expect("NAVIGERA_SNAP_DIR");
+        let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        let (mut same, mut errs) = (0, 0);
+        for f in files {
+            let value: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+            let snap = Snap::from_value(&value).unwrap();
+            let d = &snap.docs[0];
+            let n = d.parent.len();
+            assert!(is_preorder(&d.parent), "{}: capture not in preorder", f.display());
+            for seed in 0..40u64 {
+                let kids = Kids::of(&d.parent).unwrap();
+                let text = |b: i64| NewNode {
+                    parent: usize::MAX,
+                    ty: 3,
+                    name: "#text".into(),
+                    value: Some(format!("t{b}")),
+                    backend: b,
+                    ..Default::default()
+                };
+                let make = |seed: u64| -> Vec<Op> {
+                    let mut r = seed.wrapping_add(1);
+                    let mut next = |m: usize| {
+                        r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        ((r >> 33) as usize) % m.max(1)
+                    };
+                    let mut ops = Vec::new();
+                    for _ in 0..1 + next(4) {
+                        let i = next(n);
+                        let b = d.backend[i];
+                        match next(3) {
+                            0 => ops.push(Op::Replace { backend: b, nodes: vec![text(b)] }),
+                            1 => {
+                                let mut list: Vec<Child> = kids
+                                    .of_node(i)
+                                    .iter()
+                                    .filter(|&&k| !d.pseudo_type.iter().any(|&(p, _)| p == k))
+                                    .map(|&k| Child::Keep(d.backend[k]))
+                                    .collect();
+                                if next(2) == 0 {
+                                    list.reverse();
+                                }
+                                if !list.is_empty() && next(3) == 0 {
+                                    list.remove(next(list.len()));
+                                }
+                                let at = next(list.len() + 1);
+                                list.insert(at, Child::New(vec![text(-7 - i as i64)]));
+                                ops.push(Op::Children { backend: b, children: list });
+                            }
+                            _ => ops.push(Op::Clickable { backend: b, on: next(2) == 0 }),
+                        }
+                    }
+                    ops
+                };
+                let (ops, ops2) = (make(seed), make(seed));
+                let bulk = snap.clone().patch_with(ops, true);
+                let walk = snap.clone().patch_with(ops2, false);
+                match (&bulk, &walk) {
+                    (Ok(a), Ok(b)) => {
+                        assert!(format!("{a:?}") == format!("{b:?}"), "{}: seed {seed} differs", f.display());
+                        assert!(is_preorder(&a.docs[0].parent), "{}: patched not in preorder", f.display());
+                        same += 1;
+                    }
+                    (Err(a), Err(b)) => {
+                        assert_eq!(a, b, "{}: seed {seed}", f.display());
+                        errs += 1;
+                    }
+                    _ => panic!("{}: seed {seed}: {:?} vs {:?}", f.display(), bulk.is_ok(), walk.is_ok()),
+                }
+            }
+        }
+        eprintln!("{same} patches equal, {errs} errors equal");
+    }
+
     use super::*;
     use serde_json::json;
 
