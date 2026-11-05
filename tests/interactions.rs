@@ -1781,12 +1781,17 @@ fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
 /// the next capture). Opened and closed again, its body is reported shown
 /// and then gone in both sessions, though Chrome keeps the boxes it had.
 /// No report lists rows that only moved across the cut of the 2,000-line
-/// tree. Timed against that session.
+/// tree. While a click on that page is timed, the patching session sends
+/// no `DOMSnapshot.captureSnapshot` and the other sends one per click (the
+/// CDP trace of each session); the times are printed, not asserted, as a
+/// shared runner's debug build can't tell them apart reliably.
 #[test]
 fn a_click_on_a_large_page_reads_only_what_it_changed() {
     let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
     let page = format!("{}/clicks", site.url);
+    let trace_of =
+        |on: &str| std::env::temp_dir().join(format!("nv-interactions-delta{on}-{}.jsonl", std::process::id()));
     let sessions: Vec<String> = ["1", "0"]
         .iter()
         .map(|on| {
@@ -1794,8 +1799,10 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
                 .join(format!("nv-interactions-delta{on}-{}.sock", std::process::id()))
                 .display()
                 .to_string();
+            let _ = std::fs::remove_file(trace_of(on));
             let out = Command::new(tool_exe())
                 .env("NAVIGERA_DELTA_READ", on)
+                .env("NAVIGERA_CDP_TRACE", trace_of(on))
                 .args(["--session", &name, "start"])
                 .stdin(Stdio::null())
                 .output()
@@ -1887,22 +1894,46 @@ fn a_click_on_a_large_page_reads_only_what_it_changed() {
         r[..15].iter().all(|l| !l.lines().any(past_top)),
         "a report listed rows that only moved across the cut: {r:?}"
     );
-    let best = |name: &str| {
+    let captures = |on: &str| {
+        std::fs::read_to_string(trace_of(on))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
+            .count()
+    };
+    // Best of 3 clicks, and the full captures sent while they ran.
+    let best = |name: &str, on: &str| {
         compact(name, &["goto", &page]);
         compact(name, &["ax"]);
-        (0..3)
+        let before = captures(on);
+        let ms = (0..3)
             .map(|_| {
                 let t = std::time::Instant::now();
                 assert!(compact(name, &["click", "--selector", "#edit"]).contains("edited"));
                 t.elapsed().as_secs_f64() * 1000.0
             })
-            .fold(f64::MAX, f64::min)
+            .fold(f64::MAX, f64::min);
+        (ms, captures(on) - before)
     };
-    let (patched, read) = (best(&sessions[0]), best(&sessions[1]));
-    assert!(patched < read * 0.75, "a click's report took {patched:.0} ms patched, {read:.0} ms captured whole");
+    let ((patched, patched_caps), (read, read_caps)) = (best(&sessions[0], "1"), best(&sessions[1], "0"));
+    eprintln!("a click's report: {patched:.0} ms patched, {read:.0} ms captured whole");
     for name in &sessions {
         compact(name, &["quit"]);
     }
+    // Keep CI's protocol check seeing what these sessions sent.
+    if let Some(ci) = std::env::var_os("NAVIGERA_CDP_TRACE") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ci) {
+            for on in ["1", "0"] {
+                let _ = f.write_all(std::fs::read_to_string(trace_of(on)).unwrap_or_default().as_bytes());
+            }
+        }
+    }
+    for on in ["1", "0"] {
+        let _ = std::fs::remove_file(trace_of(on));
+    }
+    assert_eq!(read_caps, 3, "the session capturing every read captured the page {read_caps} times for 3 clicks");
+    assert_eq!(patched_caps, 0, "a patched click's report captured the page whole {patched_caps} times in 3 clicks");
 }
 
 /// After a click whose fetch has started, the snapshot waits for that fetch
