@@ -219,6 +219,65 @@ fn mcp_drives_a_page() {
     assert!(c.child.wait().unwrap().success(), "EOF shuts the server and its browser down");
 }
 
+/// Between calls the server reads a large page a navigation loaded ahead
+/// of its snapshot while the agent thinks: the first `browser_snapshot`
+/// then patches that read instead of capturing the page (and shows what
+/// changed since). Calls sent at once leave the capture to the snapshot.
+#[test]
+fn mcp_reads_a_large_page_ahead_while_the_agent_thinks() {
+    if !chrome_available() {
+        eprintln!("skipping: no Chrome/Chromium/Edge binary installed");
+        return;
+    }
+    let trace = std::env::temp_dir().join(format!("nv-mcp-ahead-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&trace);
+    let mut c = Client::start_with(&[("NAVIGERA_CDP_TRACE", trace.to_str().unwrap()), ("NAVIGERA_PRE_READ", "1")]);
+    c.request("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t"}}));
+    c.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let captures = || {
+        std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
+            .count()
+    };
+    let think = || std::thread::sleep(std::time::Duration::from_millis(1500));
+    // 1,000 rows: past the 2,500 nodes a page needs to be read ahead.
+    let rows = page(
+        "<title>Rows</title><table><tbody id=rows></tbody></table><script>\
+         for (let i = 0; i < 1000; i++) { const r = rows.insertRow(); r.id = 'r' + i; \
+         r.insertCell().textContent = 'SKU-' + String(i).padStart(5, '0'); r.insertCell().textContent = 'Item ' + i; }\
+         </script>",
+    );
+    think();
+    let (text, is_error, _) = c.call("browser_navigate", json!({"url": rows}));
+    assert!(!is_error, "{text}");
+    think();
+    let before = captures();
+    assert!(before >= 1, "the page was read ahead while the agent thought");
+    let (text, is_error, _) = c.call(
+        "browser_evaluate",
+        json!({"expression": "() => { document.querySelector('#r5 td:nth-child(2)').textContent = 'changed after navigate'; return 1 }"}),
+    );
+    assert!(!is_error, "{text}");
+    think();
+    let (tree, is_error, _) = c.call("browser_snapshot", json!({}));
+    assert!(!is_error && tree.contains("changed after navigate") && tree.contains("SKU-00000"), "{tree}");
+    assert_eq!(captures(), before, "the first snapshot patched what was read ahead");
+    // Calls sent at once: no read ahead, the snapshot captures.
+    for _ in 0..3 {
+        c.call("browser_evaluate", json!({"expression": "() => 1"}));
+    }
+    c.call("browser_navigate", json!({"url": rows}));
+    let before = captures();
+    let (tree, _, _) = c.call("browser_snapshot", json!({}));
+    assert!(tree.contains("SKU-00000"), "{tree}");
+    assert_eq!(captures(), before + 1, "a script's snapshot captures for itself");
+    drop(c.stdin);
+    assert!(c.child.wait().unwrap().success());
+    let _ = std::fs::remove_file(&trace);
+}
+
 /// The decision tools exist only when a decider is configured, so the
 /// default list stays the one agents know.
 #[test]

@@ -2627,6 +2627,10 @@ pub struct Driver {
     look: Option<Look>,
     /// The last report was compact: an agent reads what actions change.
     compact: bool,
+    /// Reads are an agent's that reads again (the MCP server's), whatever
+    /// the output: each keeps the change journal it arms, so the next read
+    /// is patched, as for compact reports.
+    agent_reads: bool,
     /// A read ahead of the first `ax` after a `goto` (see
     /// [`Driver::pre_read_if_idle`]).
     pre_read: PreRead,
@@ -3019,6 +3023,7 @@ impl Driver {
                 reported: None,
                 look: None,
                 compact: false,
+                agent_reads: false,
                 pre_read: PreRead::default(),
             });
         }
@@ -3033,6 +3038,7 @@ impl Driver {
                 reported: None,
                 look: None,
                 compact: false,
+                agent_reads: false,
                 pre_read: PreRead::default(),
             });
         }
@@ -3054,6 +3060,7 @@ impl Driver {
             reported: None,
             look: None,
             compact: false,
+            agent_reads: false,
             pre_read: PreRead::default(),
         })
     }
@@ -3077,6 +3084,7 @@ impl Driver {
             reported: None,
             look: None,
             compact: false,
+            agent_reads: false,
             pre_read: PreRead::default(),
         })
     }
@@ -3115,6 +3123,7 @@ impl Driver {
             reported: None,
             look: None,
             compact: false,
+            agent_reads: false,
             pre_read: PreRead::default(),
         })
     }
@@ -3639,6 +3648,24 @@ impl Driver {
         self.pre_read.answered = Some(Instant::now());
     }
 
+    /// Reads are an agent's that reads again (see `agent_reads`).
+    pub fn reads_for_an_agent(&mut self) {
+        self.agent_reads = true;
+    }
+
+    /// The client paused this long before the command about to run: an MCP
+    /// server makes its driver on the first call, and the wait before that
+    /// call counts as the client's first pause.
+    pub fn paused_before(&mut self, pause: Duration) {
+        self.pre_read.answered = Instant::now().checked_sub(pause);
+    }
+
+    /// The next op is a later step of the same client command (an MCP call
+    /// of several ops): the client did not pause before it.
+    pub fn same_command(&mut self) {
+        self.pre_read.answered = None;
+    }
+
     /// Whether a read ahead waits for the session to be idle.
     pub fn pre_read_due(&self) -> bool {
         self.pre_read.due.is_some()
@@ -3970,7 +3997,7 @@ impl Driver {
         // An action after a look: the journal takes the state an entry
         // (text, a check, a choice) will be judged against, or the read
         // after any other action patched from (see `page_change`).
-        if self.compact && reports_page_change(command) {
+        if (self.compact || self.agent_reads) && reports_page_change(command) {
             if let Some(id) =
                 self.look.as_ref().filter(|l| l.page == self.session.page_identity()).and_then(|l| l.journal)
             {
@@ -4531,7 +4558,7 @@ impl Driver {
                     limit: limit.unwrap_or(DEFAULT_AX_LIMIT),
                     scope: scope.optional("ax")?,
                     full_text: *full_text,
-                    journal: self.compact && change_journal(),
+                    journal: (self.compact || self.agent_reads) && change_journal(),
                 };
                 let mut tree = s.ax(&opts, *timeout_ms).map_err(|e| e.context("ax"))?;
                 if let (Value::Array(nodes), Some(n)) = (&mut tree, limit) {

@@ -87,6 +87,17 @@ All notable changes to this project are documented here. The format follows
   comes in while it runs waits for it. A page read ahead and left
   unread for another `goto` stops it until an `ax` follows a `goto`
   again. `NAVIGERA_PRE_READ=0` turns it off.
+- `navigera mcp` reads large pages the way the CLI does. Its snapshots
+  kept no change journal, so every `browser_snapshot` on a large page
+  captured it whole; now a snapshot after an action, after another
+  snapshot or after a navigation the agent paused on is patched with
+  what changed, and between calls the server reads a page a navigation
+  loaded ahead of its snapshot (10,000 rows: first snapshot after
+  `browser_navigate` 839 to 137 ms, snapshot after a click 780 to 97 ms;
+  1,000 rows 85 to 30 ms; medians of 10, interleaved, client pausing
+  1.5 s). Tool results read the same as before. Between calls it also
+  takes the storage snapshot a shared browser's crash recovery restores,
+  which it never did over MCP.
 - Building a large page's tree costs less on navigera's side (10,000 rows,
   from a saved snapshot: tree 85 to 51 ms, text 49 to 26 ms, clickable
   elements 34 to 20 ms): the snapshot is read into columns once, per-node

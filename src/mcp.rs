@@ -16,6 +16,7 @@
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
@@ -557,11 +558,34 @@ fn notes(outcome_dialogs: &[Value], new_tabs: &[usize], engine_notes: &[String])
 pub struct Server<'a> {
     config: &'a SessionConfig,
     driver: Option<Driver>,
+    /// How long the client took to send the call being served after the
+    /// last reply: its first pause, for a driver this call makes.
+    paused: Duration,
 }
 
 impl<'a> Server<'a> {
     pub fn new(config: &'a SessionConfig) -> Self {
-        Server { config, driver: None }
+        Server { config, driver: None, paused: Duration::ZERO }
+    }
+
+    /// How long to wait for the next call before [`Server::idle`]: often
+    /// while a page a navigation loaded waits to be read ahead.
+    fn tick(&self) -> Duration {
+        if self.driver.as_ref().is_some_and(Driver::pre_read_due) {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_millis(250)
+        }
+    }
+
+    /// Between calls, as the session server does between commands: read a
+    /// page a navigation loaded ahead of its snapshot once it is quiet, and
+    /// take a storage snapshot an op skipped for being too soon.
+    fn idle(&mut self) {
+        if let Some(driver) = self.driver.as_mut() {
+            driver.pre_read_if_idle();
+            driver.snapshot_if_idle();
+        }
     }
 
     /// What the browser did so far (`history`): empty before the first call.
@@ -581,8 +605,11 @@ impl<'a> Server<'a> {
 
     fn driver(&mut self) -> Result<&mut Driver, String> {
         if self.driver.is_none() {
-            self.driver =
-                Some(Driver::launch_session(self.config).map_err(|e| format!("could not start the browser: {e:#}"))?);
+            let mut driver =
+                Driver::launch_session(self.config).map_err(|e| format!("could not start the browser: {e:#}"))?;
+            driver.reads_for_an_agent();
+            driver.paused_before(self.paused);
+            self.driver = Some(driver);
         }
         Ok(self.driver.as_mut().expect("just launched"))
     }
@@ -616,7 +643,21 @@ impl<'a> Server<'a> {
             },
             other => other,
         };
-        self.driver()?.run_op(&command).map_err(|e| format!("{e:#}"))
+        let driver = self.driver()?;
+        let mut outcome = driver.run_op(&command).map_err(|e| format!("{e:#}"))?;
+        // Kept as the session server keeps it (output unchanged): the last
+        // tree, which the next action's change journal is primed against.
+        let mut result = Some(std::mem::take(&mut outcome.result));
+        driver.report_state(&command, &mut result, false);
+        outcome.result = result.unwrap_or_default();
+        Ok(outcome)
+    }
+
+    /// A later op of the same call: the client did not pause before it.
+    fn same_command(&mut self) {
+        if let Some(driver) = self.driver.as_mut() {
+            driver.same_command();
+        }
     }
 
     /// One `tools/call` of a browser tool: its MCP result.
@@ -629,6 +670,9 @@ impl<'a> Server<'a> {
         let mut text = Vec::new();
         let total = plan.steps.len();
         for (i, step) in plan.steps.iter().enumerate() {
+            if i > 0 {
+                self.same_command();
+            }
             match self.run(step) {
                 Ok(outcome) => {
                     if step["op"] == "screenshot" {
@@ -658,6 +702,7 @@ impl<'a> Server<'a> {
             }
         }
         if plan.snapshot {
+            self.same_command();
             match self.run(&json!({"op": "ax", "format": "text"})) {
                 Ok(outcome) => {
                     text.push(describe(&outcome.result));
@@ -795,9 +840,30 @@ pub fn reply(output: &mut dyn Write, id: &Value, result: Result<Value, (i64, Str
 }
 
 /// Serve MCP on `input`/`output` (newline-delimited JSON-RPC) until EOF.
-pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn Write) -> ExitCode {
+pub fn serve<R: BufRead + Send + 'static>(config: &SessionConfig, input: R, output: &mut dyn Write) -> ExitCode {
+    use std::sync::mpsc::RecvTimeoutError;
     let mut server = Server::new(config);
-    for line in input.lines() {
+    // Calls come in on a thread of their own, so that between them the
+    // server can work for the next one (a read ahead after a navigation).
+    let (lines, incoming) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in input.lines() {
+            let failed = line.is_err();
+            if lines.send((line, Instant::now())).is_err() || failed {
+                return;
+            }
+        }
+    });
+    let mut replied = Instant::now();
+    loop {
+        let (line, arrived) = match incoming.recv_timeout(server.tick()) {
+            Ok(next) => next,
+            Err(RecvTimeoutError::Timeout) => {
+                server.idle();
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         let Ok(line) = line else { break };
         let line = line.trim_start_matches('\u{feff}');
         if line.trim().is_empty() {
@@ -832,7 +898,10 @@ pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn W
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tools()})),
             "tools/call" => match params.get("name").and_then(Value::as_str) {
-                Some(name) => Ok(server.call(name, params.get("arguments").unwrap_or(&Value::Null))),
+                Some(name) => {
+                    server.paused = arrived.saturating_duration_since(replied);
+                    Ok(server.call(name, params.get("arguments").unwrap_or(&Value::Null)))
+                }
                 None => Err((-32602, "tools/call needs a tool name".into())),
             },
             other => Err((-32601, format!("method not found: {other}"))),
@@ -840,6 +909,7 @@ pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn W
         if reply(output, &id, result).is_err() {
             break;
         }
+        replied = Instant::now();
     }
     server.close();
     crate::timing::report();

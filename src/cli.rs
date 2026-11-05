@@ -51,8 +51,7 @@ fn run(parsed: &protocol::ParsedArgs, output: &mut dyn Write) -> ExitCode {
         return protocol::run_local(local, config, output);
     }
     if parsed.mcp {
-        let stdin = io::stdin();
-        return crate::mcp::serve(config, &mut stdin.lock(), output);
+        return crate::mcp::serve(config, io::BufReader::new(io::stdin()), output);
     }
     {
         use crate::session;
