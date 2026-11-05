@@ -364,8 +364,9 @@ and enum value against the `/json/protocol` that *that* browser serves.
 Deprecated or unknown usage fails the build. Edge and Brave are covered by
 the benchmark.
 
-**Lightpanda** (`--engine lightpanda`) runs the same end-to-end suite in CI,
-on its newest stable release. It is a different engine (one tab, no layout),
+**Lightpanda** (`--engine lightpanda`) passed the same end-to-end suite up
+to its 1.0.2 release; it is out of CI for now (1.0.3 fails the drag test,
+which is being looked into). It is a different engine (one tab, no layout),
 so navigera fills in what its CDP leaves out: shadow roots and password
 fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
 The differences that remain are listed in

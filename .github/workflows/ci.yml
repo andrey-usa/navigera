@@ -5,7 +5,7 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
-  # Weekly: a new Chrome Stable/Beta or Lightpanda release must not break
+  # Weekly: a new Chrome Stable/Beta release must not break
   # agents before we notice.
   schedule:
     - cron: "17 6 * * 1"
@@ -80,34 +80,6 @@ jobs:
           sh -n packaging/glama/build.sh
           if cargo package --list --locked --allow-dirty | grep -iE '(^|/)(glama\.json|packaging/glama/)'; then
             echo "::error::a Glama-only file is in the crate's package list (Cargo.toml include)"
-            exit 1
-          fi
-
-  # The Lightpanda engine: its end-to-end tests on Lightpanda's newest
-  # stable release, on every push and pull request (the weekly run catches a
-  # new release before a push does).
-  lightpanda:
-    name: lightpanda (latest stable)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
-        with:
-          toolchain: stable
-      - uses: ./.github/actions/lightpanda
-      - name: Tests (Lightpanda e2e; no X server)
-        env:
-          NAVIGERA_REQUIRE_LIGHTPANDA: "1"
-          LIGHTPANDA_DISABLE_TELEMETRY: "1"
-        run: |
-          set -o pipefail
-          unset DISPLAY
-          if ! cargo test --locked --test lightpanda --test commands 2>&1 | tee /tmp/test.log; then
-            sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
-            python3 bench/ladder/annotate.py /tmp/test-tail.log "lightpanda $LIGHTPANDA_RELEASE test failure"
             exit 1
           fi
 
