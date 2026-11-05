@@ -224,6 +224,49 @@ fn mcp_drives_a_page() {
 /// then patches that read instead of capturing the page (and shows what
 /// changed since). Calls sent at once leave the capture to the snapshot.
 #[test]
+fn action_tools_say_what_changed_unless_asked_for_the_state() {
+    if !chrome_available() {
+        eprintln!("skipping: no Chrome/Chromium/Edge binary installed");
+        return;
+    }
+    let mut c = Client::start();
+    c.request("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t"}}));
+    c.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let html = page(
+        "<title>Shop</title><h1>Cart</h1>\
+         <button onclick=\"document.getElementById('n').textContent=parseInt(document.getElementById('n').textContent)+1\">Add</button>\
+         <p>count: <span id=n>0</span></p>",
+    );
+    let (text, is_error, _) = c.call("browser_navigate", json!({"url": html}));
+    assert!(!is_error && text.starts_with("Page: Shop"), "{text}");
+
+    let (tree, is_error, _) = c.call("browser_snapshot", json!({}));
+    assert!(!is_error, "{tree}");
+    let add = tree.lines().find(|l| l.contains("button \"Add\"")).expect("Add button");
+    let at = add.find("ref=").unwrap() + 4;
+    let add_ref: u64 = add[at..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap();
+
+    // An action says what changed, not the whole state again.
+    let (text, is_error, _) = c.call("browser_click", json!({"ref": add_ref}));
+    assert!(!is_error, "{text}");
+    assert!(text.contains('1') && !text.contains("Page: Shop"), "the change, not the state: {text}");
+
+    // state: true keeps the full page state.
+    let (text, is_error, _) = c.call("browser_click", json!({"ref": add_ref, "state": true}));
+    assert!(!is_error, "{text}");
+    assert!(text.starts_with("Page: Shop"), "state:true keeps the full state: {text}");
+
+    // The WebMCP tools are deferred: listed by browser_more, callable by name.
+    let (text, is_error, _) = c.call("browser_more", json!({}));
+    assert!(!is_error && text.contains("browser_webmcp_list") && text.contains("browser_webmcp_call"), "{text}");
+    let (text, _, _) = c.call("browser_webmcp_list", json!({}));
+    assert!(!text.is_empty(), "webmcp-list answers on a page with no WebMCP tools");
+
+    let _ = c.call("browser_close", json!({}));
+}
+
+#[test]
 fn mcp_reads_a_large_page_ahead_while_the_agent_thinks() {
     if !chrome_available() {
         eprintln!("skipping: no Chrome/Chromium/Edge binary installed");

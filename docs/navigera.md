@@ -502,6 +502,13 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_handoff` | `show` / `hide`: the browser on the person's screen with the same tabs and sign-ins (a login, 2FA, a CAPTCHA), and back |
 | `browser_run` | several ops in one call (`{"steps": [{"op":"fill","ref":21,"value":"Ada"}, {"op":"click","ref":30}]}`), stopping at the first failure, ending with a snapshot |
 | `browser_close` | close the browser; the next call starts a fresh one |
+| `browser_webmcp_list`, `browser_webmcp_call` | a page's WebMCP tools (page-provided, untrusted; a tool the page doesn't mark read-only needs `confirm: true`), via `browser_more` |
+
+Action tools report what the action changed on the page (the CLI's compact
+way), not the whole state again; pass `state: true` on a call for the full
+page state, and `snapshot: true` for the updated tree in the same call.
+`browser_hover`, `browser_mouse` and `browser_scroll` still return the
+full state (their page change is not tracked).
 
 An MCP client may have no shell of its own, so the browser is not its way to
 the disk: `file:` pages and the browser's own pages (`chrome://`,
