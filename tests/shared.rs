@@ -482,8 +482,21 @@ fn a_never_reached_command_runs_once_after_the_relaunch() {
 /// a plain error: no crash loop. `start` makes a new one.
 #[test]
 fn a_second_crash_right_after_a_recovery_ends_the_session() {
+    second_crash_ends_the_session("loop", Duration::from_millis(300));
+}
+
+/// The same, with the next command sent before the host has dropped its
+/// connections (it refuses requests to a dead browser at once but closes
+/// connections at its next tick): the session ends from the host's
+/// refusal alone, its socket gone before the answer.
+#[test]
+fn a_second_crash_the_host_reports_first_ends_the_session() {
+    second_crash_ends_the_session("loop-early", Duration::from_millis(30));
+}
+
+fn second_crash_ends_the_session(name: &str, pause: Duration) {
     let (true, Some(site)) = (chrome(), site()) else { return };
-    let browser = Browser::new("loop", 5);
+    let browser = Browser::new(name, 5);
     let a = browser.start("a", &[]);
     a.ok(&["goto", &format!("{}/download", site.url)]);
     kill(browser.wait_browsers(1, Duration::from_secs(5))[0]);
@@ -491,7 +504,7 @@ fn a_second_crash_right_after_a_recovery_ends_the_session() {
     let (success, r) = after_crash(&a, &["eval", "1"]);
     assert!(success && r["recovered"]["browser"] == "relaunched", "{r}");
     kill(browser.wait_browsers(1, Duration::from_secs(5))[0]);
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(pause);
     let (_, r) = after_crash(&a, &["eval", "1"]);
     let err = r["error"].as_str().unwrap_or_default().to_string();
     assert!(err.contains("crashed again") && err.contains("start"), "{err}");

@@ -3089,10 +3089,13 @@ impl Driver {
         crate::browser::set_download_dir(config.download_dir.as_deref());
     }
 
-    /// Has the connection to a shared browser ended (it crashed or was
-    /// killed)? The session can do nothing more then.
+    /// Has this session given up on its shared browser (it crashed again
+    /// right after a relaunch, or could not be relaunched)? The session can
+    /// do nothing more then. Not tied to the host's connection: the host
+    /// refuses requests to a dead browser before it drops its connections,
+    /// and that refusal alone can end the session.
     pub fn shared_browser_gone(&self) -> bool {
-        self.session.is_shared() && self.session.browser_gone() && self.crash.given_up
+        self.session.is_shared() && self.crash.given_up
     }
 
     /// The active page (tab) this driver's ops target.

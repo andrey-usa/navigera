@@ -130,7 +130,10 @@ All notable changes to this project are documented here. The format follows
   out, said `already_running`, and the next command found no session
   (seen on Windows, about 1 run in 30). The socket now goes before that
   answer, and a `start` that reaches a server leaving without answering
-  waits for it to go and starts a new session.
+  waits for it to go and starts a new session. That holds too when the
+  command came in before the shared browser's host had dropped its
+  connections (it refuses requests to a dead browser at once): that
+  refusal alone ends the session.
 - `ax` no longer shows content the page hides behind a display lock
   once it has been shown: the body of a `<details>` opened and closed
   again, or what is under `content-visibility: hidden` or
