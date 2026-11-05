@@ -6151,40 +6151,54 @@ fn clickables_from(snap: &Snap) -> ax::Clickables {
                 _ => false,
             };
             let (parents, types, backends, names, values) = (&doc.parent, &doc.ty, &doc.backend, &doc.name, &doc.value);
-            let mut children: FxMap<i64, Vec<i64>> = FxMap::default();
+            // Per node, by index (every node is looked at, most more than
+            // once: arrays, not maps).
+            let n = parents.len();
+            let at = |v: i64| usize::try_from(v).ok().filter(|&i| i < n);
+            // Each element's element children, in order.
+            let mut children: Vec<Vec<i64>> = vec![Vec::new(); n];
             // Each element's own text nodes, in order.
-            let mut own_text: FxMap<i64, Vec<&str>> = FxMap::default();
+            let mut own_text: Vec<Vec<&str>> = vec![Vec::new(); n];
             // Elements with text of their own somewhere inside.
-            let mut texted = FxSet::default();
+            let mut texted = vec![false; n];
             for (i, &parent) in parents.iter().enumerate() {
-                if types.get(i) == Some(&1) && parent >= 0 {
-                    children.entry(parent).or_default().push(i as i64);
+                let Some(p) = at(parent) else { continue };
+                if types.get(i) == Some(&1) {
+                    children[p].push(i as i64);
                 }
                 let value = values.get(i).map_or("", |&v| text(v));
                 if types.get(i) == Some(&3) && !value.trim().is_empty() {
-                    own_text.entry(parent).or_default().push(value);
-                    let mut at = parent;
+                    own_text[p].push(value);
+                    let mut up = parent;
                     for _ in 0..64 {
-                        if at < 0 || !texted.insert(at) {
-                            break;
+                        match at(up) {
+                            Some(u) if !texted[u] => texted[u] = true,
+                            _ => break,
                         }
-                        at = parents.get(at as usize).copied().unwrap_or(-1);
+                        up = parents[up as usize];
                     }
                 }
             }
-            let listening: FxSet<i64> = doc.clickable.iter().map(|&i| i as i64).collect();
+            let children_of = |i: i64| -> &[i64] { at(i).map_or(&[], |i| children[i].as_slice()) };
+            let own_text_of = |i: i64| -> &[&str] { at(i).map_or(&[], |i| own_text[i].as_slice()) };
+            let texted = |i: i64| at(i).is_some_and(|i| texted[i]);
+            let mut listening = vec![false; n];
+            for &i in doc.clickable.iter().filter(|&&i| i < n) {
+                listening[i] = true;
+            }
             // Per laid-out node: (cursor, pointer-events, opacity, has an area,
             // visibility).
-            let mut boxes = FxMap::default();
-            for l in &doc.layout {
+            let mut boxes = vec![None; n];
+            for l in doc.layout.iter().filter(|l| l.node < n) {
                 let style = |k: usize| text(l.styles[k]);
                 let area = l.bounds[2] > 0.0 && l.bounds[3] > 0.0;
-                boxes.insert(l.node as i64, (style(0), style(1), style(2), area, style(3)));
+                boxes[l.node] = Some((style(0), style(1), style(2), area, style(3)));
             }
-            let pointer = |i: i64| boxes.get(&i).is_some_and(|b| b.0 == "pointer");
+            let box_of = |i: i64| at(i).and_then(|i| boxes[i]);
+            let pointer = |i: i64| box_of(i).is_some_and(|b| b.0 == "pointer");
             let transparent = |mut i: i64| {
                 for _ in 0..64 {
-                    if boxes.get(&i).is_some_and(|b| b.2 == "0") {
+                    if box_of(i).is_some_and(|b| b.2 == "0") {
                         return true;
                     }
                     match parents.get(i as usize) {
@@ -6216,13 +6230,13 @@ fn clickables_from(snap: &Snap) -> ax::Clickables {
                             | "treeitem"
                     )
             };
-            let boxed = |i: &i64| boxes.get(i).is_some_and(|b| b.3);
+            let boxed = |i: &i64| box_of(*i).is_some_and(|b| b.3);
             // The items of a list or rows of a table that `i` holds (through
             // wrappers of one child each): two or more list items or rows of
             // one tag and class, most of its children, each with text.
             let items = |mut i: i64| -> Option<Vec<i64>> {
                 for _ in 0..4 {
-                    let kids: Vec<i64> = children.get(&i).into_iter().flatten().copied().filter(boxed).collect();
+                    let kids: Vec<i64> = children_of(i).iter().copied().filter(boxed).collect();
                     match kids.as_slice() {
                         [] => return None,
                         [only] => i = *only,
@@ -6235,7 +6249,7 @@ fn clickables_from(snap: &Snap) -> ax::Clickables {
                             let group = groups.into_values().max_by_key(Vec::len)?;
                             let listed = group.len() >= 2
                                 && group.len() * 2 > kids.len()
-                                && group.iter().all(|&k| item(k) && texted.contains(&k));
+                                && group.iter().all(|&k| item(k) && texted(k));
                             return listed.then_some(group);
                         }
                     }
@@ -6272,18 +6286,24 @@ fn clickables_from(snap: &Snap) -> ax::Clickables {
                     }
                 })
             };
-            let by_id: std::collections::HashMap<&str, i64> = (0..names.len() as i64)
-                .filter(|&i| types.get(i as usize) == Some(&1))
-                .map(|i| (attr_of(i, "id"), i))
-                .filter(|(id, _)| !id.is_empty())
-                .collect();
+            // Only a label asks (the last element with an id wins).
+            let by_id = std::cell::OnceCell::new();
+            let by_id = || {
+                by_id.get_or_init(|| -> std::collections::HashMap<&str, i64> {
+                    (0..names.len() as i64)
+                        .filter(|&i| types.get(i as usize) == Some(&1))
+                        .map(|i| (attr_of(i, "id"), i))
+                        .filter(|(id, _)| !id.is_empty())
+                        .collect()
+                })
+            };
             // A label clicks its control, which has a ref of its own, unless
             // the control is hidden: then the label is what a user clicks.
             let control_hidden = |label: i64| {
-                let control = by_id.get(attr_of(label, "for")).copied().or_else(|| {
+                let control = by_id().get(attr_of(label, "for")).copied().or_else(|| {
                     let mut stack = vec![(label, 0)];
                     while let Some((at, depth)) = stack.pop() {
-                        for &k in children.get(&at).into_iter().flatten() {
+                        for &k in children_of(at) {
                             if matches!(tag_of(k), "INPUT" | "SELECT" | "TEXTAREA") {
                                 return Some(k);
                             }
@@ -6298,7 +6318,7 @@ fn clickables_from(snap: &Snap) -> ax::Clickables {
             };
             // A user's click could land on it.
             let landable = |i: i64| {
-                let Some(&(_, events, _, area, visibility)) = boxes.get(&i) else { return false };
+                let Some((_, events, _, area, visibility)) = box_of(i) else { return false };
                 let tag = tag_of(i);
                 !foreign
                     && !matches!(tag, "HTML" | "BODY")
@@ -6315,14 +6335,14 @@ fn clickables_from(snap: &Snap) -> ax::Clickables {
                 let mut words = String::new();
                 let mut stack = vec![(i, 0)];
                 while let Some((at, depth)) = stack.pop() {
-                    for value in own_text.get(&at).into_iter().flatten() {
+                    for value in own_text_of(at) {
                         words.push(' ');
                         words.push_str(value.trim());
                     }
                     if words.len() > 80 || depth >= 8 {
                         continue;
                     }
-                    for &k in children.get(&at).into_iter().flatten().rev() {
+                    for &k in children_of(at).iter().rev() {
                         stack.push((k, depth + 1));
                     }
                 }
@@ -6402,7 +6422,7 @@ fn clickables_from(snap: &Snap) -> ax::Clickables {
                         _ => {}
                     }
                     if depth < 4 {
-                        for &k in children.get(&at).into_iter().flatten() {
+                        for &k in children_of(at) {
                             queue.push_back((k, depth + 1));
                         }
                     }
@@ -6428,20 +6448,20 @@ fn clickables_from(snap: &Snap) -> ax::Clickables {
                     attr("class").and_then(|c| c.split_whitespace().next().map(|c| format!(".{c}")))
                 };
                 // With no text inside (an icon button): what the page says it is.
-                let what = if texted.contains(&index) { None } else { icon_hint(index) };
+                let what = if texted(index) { None } else { icon_hint(index) };
                 match (selector, what) {
                     (Some(s), Some(w)) => out.hints.insert(backend, format!("{s} {w}")),
                     (Some(h), None) | (None, Some(h)) => out.hints.insert(backend, h),
                     (None, None) => None,
                 };
-                if !landable(index) {
-                    continue;
-                }
                 let parent = parents.get(i).copied().unwrap_or(-1);
                 // `draggable=true` is a handle a user grabs, handler or not.
-                if listening.contains(&index)
+                // The cheap tests first: most elements fail them, and
+                // whether a click could land walks the ancestors.
+                if (listening[i]
                     || (pointer(index) && !pointer(parent))
-                    || attr("draggable").as_deref() == Some("true")
+                    || attr("draggable").as_deref() == Some("true"))
+                    && landable(index)
                 {
                     match items(index) {
                         Some(items) => out.nodes.extend(
@@ -7504,6 +7524,63 @@ mod tests {
             drop(snap.clone().patch(vec![Op::Replace { backend, nodes: vec![node] }]).unwrap())
         });
         time("clone", &mut || drop(snap.clone()));
+    }
+
+    /// The clickable elements of every snapshot in `NAVIGERA_SNAP_DIR`, one
+    /// JSON line per file (sorted), to compare two builds by.
+    #[test]
+    #[ignore]
+    fn clickables_of_saved_snapshots() {
+        use super::*;
+        let dir = std::env::var("NAVIGERA_SNAP_DIR").expect("NAVIGERA_SNAP_DIR");
+        let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        for f in files {
+            let value: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+            let snap = Snap::from_value(&value).unwrap();
+            let c = clickables_from(&snap);
+            let mut nodes: Vec<_> = c.nodes.iter().copied().collect();
+            nodes.sort();
+            let hints: std::collections::BTreeMap<_, _> = c.hints.iter().collect();
+            let texts: std::collections::BTreeMap<_, _> = c.texts.iter().collect();
+            println!(
+                "{} {}",
+                f.file_name().unwrap().to_string_lossy(),
+                json!({"nodes": nodes, "hints": hints, "texts": texts})
+            );
+        }
+    }
+
+    /// The tree made as it prints is the whole tree's text, on every
+    /// snapshot in `NAVIGERA_SNAP_DIR`, at several limits, with and without
+    /// full text and every ref.
+    #[test]
+    #[ignore]
+    fn lazy_tree_of_saved_snapshots() {
+        use super::*;
+        let dir = std::env::var("NAVIGERA_SNAP_DIR").expect("NAVIGERA_SNAP_DIR");
+        let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        let mut checked = 0;
+        for f in files {
+            let value: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+            let snap = Snap::from_value(&value).unwrap();
+            let built = domax::build(&snap).unwrap();
+            let strings = domax::strings(&snap);
+            let source = domax::Lazy::new(&snap, &strings).unwrap();
+            let clicks = clickables_from(&snap);
+            for limit in [0, 1, 7, 50, 2000] {
+                for (full_text, all_refs) in [(false, false), (true, false), (false, true)] {
+                    let opts = ax::Options { limit, full_text, all_refs, clicks: clicks.clone(), ..Default::default() };
+                    let whole = ax::render_nodes("page", &built.nodes, &built.frames, &opts);
+                    let lazy = ax::render_source("page", &source, &opts);
+                    assert!(whole.text == lazy.text, "{}: lazy differs at limit {limit}", f.display());
+                    assert_eq!(whole.refs, lazy.refs, "{}: refs differ at limit {limit}", f.display());
+                    checked += 1;
+                }
+            }
+        }
+        eprintln!("{checked} renders equal");
     }
 
     #[test]
