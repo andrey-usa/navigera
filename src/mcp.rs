@@ -42,8 +42,7 @@ fn target_props() -> Value {
         "text": {"type": "string", "description": "Visible text/label, instead of ref"},
     });
     if deciding() {
-        props["find"] =
-            json!({"type": "string", "description": "Or describe it: a decision model picks it"});
+        props["find"] = json!({"type": "string", "description": "Or describe it: a decision model picks it"});
     }
     props
 }
@@ -93,7 +92,8 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 /// schemas and every one stays callable by name.
 /// The browser tools, as `tools/list` gives them.
 pub fn tools() -> Vec<Value> {
-    let action = |extra: Value| props(&[target_props(), extra, json!({"snapshot": snapshot_prop(), "state": state_prop()})]);
+    let action =
+        |extra: Value| props(&[target_props(), extra, json!({"snapshot": snapshot_prop(), "state": state_prop()})]);
     let mut list = vec![
         tool(
             "browser_navigate",
@@ -269,7 +269,8 @@ pub fn tools() -> Vec<Value> {
 /// The rarely needed tools: off `tools/list` so the per-turn list stays
 /// small, still callable by name; `browser_more` returns this list.
 fn deferred_tools() -> Vec<Value> {
-    let action = |extra: Value| props(&[target_props(), extra, json!({"snapshot": snapshot_prop(), "state": state_prop()})]);
+    let action =
+        |extra: Value| props(&[target_props(), extra, json!({"snapshot": snapshot_prop(), "state": state_prop()})]);
     vec![
         tool("browser_hover", "Move the mouse over an element (hover menus).", object(action(json!({})), &[]), false),
         tool(
@@ -521,7 +522,11 @@ fn plan(name: &str, arguments: &Value) -> Result<Plan, String> {
                 args.get(k).and_then(Value::as_u64).map(|v| v.to_string()).ok_or(format!("browser_resize needs {k}"))
             };
             let values = vec![dim("width")?, dim("height")?];
-            Plan { full_state: false, steps: vec![json!({"op": "set", "what": "viewport", "values": values})], snapshot: false }
+            Plan {
+                full_state: false,
+                steps: vec![json!({"op": "set", "what": "viewport", "values": values})],
+                snapshot: false,
+            }
         }
         "browser_file_upload" => {
             if let Some(paths) = args.remove("paths") {
@@ -1026,12 +1031,30 @@ mod tests {
     #[test]
     fn no_baseline_tool_is_lost() {
         const BASELINE: &[&str] = &[
-            "browser_check", "browser_click", "browser_close", "browser_console_messages",
-            "browser_evaluate", "browser_file_upload", "browser_fill", "browser_find",
-            "browser_handle_dialog", "browser_handoff", "browser_history", "browser_hover",
-            "browser_mouse", "browser_navigate", "browser_network_requests", "browser_press_key",
-            "browser_resize", "browser_run", "browser_screenshot", "browser_scroll",
-            "browser_select_option", "browser_snapshot", "browser_tabs", "browser_type",
+            "browser_check",
+            "browser_click",
+            "browser_close",
+            "browser_console_messages",
+            "browser_evaluate",
+            "browser_file_upload",
+            "browser_fill",
+            "browser_find",
+            "browser_handle_dialog",
+            "browser_handoff",
+            "browser_history",
+            "browser_hover",
+            "browser_mouse",
+            "browser_navigate",
+            "browser_network_requests",
+            "browser_press_key",
+            "browser_resize",
+            "browser_run",
+            "browser_screenshot",
+            "browser_scroll",
+            "browser_select_option",
+            "browser_snapshot",
+            "browser_tabs",
+            "browser_type",
             "browser_wait_for",
         ];
         let advertised: std::collections::HashSet<String> = tools()

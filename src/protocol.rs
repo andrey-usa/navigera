@@ -2565,7 +2565,7 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
     let refs = path.join("references");
     std::fs::create_dir_all(&refs)?;
     for (name, text) in SKILL_REFS {
-        write_own(&refs.join(name), text.as_bytes())?;
+        write_own(refs.join(name), text.as_bytes())?;
     }
     Ok(file.display().to_string())
 }
