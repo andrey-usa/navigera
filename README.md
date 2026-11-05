@@ -285,7 +285,7 @@ the same protocol.
 
 `navigera mcp` is a Model Context Protocol server for Cline, Roo Code, Kilo
 Code, Continue, VS Code, Claude Desktop and Cursor, with the same tree, refs and
-waits as the CLI, in 23 tools (a tool list of about 16 KB). Add it as `{"command": "navigera", "args": ["mcp"]}`, or without
+waits as the CLI, in 13 tools (a tool list of about 8 KB; `browser_more` lists the rarer ones on demand). Add it as `{"command": "navigera", "args": ["mcp"]}`, or without
 installing anything as
 `{"command": "npx", "args": ["-y", "navigera", "mcp"]}`; per-client snippets
 are in [docs/navigera.md](https://github.com/andrey-usa/navigera/blob/master/docs/navigera.md#mcp-server-ide-agents). Agents that run
@@ -652,7 +652,7 @@ CI results, A/B benchmarks and releasing.
 - `bench/llm/`: one model drives each tool (navigera, agent-browser, playwright-cli, Playwright MCP, Chrome DevTools MCP) on a site the driver serves, judged from its recorded state (`llm-bench.yml`)
 - `bench/decide/`: decision benchmark (`compare.py`), TypeSafe relay (`relay.py`) and a stand-in for runs without a key (`mock_jev.py`)
 - `tools/`: `cdp_check.py` (protocol correctness), `protocol_dump.sh`, `cft_matrix.py` (Chrome version matrix)
-- `skills/navigera/SKILL.md`: the agent guide (compiled into the binary: `navigera skill`)
+- `skills/navigera/SKILL.md` (+ `references/`): the agent guide, a <=5 KB core with on-demand references (compiled into the binary: `navigera skill`)
 - `.github/workflows/`: `ci.yml` (tests, Chrome matrix, protocol check), `bench.yml`, `agent-eval.yml`, `llm-bench.yml`, `release.yml`, `chrome-bisect.yml`, `vendor.yml`
 
 </details>

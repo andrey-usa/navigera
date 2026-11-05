@@ -113,7 +113,7 @@ fn mcp_handshake_without_a_browser() {
         assert!(names.contains(&want), "{want} missing from {names:?}");
     }
     let schemas = serde_json::to_string(&list["result"]["tools"]).unwrap();
-    assert!(schemas.len() < 16_000, "tool list stays small for the model's context: {} bytes", schemas.len());
+    assert!(schemas.len() < 8_000, "tool list stays small for the model's context: {} bytes", schemas.len());
 
     assert!(c.request("ping", json!({}))["result"].is_object());
     assert_eq!(c.request("resources/list", json!({}))["error"]["code"], -32601);

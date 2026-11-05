@@ -145,7 +145,7 @@ another process are reachable by ref only.
 | `quit` (`close`) | — | `{bye: true}`; a session server exits with its browser context (a browser of its own: with its browser). `--close-browser` on a shared browser closes it with this session unless other sessions use it, and says which |
 | `skill` | — | prints the agent guide (SKILL.md) |
 | `install-browser` | `[chrome-headless-shell \| chrome] [--channel stable\|beta\|dev\|canary] [--where]` | downloads that Chrome from Google's Chrome for Testing into navigera's cache, used from then on (see Browsers and engines): `{installed, version}`; `--where` prints the directory |
-| `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
+| `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` with its `references/` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
 
 Other names the parser takes, for agents used to other tools' names: `navigate`
 (`goto`), `drag-drop` (`drag`), `cookie` (`cookies`), `emulate` (`set`),
@@ -512,8 +512,8 @@ HAR or response body from `network`, a PDF, a screenshot's path, a
 the client opened). `NAVIGERA_MCP_ALLOW_FILES=1` lifts these limits.
 
 Every action takes `snapshot: true` to return the updated tree in the same
-call. The whole tool list (23 tools) is about 16 KB (~4,000 tokens), against
-~26 KB for Chrome DevTools MCP 1.10.1.
+call. The default tool list (13 of the 23 tools; `browser_more` lists the rest on demand) is about 8 KB
+(~2,000 tokens), against ~26 KB for Chrome DevTools MCP 1.10.1.
 
 Client configuration (all run the same command):
 
