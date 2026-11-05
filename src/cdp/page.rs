@@ -3166,6 +3166,8 @@ pub struct Page {
     /// one can be patched, as can any read after a journal primed with its
     /// arming ([`Kept::rested`]).
     primed: Arc<std::sync::Mutex<Option<u64>>>,
+    /// The journal of the last [`Page::pre_read`] (0: none yet).
+    pre_journal: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A tree read's snapshot, kept with the journal armed with it.
@@ -3279,6 +3281,7 @@ impl Page {
             journal: Default::default(),
             kept: Default::default(),
             primed: Default::default(),
+            pre_journal: Default::default(),
         }
     }
 
@@ -6752,6 +6755,48 @@ impl Page {
         }
     }
 
+    /// Read a large page ahead of its first `ax`, while the agent reads
+    /// what `goto` said: a journal armed and primed, then the page
+    /// captured, and the snapshot kept as a read keeps it, unprinted. The
+    /// `ax` that comes next is then patched with what changed since (see
+    /// [`Page::read_delta`]) instead of capturing the page itself. Not on
+    /// a page small enough to capture quickly, nor where a read would not
+    /// keep its snapshot, nor one whose capture would take longer than
+    /// `budget`. Says why not, or "" once kept.
+    pub fn pre_read(&self, budget: Duration, timeout: Duration) -> &'static str {
+        if !delta_reads() || !rest_prime() || self.shared.is_single_target() {
+            return "off";
+        }
+        let Some(nodes) = self.dom_nodes(timeout) else { return "no node count" };
+        if nodes <= JOURNAL_NODES {
+            return "small page";
+        }
+        if Duration::from_micros(nodes * PRE_READ_NODE_US) > budget {
+            return "too large for the client's pause";
+        }
+        let Some((id, watched, rested)) = self.arm_journal(timeout) else { return "no journal" };
+        if !rested {
+            return "not primed";
+        }
+        let started = std::time::Instant::now();
+        let Some(text) = self.dom_snapshot(timeout) else { return "no snapshot" };
+        let Some(snap) = snap_from_text(&text) else { return "no document" };
+        drop(std::thread::spawn(move || drop(text)));
+        crate::timing::record("pre_read", started);
+        if watched < snap.docs.len() as u64 || has_closed_shadow_root(&snap) {
+            return "not watched whole";
+        }
+        *self.kept.lock().unwrap() = Some(Kept { journal: id, snap, rested: true });
+        self.pre_journal.store(id, std::sync::atomic::Ordering::Relaxed);
+        ""
+    }
+
+    /// The snapshot [`Page::pre_read`] kept is still there: no read took it.
+    pub fn pre_read_unused(&self) -> bool {
+        let pre = self.pre_journal.load(std::sync::atomic::Ordering::Relaxed);
+        pre != 0 && self.kept.lock().unwrap().as_ref().is_some_and(|k| k.journal == pre)
+    }
+
     /// Accessibility snapshot for agents (see [`ax`]): an indented text
     /// tree with `[ref=N]` on actionable nodes, iframes included. `json`
     /// keeps the older flat `[{ref, role, name, value?}]` list.
@@ -7522,6 +7567,11 @@ const DOM_TREE_NODES: u64 = 800;
 /// [`JOURNAL_ARM`]): reading again costs tens of milliseconds there, and
 /// keeping the journal a few. Below it, a read is about as cheap.
 const JOURNAL_NODES: u64 = 2500;
+
+/// What capturing a DOM node costs at most, for judging whether a read
+/// ahead ends before the client's next command (see [`Page::pre_read`]):
+/// a 10,000-row page's 80,000 nodes took 350-660 ms, Chrome 153, 4 cores.
+const PRE_READ_NODE_US: u64 = 8;
 
 /// How long `close_target` waits for the page to go after `Page.close`.
 const CLOSE_WAIT: Duration = Duration::from_millis(1500);

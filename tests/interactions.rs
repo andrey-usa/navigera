@@ -2061,6 +2061,68 @@ fn a_read_leaves_walking_a_large_style_sheet_to_the_first_action() {
     let _ = std::fs::remove_file(&trace);
 }
 
+/// A client that pauses between commands (an agent reading what `goto`
+/// said) has the large page read ahead while it pauses: its first `ax`
+/// captures nothing and still shows what changed after `goto`. A client
+/// that sends its next command at once (a script) gets no read ahead.
+#[test]
+fn the_first_read_after_a_paused_goto_was_read_ahead() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let trace = std::env::temp_dir().join(format!("nv-interactions-ahead-{}.jsonl", std::process::id()));
+    let name =
+        std::env::temp_dir().join(format!("nv-interactions-ahead-{}.sock", std::process::id())).display().to_string();
+    let _ = std::fs::remove_file(&trace);
+    let out = Command::new(tool_exe())
+        .env("NAVIGERA_CDP_TRACE", &trace)
+        .env_remove("NAVIGERA_PRE_READ")
+        .env_remove("NAVIGERA_REST_PRIME")
+        .args(["--session", &name, "start"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run navigera");
+    assert!(out.status.success(), "start failed: {}", String::from_utf8_lossy(&out.stdout));
+    let run = |args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .args(["--session", &name])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let captures = || {
+        std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
+            .count()
+    };
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(1500));
+    let page = format!("{}/clicks", site.url);
+    pause();
+    run(&["goto", &page]);
+    pause();
+    let before = captures();
+    assert!(before >= 1, "the page was read ahead while the client paused");
+    // A change between the read ahead and the read is shown.
+    run(&["eval", "document.querySelector('#r5 td:nth-child(2)').textContent = 'changed after goto'"]);
+    pause();
+    let tree = run(&["ax"]);
+    assert!(tree.contains("changed after goto") && tree.contains("SKU-00000"), "{tree}");
+    assert_eq!(captures(), before, "the first read patched what was read ahead");
+    // Commands sent at once: no read ahead, the read captures.
+    for _ in 0..3 {
+        run(&["title"]);
+    }
+    run(&["goto", &page]);
+    let before = captures();
+    assert!(run(&["ax"]).contains("SKU-00000"));
+    assert_eq!(captures(), before + 1, "a script's read captures for itself");
+    run(&["quit"]);
+    let _ = std::fs::remove_file(&trace);
+}
+
 /// After a click whose fetch has started, the snapshot waits for that fetch
 /// and a short settle, not the whole quiet window: the list is there, well
 /// before the 200 ms fetch plus 500 ms of quiet it used to take. A window

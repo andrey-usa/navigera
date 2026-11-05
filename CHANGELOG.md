@@ -76,6 +76,17 @@ All notable changes to this project are documented here. The format follows
   first action, as before (github.com, first `ax` 193 to 72 ms; medians
   of 5, interleaved, live). A walk also stops as soon as it finds more
   state-dependent rules than the journal tracks.
+- The first `ax` after a `goto` on a large page is patched too, when the
+  client pauses between its commands (an agent reading what `goto` said):
+  while it pauses, the session captures the page once its network is
+  quiet and keeps the snapshot as a read would, unprinted (10,000 rows,
+  first `ax` 776 to 130 ms; 1,000 rows 93 to 34 ms; medians of 10,
+  interleaved, local). Only for a client that paused 1 s or more before
+  each of its last three commands, and a page whose capture fits in half
+  that pause: Chrome's capture can't be cut short, so a command that
+  comes in while it runs waits for it. A page read ahead and left
+  unread for another `goto` stops it until an `ax` follows a `goto`
+  again. `NAVIGERA_PRE_READ=0` turns it off.
 - Building a large page's tree costs less on navigera's side (10,000 rows,
   from a saved snapshot: tree 85 to 51 ms, text 49 to 26 ms, clickable
   elements 34 to 20 ms): the snapshot is read into columns once, per-node

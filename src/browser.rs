@@ -2428,6 +2428,16 @@ impl BrowserSession {
         self.active_tab().journal_id()
     }
 
+    /// [`cdp::Page::pre_read`] on the active tab.
+    pub fn pre_read(&self, budget: Duration) -> &'static str {
+        self.active_tab().pre_read(budget, self.timeout(None))
+    }
+
+    /// [`cdp::Page::pre_read_unused`] on the active tab.
+    pub fn pre_read_unused(&self) -> bool {
+        self.active_tab().pre_read_unused()
+    }
+
     /// [`cdp::Page::journal_prime`] on the active tab.
     pub fn journal_prime(&self, id: u64, entry: bool) -> bool {
         self.active_tab().journal_prime(id, entry, self.timeout(None))

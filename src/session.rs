@@ -349,12 +349,17 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     // Set once the session took its socket file away early (shared browser
     // gone for good).
     let mut retired = false;
+    driver.serving();
     loop {
         // Between commands: a storage snapshot an op skipped for being too
-        // soon after the last one is taken once the session is idle.
-        let (stream, arrived) = match incoming.recv_timeout(Duration::from_millis(250)) {
+        // soon after the last one is taken once the session is idle, and a
+        // page a `goto` loaded is read ahead of its `ax` once it is quiet
+        // (looked for often while one is due).
+        let tick = if driver.pre_read_due() { Duration::from_millis(10) } else { Duration::from_millis(250) };
+        let (stream, arrived) = match incoming.recv_timeout(tick) {
             Ok(next) => next,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                driver.pre_read_if_idle();
                 driver.snapshot_if_idle();
                 continue;
             }

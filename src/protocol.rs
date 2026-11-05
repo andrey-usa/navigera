@@ -2627,6 +2627,49 @@ pub struct Driver {
     look: Option<Look>,
     /// The last report was compact: an agent reads what actions change.
     compact: bool,
+    /// A read ahead of the first `ax` after a `goto` (see
+    /// [`Driver::pre_read_if_idle`]).
+    pre_read: PreRead,
+}
+
+/// When to read a page ahead of its first `ax` (see
+/// [`Driver::pre_read_if_idle`]).
+#[derive(Default)]
+struct PreRead {
+    /// A `goto` answered then, on that document: read it once the
+    /// session is idle and the page quiet.
+    due: Option<(Instant, (String, u64))>,
+    /// A page read ahead was left for another `goto` unread: read ahead no
+    /// more until an `ax` follows a `goto` again.
+    off: bool,
+    /// The last command was a `goto`.
+    after_goto: bool,
+    /// When the last command was answered (or the session came up).
+    answered: Option<Instant>,
+    /// How long the client took to send each of its last commands after
+    /// the one before was answered, newest last.
+    gaps: std::collections::VecDeque<Duration>,
+}
+
+/// How many of the client's last pauses between commands judge whether it
+/// leaves time for a read ahead.
+const PRE_READ_GAPS: usize = 3;
+
+/// How long after a `goto` a page is still read ahead: past this, the
+/// agent is not about to read it.
+const PRE_READ_WITHIN: Duration = Duration::from_secs(30);
+
+/// A read ahead holds up a command that comes in while it runs (it is
+/// Chrome's capture of the page, which nothing can cut short), so it is
+/// made only for a client that has paused this long or longer before
+/// each of its last commands: an agent thinking, not a script.
+const PRE_READ_PAUSE: Duration = Duration::from_secs(1);
+
+/// Whether a large page is read ahead of its first `ax` after a `goto`
+/// (`NAVIGERA_PRE_READ=0` leaves the capture to that `ax`, to compare).
+fn pre_read_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_PRE_READ").map_or(true, |v| v.trim() != "0"))
 }
 
 /// A text tree as an `ax` read it, and the document it was read from.
@@ -2976,6 +3019,7 @@ impl Driver {
                 reported: None,
                 look: None,
                 compact: false,
+                pre_read: PreRead::default(),
             });
         }
         if let Some(target) = config.attach_target() {
@@ -2989,6 +3033,7 @@ impl Driver {
                 reported: None,
                 look: None,
                 compact: false,
+                pre_read: PreRead::default(),
             });
         }
         let mut session = BrowserSession::launch_with(
@@ -3002,7 +3047,15 @@ impl Driver {
             e.context(format!("browser launch failed (engine={}, headed={})", config.engine, config.headed))
         })?;
         Self::apply_allow_policy(&mut session, config)?;
-        Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None, look: None, compact: false })
+        Ok(Self {
+            session,
+            history: Vec::new(),
+            crash: Crash::default(),
+            reported: None,
+            look: None,
+            compact: false,
+            pre_read: PreRead::default(),
+        })
     }
 
     /// A named session's or an MCP server's browser: a context of its own
@@ -3017,7 +3070,15 @@ impl Driver {
             .map_err(|e| e.context(format!("browser launch failed (shared browser, headed={})", config.headed)))?;
         Self::apply_allow_policy(&mut session, config)?;
         let crash = Crash { headless: !config.headed, ..Crash::default() };
-        Ok(Self { session, history: Vec::new(), crash, reported: None, look: None, compact: false })
+        Ok(Self {
+            session,
+            history: Vec::new(),
+            crash,
+            reported: None,
+            look: None,
+            compact: false,
+            pre_read: PreRead::default(),
+        })
     }
 
     /// The process-wide settings `config` names: natural mode, the element
@@ -3051,6 +3112,7 @@ impl Driver {
             reported: None,
             look: None,
             compact: false,
+            pre_read: PreRead::default(),
         })
     }
 
@@ -3488,6 +3550,7 @@ impl Driver {
     /// Run one op, after relaunching the shared browser if it died since the
     /// last one; its outcome says so, and what was lost.
     pub fn run_op(&mut self, command: &Command) -> anyhow::Result<Outcome> {
+        self.pre_read_before(command);
         self.whole_look_before(command);
         let mut recovered = if self.session.is_shared()
             && self.session.browser_gone()
@@ -3527,6 +3590,12 @@ impl Driver {
             }
         }
         self.remember();
+        if matches!(command, Command::Goto { .. }) && result.is_ok() && !self.pre_read.off && pre_read_on() {
+            self.pre_read.due = Some((Instant::now(), self.session.page_identity()));
+        }
+        if !matches!(command, Command::Status {}) {
+            self.pre_read.answered = Some(Instant::now());
+        }
         match (&mut result, recovered) {
             (Ok(outcome), Some(r)) => {
                 outcome.notes.insert(0, r.note);
@@ -3536,6 +3605,71 @@ impl Driver {
             _ => {}
         }
         result
+    }
+
+    /// What a command says about reading ahead: any command takes the
+    /// session before a read ahead started; a `goto` that finds the last
+    /// page read ahead unread stops it, an `ax` right after a `goto`
+    /// starts it again.
+    fn pre_read_before(&mut self, command: &Command) {
+        if matches!(command, Command::Status {}) {
+            return;
+        }
+        self.pre_read.due = None;
+        if let Some(at) = self.pre_read.answered.take() {
+            if self.pre_read.gaps.len() == PRE_READ_GAPS {
+                self.pre_read.gaps.pop_front();
+            }
+            self.pre_read.gaps.push_back(at.elapsed());
+        }
+        match command {
+            Command::Goto { .. } if self.session.pre_read_unused() => self.pre_read.off = true,
+            Command::Ax { .. } if self.pre_read.after_goto => self.pre_read.off = false,
+            _ => {}
+        }
+        self.pre_read.after_goto = matches!(command, Command::Goto { .. });
+    }
+
+    /// The session server is up and waiting for its first command: the
+    /// client's first pause counts from here.
+    pub fn serving(&mut self) {
+        self.pre_read.answered = Some(Instant::now());
+    }
+
+    /// Whether a read ahead waits for the session to be idle.
+    pub fn pre_read_due(&self) -> bool {
+        self.pre_read.due.is_some()
+    }
+
+    /// Between commands: read the page a `goto` loaded ahead of its first
+    /// `ax` (see [`crate::cdp::Page::pre_read`]) once its network is
+    /// quiet, as that `ax` would wait for it to be; the session server
+    /// calls this only while no command waits.
+    pub fn pre_read_if_idle(&mut self) {
+        let Some((at, page)) = &self.pre_read.due else { return };
+        if at.elapsed() > PRE_READ_WITHIN || *page != self.session.page_identity() || self.session.browser_gone() {
+            self.pre_read.due = None;
+            return;
+        }
+        if !self.session.network_quiet(self.session.network_quiet_window(), Duration::ZERO) {
+            return;
+        }
+        self.pre_read.due = None;
+        // The client's shortest recent pause, half of it for the capture
+        // (it may pause less this time).
+        let pause = self.pre_read.gaps.iter().min().copied().unwrap_or_default();
+        if pause < PRE_READ_PAUSE {
+            crate::timing::log(&format!("[pre-read] not read ahead: the client paused {} ms", pause.as_millis()));
+            return;
+        }
+        let started = Instant::now();
+        let why = self.session.pre_read(pause / 2);
+        crate::timing::record("pre_read_total", started);
+        if why.is_empty() {
+            crate::timing::log("[pre-read] read ahead");
+        } else {
+            crate::timing::log(&format!("[pre-read] not read ahead: {why}"));
+        }
     }
 
     /// Keep what a crash is recovered from: the tabs on every op (one
