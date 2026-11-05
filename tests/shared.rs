@@ -495,6 +495,9 @@ fn a_second_crash_right_after_a_recovery_ends_the_session() {
     let (_, r) = after_crash(&a, &["eval", "1"]);
     let err = r["error"].as_str().unwrap_or_default().to_string();
     assert!(err.contains("crashed again") && err.contains("start"), "{err}");
+    // Gone before that answer: the `start` below makes a new session instead
+    // of finding this one on its way out (which said "already running").
+    assert!(!std::path::Path::new(&a.sock).exists(), "the ended session's socket is still there");
     let a = browser.start("a", &[]);
     assert_eq!(a.text(&["eval", "1 + 1"]), "2");
 }

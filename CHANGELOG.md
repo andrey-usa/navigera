@@ -104,6 +104,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `start` right after a session ended because its shared browser crashed
+  again makes a new session. The ended session answered first and let go
+  of its socket afterwards, so a `start` in between reached it on its way
+  out, said `already_running`, and the next command found no session
+  (seen on Windows, about 1 run in 30). The socket now goes before that
+  answer, and a `start` that reaches a server leaving without answering
+  waits for it to go and starts a new session.
 - `ax` no longer shows content the page hides behind a display lock
   once it has been shown: the body of a `<details>` opened and closed
   again, or what is under `content-visibility: hidden` or

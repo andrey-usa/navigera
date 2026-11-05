@@ -346,6 +346,9 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     // connected (`start` checking the socket is up) kept no one waiting.
     let mut free_since = Instant::now();
     let mut callers = Callers::default();
+    // Set once the session took its socket file away early (shared browser
+    // gone for good).
+    let mut retired = false;
     loop {
         // Between commands: a storage snapshot an op skipped for being too
         // soon after the last one is taken once the session is idle.
@@ -358,17 +361,18 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let waited = arrived < free_since;
-        let (quit, ran) = serve_connection(&mut driver, stream, &last_activity, &server, waited, &mut callers);
+        let (quit, ran) =
+            serve_connection(&mut driver, stream, &last_activity, &server, waited, &mut callers, &path, &mut retired);
         if ran {
             free_since = Instant::now();
         }
         if quit {
             break;
         }
-        // The shared browser went away: this session's error said so, and
-        // `start` makes a new one (on a relaunched browser).
+        // The shared browser went away: this session's error said so (and
+        // its socket is gone), and `start` makes a new one (on a relaunched
+        // browser).
         if driver.shared_browser_gone() {
-            eprintln!("navigera: the shared browser is gone; shutting the session down");
             break;
         }
     }
@@ -376,7 +380,10 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     crate::timing::report();
     // Log first: a client that finds the socket gone quotes this line.
     eprintln!("navigera: session {} shut down", path.display());
-    let _ = std::fs::remove_file(&path);
+    // Not when it went early: by now the path can be a new session's.
+    if !retired {
+        let _ = std::fs::remove_file(&path);
+    }
     ExitCode::SUCCESS
 }
 
@@ -395,6 +402,7 @@ pub const SHARED_NAME_NOTE: &str = "another command was running on this session 
 /// Serve one client connection; returns whether a `quit` was answered and
 /// whether it ran any command. `waited`: it came in while another
 /// connection's command was running.
+#[allow(clippy::too_many_arguments)]
 fn serve_connection(
     driver: &mut Driver,
     stream: Stream,
@@ -402,6 +410,8 @@ fn serve_connection(
     server: &ServerInfo,
     waited: bool,
     callers: &mut Callers,
+    path: &std::path::Path,
+    retired: &mut bool,
 ) -> (bool, bool) {
     let reader = match stream.try_clone() {
         Ok(read_half) => BufReader::new(read_half),
@@ -450,6 +460,17 @@ fn serve_connection(
                     "parent": server.parent,
                 });
             }
+        }
+        // A command that found the shared browser gone for good ended the
+        // session: its socket file goes before the answer, so a `start` the
+        // caller runs next makes a new session instead of reaching this
+        // server on its way out. (`quit` keeps the file to the end: its
+        // client waits for the file to go.) Log first: a client that finds
+        // the socket gone quotes this line.
+        if driver.shared_browser_gone() && !*retired {
+            eprintln!("navigera: the shared browser is gone; shutting the session down");
+            let _ = std::fs::remove_file(path);
+            *retired = true;
         }
         let written = responses.iter().try_for_each(|response| protocol::write_response(&mut writer, response, false));
         if !probe {
@@ -643,15 +664,21 @@ pub fn client(config: &SessionConfig, name: &str, command: &Command, output: &mu
     if matches!(command, Command::Quit { .. }) {
         // Return only once the server has let go of the socket, so a `start`
         // right after `quit` gets a fresh session, not the dying one.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while path.exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_gone(&path);
     }
     if protocol::print_cli_response(output, &response, config) {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+/// Wait (up to 10 s) until a session server on its way out has let go of
+/// its socket file.
+fn wait_gone(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -710,16 +737,41 @@ pub(crate) fn log_tail(path: &std::path::Path, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
-/// The engine a running session server reports (`status`), if it answers.
-fn running_engine(stream: Stream) -> Option<String> {
+/// What the session server on a socket says to `start`'s `status`.
+enum Running {
+    /// It answered: the engine it runs, when it says.
+    Engine(Option<String>),
+    /// It closed the connection unanswered (on Windows a reset: the
+    /// request was still unread): a server on its way out, not a session
+    /// to report.
+    Leaving,
+}
+
+/// Ask the session server on `stream` for its engine (`status`).
+fn running_engine(stream: Stream) -> Running {
     let mut writer = &stream;
-    writer.write_all(b"{\"id\":1,\"op\":\"status\"}\n").ok()?;
-    writer.flush().ok()?;
+    if writer.write_all(b"{\"id\":1,\"op\":\"status\"}\n").and_then(|()| writer.flush()).is_err() {
+        return Running::Leaving;
+    }
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line).ok()?;
-    let response: Value = serde_json::from_str(line.trim()).ok()?;
-    response.pointer("/result/engine").and_then(Value::as_str).map(str::to_string)
+    match BufReader::new(&stream).read_line(&mut line) {
+        Ok(0) => return Running::Leaving,
+        Ok(_) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            return Running::Leaving
+        }
+        Err(_) => return Running::Engine(None),
+    }
+    let response: Option<Value> = serde_json::from_str(line.trim()).ok();
+    Running::Engine(response.and_then(|r| r.pointer("/result/engine").and_then(Value::as_str).map(str::to_string)))
 }
 
 fn fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCode {
@@ -741,11 +793,16 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     };
     let log_path = path.with_extension("log");
     let (socket_str, log_str) = (path.display().to_string(), log_path.display().to_string());
-    if let Ok(stream) = connect(&path) {
+    let running = connect(&path).ok().map(running_engine);
+    // A server on its way out (it closed `status` unanswered): once it has
+    // let go of the socket, this `start` makes a new session.
+    if matches!(running, Some(Running::Leaving)) {
+        wait_gone(&path);
+    }
+    if let Some(Running::Engine(running)) = running {
         // The running session must be the browser this `start` asks for: a
         // Chrome command sent to a Lightpanda session left over from another
         // run would quietly test the wrong engine.
-        let running = running_engine(stream);
         let wanted = if crate::browser::is_lightpanda(&config.engine) { "lightpanda" } else { "chrome" };
         if let Some(running) = running.filter(|r| r != wanted) {
             return fail(
@@ -931,6 +988,26 @@ mod tests {
 
         let err = ensure_private_dir(&fresh, uid + 1).unwrap_err().to_string();
         assert!(err.contains("owned by uid"), "{err}");
+    }
+
+    #[test]
+    fn a_server_that_closes_status_unanswered_is_leaving_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sock");
+        let listener = endpoint::Listener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            // On its way out: takes the connection and answers nothing.
+            drop(listener.accept().unwrap());
+            // Running: answers `status`.
+            let stream = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            (&stream).write_all(b"{\"id\":1,\"ok\":true,\"result\":{\"engine\":\"chrome\"}}\n").unwrap();
+        });
+        assert!(matches!(running_engine(endpoint::connect(&path).unwrap()), Running::Leaving));
+        let running = running_engine(endpoint::connect(&path).unwrap());
+        assert!(matches!(&running, Running::Engine(Some(engine)) if engine == "chrome"));
+        server.join().unwrap();
     }
 
     #[test]
