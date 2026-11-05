@@ -482,6 +482,20 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             for (const d of docs) walk(d);
         }
         const partial = roots.length >= 1000;
+        // `show()`, `showPopover()` and `details.open` queue their `toggle`
+        // as a later task, so an earlier action's can land in this click's
+        // window: one saying a dialog, <details> or popover went to the
+        // state it already had when this click was armed is that earlier
+        // change's, not this click's. (`toggle` doesn't leave a shadow
+        // tree, so the documents are enough.)
+        const openAtArm = new Set();
+        if (!skip) {
+            for (const d of docs) {
+                try { for (const n of d.querySelectorAll('dialog[open], details[open], :popover-open')) openAtArm.add(n); } catch (_) {
+                    try { for (const n of d.querySelectorAll('dialog[open], details[open]')) openAtArm.add(n); } catch (_) {}
+                }
+            }
+        }
         if (!skip) {
             for (const r of roots) {
                 const o = new MutationObserver((recs) => { fx.m += recs.length; });
@@ -493,6 +507,8 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 // the document or an ancestor a frame later: not the click's.
                 const t = e.target;
                 if (e.type === 'scroll' && (t.nodeType === 9 || (t.contains && t.contains(el)))) return;
+                if (e.type === 'toggle' && e.oldState !== e.newState
+                    && e.newState === (openAtArm.has(t) ? 'open' : 'closed')) return;
                 fx.e++;
             };
             const wins = w === top ? [top] : [top, w];

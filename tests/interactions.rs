@@ -821,6 +821,26 @@ fn a_click_that_changes_nothing_says_so() {
     assert!(r.get("no_effect").is_none(), "checkbox: {r}");
 }
 
+/// `show()` and `showPopover()` queue their `toggle` as a later task, so an
+/// earlier click's can land while the next click watches for its effect: a
+/// toggle saying a dialog or popover went to the state it already had is
+/// not that click's, and a click that did nothing still says so. Opening
+/// and closing a popover (no attribute changes, only the toggle) still count.
+#[test]
+fn a_toggle_an_earlier_click_queued_is_not_the_next_clicks_effect() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("toggles", &[]);
+    s.ok(&["goto", &format!("{}/toggles", site.url)]);
+    for target in ["#open-tip", "#close-tip", "#open-tip"] {
+        let r = s.ok(&["click", "--selector", target]);
+        assert!(r.get("no_effect").is_none(), "{target}: {r}");
+    }
+    for target in ["#late-tip", "#late-dlg", "#noop"] {
+        let r = s.ok(&["click", "--selector", target]);
+        assert!(r.get("no_effect").is_some(), "{target}: {r}");
+    }
+}
+
 /// A script that clicks right after `goto` can beat the page to wiring the
 /// button up: a timer after load, a script the page loads then, a listener
 /// on the button's container or on the document. Nothing listened for that

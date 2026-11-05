@@ -761,6 +761,25 @@ customElements.define('x-panel', class extends HTMLElement {
 </script>""")
 
 
+PAGES["/toggles"] = ("toggles", "#tip{inset:auto;top:240px;left:20px;margin:0}#dlg{top:160px}", """
+<button id=open-tip>Open tip</button> <button id=close-tip>Close tip</button>
+<button id=late-tip>Late tip</button> <button id=late-dlg>Late dialog</button> <button id=noop>Does nothing</button>
+<div id=tip popover=manual>Tip</div>
+<dialog id=dlg>Dialog</dialog>
+<script>
+const tip = document.getElementById('tip'), dlg = document.getElementById('dlg');
+// A popover opening or closing changes no attribute: only its toggle says so.
+document.getElementById('open-tip').onclick = () => tip.showPopover();
+document.getElementById('close-tip').onclick = () => tip.hidePopover();
+// show() and showPopover() queue their toggle as a later task, which can
+// run after the next click has started: these stand in for that late event.
+const late = (n) => n.dispatchEvent(new ToggleEvent('toggle', { oldState: 'closed', newState: 'open' }));
+document.getElementById('late-tip').onclick = () => late(tip);
+document.getElementById('late-dlg').onclick = () => late(dlg);
+dlg.show();
+</script>""")
+
+
 PAGES["/hover-cover"] = ("hover cover", "#cover{position:fixed;inset:0;background:#fff} #cover button{width:100%;height:100%}", """
 <button id=go onclick="document.getElementById('out').textContent = 'clicked ' + (++window.k)">Go</button>
 <span id=out>idle</span>
