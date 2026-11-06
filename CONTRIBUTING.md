@@ -161,7 +161,7 @@ from its copy of the repository, not from the tag, and `build.sh` takes the
 version from that copy's `Cargo.toml`. So after the release merge reaches
 `master`, sync Glama's copy (the link next to its head commit) before the
 build. A stale copy fails the build, or builds the version before. After it,
-check the listing in Glama's "try it": `tools/list` gives the 23 tools, and
+check the listing in Glama's "try it": `tools/list` gives the 13 default tools, and
 `browser_navigate` to https://example.com followed by `browser_snapshot`
 returns the page's tree. Glama can't rebuild a version it has released, so a
 fix to Glama's image alone would need a number of its own. Wait for the next
