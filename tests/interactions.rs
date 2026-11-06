@@ -2083,8 +2083,9 @@ fn a_read_leaves_walking_a_large_style_sheet_to_the_first_action() {
 
 /// A client that pauses between commands (an agent reading what `goto`
 /// said) has the large page read ahead while it pauses: its first `ax`
-/// captures nothing and still shows what changed after `goto`. A client
-/// that sends its next command at once (a script) gets no read ahead.
+/// captures nothing and still shows what changed after `goto`, even when
+/// a setup sent `start` and a first `goto` at once. A client that sends
+/// its next command at once (a script) gets no read ahead.
 #[test]
 fn the_first_read_after_a_paused_goto_was_read_ahead() {
     let (true, Some(site)) = (chrome(), site()) else { return };
@@ -2120,6 +2121,9 @@ fn the_first_read_after_a_paused_goto_was_read_ahead() {
     };
     let pause = || std::thread::sleep(std::time::Duration::from_millis(1500));
     let page = format!("{}/clicks", site.url);
+    // A setup's goto, sent at once after start: not read ahead itself,
+    // and it doesn't stop the paused goto that follows.
+    run(&["goto", &page]);
     pause();
     run(&["goto", &page]);
     pause();

@@ -93,9 +93,11 @@ All notable changes to this project are documented here. The format follows
   quiet and keeps the snapshot as a read would, unprinted (10,000 rows,
   first `ax` 776 to 130 ms; 1,000 rows 93 to 34 ms; medians of 10,
   interleaved, local). Only for a client that paused 1 s or more before
-  each of its last three commands, and a page whose capture fits in half
-  that pause: Chrome's capture can't be cut short, so a command that
-  comes in while it runs waits for it. A page read ahead and left
+  the `goto` and before most of its last three commands (a `start` and a
+  first `goto` sent at once don't count against an agent's own first
+  `goto`), and a page whose capture fits in half its shortest such
+  pause: Chrome's capture can't be cut short, so a command that comes
+  in while it runs waits for it. A page read ahead and left
   unread for another `goto` stops it until an `ax` follows a `goto`
   again. `NAVIGERA_PRE_READ=0` turns it off.
 - `navigera mcp` reads large pages the way the CLI does. Its snapshots

@@ -2735,9 +2735,27 @@ const PRE_READ_WITHIN: Duration = Duration::from_secs(30);
 
 /// A read ahead holds up a command that comes in while it runs (it is
 /// Chrome's capture of the page, which nothing can cut short), so it is
-/// made only for a client that has paused this long or longer before
-/// each of its last commands: an agent thinking, not a script.
+/// made only for a client that paused this long or longer before the
+/// `goto` and before most of its last commands: an agent thinking, not a
+/// script (see [`pre_read_budget`]).
 const PRE_READ_PAUSE: Duration = Duration::from_secs(1);
+
+/// How long a read ahead may keep the client waiting, judged by its last
+/// pauses between commands (`gaps`, newest last: the one before the
+/// `goto`), or `None` for a client that sends its next command at once.
+/// The pause before the `goto` is its pace now; the older ones count by
+/// majority, so a start and a `goto` sent at once (a setup script, or
+/// `start && goto` in one shell) don't keep an agent's own first `goto`
+/// from being read ahead. Half the shortest long pause: it may pause less
+/// this time.
+fn pre_read_budget(gaps: &std::collections::VecDeque<Duration>) -> Option<Duration> {
+    let newest = *gaps.back()?;
+    let long = gaps.iter().filter(|g| **g >= PRE_READ_PAUSE);
+    if newest < PRE_READ_PAUSE || long.clone().count() * 2 < gaps.len() {
+        return None;
+    }
+    long.min().map(|p| *p / 2)
+}
 
 /// Whether a large page is read ahead of its first `ax` after a `goto`
 /// (`NAVIGERA_PRE_READ=0` leaves the capture to that `ax`, to compare).
@@ -2853,6 +2871,40 @@ fn retry_eligible(command: &Command) -> bool {
             | Command::Set { .. }
             | Command::Reset { .. }
     )
+}
+
+#[cfg(test)]
+mod pre_read_budget_tests {
+    use super::pre_read_budget;
+    use std::time::Duration;
+
+    fn budget(ms: &[u64]) -> Option<u64> {
+        let gaps = ms.iter().map(|m| Duration::from_millis(*m)).collect();
+        pre_read_budget(&gaps).map(|b| b.as_millis() as u64)
+    }
+
+    #[test]
+    fn an_agent_is_read_ahead_and_a_script_is_not() {
+        assert_eq!(budget(&[1600, 1500, 2400]), Some(750), "an agent: half its shortest pause");
+        assert_eq!(budget(&[0, 0, 0]), None, "a script");
+        assert_eq!(budget(&[]), None, "no pause seen yet");
+        assert_eq!(budget(&[0]), None, "a goto sent at once after start");
+        assert_eq!(budget(&[1800]), Some(900), "a goto sent after a pause from start");
+    }
+
+    #[test]
+    fn a_setup_sent_at_once_does_not_stop_the_agents_first_goto() {
+        // start + goto from a setup script, then the agent's own goto.
+        assert_eq!(budget(&[40, 2000]), Some(1000));
+        // ... and a shared model turn (two commands at once) among pauses.
+        assert_eq!(budget(&[1500, 0, 1700]), Some(750));
+    }
+
+    #[test]
+    fn a_goto_sent_at_once_or_a_mostly_quick_client_is_not_read_ahead() {
+        assert_eq!(budget(&[2000, 1500, 30]), None, "the goto itself came at once");
+        assert_eq!(budget(&[10, 20, 1500]), None, "one pause in a script");
+    }
 }
 
 #[cfg(test)]
@@ -3755,15 +3807,13 @@ impl Driver {
             return;
         }
         self.pre_read.due = None;
-        // The client's shortest recent pause, half of it for the capture
-        // (it may pause less this time).
-        let pause = self.pre_read.gaps.iter().min().copied().unwrap_or_default();
-        if pause < PRE_READ_PAUSE {
-            crate::timing::log(&format!("[pre-read] not read ahead: the client paused {} ms", pause.as_millis()));
+        let Some(budget) = pre_read_budget(&self.pre_read.gaps) else {
+            let gaps: Vec<_> = self.pre_read.gaps.iter().map(|g| g.as_millis()).collect();
+            crate::timing::log(&format!("[pre-read] not read ahead: the client paused {gaps:?} ms"));
             return;
-        }
+        };
         let started = Instant::now();
-        let why = self.session.pre_read(pause / 2);
+        let why = self.session.pre_read(budget);
         crate::timing::record("pre_read_total", started);
         if why.is_empty() {
             crate::timing::log("[pre-read] read ahead");
