@@ -25,6 +25,8 @@ What v2 changes, and why:
 Arms:
   nav-default          navigera CLI (compact output, its default)
   nav-batch            navigera CLI; a whole flow may go in one `batch`
+  nav-help             navigera CLI, no command list in the prompt: the
+                       agent learns the commands from `navigera --help`
   agent-browser        agent-browser CLI
   playwright-cli       playwright-cli CLI (-s session)
   playwright-mcp       Playwright MCP server, `mcp <tool> <json>` lines
@@ -72,10 +74,11 @@ TRANSCRIPT_RESULT_MAX = 500
 PORT = 8901
 BASE = f"http://127.0.0.1:{PORT}"
 
-ALL_ARMS = ["nav-default", "nav-batch", "agent-browser", "playwright-cli",
-            "playwright-mcp", "chrome-devtools-mcp"]
+ALL_ARMS = ["nav-default", "nav-batch", "nav-help", "agent-browser",
+            "playwright-cli", "playwright-mcp", "chrome-devtools-mcp"]
 ALL_TASKS = ["search", "form", "table", "catalog"]
 CLI_TOOL = {"nav-default": "navigera", "nav-batch": "navigera",
+            "nav-help": "navigera",
             "agent-browser": "agent-browser",
             "playwright-cli": "playwright-cli"}
 
@@ -467,6 +470,11 @@ def bins(tools_dir, nav_bin):
 
 def vocab(arm, sess):
     """The arm's prompt block: the same shape and length for every tool."""
+    if arm == "nav-help":
+        p = f"navigera -s {sess}"
+        return (f"Browser tool: the navigera CLI, already running on the "
+                f"home page. Run its commands as `{p} <command>`; "
+                f"`navigera --help` lists them.")
     if arm.startswith("nav-"):
         p = f"navigera -s {sess}"
         extra = ""
