@@ -1,0 +1,1 @@
+{"tool": "navigera", "goto_client_ms": 7772.653, "eval_client_ms": 0.485, "eval_engine_ms": 0.384, "title": "Example Domain", "phases": {"browser_up": 4715.585, "close": 7.379, "first_page": 2518.367, "launch_total": 7294.033, "spawn": 0.794}, "run": 1}
