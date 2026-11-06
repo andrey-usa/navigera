@@ -1,0 +1,44 @@
+name: loops
+on:
+  push:
+    branches: [experiment-23]
+permissions:
+  contents: read
+jobs:
+  electron:
+    name: electron (macos-latest, head)
+    strategy:
+      fail-fast: false
+    runs-on: macos-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+      - name: Electron for the fixture app
+        working-directory: tests/fixtures/electron-app
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          node node_modules/electron/install.js
+      - run: cargo test --locked --test electron --no-run
+      - env:
+          NAVIGERA_REQUIRE_ELECTRON: "1"
+          NAVIGERA_CDP_TRACE: "1"
+          LOOP_REF: ${{ github.sha }}
+          LOOP_ROWS_OUT: loop-rows-electron-macos-head.json
+        run: python3 .github/loop.py electron 20
+      - name: Upload per-run rows
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: loop-rows-electron-macos-head
+          path: loop-rows-electron-macos-head.json
