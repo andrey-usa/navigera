@@ -28,10 +28,10 @@ navigera -s work quit
   tools through the same tasks, navigera's sessions use the fewest tokens
   (8.2K, or 7.3K with `batch`, against 10.0K–16.3K) at the lowest cost;
   47 of its 48 sessions succeed.
-- **Fast at every step.** 28 ms per command an agent sends, against 100 ms for
-  agent-browser and 184–638 ms for the MCP servers and playwright-cli; a
-  1,000-row page reads in 49 ms as 41 KB.
-- **Light.** 7 MB for navigera itself; eight agents at once in 943 MB where
+- **Fast at every step.** 33 ms per command an agent sends, against 104 ms for
+  agent-browser and 199–778 ms for the MCP servers and playwright-cli; a
+  1,000-row page reads in 88 ms as 41 KB.
+- **Light.** 7 MB for navigera itself; eight agents at once in 947 MB where
   the other agent tools need 2.4–2.6 GB, because sessions share one browser
   with a private context each.
 - **It tells the agent what happened.** A click that loads results prints the
@@ -55,25 +55,22 @@ how each was measured is under [Benchmarks](#benchmarks) and
 |---|---|---|
 | tokens per agent session (one model, six tools) | **8,215** (7,320 with `batch`) | playwright-cli 9,960 |
 | estimated cost of the 24 agent sessions | **$0.0169** ($0.0160 with `batch`) | playwright-cli $0.0194 |
-| time per agent command | **28 ms** | agent-browser 100 ms |
-| a 1,000-row page as a snapshot | **49 ms, 41 KB** | Playwright MCP 112 ms, 144 KB |
-| scripted session, same Chrome | **0.51 s** | go-rod 0.56 s |
+| time per agent command | **33 ms** | agent-browser 104 ms |
+| a 1,000-row page as a snapshot | **88 ms, 41 KB** | Playwright MCP 177 ms, 144 KB |
+| scripted session, same Chrome | **0.61 s** | go-rod 0.66 s |
 | cold start, same Chrome (median of 15) | 0.30 s | go-rod 0.29 s |
 | memory of the driver itself | **7 MB** | chromedp 8 MB |
-| eight agents at once | **943 MB** | agent-browser 2,369 MB |
+| eight agents at once | **947 MB** | agent-browser 2,366 MB |
 
 ### Where navigera is not first
 
-- **Browsing GitHub, live (median of 9): 3.96 s against go-rod's 3.64 s.** Two things
-  navigera does for agents cost time there. It records every request a page
-  makes, so `ax` can wait for data that is still loading and a click can say
-  what it changed; Chrome charges for those events, and go-rod with the same
-  events turned on slowed down by more than this gap. And navigera's click
-  returns once the new page is there, where go-rod's returns at once.
-- **One JavaScript `eval`, warm: 0.41 ms against go-rod's 0.27 ms.** Part of
-  it is that navigera is a separate process an agent's shell talks to, and
-  go-rod a library inside its caller. Not explained further yet, and not an
-  agent trade-off.
+- **Browsing GitHub, live (median of 9): 3.96 s, behind go-rod's 3.64 s,
+  chromey's 3.86 s and chromiumoxide's 3.89 s.** navigera's click returns
+  once the new page is there, where the other drivers' return at once and
+  they then poll the URL, so this row does not time the same readiness.
+- **One JavaScript `eval`, warm: 0.46 ms against go-rod's 0.44 ms.** navigera
+  is a separate process an agent's shell talks to, and go-rod a library
+  inside its caller; the gap is 0.02 ms.
 - **Cold start (median of 15): go-rod by 6 ms,** 0.294 s against navigera's 0.300 s.
 - **example.com, live (median of 9): 0.39 s against go-rod's 0.38 s.**
 - **In the agent eval** navigera without `batch` got one of its 24 answers
