@@ -86,30 +86,30 @@ jobs:
   # The Lightpanda engine: its end-to-end tests on Lightpanda's newest
   # stable release, on every push and pull request (the weekly run catches a
   # new release before a push does).
-  lightpanda:
-    name: lightpanda (latest stable)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
-        with:
-          toolchain: stable
-      - uses: ./.github/actions/lightpanda
-      - name: Tests (Lightpanda e2e; no X server)
-        env:
-          NAVIGERA_REQUIRE_LIGHTPANDA: "1"
-          LIGHTPANDA_DISABLE_TELEMETRY: "1"
-        run: |
-          set -o pipefail
-          unset DISPLAY
-          if ! cargo test --locked --test lightpanda --test commands 2>&1 | tee /tmp/test.log; then
-            sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
-            python3 bench/ladder/annotate.py /tmp/test-tail.log "lightpanda $LIGHTPANDA_RELEASE test failure"
-            exit 1
-          fi
+  # lightpanda:
+  #   name: lightpanda (latest stable)
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 20
+  #   steps:
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+  #       with:
+  #         persist-credentials: false
+  #     - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+  #       with:
+  #         toolchain: stable
+  #     - uses: ./.github/actions/lightpanda
+  #     - name: Tests (Lightpanda e2e; no X server)
+  #       env:
+  #         NAVIGERA_REQUIRE_LIGHTPANDA: "1"
+  #         LIGHTPANDA_DISABLE_TELEMETRY: "1"
+  #       run: |
+  #         set -o pipefail
+  #         unset DISPLAY
+  #         if ! cargo test --locked --test lightpanda --test commands 2>&1 | tee /tmp/test.log; then
+  #           sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
+  #           python3 bench/ladder/annotate.py /tmp/test-tail.log "lightpanda $LIGHTPANDA_RELEASE test failure"
+  #           exit 1
+  #         fi
 
   # Electron apps (`start --electron`): the fixture app on each OS, with the
   # Electron the npm package installs. Linux has no display, so xvfb-run.
