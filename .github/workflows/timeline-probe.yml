@@ -1,0 +1,67 @@
+name: timeline-probe
+
+# Per-request timeline on https://example.com: navigera serve vs go-rod.
+# Experiment-branch diagnostic only; results are committed back to the
+# branch ([skip ci]) so they are readable without Actions log access.
+
+on:
+  push:
+    branches: [experiment-24]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+        with:
+          toolchain: stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.27"
+
+      - name: Chrome version
+        run: |
+          CHROME_BIN=$(which google-chrome)
+          echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
+          "$CHROME_BIN" --version
+
+      - name: Build navigera
+        run: cargo build --release
+
+      - name: Build the go-rod probe
+        run: |
+          cd bench/ladder/contenders/gorod
+          go build -o "$GITHUB_WORKSPACE/ladder-gorod-probe" .
+
+      - name: Run interleaved probes (9 each)
+        run: |
+          python3 bench/ladder/timeline/drive.py \
+            --reps 9 \
+            --navigera target/release/navigera \
+            --gorod ladder-gorod-probe \
+            --chrome "$CHROME_BIN" \
+            --out bench/ladder/timeline/results-experiment-24.jsonl \
+            --summary bench/ladder/timeline/summary-experiment-24.md \
+            --run-id "${{ github.run_id }}"
+
+      - name: Commit the results
+        run: |
+          git config user.name "andrey-usa"
+          git config user.email "62624421+andrey-usa@users.noreply.github.com"
+          git pull --rebase origin experiment-24 || true
+          git add bench/ladder/timeline/results-experiment-24.jsonl bench/ladder/timeline/summary-experiment-24.md
+          git commit -m "Timeline probe results (run ${{ github.run_id }}) [skip ci]" || echo "nothing to commit"
+          git push

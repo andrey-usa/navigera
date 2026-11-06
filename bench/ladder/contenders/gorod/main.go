@@ -27,6 +27,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -446,8 +447,123 @@ func realMain() error {
 			return err
 		}
 		emit(map[string]any{"mode": "browse", "wall_ms": wallMs(), "realworld": br})
+	case "timeline":
+		tl, err := runTimeline(chromeBin)
+		if err != nil {
+			return err
+		}
+		emit(map[string]any{"mode": "timeline", "wall_ms": wallMs(), "timeline": tl})
 	default:
 		return fmt.Errorf("unknown mode %q", mode)
 	}
 	return nil
+}
+
+// runTimeline: per-request timeline on https://example.com.
+// Same Navigate+WaitLoad as runRealworld, wrapped with Network.* and
+// Page.loadEventFired event timestamps so the goto window can be split
+// into before-the-response, response-to-load and after-load phases.
+// All client times are ms since just before page.Navigate; CDP times are
+// the events' own monotonic timestamps (s), reported raw.
+func runTimeline(chromeBin string) (map[string]any, error) {
+	lt0 := time.Now()
+	browser, err := newBrowser(chromeBin)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = browser.Close() }()
+	launchMs := float64(time.Since(lt0).Nanoseconds()) / 1e6
+
+	page, err := browser.Page(proto.TargetCreateTarget{})
+	if err != nil {
+		return nil, fmt.Errorf("open page: %w", err)
+	}
+	if err := (proto.NetworkEnable{}).Call(page); err != nil {
+		return nil, fmt.Errorf("network.enable: %w", err)
+	}
+	if err := (proto.PageEnable{}).Call(page); err != nil {
+		return nil, fmt.Errorf("page.enable: %w", err)
+	}
+
+	var mu sync.Mutex
+	reqAt, respAt, loadAt := -1.0, -1.0, -1.0    // client ms since nav start
+	reqCDP, respCDP, loadCDP := -1.0, -1.0, -1.0 // CDP monotonic timestamps (s)
+	var rt *proto.NetworkResourceTiming
+	var t0 time.Time
+	msSince := func(t time.Time) float64 { return float64(time.Since(t0).Nanoseconds()) / 1e6 }
+
+	// rod's event loop runs inside the returned wait function; run it in a
+	// goroutine so events are consumed while Navigate/WaitLoad proceed.
+	wait := page.EachEvent(func(e *proto.NetworkRequestWillBeSent) {
+		if e.Request != nil && strings.HasPrefix(e.Request.URL, "https://example.com/") {
+			mu.Lock()
+			if reqAt < 0 && t0 != (time.Time{}) {
+				reqAt = msSince(time.Now())
+				reqCDP = float64(e.Timestamp)
+			}
+			mu.Unlock()
+		}
+	}, func(e *proto.NetworkResponseReceived) {
+		if e.Response != nil && strings.HasPrefix(e.Response.URL, "https://example.com/") {
+			mu.Lock()
+			if respAt < 0 && t0 != (time.Time{}) {
+				respAt = msSince(time.Now())
+				respCDP = float64(e.Timestamp)
+				rt = e.Response.Timing
+			}
+			mu.Unlock()
+		}
+	}, func(e *proto.PageLoadEventFired) {
+		mu.Lock()
+		if loadAt < 0 && t0 != (time.Time{}) {
+			loadAt = msSince(time.Now())
+			loadCDP = float64(e.Timestamp)
+		}
+		mu.Unlock()
+	})
+	go wait()
+
+	t0 = time.Now()
+	if err := page.Navigate("https://example.com"); err != nil {
+		return nil, fmt.Errorf("goto: %w", err)
+	}
+	navReplyMs := msSince(time.Now())
+	if err := page.WaitLoad(); err != nil {
+		return nil, fmt.Errorf("load: %w", err)
+	}
+	waitLoadMs := msSince(time.Now())
+
+	te := time.Now()
+	title, err := evalNullable(page, evalTitle)
+	if err != nil {
+		return nil, fmt.Errorf("title: %w", err)
+	}
+	evalMs := float64(time.Since(te).Nanoseconds()) / 1e6
+
+	mu.Lock()
+	defer mu.Unlock()
+	out := map[string]any{
+		"launch_ms":    launchMs,
+		"nav_reply_ms": navReplyMs,
+		"goto_ms":      waitLoadMs,
+		"eval_ms":      evalMs,
+		"title":        title,
+		"req_ms":       reqAt,
+		"resp_ms":      respAt,
+		"load_ms":      loadAt,
+		"req_cdp_s":    reqCDP,
+		"resp_cdp_s":   respCDP,
+		"load_cdp_s":   loadCDP,
+	}
+	if rt != nil {
+		out["timing"] = map[string]any{
+			"dns_ms":     rt.DNSEnd - rt.DNSStart,
+			"connect_ms": rt.ConnectEnd - rt.ConnectStart,
+			"ssl_ms":     rt.SslEnd - rt.SslStart,
+			"send_ms":    rt.SendEnd - rt.SendStart,
+			"ttfb_ms":    rt.ReceiveHeadersEnd,
+			"proxy_ms":   rt.ProxyEnd - rt.ProxyStart,
+		}
+	}
+	return out, nil
 }
