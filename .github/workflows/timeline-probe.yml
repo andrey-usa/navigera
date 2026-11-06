@@ -47,6 +47,9 @@ jobs:
           go build -o "$GITHUB_WORKSPACE/ladder-gorod-probe" .
 
       - name: Run interleaved probes (9 each)
+        # Never hard-fail: whatever happened (partial results, probe
+        # stderr) is committed back below, since the runner's own logs
+        # are not readable without an Actions token.
         run: |
           python3 bench/ladder/timeline/drive.py \
             --reps 9 \
@@ -55,13 +58,15 @@ jobs:
             --chrome "$CHROME_BIN" \
             --out bench/ladder/timeline/results-experiment-24.jsonl \
             --summary bench/ladder/timeline/summary-experiment-24.md \
-            --run-id "${{ github.run_id }}"
+            --run-id "${{ github.run_id }}" \
+            > bench/ladder/timeline/probe-stdout.txt \
+            2> bench/ladder/timeline/probe-stderr.txt || true
 
       - name: Commit the results
         run: |
           git config user.name "andrey-usa"
           git config user.email "62624421+andrey-usa@users.noreply.github.com"
           git pull --rebase origin experiment-24 || true
-          git add bench/ladder/timeline/results-experiment-24.jsonl bench/ladder/timeline/summary-experiment-24.md
+          git add bench/ladder/timeline/results-experiment-24.jsonl bench/ladder/timeline/summary-experiment-24.md bench/ladder/timeline/probe-stdout.txt bench/ladder/timeline/probe-stderr.txt
           git commit -m "Timeline probe results (run ${{ github.run_id }}) [skip ci]" || echo "nothing to commit"
           git push
