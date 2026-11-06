@@ -45,6 +45,9 @@ import glob
 import json
 import os
 import queue
+import statistics
+import datetime as dt
+from decimal import Decimal
 import random
 import shlex
 import shutil
@@ -62,7 +65,6 @@ API = "https://api.siliconflow.com/v1/chat/completions"
 MODEL_DEFAULT = "deepseek-ai/DeepSeek-V4.1-Flash"
 PRICE_IN, PRICE_IN_CACHED, PRICE_OUT = 0.15, 0.003, 0.60  # USD / 1M
 MAX_TOKENS = 1024
-TOOL_DEF_OVERHEAD_TOKENS = 250
 MIN_RESERVE_USD = 0.005
 MAX_TURNS = 40
 CMD_TIMEOUT = 120
@@ -322,13 +324,19 @@ class Budget:
         self.spent += cost
 
 
-def reserve_for(messages):
-    n = TOOL_DEF_OVERHEAD_TOKENS
-    for m in messages:
-        c = m.get("content") or ""
-        n += len(c) // 4 + 8
-        for call in (m.get("tool_calls") or []):
-            n += len(json.dumps(call)) // 4 + 8
+def reserve_for(body, messages):
+    # Conditional ceiling, NOT a verified bound. For a byte-level BPE
+    # tokenizer every token spans at least one input byte, so prompt tokens
+    # would never exceed the UTF-8 byte count of the full serialized request
+    # body (message texts, tool defs, model name, everything the provider
+    # sees). Whether this provider's model tokenizes that way is UNVERIFIED,
+    # and the chat-template slack (32 tokens per message, 512 per request,
+    # far above any known template's role markers and tool-call framing) is
+    # a heuristic. Use for admission control only; settle() consumes calculated
+    # cost estimates on success and consumes the reservation on unknown outcomes, so
+    # this reserve is accounting, not a proven cap. Output is hard-bounded
+    # by max_tokens.
+    n = len(body.encode()) + 32 * len(messages) + 512
     return max(MIN_RESERVE_USD, (n * PRICE_IN + MAX_TOKENS * PRICE_OUT) / 1e6)
 
 
@@ -340,29 +348,176 @@ TOOLS = [{"type": "function", "function": {
                    "required": ["command"]}}}]
 
 
-def chat(key, model, messages, budget):
-    amount = reserve_for(messages)
-    budget.reserve(amount)
+# Reporting schema v1: input includes cached input. Null is unknown, not zero.
+# Prices are estimates from a dated public rate card, not provider charges.
+RATE_CARD = {
+    "model": MODEL_DEFAULT, "currency": "USD", "per_tokens": 1_000_000,
+    "read_at": "2026-11-05", "source": "https://www.siliconflow.com/pricing",
+    "input_uncached": "0.15", "input_cached": "0.003",
+    "output_uncached": "0.60", "output_cached": None,
+}
+TOKEN_FIELDS = ("input_total", "input_cached", "input_uncached",
+                "output_total", "output_cached", "output_uncached")
+
+
+def token_value(obj, key):
+    value = obj.get(key) if isinstance(obj, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
+def usage_record(raw, model):
+    u = raw if isinstance(raw, dict) else {}
+    p, c = token_value(u, "prompt_tokens"), token_value(u, "completion_tokens")
+    cached = token_value(u.get("prompt_tokens_details"), "cached_tokens")
+    # This provider does not document output caching. Do not invent a zero.
+    od = u.get("completion_tokens_details")
+    output_cached = token_value(od, "cached_tokens")
+    output_reported = isinstance(od, dict) and "cached_tokens" in od
+    valid_in = p is not None and cached is not None and cached <= p
+    valid_out = c is not None and (not output_reported or
+                 (output_cached is not None and output_cached <= c))
+    tokens = {"input_total": p, "input_cached": cached,
+              "input_uncached": p - cached if valid_in else None,
+              "output_total": c, "output_cached": output_cached,
+              "output_uncached": (c - output_cached if output_reported and valid_out
+                                  else c if valid_out else None)}
+    status = {k: "reported" if tokens[k] is not None else "missing"
+              for k in TOKEN_FIELDS}
+    for k in ("input_uncached", "output_uncached"):
+        if tokens[k] is not None:
+            status[k] = "derived"
+    if not output_reported:
+        status["output_cached"] = "unsupported"
+    issues = []
+    if p is not None and cached is not None and cached > p:
+        issues.append("cached input exceeds total input")
+    if output_reported and not valid_out:
+        issues.append("invalid cached output usage")
+    rates = dict(RATE_CARD) if model == MODEL_DEFAULT else {
+        "model": model, "currency": "USD", "per_tokens": 1_000_000,
+        "read_at": None, "source": None, **{k: None for k in
+        ("input_uncached", "input_cached", "output_uncached", "output_cached")}}
+    parts = {}
+    for k in ("input_uncached", "input_cached", "output_uncached", "output_cached"):
+        n, rate = tokens[k], rates[k]
+        parts[k] = (float(Decimal(n) * Decimal(rate) / Decimal(1_000_000))
+                    if n is not None and rate is not None else None)
+    required = [parts[k] for k in ("input_uncached", "input_cached", "output_uncached")]
+    # Unsupported cached output adds no separate component; a reported positive
+    # cache count requires a verified rate before a total can be estimated.
+    cache_cost_known = not output_reported or output_cached == 0 or parts["output_cached"] is not None
+    total = (float(sum(Decimal(str(v)) for v in required) +
+             Decimal(str(parts["output_cached"] or 0)))
+             if all(v is not None for v in required) and cache_cost_known and not issues else None)
+    return {"raw_usage": raw, "tokens": tokens, "token_status": status,
+            "rates": rates, "estimated_cost_components_usd": parts,
+            "estimated_cost_usd": total, "provider_charge_usd": None,
+            "provider_charge_status": "not_reported", "issues": issues}
+
+
+def append_call(journal, event):
+    if journal is None:
+        return
+    journal["calls"].append(event)
+    with open(journal["path"], "a", encoding="utf-8") as f:
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def chat(key, model, messages, budget, journal=None):
     body = json.dumps({"model": model, "messages": messages,
                        "temperature": 0, "max_tokens": MAX_TOKENS,
                        "tools": TOOLS})
+    amount = reserve_for(body, messages)
+    budget.reserve(amount)
     req = urllib.request.Request(API, data=body.encode(), headers={
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json"})
+        "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    start, status = time.monotonic(), None
+    event = {"schema_version": 1, "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+             "model": model, "http_status": None,
+             "retry_count": 0, "attempt": 1, "reservation_usd": amount,
+             "request_bytes": len(body.encode()), "message_count": len(messages),
+             "context_strategy": "append-only history; stable initial instructions",
+             "provider_charge_usd": None, "provider_charge_status": "not_reported"}
+    if journal is not None:
+        event.update(journal["identity"])
+        event["call_index"] = len(journal["calls"]) + 1
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
+            status = r.status
             resp = json.loads(r.read())
+        event.update(usage_record(resp.get("usage"), model))
+        event["response_model"] = resp.get("model")
+        event["provider_request_id"] = resp.get("id")
+        # Persist usage even if the successful HTTP response has no answer.
+        message = resp["choices"][0]["message"]
     except Exception as e:
-        budget.settle(amount, 0.0)
-        raise RuntimeError(f"model request failed: {e}")
-    u = resp.get("usage", {})
-    p, c = u.get("prompt_tokens", 0), u.get("completion_tokens", 0)
-    cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-    cost = ((p - cached) * PRICE_IN + cached * PRICE_IN_CACHED
-            + c * PRICE_OUT) / 1e6
-    budget.settle(amount, cost)
-    return resp["choices"][0]["message"], {"prompt": p, "completion": c,
-                                           "cached": cached, "cost": cost}
+        event.setdefault("raw_usage", None)
+        event["estimated_cost_usd"] = None
+        event.update({"status": "cost_unknown", "error_type": type(e).__name__,
+                      "http_status": getattr(e, "code", status),
+                      "wall_ms": round((time.monotonic() - start) * 1000),
+                      "unknown_exposure_bound_usd": amount,
+                      "bound_verified": False})
+        append_call(journal, event)
+        # Conservatively consume the reservation for admission control. This
+        # is exposure, NOT measured spend; the input bound is not verified.
+        budget.settle(amount, amount)
+        raise RuntimeError(f"model request failed: {type(e).__name__}") from e
+    cost = event["estimated_cost_usd"]
+    event.update({"status": "ok" if cost is not None else "usage_unknown",
+                  "http_status": status,
+                  "wall_ms": round((time.monotonic() - start) * 1000),
+                  "unknown_exposure_bound_usd": amount if cost is None else 0,
+                  "bound_verified": False})
+    append_call(journal, event)
+    budget.settle(amount, cost if cost is not None else amount)
+    return message, event
+
+
+def decimal_sum(values):
+    return float(sum((Decimal(str(v)) for v in values), Decimal(0)))
+
+
+def complete_sum(values):
+    if not values or any(v is None for v in values):
+        return None
+    return sum(values) if all(type(v) is int for v in values) else decimal_sum(values)
+
+
+def session_usage(calls):
+    tokens = {k: complete_sum([c.get("tokens", {}).get(k) for c in calls])
+              for k in TOKEN_FIELDS}
+    costs = [c.get("estimated_cost_usd") for c in calls]
+    return {"tokens": tokens, "estimated_cost_usd": complete_sum(costs),
+            "known_estimated_cost_subtotal_usd": decimal_sum(v for v in costs if v is not None),
+            "unknown_cost_calls": sum(c.get("estimated_cost_usd") is None for c in calls),
+            "unknown_exposure_bound_usd": decimal_sum(c.get("unknown_exposure_bound_usd", 0) for c in calls),
+            "provider_charge_usd": None, "provider_charge_status": "not_reported",
+            "token_status": {k: ("unsupported" if k == "output_cached" and calls and
+              all(c.get("token_status", {}).get(k) == "unsupported" for c in calls)
+              else "known" if tokens[k] is not None else "missing") for k in TOKEN_FIELDS},
+            "attempted_calls": len(calls),
+            "completed_calls": sum(c["status"] != "cost_unknown" for c in calls)}
+
+
+def shown(value):
+    return "unknown" if value is None else str(value)
+
+
+def result_line(rec):
+    u, t = rec["usage"], rec["usage"]["tokens"]
+    cached_out = ("unsupported" if u["token_status"]["output_cached"] == "unsupported"
+                  else shown(t["output_cached"]))
+    total = (t["input_total"] + t["output_total"] if
+             t["input_total"] is not None and t["output_total"] is not None else None)
+    return (f"RESULT arm={rec['arm']} task={rec['task']} rep={rec['rep']} "
+            f"success={int(rec['success'])} turns={rec['turns']} tokens={shown(total)} "
+            f"input={shown(t['input_total'])} cached_input={shown(t['input_cached'])} "
+            f"uncached_input={shown(t['input_uncached'])} output={shown(t['output_total'])} "
+            f"cached_output={cached_out} estimated_cost_usd={shown(u['estimated_cost_usd'])} "
+            f"provider_charge_usd=unknown attempted_calls={u['attempted_calls']} "
+            f"cost_unknown_calls={u['unknown_cost_calls']} wall_ms={rec['wall_ms']} "
+            f"stop={rec['stop'].split(' ')[0]}")
 
 
 # ---------------------------------------------------------------- tools
@@ -686,8 +841,11 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
     cwd = tempfile.mkdtemp(prefix="llmb-")
     mcp = None
     t0 = time.monotonic()
-    turns = prompt_t = completion_t = cached_t = 0
-    cost = 0.0
+    turns = 0
+    journal = {"calls": [], "path": os.path.join(out_dir, f"{sess}.usage.jsonl"),
+               "identity": {"arm": arm, "task": task, "rep": rep}}
+    with open(journal["path"], "w", encoding="utf-8"):
+        pass
     success = False
     answer = ""
     stop = "max-turns"
@@ -710,12 +868,8 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
             if time.monotonic() - t0 > SESSION_TIMEOUT:
                 stop = "timeout"
                 break
-            msg, u = chat(key, model, messages, budget)
+            msg, u = chat(key, model, messages, budget, journal)
             turns += 1
-            prompt_t += u["prompt"]
-            completion_t += u["completion"]
-            cached_t += u["cached"]
-            cost += u["cost"]
             messages.append(msg)
             calls = msg.get("tool_calls") or []
             if not calls:
@@ -773,17 +927,17 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
         finally:
             shutil.rmtree(cwd, ignore_errors=True)
     wall_ms = round((time.monotonic() - t0) * 1000)
+    usage = session_usage(journal["calls"])
     rec = {"arm": arm, "task": task, "rep": rep, "success": success,
-           "turns": turns, "prompt_tokens": prompt_t,
-           "completion_tokens": completion_t, "cached_tokens": cached_t,
-           "cost_usd": round(cost, 6), "wall_ms": wall_ms, "stop": stop,
-           "pauses": pauses}
+           "turns": turns, "prompt_tokens": usage["tokens"]["input_total"],
+           "completion_tokens": usage["tokens"]["output_total"],
+           "cached_tokens": usage["tokens"]["input_cached"],
+           "usage": usage, "rate_card": RATE_CARD if model == MODEL_DEFAULT else None,
+           "usage_jsonl": os.path.basename(journal["path"]),
+           "wall_ms": wall_ms, "stop": stop, "pauses": pauses}
     with open(os.path.join(out_dir, f"{sess}.json"), "w") as f:
         json.dump(rec, f, indent=2)
-    line = (f"RESULT arm={arm} task={task} rep={rep} success={int(success)} "
-            f"turns={turns} tokens={prompt_t + completion_t} "
-            f"cached={cached_t} cost_usd={cost:.6f} wall_ms={wall_ms} "
-            f"stop={stop.split(' ')[0]}")
+    line = result_line(rec)
     print(line, flush=True)
     print(f"::notice::{line}", flush=True)
     for t in transcript:
@@ -848,25 +1002,42 @@ def pause_lines(records, arms):
 
 
 def med(xs):
-    xs = sorted(xs)
-    return xs[len(xs) // 2] if xs else 0
+    return statistics.median(xs) if xs and all(x is not None for x in xs) else None
 
 
 def table(records, arms, tasks):
-    out = ["| arm | task | success | median turns | median tokens | "
-           "median $ | median wall s |", "|---|---|---|---|---|---|---|"]
+    out = ["| arm | task | success | median calls | input incl cache | cached input | output | estimated USD median | estimated USD / success | median wall s |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
     for arm in arms:
         for task in tasks:
             rs = [r for r in records if r["arm"] == arm and r["task"] == task]
             if not rs:
                 continue
-            out.append(
-                f"| {arm} | {task} | {sum(r['success'] for r in rs)}/"
-                f"{len(rs)} | {med([r['turns'] for r in rs])} | "
-                f"{med([r['prompt_tokens'] + r['completion_tokens'] for r in rs])} | "
-                f"{med([r['cost_usd'] for r in rs]):.5f} | "
-                f"{med([r['wall_ms'] for r in rs]) / 1000:.1f} |")
+            success = sum(r["success"] for r in rs)
+            costs = [r["usage"]["estimated_cost_usd"] for r in rs]
+            total = complete_sum(costs)
+            # Include failed task spend in the numerator, never silently omit it.
+            cps = total / success if total is not None and success else None
+            vals = [arm, task, f"{success}/{len(rs)}",
+                    shown(med([r["usage"]["attempted_calls"] for r in rs]))]
+            vals += [shown(med([r["usage"]["tokens"][k] for r in rs]))
+                     for k in ("input_total", "input_cached", "output_total")]
+            vals += [shown(med(costs)), shown(cps),
+                     shown(med([r["wall_ms"] / 1000 for r in rs]))]
+            out.append("| " + " | ".join(vals) + " |")
     return "\n".join(out)
+
+
+def run_usage(records, expected):
+    costs = [r["usage"]["estimated_cost_usd"] for r in records]
+    return {"expected_sessions": expected, "observed_sessions": len(records),
+            "coverage_complete": len(records) == expected,
+            "estimated_cost_usd": complete_sum(costs),
+            "known_estimated_cost_subtotal_usd": decimal_sum(v for v in costs if v is not None),
+            "unknown_cost_calls": sum(r["usage"]["unknown_cost_calls"] for r in records),
+            "unknown_exposure_bound_usd": decimal_sum(r["usage"]["unknown_exposure_bound_usd"] for r in records),
+            "provider_charge_usd": None, "provider_charge_status": "not_reported",
+            "rates": RATE_CARD}
 
 
 def main():
@@ -907,7 +1078,9 @@ def main():
     server.shutdown()
     with open(os.path.join(args.out, "summary.json"), "w") as f:
         json.dump({"model": args.model, "records": records,
-                   "total_cost_usd": round(budget.spent, 6)}, f, indent=2)
+                   "usage": run_usage(records, args.reps * len(arms) * len(tasks)),
+                   "admission_control_consumed_usd": budget.spent,
+                   "admission_bound_verified": False}, f, indent=2)
     t = table(records, arms, tasks)
     print(t, flush=True)
     for line in pause_lines(records, arms):
@@ -918,8 +1091,9 @@ def main():
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a") as f:
-            f.write(f"\n## Summary\n\nModel {args.model}, spend "
-                    f"${budget.spent:.4f}\n\n{t}\n")
+            f.write(f"\n## Summary\n\nModel {args.model}, estimated cost "
+                    f"{shown(run_usage(records, len(records))['estimated_cost_usd'])} USD; "
+                    f"admission-control consumption is not billing.\n\n{t}\n")
     return 0
 
 
