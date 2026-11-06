@@ -39,19 +39,6 @@ pub const DEFAULT_AX_LIMIT: usize = 2000;
 /// `navigera install-skill`), so docs always match the binary version.
 pub const SKILL_MD: &str = include_str!("../skills/navigera/SKILL.md");
 
-/// The skill's reference files, installed beside SKILL.md under
-/// `references/` and read by the agent only when the topic comes up.
-pub const SKILL_REFS: [(&str, &str); 8] = [
-    ("acting.md", include_str!("../skills/navigera/references/acting.md")),
-    ("reading.md", include_str!("../skills/navigera/references/reading.md")),
-    ("inspecting.md", include_str!("../skills/navigera/references/inspecting.md")),
-    ("sessions.md", include_str!("../skills/navigera/references/sessions.md")),
-    ("electron.md", include_str!("../skills/navigera/references/electron.md")),
-    ("decider.md", include_str!("../skills/navigera/references/decider.md")),
-    ("setup.md", include_str!("../skills/navigera/references/setup.md")),
-    ("troubleshooting.md", include_str!("../skills/navigera/references/troubleshooting.md")),
-];
-
 /// Accepts a ref as a number or as `"12"`, `"@12"`, `"ref=12"`, `"e12"`
 /// (the forms other agent tools print).
 fn de_ref<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
@@ -2562,11 +2549,6 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
     std::fs::create_dir_all(&path)?;
     let file = path.join("SKILL.md");
     write_own(&file, SKILL_MD.as_bytes())?;
-    let refs = path.join("references");
-    std::fs::create_dir_all(&refs)?;
-    for (name, text) in SKILL_REFS {
-        write_own(refs.join(name), text.as_bytes())?;
-    }
     Ok(file.display().to_string())
 }
 
