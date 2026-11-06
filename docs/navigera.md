@@ -735,8 +735,12 @@ BrowserWindow.getAllWindows().length"`); MCP clients pass `main: true` to
 `browser_evaluate`. An app that turns the switch off (Electron's
 `EnableNodeCliInspectArguments` fuse) still runs; `eval --main` then says
 so. Every window the app
-opens is adopted as a tab and becomes the active one, though it has no
-opener as a popup does; DevTools windows are not. A window that closes
+opens is adopted as a tab (DevTools windows are not). One it opens after
+the agent has acted, navigated or picked a tab becomes the active one,
+though it has no opener as a popup does; one it opens on its own before
+that (a start-up window that shows up after `start` chose one) is chosen
+among as at `start`, so the session stays in the largest window the app
+shows. A window that closes
 itself is dropped and the session goes on in the one before it. `quit`
 ends the app (its whole process group, or its job object on Windows). A
 sandbox this machine can't give it (root, Ubuntu 24.04's AppArmor rule for

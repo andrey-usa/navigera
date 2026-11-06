@@ -4114,6 +4114,9 @@ impl Driver {
         if command.is_action() {
             self.session.mark_action();
         }
+        if command.steers() {
+            self.session.mark_steered();
+        }
         // An action after a look: the journal takes the state an entry
         // (text, a check, a choice) will be judged against, or the read
         // after any other action patched from (see `page_change`).
@@ -5352,6 +5355,28 @@ impl Command {
                 | Command::Eval { .. }
                 | Command::Dialog { .. }
         )
+    }
+
+    /// The agent steers the session: it acts on a page, navigates, or
+    /// chooses a tab. A window an Electron app opens after that is the
+    /// agent's doing and becomes the session's tab; one it opens before is
+    /// chosen among (see `BrowserSession::sync_tabs`).
+    fn steers(&self) -> bool {
+        self.is_action()
+            || matches!(self, Command::Open { url: Some(_) })
+            || matches!(
+                self,
+                Command::Goto { .. }
+                    | Command::Back { .. }
+                    | Command::Forward { .. }
+                    | Command::Reload { .. }
+                    | Command::WebmcpCall { .. }
+                    | Command::Reset { .. }
+                    | Command::TabNew { .. }
+                    | Command::TabSelect { .. }
+                    | Command::TabClose { .. }
+                    | Command::ClosePage { .. }
+            )
     }
 
     fn no_wait(&self) -> bool {

@@ -761,6 +761,9 @@ pub struct BrowserSession {
     /// Modifiers held with `keydown` (Shift, Control, Alt, Meta): later
     /// `press`es carry them until `keyup`.
     held: std::sync::Mutex<Vec<String>>,
+    /// The agent has steered the session since it started: an action, a
+    /// navigation or a tab command (see [`BrowserSession::mark_steered`]).
+    steered: std::sync::atomic::AtomicBool,
     /// The browser context `reset` made (its tabs are the session's).
     context: Option<String>,
     /// False for a session `fork` made: closing it closes its context, not
@@ -869,6 +872,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
+            steered: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -945,6 +949,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
+            steered: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1094,6 +1099,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
+            steered: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1208,6 +1214,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
+            steered: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1452,6 +1459,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: std::sync::Mutex::new(Vec::new()),
+            steered: Default::default(),
             context: Some(context),
             owner: false,
             shared: self.shared,
@@ -1501,10 +1509,18 @@ impl BrowserSession {
     /// and drop tabs the page closed (`window.close()`). A newly opened tab
     /// becomes active, as it would in a visible browser. Returns the
     /// indices of adopted tabs.
+    ///
+    /// An Electron app's windows that open before the agent has steered the
+    /// session (its own start-up windows, whose targets can come after
+    /// `start` chose one) are more windows to choose from, as at start: the
+    /// session goes on in the one the app shows ([`best_window`]), not in
+    /// whichever window's target came last.
     pub fn sync_tabs(&mut self) -> Vec<usize> {
         self.browser.caught_up();
         let shared = std::sync::Arc::clone(self.browser.shared());
         let mut adopted = Vec::new();
+        let choose = self.is_electron() && !self.steered.load(std::sync::atomic::Ordering::Relaxed);
+        let mut candidates = Vec::new();
         let forked = shared.forked.load(std::sync::atomic::Ordering::Relaxed);
         let mine: Vec<String> = self.pages.iter().map(|p| p.target_id().to_string()).collect();
         let opened = if forked {
@@ -1543,11 +1559,24 @@ impl BrowserSession {
                     };
                     self.pages.push(page);
                     if !hidden && !embedded {
-                        self.active = self.pages.len() - 1;
-                        adopted.push(self.active);
+                        if choose {
+                            candidates.push(self.pages.len() - 1);
+                        } else {
+                            self.active = self.pages.len() - 1;
+                            adopted.push(self.active);
+                        }
                     }
                 }
                 Err(e) => eprintln!("[browser] could not adopt new tab {target_id}: {e:#}"),
+            }
+        }
+        // Every window answers, or the session stays where it is.
+        if !candidates.is_empty() {
+            if let Some(i) = best_window(&self.pages, &self.browser, Duration::from_millis(1000), true) {
+                if candidates.contains(&i) {
+                    self.active = i;
+                    adopted.push(i);
+                }
             }
         }
         let mine: Vec<String> = self.pages.iter().map(|p| p.target_id().to_string()).collect();
@@ -2397,6 +2426,13 @@ impl BrowserSession {
     /// An action is about to run on the active tab.
     pub fn mark_action(&self) {
         self.active_tab().mark_action();
+    }
+
+    /// The agent acted, navigated or chose a tab: from now on a window an
+    /// Electron app opens becomes the session's tab, as the agent's doing
+    /// (see [`BrowserSession::sync_tabs`]).
+    pub fn mark_steered(&self) {
+        self.steered.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The last action's own requests have started on the active tab, with

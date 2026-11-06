@@ -501,6 +501,11 @@ fn a_webview_that_loads_later_is_still_a_tab_of_its_own() {
     let webview = tabs["tabs"].as_array().unwrap().iter().find(|t| t["webview"] == true).unwrap();
     assert_eq!(webview["active"], false, "{tabs}");
     assert_eq!(webview["title"], "Embedded", "{tabs}");
+    // The Notes window opened on its own after `start` chose Orders, before
+    // the agent did anything: the session is still in the window the app
+    // shows most of, not in whichever window came last.
+    let tree = ax(&session);
+    assert!(tree.contains("heading \"Orders\""), "{tree}\n{}", windows_report(&session));
     ok(&session, &["quit"]);
 }
 

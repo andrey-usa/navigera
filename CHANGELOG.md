@@ -148,6 +148,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- An Electron session no longer moves to a window the app opened on its
+  own right after `start` chose one. When a second start-up window's target
+  came late (a slow machine), the first command after `start` adopted it as
+  a new tab and made it the active one, so `ax` read that window instead of
+  the main one (seen on Windows and macOS CI, about 1 run in 20). Until the
+  agent acts, navigates or picks a tab, a window the app opens is chosen
+  among as at `start` (the largest one it shows); one it opens after that
+  is still the new active tab.
+
 - `start` right after a session ended because its shared browser crashed
   again makes a new session. The ended session answered first and let go
   of its socket afterwards, so a `start` in between reached it on its way

@@ -235,8 +235,10 @@ navigera -s app quit                            # ends the app
 <details>
 <summary>How windows, the main process and attaching work</summary>
 
-Windows the app opens later are adopted as they appear; a window that
-closes itself is dropped, and the session goes on in the one before.
+Windows the app opens later are adopted as they appear (one opened after
+the agent acts is the active tab; the app's own start-up windows don't take
+the session from the largest one it shows); a window that closes itself is
+dropped, and the session goes on in the one before.
 `eval --main` runs JavaScript in the app's main process (Node), where a
 function gets the `electron` module: read the app's state, call its IPC
 handlers' logic, check what a menu or dialog would do. The app
