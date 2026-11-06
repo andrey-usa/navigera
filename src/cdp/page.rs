@@ -3576,7 +3576,7 @@ impl Page {
     /// until [`Page::stop_counting_changes`]); returns the count so far.
     pub fn count_changes(&self, timeout: Duration) -> Option<u64> {
         let js = "(() => { let c = window.__nvMut; if (!c) { c = { n: 0, w: null }; \
-                  c.o = new MutationObserver((r) => { c.n += r.length; const w = c.w; if (w) { c.w = null; w(); } }); \
+                  c.o = new MutationObserver((r) => { c.n += r.length; const w = c.w; if (w) { c.w = null; w(); } const w2 = c.w2; if (w2) { c.w2 = null; w2(); } }); \
                   c.o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true }); \
                   Object.defineProperty(window, '__nvMut', { value: c, configurable: true, enumerable: false }); } \
                   return c.n; })()";
@@ -3637,6 +3637,63 @@ impl Page {
         }
     }
 
+    /// The wait after an action's own requests, ended on proof instead of
+    /// time. Once nothing is in flight, a page whose DOM changed since the
+    /// action (see [`Page::mark_action`]) and that then ran a frame and a
+    /// post-paint task with no new request is done rendering what the
+    /// action fetched; waiting out the rest of `quiet` only delays the
+    /// report. Falls back to the quiet window when the proof does not come
+    /// (a response the page does not render, or work that starts a request
+    /// past the frame). Returns like [`Page::network_quiet_waited`].
+    pub fn action_settle_wait(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
+        let started = std::time::Instant::now();
+        let deadline = started + max;
+        loop {
+            let (pending, _) = self.shared.net_state(&self.session_id);
+            if pending == 0 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return (false, started.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (seq0, _) = self.shared.net_seq_pending(&self.session_id);
+        let ms = quiet.as_millis();
+        let floor = (quiet / 2).as_millis();
+        let js = format!(
+            "new Promise((r) => {{ const c = window.__nvMut; \
+             if (!c) return r(false); \
+             let proved = false; let floor = false; \
+             const t = setTimeout(() => r(false), {ms}); \
+             const maybe = () => {{ if (proved && floor) {{ clearTimeout(t); r(true); }} }}; \
+             setTimeout(() => {{ floor = true; maybe(); }}, {floor}); \
+             const probe = () => requestAnimationFrame(() => {{ const ch = new MessageChannel(); \
+               ch.port1.onmessage = () => {{ proved = true; maybe(); }}; ch.port2.postMessage(1); }}); \
+             if (c.n > c.a) probe(); else c.w2 = probe; }})"
+        );
+        let proved = self
+            .send(
+                "Runtime.evaluate",
+                json!({ "expression": js, "awaitPromise": true, "returnByValue": true }),
+                quiet + Duration::from_secs(1),
+            )
+            .ok()
+            .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
+            .unwrap_or(false);
+        let (seq1, pending1) = self.shared.net_seq_pending(&self.session_id);
+        if proved && seq0 == seq1 && pending1 == 0 {
+            return (true, started.elapsed());
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return (false, started.elapsed());
+        }
+        let (ok, _) = self.network_quiet_waited(quiet, left);
+        let _ = ok;
+        (ok, started.elapsed())
+    }
+
     /// Whether the next snapshot may skip the quiet wait: a `wait` already
     /// synced with this tab and no new request has started since. A request
     /// the wait itself was waiting for may still sit in the in-flight set
@@ -3667,6 +3724,15 @@ impl Page {
     /// An action is about to run here (see [`Shared::mark_action`]).
     pub fn mark_action(&self) {
         self.shared.mark_action(&self.session_id, self.nav_generation());
+        // Baseline the DOM-change count for the settle proof (see
+        // [`Page::action_settle_wait`]): what was on the page before the
+        // action does not count.
+        let js = "(() => { let c = window.__nvMut; if (!c) { c = { n: 0, w: null, w2: null };                   c.o = new MutationObserver((r) => { c.n += r.length; const w = c.w; if (w) { c.w = null; w(); } const w2 = c.w2; if (w2) { c.w2 = null; w2(); } });                   c.o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });                   Object.defineProperty(window, '__nvMut', { value: c, configurable: true, enumerable: false }); }                   c.a = c.n; return 0; })()";
+        let _ = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": js, "returnByValue": true }),
+            Duration::from_millis(500),
+        );
     }
 
     /// The last action's own requests have started, with no navigation

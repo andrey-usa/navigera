@@ -1,0 +1,55 @@
+{"trap": "sync", "rep": 0, "final": true, "wall_ms": 385.9, "rc": 0, "out": "+ text: final: sync two\n- text: idle\n"}
+{"trap": "sync", "rep": 1, "final": true, "wall_ms": 391.7, "rc": 0, "out": "+ text: final: sync two\n- text: idle\n"}
+{"trap": "sync", "rep": 2, "final": true, "wall_ms": 435.7, "rc": 0, "out": "+ text: final: sync two\n- text: idle\n"}
+{"trap": "sync", "rep": 3, "final": true, "wall_ms": 455.3, "rc": 0, "out": "+ text: final: sync two\n- text: idle\n"}
+{"trap": "sync", "rep": 4, "final": true, "wall_ms": 393.0, "rc": 0, "out": "+ text: final: sync two\n- text: idle\n"}
+{"trap": "microtask", "rep": 0, "final": true, "wall_ms": 445.6, "rc": 0, "out": "+ text: final: microtask two\n- text: idle\n"}
+{"trap": "microtask", "rep": 1, "final": true, "wall_ms": 389.0, "rc": 0, "out": "+ text: final: microtask two\n- text: idle\n"}
+{"trap": "microtask", "rep": 2, "final": true, "wall_ms": 447.2, "rc": 0, "out": "+ text: final: microtask two\n- text: idle\n"}
+{"trap": "microtask", "rep": 3, "final": true, "wall_ms": 445.4, "rc": 0, "out": "+ text: final: microtask two\n- text: idle\n"}
+{"trap": "microtask", "rep": 4, "final": true, "wall_ms": 394.0, "rc": 0, "out": "+ text: final: microtask two\n- text: idle\n"}
+{"trap": "timer0", "rep": 0, "final": true, "wall_ms": 389.3, "rc": 0, "out": "+ text: final: timer0 two\n- text: idle\n"}
+{"trap": "timer0", "rep": 1, "final": true, "wall_ms": 394.2, "rc": 0, "out": "+ text: final: timer0 two\n- text: idle\n"}
+{"trap": "timer0", "rep": 2, "final": true, "wall_ms": 447.7, "rc": 0, "out": "+ text: final: timer0 two\n- text: idle\n"}
+{"trap": "timer0", "rep": 3, "final": true, "wall_ms": 447.1, "rc": 0, "out": "+ text: final: timer0 two\n- text: idle\n"}
+{"trap": "timer0", "rep": 4, "final": true, "wall_ms": 388.9, "rc": 0, "out": "+ text: final: timer0 two\n- text: idle\n"}
+{"trap": "timer30", "rep": 0, "final": true, "wall_ms": 470.8, "rc": 0, "out": "+ text: final: timer30 two\n- text: idle\n"}
+{"trap": "timer30", "rep": 1, "final": true, "wall_ms": 471.4, "rc": 0, "out": "+ text: final: timer30 two\n- text: idle\n"}
+{"trap": "timer30", "rep": 2, "final": true, "wall_ms": 477.0, "rc": 0, "out": "+ text: final: timer30 two\n- text: idle\n"}
+{"trap": "timer30", "rep": 3, "final": true, "wall_ms": 477.6, "rc": 0, "out": "+ text: final: timer30 two\n- text: idle\n"}
+{"trap": "timer30", "rep": 4, "final": true, "wall_ms": 473.0, "rc": 0, "out": "+ text: final: timer30 two\n- text: idle\n"}
+{"trap": "timer120", "rep": 0, "final": false, "wall_ms": 233.0, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
+{"trap": "timer120", "rep": 1, "final": false, "wall_ms": 231.5, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
+{"trap": "timer120", "rep": 2, "final": false, "wall_ms": 242.5, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
+{"trap": "timer120", "rep": 3, "final": false, "wall_ms": 234.0, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
+{"trap": "timer120", "rep": 4, "final": false, "wall_ms": 237.8, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
+{"trap": "raf", "rep": 0, "final": true, "wall_ms": 444.9, "rc": 0, "out": "+ text: final: raf two\n- text: idle\n"}
+{"trap": "raf", "rep": 1, "final": true, "wall_ms": 447.0, "rc": 0, "out": "+ text: final: raf two\n- text: idle\n"}
+{"trap": "raf", "rep": 2, "final": true, "wall_ms": 392.3, "rc": 0, "out": "+ text: final: raf two\n- text: idle\n"}
+{"trap": "raf", "rep": 3, "final": true, "wall_ms": 445.4, "rc": 0, "out": "+ text: final: raf two\n- text: idle\n"}
+{"trap": "raf", "rep": 4, "final": true, "wall_ms": 389.4, "rc": 0, "out": "+ text: final: raf two\n- text: idle\n"}
+{"trap": "msgchan", "rep": 0, "final": true, "wall_ms": 443.3, "rc": 0, "out": "+ text: final: msgchan two\n- text: idle\n"}
+{"trap": "msgchan", "rep": 1, "final": true, "wall_ms": 452.4, "rc": 0, "out": "+ text: final: msgchan two\n- text: idle\n"}
+{"trap": "msgchan", "rep": 2, "final": true, "wall_ms": 443.4, "rc": 0, "out": "+ text: final: msgchan two\n- text: idle\n"}
+{"trap": "msgchan", "rep": 3, "final": true, "wall_ms": 445.4, "rc": 0, "out": "+ text: final: msgchan two\n- text: idle\n"}
+{"trap": "msgchan", "rep": 4, "final": true, "wall_ms": 394.0, "rc": 0, "out": "+ text: final: msgchan two\n- text: idle\n"}
+{"trap": "placeholder", "rep": 0, "final": true, "wall_ms": 392.2, "rc": 0, "out": "+ text: final: placeholder two\n- text: idle\n"}
+{"trap": "placeholder", "rep": 1, "final": true, "wall_ms": 446.0, "rc": 0, "out": "+ text: final: placeholder two\n- text: idle\n"}
+{"trap": "placeholder", "rep": 2, "final": true, "wall_ms": 449.9, "rc": 0, "out": "+ text: final: placeholder two\n- text: idle\n"}
+{"trap": "placeholder", "rep": 3, "final": true, "wall_ms": 476.9, "rc": 0, "out": "+ text: final: placeholder two\n- text: idle\n"}
+{"trap": "placeholder", "rep": 4, "final": true, "wall_ms": 451.6, "rc": 0, "out": "+ text: final: placeholder two\n- text: idle\n"}
+{"trap": "analytics", "rep": 0, "final": true, "wall_ms": 293.6, "rc": 0, "out": "+ text: working\n- text: idle\n"}
+{"trap": "analytics", "rep": 1, "final": true, "wall_ms": 284.2, "rc": 0, "out": "+ text: working\n- text: idle\n"}
+{"trap": "analytics", "rep": 2, "final": true, "wall_ms": 288.5, "rc": 0, "out": "+ text: working\n- text: idle\n"}
+{"trap": "analytics", "rep": 3, "final": true, "wall_ms": 289.6, "rc": 0, "out": "+ text: working\n- text: idle\n"}
+{"trap": "analytics", "rep": 4, "final": true, "wall_ms": 287.1, "rc": 0, "out": "+ text: working\n- text: idle\n"}
+{"trap": "longpoll", "rep": 0, "final": true, "wall_ms": 1092.3, "rc": 0, "out": "+ text: listening\n- text: idle\n"}
+{"trap": "longpoll", "rep": 1, "final": true, "wall_ms": 1097.9, "rc": 0, "out": "+ text: listening\n- text: idle\n"}
+{"trap": "longpoll", "rep": 2, "final": true, "wall_ms": 1162.7, "rc": 0, "out": "+ text: listening\n- text: idle\n"}
+{"trap": "longpoll", "rep": 3, "final": true, "wall_ms": 1127.4, "rc": 0, "out": "+ text: listening\n- text: idle\n"}
+{"trap": "longpoll", "rep": 4, "final": true, "wall_ms": 1087.0, "rc": 0, "out": "+ text: listening\n- text: idle\n"}
+{"trap": "gap150", "rep": 0, "final": false, "wall_ms": 237.9, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
+{"trap": "gap150", "rep": 1, "final": false, "wall_ms": 232.8, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
+{"trap": "gap150", "rep": 2, "final": false, "wall_ms": 231.9, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
+{"trap": "gap150", "rep": 3, "final": false, "wall_ms": 237.2, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
+{"trap": "gap150", "rep": 4, "final": false, "wall_ms": 231.2, "rc": 0, "out": "+ text: phase one\n- text: idle\n"}
