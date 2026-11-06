@@ -58,13 +58,13 @@ how each was measured is under [Benchmarks](#benchmarks) and
 | time per agent command | **28 ms** | agent-browser 100 ms |
 | a 1,000-row page as a snapshot | **49 ms, 41 KB** | Playwright MCP 112 ms, 144 KB |
 | scripted session, same Chrome | **0.51 s** | go-rod 0.56 s |
-| cold start, same Chrome | 0.23 s | go-rod 0.23 s |
+| cold start, same Chrome (median of 15) | 0.30 s | go-rod 0.29 s |
 | memory of the driver itself | **7 MB** | chromedp 8 MB |
 | eight agents at once | **943 MB** | agent-browser 2,369 MB |
 
 ### Where navigera is not first
 
-- **Browsing GitHub, live: 3.16 s against go-rod's 3.03 s.** Two things
+- **Browsing GitHub, live (median of 9): 3.96 s against go-rod's 3.64 s.** Two things
   navigera does for agents cost time there. It records every request a page
   makes, so `ax` can wait for data that is still loading and a click can say
   what it changed; Chrome charges for those events, and go-rod with the same
@@ -74,8 +74,8 @@ how each was measured is under [Benchmarks](#benchmarks) and
   it is that navigera is a separate process an agent's shell talks to, and
   go-rod a library inside its caller. Not explained further yet, and not an
   agent trade-off.
-- **Cold start: go-rod by 5 ms,** 0.225 s against navigera's 0.230 s.
-- **example.com, live: 0.33 s against go-rod's 0.30 s.**
+- **Cold start (median of 15): go-rod by 6 ms,** 0.294 s against navigera's 0.300 s.
+- **example.com, live (median of 9): 0.39 s against go-rod's 0.38 s.**
 - **In the agent eval** navigera without `batch` got one of its 24 answers
   wrong (a price table: its own `eval` joined the last row's cells into
   "Item 1730" and the model read the price as 730, not 30);
@@ -394,23 +394,24 @@ each driver. Fixtures are deterministic and local (500-card listing,
 1000-row detail). navigera is the static Linux binary the releases ship.
 Reps are interleaved across contenders. Run in CI via `.github/workflows/bench.yml`.
 
-| contender | session wall, best (median) of 5 | warm eval mean (200×) | cold start, best (median) of 5 | driver CPU (own) | driver peak RSS (own) | browser memory (PSS) |
+| contender | session wall, best (median) of 5 | warm eval mean (200×) | cold start, median (best) of 15 | driver CPU (own) | driver peak RSS (own) | browser memory (PSS) |
 |---|---|---|---|---|---|---|
-| `nv-shell` (this repo on chrome-headless-shell) | **0.25s** (0.27) | 0.21 ms | **0.07s** (0.08) | **<10 ms** | **7 MB** | 251 MB |
-| `nv-brave` (this repo on Brave) | 0.48s (0.50) | 0.24 ms | 0.23s (0.25) | **<10 ms** | **7 MB** | 617 MB |
-| `nv-serve` (this repo on Chrome) | 0.51s (0.53) | 0.41 ms | 0.23s (0.24) | **<10 ms** | **7 MB** | 391 MB |
-| `nv-edge` (this repo on Edge) | 0.51s (0.54) | **0.20 ms** | 0.27s (0.28) | **<10 ms** | **7 MB** | 672 MB |
-| `gorod` (go-rod 0.116.2, Go) | 0.56s (0.57) | 0.27 ms | 0.23s (0.25) | **10 ms** | 12 MB | 414 MB |
-| `chromiumoxide` 0.7.0 (Rust) | 0.63s (0.67) | 0.74 ms | 0.27s (0.30) | **10 ms** | 9 MB | 441 MB |
-| `chromey` 2.58.2 (Rust, maintained chromiumoxide fork) | 0.75s (0.79) | 0.68 ms | 0.28s (0.29) | **30 ms** | 16 MB | 425 MB |
-| `puppeteer-core` 24.43.1 (Node) | 0.77s (0.83) | 0.55 ms | 0.50s (0.51) | 0.25 s | 79 MB | 371 MB |
-| `chromedp` 0.19.1 (Go) | 0.79s (0.88) | 0.46 ms | 0.38s (0.41) | **20 ms** | 8 MB | 437 MB |
-| `playwright-core` 1.63.0 (Node) | 0.94s (0.95) | 1.00 ms | 0.56s (0.56) | 0.46 s | 149 MB | 406 MB |
-| `nv-lightpanda` (this repo on Lightpanda, 1 tab) | 0.15s (0.16) | 0.16 ms | 0.11s (0.11) | **<10 ms** | 8 MB | 15 MB |
+| `nv-shell` (this repo on chrome-headless-shell) | **0.30s** (0.31) | **0.33 ms** | **0.09s** (0.08) | **<10 ms** | **7 MB** | 243 MB |
+| `nv-brave` (this repo on Brave) | 0.60s (0.61) | 0.41 ms | 0.30s (0.29) | **<10 ms** | **7 MB** | 662 MB |
+| `nv-serve` (this repo on Chrome) | 0.61s (0.63) | 0.46 ms | 0.30s (0.29) | **<10 ms** | **7 MB** | 354 MB |
+| `nv-edge` (this repo on Edge) | 0.64s (0.66) | 0.40 ms | 0.33s (0.32) | **<10 ms** | **7 MB** | 785 MB |
+| `gorod` (go-rod 0.116.2, Go) | 0.66s (0.68) | 0.44 ms | 0.29s (0.28) | **10 ms** | 12 MB | 381 MB |
+| `chromiumoxide` 0.7.0 (Rust) | 0.80s (0.81) | 0.91 ms | 0.41s (0.34) | **10 ms** | 9 MB | 463 MB |
+| `chromey` 2.58.2 (Rust, maintained chromiumoxide fork) | 0.94s (0.99) | 0.88 ms | 0.38s (0.34) | **40 ms** | 21 MB | 455 MB |
+| `chromedp` 0.19.1 (Go) | 0.98s (0.99) | 0.48 ms | 0.50s (0.43) | **30 ms** | 8 MB | 453 MB |
+| `puppeteer-core` 24.43.1 (Node) | 0.99s (1.02) | 0.82 ms | 0.61s (0.60) | 0.34 s | 81 MB | 412 MB |
+| `playwright-core` 1.63.0 (Node) | 1.20s (1.23) | 1.32 ms | 0.74s (0.72) | 0.65 s | 150 MB | 421 MB |
+| `nv-lightpanda` (this repo on Lightpanda, 1 tab) | 0.18s (0.18) | 0.28 ms | 0.11s (0.11) | **<10 ms** | 8 MB | 11 MB |
 
-Measured 2026-11-06 on GitHub-hosted `ubuntu-latest` (AMD EPYC 9V45 96-Core Processor — 4 vCPU · Chrome 156.0.8078.79).
+Measured 2026-11-06 on GitHub-hosted `ubuntu-latest` (Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz — 4 vCPU · Chrome 156.0.8078.79).
 Every driver produced byte-identical extracted data and counts (correctness
-gate); wall is best-of-N.
+gate). Session wall is best-of-N (median in brackets); cold start and the
+live-site rows are ranked by their median, with the best run in brackets.
 The ladder reruns weekly ([`bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/bench.yml)) against
 the latest contender releases. GitHub runners vary between runs, so compare
 rows within one run.
@@ -427,15 +428,15 @@ artifact ("0.82s vs 0.03s"). Browser memory is the whole browser process
 tree (every renderer/GPU/utility process), sampled as summed PSS every
 250 ms (shared pages counted once).
 
-**Reading the table.** Session wall order: nv-shell 0.25s, nv-brave 0.48s, nv-serve 0.51s, nv-edge 0.51s, gorod 0.56s, chromiumoxide 0.63s, chromey 0.75s, puppeteer 0.77s, chromedp 0.79s, playwright 0.94s. Every driver but `nv-shell`, `nv-edge` and `nv-brave` runs the same Google Chrome; on it, nv-serve (0.51s) is ahead of the fastest other driver, gorod (0.56s). `nv-shell` (0.25s) is navigera on chrome-headless-shell, a lighter build of the same browser that no other row runs, so its lead is partly the browser's. All native drivers (navigera,
+**Reading the table.** Session wall order: nv-shell 0.30s, nv-brave 0.60s, nv-serve 0.61s, nv-edge 0.64s, gorod 0.66s, chromiumoxide 0.80s, chromey 0.94s, chromedp 0.98s, puppeteer 0.99s, playwright 1.20s. Every driver but `nv-shell`, `nv-edge` and `nv-brave` runs the same Google Chrome; on it, nv-serve (0.61s) is ahead of the fastest other driver, gorod (0.66s). `nv-shell` (0.30s) is navigera on chrome-headless-shell, a lighter build of the same browser that no other row runs, so its lead is partly the browser's. All native drivers (navigera,
 go-rod, chromiumoxide, chromedp) spend tens of milliseconds of their own CPU
 or less; the Node drivers spend hundreds and carry 80–150 MB of their own RSS.
 
-### Real-world (public internet, best of 3, same run)
+### Real-world (public internet, median of 9, same run)
 
-example.com goto → title check: 10 of 10 pass; nv-shell 0.15s, gorod 0.30s, nv-serve 0.33s, nv-brave 0.33s, nv-edge 0.35s, chromey 0.35s, chromiumoxide 0.40s, chromedp 0.49s, puppeteer 0.57s, playwright 0.62s.
+example.com goto → title check: 10 of 10 pass; nv-shell 0.15s, gorod 0.38s, nv-serve 0.39s, nv-brave 0.41s, nv-edge 0.46s, chromey 0.47s, chromiumoxide 0.49s, chromedp 0.60s, puppeteer 0.71s, playwright 0.84s.
 
-GitHub browse (awesome-list scroll + trending click-through): 10 of 10 pass; nv-shell 2.81s, gorod 3.03s, nv-serve 3.16s, nv-brave 3.20s, chromiumoxide 3.23s, puppeteer 3.24s, chromedp 3.24s, chromey 3.26s, nv-edge 3.33s, playwright 3.42s.
+GitHub browse (awesome-list scroll + trending click-through): 10 of 10 pass; nv-shell 3.49s, gorod 3.64s, chromey 3.86s, chromiumoxide 3.89s, nv-serve 3.96s, puppeteer 4.03s, nv-brave 4.04s, nv-edge 4.04s, chromedp 4.26s, playwright 4.30s.
 navigera's click returns once the new page has settled; the other drivers'
 clicks return at once and they then poll the URL, so the browse rows do not
 time the same readiness. The example.com check is the title; h1 is read, not checked.
@@ -445,11 +446,11 @@ GitHub sets CSS `scroll-behavior: smooth`, so `scrollY` was read mid-animation;
 contenders now scroll with `behavior: 'instant'`.)
 
 **chrome-headless-shell** (the same Chrome build without its browser UI
-layer): cold start 0.23s → 0.07s, session 0.51s → 0.25s, browser memory 391 MB → 251 MB.
+layer): cold start 0.30s → 0.09s (medians), session 0.61s → 0.30s, browser memory 354 MB → 243 MB.
 
 **CDP transport A/B** (same build and run): `--remote-debugging-pipe` (default on Linux/macOS)
-vs a DevTools WebSocket port: cold start 0.23s vs 0.22s,
-session 0.51s vs 0.51s. No speed difference: the WebSocket handshake itself is ~10 ms. The pipe is the default for two other reasons:
+vs a DevTools WebSocket port: cold start 0.30s vs 0.29s (medians),
+session 0.61s vs 0.62s. No speed difference: the WebSocket handshake itself is ~10 ms. The pipe is the default for two other reasons:
 it opens no TCP port that another local process could attach to, and Chrome exits when
 navigera dies (EOF on its command pipe), so a killed agent leaks no browser
 (`tests/edge_cases.rs`: over a WebSocket port the browser outlives its driver).
@@ -459,10 +460,10 @@ runs there too).
 
 **This build vs navigera 0.8.0, same machine and run** (`nv-baseline`,
 built the same way by the ladder's `baseline_ref` A/B):
-session 0.54s → 0.51s (-6%), cold start 0.23s → 0.23s (+1%), browser CPU per session 0.88s → 0.85s.
+session 0.62s → 0.61s (-2%), cold start 0.30s → 0.30s median (+1%), browser CPU per session 1.16s → 1.15s.
 
 Where navigera's cold start goes (`NAVIGERA_TIMINGS`, best run): browser up
-133 ms, first page 77 ms, close 2 ms.
+161 ms, first page 101 ms, close 2 ms.
 
 ### Agent tools (scripted, warm session, best of 3)
 
@@ -476,13 +477,13 @@ is up (sessions share one browser, a context each).
 
 | tool | kind | calls | total wall | per call | snapshot | its size | 1000-row snapshot | its size | 2nd session start | gate |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `navigera` (this repo) | CLI | 14 | 0.58s | 28 ms | 31 ms | 34 KB | 49 ms | 41 KB | 93 ms | ✓ |
-| `navigera` on chrome-headless-shell | CLI | 14 | 0.31s | 18 ms | 22 ms | 34 KB | 51 ms | 41 KB | 35 ms | ✓ |
-| `navigera`, known steps in `batch` | CLI | 6 | 0.57s | 79 ms | 31 ms | 34 KB | 51 ms | 41 KB | — | ✓ |
-| `agent-browser` 0.41.2 (Vercel Labs, Rust) | CLI | 13 | 1.32s | 100 ms | 83 ms | 44 KB | 257 ms | 116 KB | — | ✓ |
-| `playwright-cli` 0.1.23 (Microsoft) | CLI | 13 | 7.99s | 638 ms | 291 ms | 50 KB | 369 ms | 144 KB | — | ✓ |
-| Playwright MCP 0.0.84 (Microsoft) | MCP | 13 | 4.78s | 370 ms | 40 ms | 50 KB | 112 ms | 144 KB | — | ✓ |
-| Chrome DevTools MCP 1.12.0 (Google) | MCP | 13 | 2.83s | 184 ms | 63 ms | 34 KB | 200 ms | 78 KB | — | ✓ |
+| `navigera` (this repo) | CLI | 14 | 0.71s | 33 ms | 31 ms | 34 KB | 88 ms | 41 KB | 109 ms | ✓ |
+| `navigera` on chrome-headless-shell | CLI | 14 | 0.37s | 22 ms | 31 ms | 34 KB | 69 ms | 41 KB | 40 ms | ✓ |
+| `navigera`, known steps in `batch` | CLI | 6 | 0.68s | 93 ms | 37 ms | 34 KB | 76 ms | 41 KB | — | ✓ |
+| `agent-browser` 0.41.2 (Vercel Labs, Rust) | CLI | 13 | 1.36s | 104 ms | 111 ms | 44 KB | 382 ms | 116 KB | — | ✓ |
+| `playwright-cli` 0.1.23 (Microsoft) | CLI | 13 | 9.76s | 778 ms | 409 ms | 50 KB | 533 ms | 144 KB | — | ✓ |
+| Playwright MCP 0.0.84 (Microsoft) | MCP | 13 | 5.17s | 395 ms | 62 ms | 50 KB | 177 ms | 144 KB | — | ✓ |
+| Chrome DevTools MCP 1.12.0 (Google) | MCP | 13 | 3.16s | 199 ms | 93 ms | 34 KB | 310 ms | 78 KB | — | ✓ |
 
 Per-call time includes process start (CLI) or JSON-RPC (MCP), the hop to
 the daemon, and the CDP work. playwright-cli and Playwright MCP share Playwright's tool
@@ -499,15 +500,15 @@ servers), summed as PSS.
 
 | tool | 1 agent | 4 agents | 8 agents | per extra agent |
 |---|---|---|---|---|
-| `navigera` (sessions share one browser) | 400 MB | 632 MB | 943 MB | 77 MB |
-| `navigera --own-browser` (a browser each) | 405 MB | 939 MB | 1608 MB | 172 MB |
-| `agent-browser` 0.41.2 (Vercel Labs, Rust) | 519 MB | 1329 MB | 2369 MB | 264 MB |
-| `playwright-cli` 0.1.23 (Microsoft) | 564 MB | 1439 MB | 2527 MB | 280 MB |
-| Playwright MCP 0.0.84 (Microsoft) | 564 MB | 1405 MB | 2515 MB | 279 MB |
-| Chrome DevTools MCP 1.12.0 (Google) | 565 MB | 1429 MB | 2563 MB | 285 MB |
+| `navigera` (sessions share one browser) | 406 MB | 638 MB | 947 MB | 77 MB |
+| `navigera --own-browser` (a browser each) | 406 MB | 937 MB | 1599 MB | 171 MB |
+| `agent-browser` 0.41.2 (Vercel Labs, Rust) | 526 MB | 1335 MB | 2366 MB | 263 MB |
+| `playwright-cli` 0.1.23 (Microsoft) | 567 MB | 1434 MB | 2536 MB | 281 MB |
+| Playwright MCP 0.0.84 (Microsoft) | 558 MB | 1405 MB | 2511 MB | 279 MB |
+| Chrome DevTools MCP 1.12.0 (Google) | 569 MB | 1430 MB | 2557 MB | 284 MB |
 
 **Lightpanda** (experimental) passes the same correctness gate in
-0.15s with ~15 MB of browser memory. It has no
+0.18s with ~11 MB of browser memory. It has no
 rendering engine and one tab (the session opens the second page in the
 same tab), so it is listed apart from the Chrome-family ranking.
 
