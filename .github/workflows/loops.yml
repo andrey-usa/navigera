@@ -6,10 +6,10 @@ permissions:
   contents: read
 jobs:
   electron:
-    name: electron (macos-latest, head)
+    name: electron (windows-latest, head)
     strategy:
       fail-fast: false
-    runs-on: macos-latest
+    runs-on: windows-latest
     timeout-minutes: 240
     defaults:
       run:
@@ -34,11 +34,11 @@ jobs:
           NAVIGERA_REQUIRE_ELECTRON: "1"
           NAVIGERA_CDP_TRACE: "1"
           LOOP_REF: ${{ github.sha }}
-          LOOP_ROWS_OUT: loop-rows-electron-macos-head.json
-        run: python3 .github/loop.py electron 20
+          LOOP_ROWS_OUT: loop-rows-electron-windows-head.json
+        run: python .github/loop.py electron 50
       - name: Upload per-run rows
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: loop-rows-electron-macos-head
-          path: loop-rows-electron-macos-head.json
+          name: loop-rows-electron-windows-head
+          path: loop-rows-electron-windows-head.json
