@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-06
+
 ### Behaviour changes
 
 - `navigera --help` (or no arguments) now fits on one screen: 1.9 KB
@@ -1351,6 +1353,8 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.9.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.9.0
+[0.8.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.8.0
 [0.7.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.1
 [0.7.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.0
 [0.6.5]: https://github.com/andrey-usa/navigera/releases/tag/v0.6.5
