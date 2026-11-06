@@ -519,7 +519,7 @@ HAR or response body from `network`, a PDF, a screenshot's path, a
 the client opened). `NAVIGERA_MCP_ALLOW_FILES=1` lifts these limits.
 
 Every action takes `snapshot: true` to return the updated tree in the same
-call. The default tool list (13 of the 23 tools; `browser_more` lists the rest on demand) is about 8 KB
+call. The default tool list (13 of the 26 tools, 15 of 28 with a decision model; `browser_more` lists the rest on demand) is about 8 KB
 (~2,000 tokens), against ~26 KB for Chrome DevTools MCP 1.10.1.
 
 Client configuration (all run the same command):

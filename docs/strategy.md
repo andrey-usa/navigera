@@ -34,7 +34,7 @@ changes. CI (run 38106699446) gates on it:
 - **Turns:** Playwright MCP needs extra calls because its snapshot right
   after `navigate` still shows a single-page app's "Loading…" placeholder;
   navigera's snapshot waits briefly for data the page is still fetching.
-- **Tool list:** ~10 KB (2,600 tokens) against 20 KB for Playwright MCP and
+- **Tool list:** ~8 KB (about 2,000 tokens) against 20 KB for Playwright MCP and
   26 KB for Chrome DevTools MCP. Every request carries it.
 - **Without vision:** everything above works with text-only models, which
   Cline's built-in browser cannot use.

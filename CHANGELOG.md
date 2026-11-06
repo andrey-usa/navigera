@@ -39,6 +39,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `navigera --help` (and no arguments) is one screen, 1.9 KB instead of
+  19.5 KB: the commands an agent needs first, one line each, the names of
+  the rest and the flags to start with. `navigera help <command>` gives a
+  command's details and `navigera help --all` the full list, as before.
+
+- MCP: the default tool list is 13 tools, about 8 KB (16.9 KB before):
+  the 13 rarely needed ones (hover, tabs, screenshot, file upload, dialog,
+  WebMCP list and call, mouse, handoff, history, console, network, resize)
+  are listed on demand by `browser_more`. With a decision model the list
+  also has `browser_find` and `browser_check`.
+
+- The skill is a 5 KB core (`SKILL.md`, 18.9 KB before) and eight reference
+  files the agent reads when it needs them (acting, reading, inspecting,
+  sessions, Electron, the decision model, setup, troubleshooting);
+  `install-skill` installs all of them.
+
 - Typing into a field on a large page reports in the time of the typing,
   not of a page read: a `fill`, `type` or `insert-text` that changed
   nothing else the tree shows answers `ok` without reading the page again
