@@ -44,7 +44,7 @@ navigera -s work quit
 ### At a glance
 
 From one benchmark run on GitHub's runners (bench
-[42177756525](https://github.com/andrey-usa/navigera/actions/runs/42177756525))
+[42228718100](https://github.com/andrey-usa/navigera/actions/runs/42228718100))
 and the agent eval (run
 [42228800128](https://github.com/andrey-usa/navigera/actions/runs/42228800128)),
 on builds with the same source;
