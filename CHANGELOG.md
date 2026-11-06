@@ -6,265 +6,270 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Behaviour changes
+
+- `navigera --help` (or no arguments) now fits on one screen: 1.9 KB
+  where it was 19.5 KB. It lists the commands an agent needs first, one
+  line each, then the names of the rest and the flags to start with.
+  `navigera help <command>` still gives a command's details, and
+  `navigera help --all` the full list.
+- MCP: the action tools (`browser_click`, `browser_fill`, `browser_type`,
+  `browser_press_key`, `browser_select_option`, `browser_file_upload`,
+  `browser_run`) return what the action changed on the page, as the
+  CLI's compact output does, where they returned the full page state.
+  Pass `state: true` to get the full state back. `browser_hover`,
+  `browser_mouse` and `browser_scroll` still return the full state,
+  because navigera doesn't track what they change.
+- MCP: the default tool list has 13 tools and takes about 8 KB, down from
+  16.9 KB. The 13 tools agents rarely need (hover, tabs, screenshot, file
+  upload, dialog, WebMCP list and call, mouse, handoff, history, console,
+  network, resize) are listed when the agent calls `browser_more`. With a
+  decision model the list also has `browser_find` and `browser_check`.
+- The skill is split into a 5 KB core (`SKILL.md`, 18.9 KB before) and
+  eight reference files that the agent opens when it needs them: acting,
+  reading, inspecting, sessions, Electron, the decision model, setup and
+  troubleshooting. `install-skill` installs all of them.
+
 ### Added
 
-- MCP: action tools (`browser_click`, `browser_fill`, `browser_type`,
-  `browser_press_key`, `browser_select_option`, `browser_file_upload`,
-  `browser_run`) report what the action changed on the page (the CLI's
-  compact way) instead of the full page state; `state: true` on the call
-  keeps the full state. `browser_hover`, `browser_mouse` and
-  `browser_scroll` still return the full state (their page change is not
-  tracked). New deferred tools `browser_webmcp_list` and
-  `browser_webmcp_call` expose a page's WebMCP tools (page-provided,
-  untrusted; a tool the page doesn't mark read-only needs
-  `confirm: true`) - via `browser_more`.
-
 - `start --allow-domains <list>` (also `$NAVIGERA_ALLOW_DOMAINS` and
-  `mcp --allow-domains`): a session's domain allowlist. Navigation and
-  requests to other hosts are refused at the Fetch request stage, before
-  any `route` rule, on every redirect hop; entries are hostnames
-  (`*.example.com` covers subdomains, not itself), malformed or empty
-  lists fail at startup, and a refused navigation's error names the
-  denied host and the flag (`status` lists refused hosts).
-  `--allow-domains-docs-only` checks top-level navigation only: a
-  navigation restriction, not exfiltration protection. Requests are also
-  paused at the browser, so a popup (`window.open`, `target=_blank`) is
-  refused before its first request, not only once navigera attaches to
-  it, and in a browser of the session's own a service worker's fetches
-  are checked too (strict mode). Measured limits: a hostname policy, not
-  an origin policy; WebSocket handshakes are not intercepted by Fetch in
-  Chrome, so neither mode stops exfiltration over them, nor over a
-  service worker of a shared browser. `reset` keeps the policy,
-  `reset --all` drops it.
+  `mcp --allow-domains`) gives a session a domain allowlist. navigera
+  refuses navigation and requests to any other host at the Fetch request
+  stage, before any `route` rule, on every redirect hop. Entries are
+  hostnames, and `*.example.com` covers the subdomains but not the domain
+  itself. An empty or malformed list fails at startup. A refused
+  navigation's error names the denied host and the flag, and `status`
+  lists the hosts it refused. Requests are paused at the browser too, so
+  a popup (`window.open`, `target=_blank`) is refused before its first
+  request rather than once navigera attaches to it, and in a browser the
+  session owns, a service worker's fetches are checked as well (strict
+  mode). `--allow-domains-docs-only` checks top-level navigation only:
+  it limits where the agent goes, and it doesn't stop data leaving the
+  page. Measured limits: the policy is by hostname, not origin, and
+  Chrome's Fetch doesn't intercept WebSocket handshakes, so neither mode
+  stops data sent over a WebSocket, or through a service worker in a
+  shared browser. `reset` keeps the policy and `reset --all` drops it.
+- MCP: two tools, `browser_webmcp_list` and `browser_webmcp_call`, listed
+  through `browser_more`, expose the WebMCP tools a page provides. The
+  page writes those tools, so they are untrusted: calling one the page
+  doesn't mark read-only needs `confirm: true`.
 
 ### Changed
 
-- `navigera --help` (and no arguments) is one screen, 1.9 KB instead of
-  19.5 KB: the commands an agent needs first, one line each, the names of
-  the rest and the flags to start with. `navigera help <command>` gives a
-  command's details and `navigera help --all` the full list, as before.
-
-- MCP: the default tool list is 13 tools, about 8 KB (16.9 KB before):
-  the 13 rarely needed ones (hover, tabs, screenshot, file upload, dialog,
-  WebMCP list and call, mouse, handoff, history, console, network, resize)
-  are listed on demand by `browser_more`. With a decision model the list
-  also has `browser_find` and `browser_check`.
-
-- The skill is a 5 KB core (`SKILL.md`, 18.9 KB before) and eight reference
-  files the agent reads when it needs them (acting, reading, inspecting,
-  sessions, Electron, the decision model, setup, troubleshooting);
-  `install-skill` installs all of them.
-
-- Typing into a field on a large page reports in the time of the typing,
-  not of a page read: a `fill`, `type` or `insert-text` that changed
-  nothing else the tree shows answers `ok` without reading the page again
-  (10,000 table rows: 574 to 27 ms; 1,000 rows: 63 to 12 ms, local, Chrome
-  153). A journal kept in the page since the last read proves nothing
-  else changed: the DOM of every document and open shadow root, form
-  values a script set, popovers, the style rules that follow an
-  element's state (`:focus`, `:invalid`, `:has()` and the like) in every
-  sheet and the sheets it `@import`s, each checked against what it
-  matched before the entry, and a script writing a style rule during the
-  entry. When it can't prove it (a change, a style sheet of another
-  origin, a closed shadow root) the page is read as before. Reports are the same either way; `NAVIGERA_CHANGE_JOURNAL=0`
+- Typing into a field on a large page no longer reads the whole page to
+  report. A `fill`, `type` or `insert-text` that changed nothing else the
+  tree shows answers `ok` straight away (10,000 table rows: 574 to 27 ms;
+  1,000 rows: 63 to 12 ms, local, Chrome 153). To know that nothing else
+  changed, navigera keeps a journal in the page from the last read. It
+  covers the DOM of every document and open shadow root, form values a
+  script set, popovers, a script writing a style rule during the entry,
+  and the style rules that depend on an element's state (`:focus`,
+  `:invalid`, `:has()` and the like) in every sheet and the sheets it
+  `@import`s, each checked against what it matched before the entry. When
+  the journal can't rule a change out (it saw one, a style sheet comes
+  from another origin, a shadow root is closed), the page is read as
+  before. The report is the same either way; `NAVIGERA_CHANGE_JOURNAL=0`
   reads after every entry, to compare.
-- `check`, `uncheck` and `select` on a large page report in the time of
-  the action too: when the journal shows the action moved only checkboxes,
-  radios or single selects, their own lines are rewritten as a read
-  prints them (`checked`, a select's `value=` and the option marked
+- `check`, `uncheck` and `select` on a large page skip the page read the
+  same way. When the journal shows the action changed only checkboxes,
+  radios or single selects, navigera rewrites just their lines as a read
+  would print them (`checked`, a select's `value=` and the option marked
   `(selected)`), a radio switch and a "select all" included (10,000 table
   rows: `check` 478 to 49 ms, `select` 447 to 34 ms; 1,000 rows: 60 to
-  22 ms and 46 to 9 ms; medians of 10 interleaved, local, Chrome 153). A
-  select inside a label of another control, a table cell or anything that
-  names by its text, an option the line doesn't list whole, or a required
-  radio group is read as before.
-- A click on a large page reports in the time of what it changed, not of
-  a page capture: the read that says what an action changed takes the
-  last read's snapshot and reads again from the page only the subtrees
-  the change journal names (10,000 table rows: a cell edited 588 to 159 ms,
-  a row added 1,071 to 315 ms; 1,000 rows: 74 to 42 ms; medians of 10 and
-  8 interleaved, local, Chrome 153). Named: each element whose attributes,
-  text or children changed, each control a script set, each element a
-  state-dependent rule (`:hover`, `:focus`, ...) or one reaching past its
-  subtree (a sibling, a child's place, `:has()`) now styles differently,
-  each popover, dialog and `<details>` that toggled, each element animated
-  in what the tree reads, and each element that gained or lost a click
-  listener. A new style sheet, a style rule a script wrote, a container
-  query, a first-letter rule, a frame or shadow root, a change in
-  `<head>`, or a change bigger than an eighth of the page is captured
-  whole, as before. Reports are the same either way;
-  `NAVIGERA_DELTA_READ=0` captures every time, to compare.
+  22 ms and 46 to 9 ms; medians of 10 interleaved, local, Chrome 153).
+  The page is still read as before for a select inside another control's
+  label, a table cell or anything else named by its text, an option the
+  line doesn't list in full, and a required radio group.
+- A click on a large page reports in about the time it takes to read
+  what changed, without capturing the whole page. navigera starts from
+  the last read's snapshot and reads again only the subtrees the change
+  journal names (10,000 table rows: a cell edited 588 to 159 ms, a row
+  added 1,071 to 315 ms; 1,000 rows: 74 to 42 ms; medians of 10 and 8
+  interleaved, local, Chrome 153). The journal names each element whose
+  attributes, text or children changed; each control a script set; each
+  element that a state-dependent rule (`:hover`, `:focus`, ...) or a rule
+  reaching past its subtree (a sibling, a child's place, `:has()`) now
+  styles differently; each popover, dialog and `<details>` that opened or
+  closed; each element animated in what the tree reads; and each element
+  that gained or lost a click listener. The page is still captured whole,
+  as before, after a new style sheet, a style rule a script wrote, a
+  container query, a first-letter rule, a frame or shadow root, a change
+  in `<head>`, or a change bigger than an eighth of the page. The report
+  is the same either way; `NAVIGERA_DELTA_READ=0` captures every time, to
+  compare.
 - A plain `ax` after a read or an action is patched the same way (10,000
   rows, the `ax` after a click: 652 to 58 ms; medians of 15, interleaved,
-  local); `NAVIGERA_REST_PRIME=0` turns that off. Not on a page whose
-  style rules far outnumber its elements (a site's whole CSS bundle, as
-  on GitHub: 26,000 to 42,000 rules): walking them for the next read
-  costs more than the capture it saves, so a read leaves them to the
-  first action, as before (github.com, first `ax` 193 to 72 ms; medians
-  of 5, interleaved, live). A walk also stops as soon as it finds more
-  state-dependent rules than the journal tracks.
-- The first `ax` after a `goto` on a large page is patched too, when the
-  client pauses between its commands (an agent reading what `goto` said):
-  while it pauses, the session captures the page once its network is
-  quiet and keeps the snapshot as a read would, unprinted (10,000 rows,
-  first `ax` 776 to 130 ms; 1,000 rows 93 to 34 ms; medians of 10,
-  interleaved, local). Only for a client that paused 1 s or more before
-  the `goto` and before most of its last three commands (a `start` and a
-  first `goto` sent at once don't count against an agent's own first
-  `goto`), and a page whose capture fits in half its shortest such
-  pause: Chrome's capture can't be cut short, so a command that comes
-  in while it runs waits for it. A page read ahead and left
-  unread for another `goto` stops it until an `ax` follows a `goto`
-  again. `NAVIGERA_PRE_READ=0` turns it off.
-- `navigera mcp` reads large pages the way the CLI does. Its snapshots
+  local); `NAVIGERA_REST_PRIME=0` turns that off. Pages whose style rules
+  far outnumber their elements are the exception. On a site that ships
+  its whole CSS bundle, as GitHub does (26,000 to 42,000 rules), walking
+  the rules for the next read costs more than the capture it saves, so a
+  read leaves them to the first action, as before (github.com, first `ax`
+  193 to 72 ms; medians of 5, interleaved, live). The walk also stops as
+  soon as it finds more state-dependent rules than the journal can track.
+- The first `ax` after a `goto` on a large page is patched too when the
+  client pauses between commands, as an agent does while it reads what
+  `goto` printed. During the pause the session captures the page once its
+  network is quiet and keeps the snapshot, unprinted, as a read would
+  (10,000 rows, first `ax` 776 to 130 ms; 1,000 rows 93 to 34 ms; medians
+  of 10, interleaved, local). It does this only for a client that paused
+  1 s or more before the `goto` and before most of its last three
+  commands, and only for a page whose capture fits in half of the
+  shortest of those pauses: Chrome can't cut a capture short, so a
+  command that arrives during one waits for it. A `start` and a first
+  `goto` sent together don't count against an agent's own first `goto`.
+  When a page read ahead is left unread because another `goto` came
+  first, reading ahead stops until an `ax` follows a `goto` again.
+  `NAVIGERA_PRE_READ=0` turns it off.
+- `navigera mcp` reads large pages the way the CLI does. The MCP server
   kept no change journal, so every `browser_snapshot` on a large page
-  captured it whole; now a snapshot after an action, after another
-  snapshot or after a navigation the agent paused on is patched with
-  what changed, and between calls the server reads a page a navigation
-  loaded ahead of its snapshot (10,000 rows: first snapshot after
-  `browser_navigate` 839 to 137 ms, snapshot after a click 780 to 97 ms;
-  1,000 rows 85 to 30 ms; medians of 10, interleaved, client pausing
-  1.5 s). Tool results read the same as before. Between calls it also
-  takes the storage snapshot a shared browser's crash recovery restores,
-  which it never did over MCP.
-- Building a large page's tree costs less on navigera's side (10,000 rows,
-  from a saved snapshot: tree 85 to 51 ms, text 49 to 26 ms, clickable
-  elements 34 to 20 ms): the snapshot is read into columns once, per-node
-  facts are indexed by node, and maps keyed by node numbers use a faster
-  hash. A full read is still mostly Chrome's capture.
-- A read of a large page makes only the part of its tree it prints. The
-  tree built from the DOM snapshot was made whole before it was printed,
-  and the printer stops a line past its limit (2,000 by default): on a
-  10,000-row table most nodes were made, named and indexed for nothing.
-  Nodes are now made as the printer reaches them (10,000 rows, from a
-  saved snapshot: tree and text 147 to 31 ms; a click's report, a cell
-  edited 292 to 219 ms, a row added 375 to 308 ms; `ax` 938 to 883 ms;
-  1,000 rows: a click 74 to 60 ms; medians of 10 interleaved, local,
-  Chrome 153). The text is the same; `NAVIGERA_LAZY_BUILD=0` makes the
-  whole tree first, to compare. Finding the clickable elements, which
-  runs beside it, went from 37 to 8 ms on the same snapshot (the same
-  elements on 103 saved pages), and a click's patch of the kept snapshot
-  copies the subtrees it doesn't touch as runs of nodes: 19 to 9 ms for a
-  cell edited.
-- Actions are faster where they used to sit out fixed waits. Saying what
-  an action changed no longer waits 50 ms for a request the action might
-  have started: one turn of the page's event loop shows whether it started
-  one. A click on a link or a submit button waits for the new document only
-  when the page planned one, not up to 150 ms when a router or a script
-  cancelled it (single-page apps, forms a script sends) or the form failed
-  validation. A click's mouse move, press and release go out together, with
-  one wait for the three. What an action reports and where it leaves the
-  page are unchanged.
-- A report of what an action changed doesn't stop at a placeholder the
-  action put up ("Loading…", "Saving", a progress bar) for work the page
-  starts a moment later (a timer, a frame, an effect after paint): it
-  waits for the page's next change and reads again, up to 1.5 s. Before,
-  such a report could show the placeholder, and the agent spent a turn
-  looking again.
+  captured the whole page. Now a snapshot after an action, after another
+  snapshot, or after a navigation the agent paused on is patched with
+  what changed, and between calls the server reads ahead a page that a
+  navigation loaded (10,000 rows: first snapshot after `browser_navigate`
+  839 to 137 ms, snapshot after a click 780 to 97 ms; 1,000 rows 85 to
+  30 ms; medians of 10, interleaved, client pausing 1.5 s). Tool results
+  read the same as before. Between calls the server also saves the
+  storage snapshot that a shared browser's crash recovery restores, which
+  it never did over MCP.
+- navigera's own share of building a large page's tree is smaller (10,000
+  rows, from a saved snapshot: tree 85 to 51 ms, text 49 to 26 ms,
+  clickable elements 34 to 20 ms). It reads the snapshot into columns
+  once, indexes per-node facts by node, and uses a faster hash for maps
+  keyed by node number. Most of a full read is still Chrome's capture.
+- A read of a large page builds only the part of the tree it prints.
+  navigera used to build the whole tree from the DOM snapshot before
+  printing it, though the printer stops one line past its limit (2,000 by
+  default), so on a 10,000-row table most nodes were built, named and
+  indexed for nothing. Nodes are now built as the printer reaches them
+  (10,000 rows, from a saved snapshot: tree and text 147 to 31 ms; a
+  click's report, a cell edited 292 to 219 ms, a row added 375 to 308 ms;
+  `ax` 938 to 883 ms; 1,000 rows: a click 74 to 60 ms; medians of 10
+  interleaved, local, Chrome 153). The text is the same;
+  `NAVIGERA_LAZY_BUILD=0` builds the whole tree first, to compare.
+  Finding the clickable elements, which runs alongside, went from 37 to
+  8 ms on the same snapshot (the same elements on 103 saved pages). A
+  click's patch of the kept snapshot copies the subtrees it doesn't touch
+  as runs of nodes: 19 to 9 ms for an edited cell.
+- Actions no longer sit out fixed waits. Before saying what an action
+  changed, navigera waited 50 ms for a request the action might have
+  started; one turn of the page's event loop now shows whether it started
+  one. A click on a link or a submit button waits for a new document only
+  when the page is loading one. It used to wait up to 150 ms when a
+  router or a script cancelled the navigation (single-page apps, forms a
+  script submits) or the form failed validation. A click's mouse move,
+  press and release go out together, with one wait for the three. What
+  an action reports, and where it leaves the page, are unchanged.
+- When an action puts up a placeholder ("Loading…", "Saving", a progress
+  bar) for work the page starts a moment later (on a timer, the next
+  frame, an effect after paint), the report waits for the page's next
+  change and reads again, for up to 1.5 s. Before, the report could show
+  just the placeholder, and the agent spent a turn looking again.
 
 ### Fixed
 
-- An Electron session no longer moves to a window the app opened on its
-  own right after `start` chose one. When a second start-up window's target
-  came late (a slow machine), the first command after `start` adopted it as
-  a new tab and made it the active one, so `ax` read that window instead of
-  the main one (seen on Windows and macOS CI, about 1 run in 20). Until the
-  agent acts, navigates or picks a tab, a window the app opens is chosen
-  among as at `start` (the largest one it shows); one it opens after that
-  is still the new active tab.
-
+- An Electron session no longer switches to a window the app opens on its
+  own right after `start`. When a second start-up window showed up late
+  (on a slow machine), the first command after `start` took it as a new
+  tab and made it the active one, so `ax` read that window instead of the
+  main one (seen on Windows and macOS CI, about 1 run in 20). Until the
+  agent acts, navigates or picks a tab, navigera now chooses among the
+  app's windows as `start` does (the largest one it shows). A window the
+  app opens after that still becomes the new active tab.
 - `start` right after a session ended because its shared browser crashed
-  again makes a new session. The ended session answered first and let go
-  of its socket afterwards, so a `start` in between reached it on its way
-  out, said `already_running`, and the next command found no session
-  (seen on Windows, about 1 run in 30). The socket now goes before that
-  answer, and a `start` that reaches a server leaving without answering
-  waits for it to go and starts a new session. That holds too when the
-  command came in before the shared browser's host had dropped its
-  connections (it refuses requests to a dead browser at once): that
-  refusal alone ends the session.
-- `ax` no longer shows content the page hides behind a display lock
-  once it has been shown: the body of a `<details>` opened and closed
-  again, or what is under `content-visibility: hidden` or
-  `hidden=until-found` after it was visible. Chrome keeps such content's
-  boxes and its DOM snapshot lists them, so the tree showed text and
-  links nobody can see, and a click that closed a `<details>` reported
-  no change. No slower: a 10,000-row read within 1% (interleaved, local).
-- What an action changed no longer lists lines that only moved across the
-  end of a tree cut at its line limit: on a page longer than `ax` shows,
-  opening a section above the cut used to report the rows it pushed past
-  the cut as removed (and closing it, the rows it brought in as added).
-- A click no longer takes out a form `submit` or clipboard method the
-  page put in while handling it: what navigera puts in to watch the
-  click is taken out only while it is still there.
-- A click no longer presses whatever took its element's place between
-  the hit test and the press: an overlay a mouse move or a timer opened
-  just then, or an element that moves every frame. Such a press is kept
-  from the page whole (down, up, click) and pressed again where the
-  element is now; when it keeps missing, the click fails saying what it
-  would have hit, and nothing was clicked. Before, the press clicked that
-  other element and the report showed what it changed as the click's
-  (3 of 40 clicks under an overlay that opened 4 to 37 ms after load
-  pressed the overlay's button; 0 now). Clicks on a still page take as
-  long as before.
-- A click whose page answered the press by moving or replacing the
-  element (a banner put in above it on pointerdown, a button rendered
-  anew on mousedown) says so in `click_missed`: the click event went to
-  the parent the press and the release share, or the browser sent none,
-  so the element's own handler never ran. Before, it read as a plain
-  success (compact output printed `ok` for the replaced button). The
-  page saw the press, so it isn't pressed again. Read with the
-  press-arrival check: no extra round trip.
+  a second time now makes a new session. The ending session sent its
+  answer first and released its socket afterwards, so a `start` in
+  between reached it on its way out, said `already_running`, and the next
+  command found no session (seen on Windows, about 1 run in 30). The
+  socket now goes before that answer, and a `start` that reaches a server
+  leaving without an answer waits for it to go, then starts a new
+  session. The same holds when the command arrived before the shared
+  browser's host had dropped its connections: the host refuses requests
+  to a dead browser at once, and that refusal alone ends the session.
+- `ax` no longer shows content the page has hidden again behind a display
+  lock: the body of a `<details>` that was opened and closed, or content
+  under `content-visibility: hidden` or `hidden=until-found` after it had
+  been visible. Chrome keeps the boxes of such content and its DOM
+  snapshot lists them, so the tree showed text and links nobody could
+  see, and a click that closed a `<details>` reported no change. Reads
+  are no slower: a 10,000-row read is within 1% (interleaved, local).
+- An action's report no longer lists lines that only moved across the
+  line limit at the end of a cut tree. On a page longer than `ax` shows,
+  opening a section above the cut reported the rows it pushed past the
+  cut as removed, and closing it reported the rows it brought back as
+  added.
+- A click no longer removes a form `submit` or clipboard method the page
+  installed while handling it. navigera removes the hooks it installs to
+  watch a click only if they are still in place.
+- A click no longer presses whatever took its element's place between the
+  hit test and the press, such as an overlay that a mouse move or a timer
+  opened just then, or an element that moves every frame. navigera keeps
+  the whole press (down, up, click) from the page and presses again where
+  the element is now. If it keeps missing, the click fails and says what
+  it would have hit, and nothing is clicked. Before, the press clicked the
+  other element and the report showed that element's change as the
+  click's (3 of 40 clicks under an overlay that opened 4 to 37 ms after
+  load pressed the overlay's button; 0 now). Clicks on a still page take
+  as long as before.
+- When the page answers a press by moving or replacing the element (a
+  banner inserted above it on pointerdown, a button rendered again on
+  mousedown), the click now says so in `click_missed`. The click event
+  went to the parent the press and the release share, or the browser sent
+  none, so the element's own handler never ran. Before, this read as a
+  plain success (compact output printed `ok` for the replaced button).
+  The page saw the press, so navigera doesn't press again. The check
+  rides on the press-arrival check, with no extra round trip.
 - A text entry on a large page reported `ok` when a script had set a
   checkbox, a radio, a select or a field's value (no DOM change, no
-  event) between the `ax` and the entry; a read showed that change. Form
-  states are now taken with the read, and a change since then means the
-  page is read again.
-- A `batch` says what its actions changed, as each action does alone:
-  `fill` and `click` in one batch printed only the page state, so an
-  agent had to read the page again to learn how the batch ended. Steps
-  that changed nothing say nothing, and a batch that changed nothing
-  prints `ok`. The LLM bench's model still looks once more before it
-  answers (search and form, 5 of 6 sessions each), so its tokens didn't
-  change (8,716 vs 8,764 per session, 6 reps, same window).
+  event) between the `ax` and the entry, though a read showed the change.
+  Form states are now recorded with the read, and if one has changed
+  since, the page is read again.
+- A `batch` says what its actions changed, as each action does on its
+  own. With `fill` and `click` in one batch it printed only the page
+  state, so the agent had to read the page again to see how the batch
+  ended. Steps that changed nothing print nothing, and a batch that
+  changed nothing prints `ok`. In the LLM bench the model still looks once
+  more before it answers (search and form, 5 of 6 sessions each), so its
+  token use didn't change (8,716 vs 8,764 per session, 6 reps, same
+  window).
 - `text --selector <css>` leaves out the scripts and styles inside the
-  element: `text --selector body` on a page with an inline script printed
-  its code after the text (565 characters for 78 of text on the bench's
-  order form).
-- A click that came before the page wired its element up (a script that
-  clicks right after `goto`, hydration, a handler a timer or a script
-  loaded after load sets) is sent again once the page wires it, instead
-  of reporting `no_effect`. On a page loaded less than 10 s ago, a click
-  that changed nothing, with no click, mouse, pointer or touch listener
-  on the element, its ancestors, its document or window when it came
-  (so no script of the page ran for it), waits while the page loads
-  scripts or data and up to 500 ms after the click for one to appear,
-  then clicks once more (`clicked_again` says how long the page took).
-  A click anything heard is never sent again: a script that recorded it
-  may replay it later, unseen. Goto and click in one batch, 3 reps each
-  of 7 late-wiring pages (local, release, Chrome 153): 0/21 to 21/21
-  clicked once; React 18 `hydrateRoot` and Vue 3 SSR mounts loaded
-  after load: clicked once. A handled click costs the same (40 in a
-  batch: 16.8 vs 16.6 ms each); a dead button on a page that just
-  loaded reports `no_effect` in 521 ms instead of 221 ms.
-  `NAVIGERA_CLICK_AGAIN=0` turns it off.
+  element. `text --selector body` on a page with an inline script printed
+  the script's code after the text (565 characters for 78 of text on the
+  bench's order form).
+- A click that arrives before the page has wired up its element (a script
+  that clicks right after `goto`, hydration, a handler set by a timer or
+  by a script loaded after load) is sent again once the page wires it,
+  where it used to report `no_effect`. On a page loaded less than 10 s
+  ago, a click that changed nothing and found no click, mouse, pointer or
+  touch listener on the element, its ancestors, its document or window
+  (so no script of the page ran for it) waits while the page loads
+  scripts or data, and up to 500 ms after the click, for a listener to
+  appear, then clicks once more (`clicked_again` says how long the page
+  took). A click that any listener heard is never sent again, because a
+  script that recorded it may replay it later, out of sight. Goto and
+  click in one batch, 3 reps each of 7 late-wiring pages (local, release,
+  Chrome 153): clicked once in 0/21 runs before, 21/21 now; React 18
+  `hydrateRoot` and Vue 3 SSR mounts loaded after load: clicked once. A
+  handled click costs the same (40 in a batch: 16.8 vs 16.6 ms each). A
+  dead button on a page that just loaded reports `no_effect` in 521 ms
+  instead of 221 ms. `NAVIGERA_CLICK_AGAIN=0` turns it off.
 - A wait on something only a property shows (`wait --js` on a field's
-  value, focus or a checkbox; assertions built on the same wait) ends when
-  the page fires `input`, `change`, `focusin` or `focusout` for that change,
-  instead of at the next check up to 100 ms later. A wait for a field's
-  value after a `fill` ended 97 ms after the input event, and now ends in
-  under 1 ms (median of 20, timed in the page, Chrome 156). A change a
-  script makes without an event (`el.checked = true` alone) is still seen
-  at the next check.
+  value, focus or a checkbox, and assertions built on the same wait) ends
+  when the page fires `input`, `change`, `focusin` or `focusout` for the
+  change, where it used to end at the next check, up to 100 ms later. A
+  wait for a field's value after a `fill` ended 97 ms after the input
+  event and now ends in under 1 ms (median of 20, timed in the page,
+  Chrome 156). A change a script makes without an event
+  (`el.checked = true` alone) is still seen at the next check.
 - A click waits for a slide that starts while it checks that the element
   holds still. A dialog that appeared during those frames and slid in
-  still read as still: a slide's first frame hasn't moved yet, and near
+  could pass as still: a slide's first frame hasn't moved yet, and near
   the end of an ease-out slide the box moves less than a pixel a frame.
   The press then went out before the page's `transitionend` handler had
-  wired the button. Now the click looks again for a running animation on
-  the element's chain, waits for it and its end event, and reads again.
-  The sliding-modal test with six browsers at once (4 cores): pressed
-  before wired in 30 of 660 runs before, 0 of 660 now.
+  wired the button. The click now looks again for a running animation on
+  the element and its ancestors, waits for it and its end event, and
+  reads again. In the sliding-modal test with six browsers at once
+  (4 cores), the button was pressed before it was wired in 30 of 660 runs
+  before, and in 0 of 660 now.
 
 ## [0.8.0] - 2026-11-03
 
