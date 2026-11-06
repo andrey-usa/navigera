@@ -1605,19 +1605,10 @@ fn a_click_waits_for_a_navigation_only_when_the_page_plans_one() {
     );
 }
 
-/// What an action changed is read after the requests it started, also one
-/// a timer starts a turn later with nothing shown first (typing that asks
-/// for suggestions): the report has the answer, not the page as it was. The
-/// page has been quiet for longer than the quiet window (an agent that
-/// thought before typing), so the quiet wait alone would read it at once.
-/// A click whose response starts a second fetch at once reports what the
-/// second fetch rendered: the after-action settle never returns between
-/// states of a chain.
-#[test]
-fn an_action_reports_a_fetches_chained_fetch() {
+fn assert_chain_reports_its_end(page: &str) {
     let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
-    let s = Session::start("action-chain", &[]);
+    let s = Session::start(page.trim_start_matches('/'), &[]);
     let compact = |args: &[&str]| {
         let out = Command::new(tool_exe())
             .env_remove("NAVIGERA_OUTPUT")
@@ -1630,7 +1621,7 @@ fn an_action_reports_a_fetches_chained_fetch() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
     for _ in 0..3 {
-        s.ok(&["goto", &format!("{}/action-chain", site.url)]);
+        s.ok(&["goto", &format!("{}{page}", site.url)]);
         let tree = compact(&["ax"]);
         let reference = tree
             .lines()
@@ -1645,6 +1636,27 @@ fn an_action_reports_a_fetches_chained_fetch() {
     }
 }
 
+/// A click whose response starts a second fetch at once reports what the
+/// second fetch rendered: the after-action settle never returns between
+/// states of a chain.
+#[test]
+fn an_action_reports_the_end_of_a_chained_fetch() {
+    assert_chain_reports_its_end("/action-chain");
+}
+
+/// The same with the second fetch deferred by a timer inside the quiet
+/// window (80 ms): the settle proof waits for short timers the page
+/// scheduled, as the plain window did.
+#[test]
+fn an_action_reports_the_end_of_a_fetch_chained_by_a_timer() {
+    assert_chain_reports_its_end("/action-chain-timer");
+}
+
+/// What an action changed is read after the requests it started, also one
+/// a timer starts a turn later with nothing shown first (typing that asks
+/// for suggestions): the report has the answer, not the page as it was. The
+/// page has been quiet for longer than the quiet window (an agent that
+/// thought before typing), so the quiet wait alone would read it at once.
 #[test]
 fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
     let _alone = timed_alone();

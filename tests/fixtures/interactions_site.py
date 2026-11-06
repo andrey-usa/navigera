@@ -314,6 +314,19 @@ go.onclick = () => {
 };
 </script>""")
 
+PAGES["/action-chain-timer"] = ("action chain timer", "", """
+<button id=go>Load</button><div id=out>idle</div>
+<script>
+// As /action-chain, with the second fetch deferred 80 ms: inside the
+// after-action quiet window, after a frame and a task.
+go.onclick = () => {
+  fetch('/slow-echo?ms=150').then((r) => r.text()).then(() => {
+    out.textContent = 'phase one';
+    setTimeout(() => fetch('/slow-echo?ms=150').then((r) => r.text()).then(() => { out.textContent = 'chain complete'; }), 80);
+  });
+};
+</script>""")
+
 PAGES["/big-table"] = ("big table", "", """
 <table><tbody id=rows></tbody></table><p id=out></p>
 <script>

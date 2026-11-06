@@ -847,6 +847,66 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     return { synthetic: true, covered: !!hit && !force, covered_by: hit && hit !== el ? describe(hit) : null, nav: mayNavigate(el) };
 }"#;
 
+/// Armed by [`Page::mark_action`] before an action runs: the DOM-change
+/// count's baseline for the settle proof (see [`Page::action_settle_wait`]),
+/// and a count of the timers the page schedules from then on with a delay
+/// up to the after-action window (100 ms). A chained fetch the page defers
+/// by such a timer is work the window used to wait for; the proof waits for
+/// those timers too (intervals count until cleared), so it never reports
+/// before work today's window would have seen start. Timers keep their ids
+/// and arguments; the hooks are put back by [`SETTLE_UNHOOK`], when the
+/// next action re-arms, or after 10 s, and only while ours are in place.
+const SETTLE_ARM: &str = r#"(() => {
+    let c = window.__nvMut;
+    if (!c) {
+        c = { n: 0, w: null, w2: null };
+        c.o = new MutationObserver((r) => { c.n += r.length; const w = c.w; if (w) { c.w = null; w(); } const w2 = c.w2; if (w2) { c.w2 = null; w2(); } });
+        c.o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+        Object.defineProperty(window, '__nvMut', { value: c, configurable: true, enumerable: false });
+    }
+    c.a = c.n;
+    if (c.unT) c.unT();
+    const T = c.T || (c.T = { st: window.setTimeout, ct: window.clearTimeout, si: window.setInterval, ci: window.clearInterval });
+    const p = new Set();
+    c.p = p; c.e = null; c.lim = 100;
+    const done = (id) => { if (p.delete(id) && !p.size && c.p === p && c.e) { const e = c.e; c.e = null; e(); } };
+    const short = (f, d) => typeof f === 'function' && (Number(d) || 0) <= c.lim;
+    const st = { setTimeout(f, d, ...a) {
+        if (!short(f, d)) return T.st.call(window, f, d, ...a);
+        const id = T.st.call(window, function () { try { return f.apply(this, a); } finally { done(id); } }, d);
+        p.add(id); return id;
+    } }.setTimeout;
+    const si = { setInterval(f, d, ...a) {
+        const id = T.si.call(window, f, d, ...a);
+        if (short(f, d)) p.add(id);
+        return id;
+    } }.setInterval;
+    const ct = { clearTimeout(id) { T.ct.call(window, id); done(id); } }.clearTimeout;
+    const ci = { clearInterval(id) { T.ci.call(window, id); done(id); } }.clearInterval;
+    const ours = { setTimeout: st, setInterval: si, clearTimeout: ct, clearInterval: ci };
+    for (const k in ours) window[k] = ours[k];
+    const g = (c.g || 0) + 1; c.g = g;
+    c.unT = () => {
+        c.unT = null;
+        const orig = { setTimeout: T.st, setInterval: T.si, clearTimeout: T.ct, clearInterval: T.ci };
+        for (const k in ours) if (window[k] === ours[k]) window[k] = orig[k];
+    };
+    T.st.call(window, () => { if (c.g === g && c.unT) c.unT(); }, 10000);
+    return 0;
+})()"#;
+
+/// The settle proof's minimum span after the last response (see
+/// [`Page::action_settle_wait`]): half the window.
+fn settle_floor(quiet: Duration) -> Duration {
+    match std::env::var("NAVIGERA_SETTLE_FLOOR_PCT").ok().and_then(|v| v.parse::<u32>().ok()) {
+        Some(pct) => quiet * pct / 100,
+        None => quiet / 2,
+    }
+}
+
+/// Puts back the timer functions [`SETTLE_ARM`] wrapped.
+const SETTLE_UNHOOK: &str = "(() => { const c = window.__nvMut; if (c && c.unT) c.unT(); return 0; })()";
+
 /// The change journal, armed in the top document just before a tree read
 /// so that a later text entry can be shown to have changed nothing else
 /// the tree shows, and the read need not be taken again (see
@@ -3646,6 +3706,16 @@ impl Page {
     /// (a response the page does not render, or work that starts a request
     /// past the frame). Returns like [`Page::network_quiet_waited`].
     pub fn action_settle_wait(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
+        let out = self.action_settle_wait_inner(quiet, max);
+        let _ = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": SETTLE_UNHOOK, "returnByValue": true }),
+            Duration::from_millis(500),
+        );
+        out
+    }
+
+    fn action_settle_wait_inner(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
         let started = std::time::Instant::now();
         let deadline = started + max;
         // A request that starts during the proof (a fetch the page defers
@@ -3665,16 +3735,24 @@ impl Page {
             }
             let (seq0, _) = self.shared.net_seq_pending(&self.session_id);
             let ms = quiet.as_millis();
-            let floor = (quiet / 2).as_millis();
+            // The floor gives work the last response set off a moment to
+            // start: it counts from that response, so a request that went
+            // quiet long ago (a held long-poll left out of the count) does
+            // not pay it again.
+            let since_last = self.shared.net_state(&self.session_id).1.map_or(quiet, |t| t.elapsed());
+            let floor = settle_floor(quiet).saturating_sub(since_last).as_millis();
             let js = format!(
                 "new Promise((r) => {{ const c = window.__nvMut; \
              if (!c) return r(false); \
+             const st = (c.T && c.T.st) || setTimeout; const ct = (c.T && c.T.ct) || clearTimeout; \
              let proved = false; let floor = false; \
-             const t = setTimeout(() => r(false), {ms}); \
-             const maybe = () => {{ if (proved && floor) {{ clearTimeout(t); r(true); }} }}; \
-             setTimeout(() => {{ floor = true; maybe(); }}, {floor}); \
+             const t = st.call(window, () => {{ c.e = null; r(false); }}, {ms}); \
              const probe = () => requestAnimationFrame(() => {{ const ch = new MessageChannel(); \
                ch.port1.onmessage = () => {{ proved = true; maybe(); }}; ch.port2.postMessage(1); }}); \
+             const maybe = () => {{ if (!(proved && floor)) return; \
+               if (c.p && c.p.size) {{ proved = false; c.e = probe; return; }} \
+               ct.call(window, t); r(true); }}; \
+             st.call(window, () => {{ floor = true; maybe(); }}, {floor}); \
              if (c.n > c.a) probe(); else c.w2 = probe; }})"
             );
             let proved = self
@@ -3700,7 +3778,6 @@ impl Page {
             return (false, started.elapsed());
         }
         let (ok, _) = self.network_quiet_waited(quiet, left);
-        let _ = ok;
         (ok, started.elapsed())
     }
 
@@ -3734,13 +3811,11 @@ impl Page {
     /// An action is about to run here (see [`Shared::mark_action`]).
     pub fn mark_action(&self) {
         self.shared.mark_action(&self.session_id, self.nav_generation());
-        // Baseline the DOM-change count for the settle proof (see
-        // [`Page::action_settle_wait`]): what was on the page before the
-        // action does not count.
-        let js = "(() => { let c = window.__nvMut; if (!c) { c = { n: 0, w: null, w2: null };                   c.o = new MutationObserver((r) => { c.n += r.length; const w = c.w; if (w) { c.w = null; w(); } const w2 = c.w2; if (w2) { c.w2 = null; w2(); } });                   c.o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });                   Object.defineProperty(window, '__nvMut', { value: c, configurable: true, enumerable: false }); }                   c.a = c.n; return 0; })()";
+        // Baseline the DOM-change count and start counting short timers
+        // for the settle proof (see [`SETTLE_ARM`]).
         let _ = self.send(
             "Runtime.evaluate",
-            json!({ "expression": js, "returnByValue": true }),
+            json!({ "expression": SETTLE_ARM, "returnByValue": true }),
             Duration::from_millis(500),
         );
     }
