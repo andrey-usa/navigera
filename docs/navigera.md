@@ -235,8 +235,8 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 - **Snapshots wait for fetched data.** Before `ax` and `screenshot`,
   navigera waits until the tab has had no `fetch`/XHR in flight for 500 ms
   (the usual network-idle window), at most 3 s; requests open longer
-  than 5 s (long polls, streams) don't count. A page that has been quiet —
-  usual when an agent has been thinking — is read at once. So
+  than 5 s (long polls, streams) don't count. A page that has been quiet,
+  as it usually is while an agent thinks, is read at once. So
   `goto … && … ax` shows a single-page app's list, not its "Loading…"
   placeholder. A request to a URL the page has already fetched twice at a
   steady interval is a poll and doesn't count, so a dashboard that refreshes

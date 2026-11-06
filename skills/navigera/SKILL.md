@@ -1,6 +1,6 @@
 ---
 name: navigera
-description: Drive a real headless Chrome, or an Electron desktop app, from the shell with navigera — one command per step against a warm session. Read pages as a compact accessibility tree with [ref=N], then click/fill/select/press by ref, wait, screenshot, handle tabs, iframes and dialogs. Use for web browsing, scraping, form filling, UI checks and Electron app testing instead of writing browser automation scripts.
+description: Drive a real headless Chrome, or an Electron desktop app, from the shell with navigera, one command per step against a warm session. Read pages as a compact accessibility tree with [ref=N], then click/fill/select/press by ref, wait, screenshot, handle tabs, iframes and dialogs. Use for web browsing, scraping, form filling, UI checks and Electron app testing instead of writing browser automation scripts.
 ---
 
 # navigera
