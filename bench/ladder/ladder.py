@@ -20,7 +20,7 @@ their binary is not installed (env EDGE_BIN / BRAVE_BIN / lightpanda shim).
 Three measurements:
   session   full 12-op scripted session, best-of-N wall
   eval      warm eval round-trip micro (200x `() => document.title`)
-  cold      cold start: launch -> new page -> one eval -> close, best-of-5
+  cold      cold start: launch -> new page -> one eval -> close, median of 15
 
 Accounting (house style, cf. gruppera bench-200m.yml):
   * wall     perf_counter around the run (best of N)
@@ -912,6 +912,16 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+def _live_median(stage: dict) -> str:
+    """Median wall of a live-site stage's passing runs (they rank it)."""
+    walls = [x["wall_s"] for x in stage["runs"] if x.get("ok") and x.get("wall_s") is not None]
+    return f"{statistics.median(walls):.2f}s" if walls else "—"
+
+
+def _passed(stage: dict) -> str:
+    return f"{sum(1 for x in stage['runs'] if x.get('ok'))}/{len(stage['runs'])}"
+
+
 def write_publish_json(out_dir: Path, results: dict, contenders: dict,
                        reps: int, env_text: str, agent_results: dict | None = None,
                        versions: dict | None = None, parallel_results: dict | None = None) -> None:
@@ -958,7 +968,11 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
         for key in ("realworld", "browse"):
             if r.get(key):
                 b = r[key]["best"]
+                ok_walls = [x["wall_s"] for x in r[key]["runs"] if x.get("ok") and x.get("wall_s") is not None]
                 row[key] = {"wall_s": r3(b.get("wall_s")), "ok": bool(b.get("ok")),
+                            # The median of the passing runs ranks the row.
+                            "median_wall_s": r3(statistics.median(ok_walls)) if ok_walls else None,
+                            "runs_wall_s": [r3(x.get("wall_s")) for x in r[key]["runs"]],
                             "passed_reps": sum(1 for x in r[key]["runs"] if x.get("ok")),
                             "reps": len(r[key]["runs"])}
                 reasons = [x.get("reason") for x in r[key]["runs"] if x.get("reason")]
@@ -1000,6 +1014,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--reps", type=int, default=3)
+    # Cold start and the live sites are ranked by median: one lucky run
+    # decided a best-of-5 row (cold 2026-11-06: go-rod best 0.225 s vs
+    # navigera 0.230 s, medians 0.251 vs 0.240 s), and the live rows carry
+    # network jitter. More reps make the median stable.
+    ap.add_argument("--cold-reps", type=int, default=15)
+    ap.add_argument("--live-reps", type=int, default=9,
+                    help="reps of the live-site stages (realworld, browse)")
     ap.add_argument("--only", default="",
                     help="comma-separated contenders to run (default: all), "
                          "e.g. nv-serve,gorod — for fast, narrow CI iterations")
@@ -1172,8 +1193,8 @@ def main() -> int:
         return {"runs": runs, "best": min(runs, key=lambda r: r["wall_s"])}
 
     stages = [("session", "session", args.reps), ("eval", "eval micro", 3),
-              ("cold", "cold start", 5), ("realworld", "realworld example.com", 3),
-              ("browse", "browse github", 3)]
+              ("cold", "cold start", args.cold_reps), ("realworld", "realworld example.com", args.live_reps),
+              ("browse", "browse github", args.live_reps)]
     parts: dict[str, dict[str, list]] = {name: {} for name in contenders}
     failed: set[tuple[str, str]] = set()
     for key, label, n in stages:
@@ -1362,15 +1383,15 @@ def main() -> int:
         b = results[name]["eval"]["best"]
         lines.append(f"| `{name}` | {b['mean_ms']:.2f} ms | {b['p95_ms']:.2f} ms |")
     lines.append("")
-    lines.append("### cold start: launch → new page → one eval → close (best of 5)")
+    lines.append(f"### cold start: launch → new page → one eval → close (median of {args.cold_reps})")
     lines.append("")
-    lines.append("| contender | wall |")
-    lines.append("|---|---|")
+    lines.append("| contender | median | best | worst |")
+    lines.append("|---|---|---|---|")
     for name in contenders:
         if not results[name].get("cold"):
             continue
-        b = results[name]["cold"]["best"]
-        lines.append(f"| `{name}` | {b['wall_s']:.2f}s |")
+        walls = [x["wall_s"] for x in results[name]["cold"]["runs"]]
+        lines.append(f"| `{name}` | {statistics.median(walls):.3f}s | {min(walls):.3f}s | {max(walls):.3f}s |")
     lines.append("")
     phase_rows = [(n, results[n]["cold"]["best"].get("phases") or {}) for n in contenders
                   if results[n].get("cold") and (results[n]["cold"]["best"].get("phases"))]
@@ -1386,28 +1407,31 @@ def main() -> int:
         lines.append("")
     rw_names = [n for n in contenders if results[n].get("realworld")]
     if rw_names:
-        lines.append("### real-world: https://example.com goto → title/h1 evals (best of 3)")
+        lines.append(f"### real-world: https://example.com goto → title/h1 evals (median of {args.live_reps})")
         lines.append("")
-        lines.append("| contender | wall | title | h1 |")
-        lines.append("|---|---|---|---|")
+        lines.append("| contender | median | best | passed | title | h1 |")
+        lines.append("|---|---|---|---|---|---|")
         for name in rw_names:
             b = results[name]["realworld"]["best"]
             ok = "✓" if b.get("ok") else "✗"
-            lines.append(f"| `{name}` | {b['wall_s']:.2f}s | {ok} {b.get('title','')} | {(b.get('h1') or '')[:20]} |")
+            lines.append(f"| `{name}` | {_live_median(results[name]['realworld'])} | {b['wall_s']:.2f}s | "
+                         f"{_passed(results[name]['realworld'])} | {ok} {b.get('title','')} | {(b.get('h1') or '')[:20]} |")
         lines.append("")
     browse_names = [n for n in contenders if results[n].get("browse")]
     if browse_names:
-        lines.append("### real-world browse: github awesome (scroll) + trending (click-through) (best of 3)")
+        lines.append("### real-world browse: github awesome (scroll) + trending (click-through) "
+                     f"(median of {args.live_reps})")
         lines.append("")
-        lines.append("| contender | wall | ok | trending top-3 | clicked |")
-        lines.append("|---|---|---|---|---|")
+        lines.append("| contender | median | best | passed | trending top-3 | clicked |")
+        lines.append("|---|---|---|---|---|---|")
         for name in browse_names:
             b = results[name]["browse"]["best"]
             ok = "✓" if b.get("ok") else "✗"
             f = b.get("facts") or {}
             top3 = ", ".join(f.get("trending_top3", []) or [])
             clicked = (f.get("trending_clicked_url") or "").replace("https://github.com/", "")
-            lines.append(f"| `{name}` | {b['wall_s']:.2f}s | {ok} | {top3[:60]} | {clicked[:40]} |")
+            lines.append(f"| `{name}` | {_live_median(results[name]['browse'])} | {b['wall_s']:.2f}s | "
+                         f"{_passed(results[name]['browse'])} | {top3[:60]} | {clicked[:40]} |")
         lines.append("")
     if agent_results:
         lines.append("### agent tools: one CLI process (or one MCP tools/call) per step, warm session (best of 3)")
