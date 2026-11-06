@@ -15,6 +15,7 @@ navigera runs a real browser for an agent that opens pages nobody vetted.
 | a web page vs. the CDP connection | the default transport is a private pipe (Linux/macOS): no port at all. Chrome rejects DevTools WebSocket connections from web origins |
 | the downloaded binary | `install.sh` / `install.ps1` verify the SHA-256 published with each release; release builds carry GitHub build-provenance attestations (`gh attestation verify <file> -R andrey-usa/navigera`) |
 | the MCP server's file access | every file a tool or `browser_run` step reads or writes (upload, route `body_file`, `state`, `network --har`/`--body-file`, `pdf`, `screenshot --path`, `downloads --dir`) must be inside the working directory, and `file:` and `chrome://`/`devtools://` pages are refused, unless `NAVIGERA_MCP_ALLOW_FILES=1` |
+| what a session may reach | `start --allow-domains <list>` (`$NAVIGERA_ALLOW_DOMAINS`, `mcp --allow-domains`): navigation and requests to other hosts are refused before they are sent, on every redirect hop. `--allow-domains-docs-only` checks top-level navigation only: a navigation limit, not exfiltration protection |
 | page content vs. third parties | nothing leaves the machine but the browser's own traffic, unless you configure a decision model (`NAVIGERA_DECIDER_KEY` / `NAVIGERA_DECIDER_URL`). Then `find` and `check` send the page's accessibility tree to it, with text typed into fields replaced by `(filled)`; the key goes to `curl` on stdin, not in its arguments |
 
 ## Known exposures
@@ -27,6 +28,11 @@ navigera runs a real browser for an agent that opens pages nobody vetted.
   `quit --close-browser` when you're done.
 - **`eval` runs any JavaScript** in the page, and `upload` (CLI) sends any
   file you name: by design, for the agent you run.
+- **WebMCP tools are the page's.** `webmcp-call` (MCP: `browser_webmcp_call`)
+  refuses a tool the page doesn't mark read-only without `--confirm`
+  (`confirm: true`), but that mark is the page's own claim, `eval` can call
+  page tools around the check, and of two tools with one name the first
+  registered runs. Their output is marked untrusted.
 - **Prompt injection.** Page text reaches the model. The skill and the MCP
   server tell the agent to treat it as data; the agent and its approval
   settings decide what it does with it.

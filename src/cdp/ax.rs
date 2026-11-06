@@ -23,6 +23,7 @@
 //! only printed on nodes an agent can act on, so a 500-card listing stays a
 //! fraction of the raw tree's size.
 
+use super::fxhash::{FxMap, FxSet};
 use std::collections::HashMap;
 
 use serde_json::Value;
@@ -203,6 +204,15 @@ impl Node {
     }
 }
 
+/// The end of the line that closes a tree cut at its line limit (after
+/// "… N more lines" or "… more lines").
+const CUT_TAIL: &str = " (scope with `ax --selector <css>`, or raise `--limit`)";
+
+/// Whether a line is the one that closes a tree cut at its line limit.
+pub fn is_cut_line(line: &str) -> bool {
+    line.starts_with("… ") && line.ends_with(CUT_TAIL) && line.contains("more lines")
+}
+
 pub struct Rendered {
     pub text: String,
     /// Lines emitted before truncation.
@@ -320,23 +330,25 @@ struct Tree<'a> {
     /// invalidate a node the walk already holds. The caller's nodes are
     /// borrowed; only fetched ones are owned.
     nodes: Vec<std::borrow::Cow<'a, Node>>,
-    by_id: HashMap<String, usize>,
-    by_backend: HashMap<u64, usize>,
-    frame_roots: HashMap<u64, Vec<usize>>,
-    frame_root_ids: std::collections::HashSet<usize>,
+    by_id: FxMap<String, usize>,
+    by_backend: FxMap<u64, usize>,
+    frame_roots: FxMap<u64, Vec<usize>>,
+    frame_root_ids: FxSet<usize>,
     opts: &'a Options,
     lines: Vec<String>,
     fetch: Option<AxFetch>,
+    /// Where nodes come from as the walk reaches them (see [`Source`]).
+    source: Option<&'a dyn Source>,
     /// Nodes whose children the lazy fetch already asked for (a node the
     /// browser answered without is not asked again).
-    fetched: std::collections::HashSet<usize>,
+    fetched: FxSet<usize>,
     fetch_failed: bool,
     /// Child fetches so far, and the fetched nodes the walk has reached
     /// (see [`Options::lazy_budget`]): fetches run ahead of the walk by up
     /// to a window of siblings, so the lines per fetch are read off the
     /// fetches it has used.
     calls: usize,
-    used: std::collections::HashSet<usize>,
+    used: FxSet<usize>,
     /// The output limit was reached mid-walk: no more lines are printed.
     stopped: bool,
     /// Line indices whose node's children were cut off by the limit (the
@@ -399,7 +411,10 @@ impl<'a> Tree<'a> {
                 return kids.clone();
             }
         }
-        let kids: std::rc::Rc<[usize]> = self.children_uncached(idx).into();
+        let kids: std::rc::Rc<[usize]> = match self.source {
+            Some(source) => self.expand(source, idx).into(),
+            None => self.children_uncached(idx).into(),
+        };
         if self.fetch.is_none() {
             if self.kids.len() < self.nodes.len() {
                 self.kids.resize(self.nodes.len(), None);
@@ -407,6 +422,30 @@ impl<'a> Tree<'a> {
             self.kids[idx] = Some(kids.clone());
         }
         kids
+    }
+
+    /// `idx`'s children from the source: the text child it came with,
+    /// then the ones the source makes now, then a frame's root.
+    fn expand(&mut self, source: &'a dyn Source, idx: usize) -> Vec<usize> {
+        let id = self.nodes[idx].id.clone();
+        let mut out: Vec<usize> = self.nodes[idx].children.iter().filter_map(|c| self.by_id.get(c).copied()).collect();
+        let (kids, frame) = source.children(&id);
+        for n in kids {
+            let direct = n.parent.as_deref() == Some(id.as_str());
+            let at = self.insert(std::borrow::Cow::Owned(n));
+            if direct {
+                out.push(at);
+            }
+        }
+        for n in frame {
+            let root = n.parent.is_none();
+            let at = self.insert(std::borrow::Cow::Owned(n));
+            if root {
+                self.frame_root_ids.insert(at);
+                out.push(at);
+            }
+        }
+        out
     }
 
     fn children_uncached(&mut self, idx: usize) -> Vec<usize> {
@@ -1023,11 +1062,35 @@ fn read_nodes(nodes: &[Value], frames: &[Frame]) -> (Vec<Node>, Vec<Frame<Node>>
 
 /// [`render`] of [`Node`]s.
 pub fn render_nodes(header: &str, nodes: &[Node], frames: &[Frame<Node>], opts: &Options) -> Rendered {
-    let rendered = render_inner(header, nodes, frames, opts, None).0;
+    let rendered = render_inner(header, nodes, frames, opts, None, None).0;
     // What the cuts saved is small: the whole text costs less than the
     // agent's next call to read it.
     if !opts.full_text && rendered.cuts > 0 && rendered.text.len() + rendered.cut_chars <= FULL_TEXT_BUDGET {
-        return render_inner(header, nodes, frames, &Options { full_text: true, ..opts.clone() }, None).0;
+        return render_inner(header, nodes, frames, &Options { full_text: true, ..opts.clone() }, None, None).0;
+    }
+    rendered
+}
+
+/// Nodes made as the walk reaches them, for a tree that is costly to make
+/// whole (one built from a DOM snapshot): the walk stops a line past the
+/// limit, so a large page costs the lines printed, not its size.
+pub trait Source {
+    /// The root, then the text child it holds, if any (the node's
+    /// `children` name it).
+    fn root(&self) -> Vec<Node>;
+    /// The children of the node `id`, in order, each followed by the text
+    /// child it holds; then, for a frame's owner, the frame's root (with
+    /// no parent) and its text child. The nodes' own children come when
+    /// asked for.
+    fn children(&self, id: &str) -> (Vec<Node>, Vec<Node>);
+}
+
+/// [`render_nodes`] of the tree `source` makes: the same text, made
+/// only as far as the walk goes.
+pub fn render_source(header: &str, source: &dyn Source, opts: &Options) -> Rendered {
+    let rendered = render_inner(header, &[], &[], opts, None, Some(source)).0;
+    if !opts.full_text && rendered.cuts > 0 && rendered.text.len() + rendered.cut_chars <= FULL_TEXT_BUDGET {
+        return render_inner(header, &[], &[], &Options { full_text: true, ..opts.clone() }, None, Some(source)).0;
     }
     rendered
 }
@@ -1046,7 +1109,7 @@ pub const FULL_TEXT_BUDGET: usize = 32_000;
 /// cut (the full walk would have decided it from those children).
 pub fn render_lazy(header: &str, seed: &[Value], frames: &[Frame], opts: &Options, fetch: AxFetch) -> (Rendered, bool) {
     let (seed, frames) = read_nodes(seed, frames);
-    render_inner(header, &seed, &frames, opts, Some(fetch))
+    render_inner(header, &seed, &frames, opts, Some(fetch), None)
 }
 
 fn render_inner<'a>(
@@ -1055,20 +1118,22 @@ fn render_inner<'a>(
     frames: &'a [Frame<Node>],
     opts: &'a Options,
     fetch: Option<AxFetch>,
+    source: Option<&'a dyn Source>,
 ) -> (Rendered, bool) {
     let mut tree = Tree {
         nodes: Vec::new(),
-        by_id: HashMap::new(),
-        by_backend: HashMap::new(),
-        frame_roots: HashMap::new(),
-        frame_root_ids: std::collections::HashSet::new(),
+        by_id: FxMap::default(),
+        by_backend: FxMap::default(),
+        frame_roots: FxMap::default(),
+        frame_root_ids: FxSet::default(),
         opts,
         lines: Vec::new(),
         fetch,
-        fetched: std::collections::HashSet::new(),
+        source,
+        fetched: FxSet::default(),
         fetch_failed: false,
         calls: 0,
-        used: std::collections::HashSet::new(),
+        used: FxSet::default(),
         stopped: false,
         boundary: Vec::new(),
         cuts: std::cell::Cell::new(0),
@@ -1078,6 +1143,9 @@ fn render_inner<'a>(
     };
     for n in nodes.iter().chain(frames.iter().flat_map(|f| f.nodes.iter())) {
         tree.insert(std::borrow::Cow::Borrowed(n));
+    }
+    for n in source.map(|s| s.root()).unwrap_or_default() {
+        tree.insert(std::borrow::Cow::Owned(n));
     }
     for f in frames {
         if let Some(root) = f.nodes.iter().find(|n| n.parent.is_none()) {
@@ -1130,7 +1198,7 @@ fn render_inner<'a>(
         // lines the whole tree has is not known: no count, rather than a
         // wrong one ("1 more lines" on a 3,000-line page).
         let more = if lazy || tree_stopped { "more lines".to_string() } else { format!("{truncated} more lines") };
-        lines.push(format!("… {more} (scope with `ax --selector <css>`, or raise `--limit`)"));
+        lines.push(format!("… {more}{CUT_TAIL}"));
     }
     // Cut text said once, at the top, with how to read it all: an agent
     // that reads on without following the cut marks misses what they hide.

@@ -38,6 +38,15 @@ getting wrong, one page each, built the way those sites behave:
                 clause long enough to be cut in a snapshot
 /two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
+/clicks         a 2,000-row page with a button per kind of change a click makes
+                (a cell, a row added or removed, a menu a sibling rule shows, a
+                dialog, a popover, a list drawn again, a listener, a value, a
+                fade, a numbered list), and a closed <details>
+/journal        a 1,300-row page with fields whose typing changes nothing
+                else, a live count, a tip a style shows on focus, a hint a
+                :has() rule hides once the field is filled, a field whose
+                typing rewrites a style rule, a focus tip from an @imported
+                sheet; ?closed: a field that changes a closed shadow root
 /stale-ref      a button and a bare draggable=true handle (no handlers)
 /drag-native    a list of draggable items that reorders on drop (reads dataTransfer)
 /drag-pointer   the same list, each item made draggable on pointerdown (as
@@ -53,6 +62,21 @@ getting wrong, one page each, built the way those sites behave:
 /cookie-banner  a button under a banner with Accept and Reject that stays
 /loading-cover  a button under an overlay with a Cancel button, removed when
                 a 2.5 s fetch returns
+/wired-late     a button wired only after load: by a timer (?ms=N), by a
+                script the page loads then (?script=N), by a listener its
+                container gets (?root=N) or the document gets (?doc=N);
+                ?analytics: a document listener from the start; ?replay=N:
+                clicks recorded at the document before Go is wired, replayed
+                once it is (&late: 50 ms after; &invisible: the replayed
+                click shows nothing); ?quiet: a button that works
+                from the start and shows nothing, beside a late listener
+/hover-cover    a button whose first mouse move opens an overlay over it, with
+                a Subscribe button, for 300 ms: the press that follows the
+                move lands on the overlay
+/click-off      a button whose page answers the press itself, so the click
+                event goes to their shared parent, #w: ?replace re-renders
+                the button on mousedown, ?banner puts a banner in above it
+                on pointerdown; neither: a still button
 /xo-parent      a card form in a cross-site iframe (localhost in a 127.0.0.1
                 page: its own process); ?same-site: cross-origin, same process
 
@@ -232,6 +256,36 @@ document.getElementById('go').onclick = () => {
     document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
   });
 };
+</script>""")
+
+PAGES["/nav-intent"] = ("nav intent", "", """
+<div id=out>idle</div>
+<button id=plain>Plain</button>
+<form id=f1><input name=x value=1><button>Handled submit</button></form>
+<form id=f2 action=/posted><input name=y value=2><button>Real submit</button></form>
+<form id=f3 action=/posted><input name=z required><button>Invalid submit</button></form>
+<form id=f4 action=/posted><input name=w value=4><button>Script submit</button></form>
+<a id=routed href=/posted>Routed link</a> <a id=real href=/posted>Real link</a>
+<input id=q aria-label=Query>
+<button id=save>Save later</button>
+<script>
+const out = document.getElementById('out');
+document.getElementById('plain').onclick = () => { out.textContent = 'plain ' + Date.now(); };
+f1.onsubmit = (e) => { e.preventDefault(); out.textContent = 'handled ' + Date.now(); };
+f4.onsubmit = (e) => { e.preventDefault(); f4.submit(); };
+routed.onclick = (e) => { e.preventDefault(); history.pushState({}, '', '/routed'); out.textContent = 'routed'; };
+// A placeholder at once, the request 30 ms later.
+document.getElementById('save').onclick = () => {
+  out.textContent = 'Saving...';
+  setTimeout(() => fetch('/slow-echo?ms=150').then(() => { out.textContent = 'saved'; }), 30);
+};
+// Typing asks for suggestions a timer turn later, after 20 ms of work,
+// with nothing shown first.
+q.oninput = () => setTimeout(() => {
+  const end = performance.now() + 20;
+  while (performance.now() < end);
+  fetch('/slow-echo?ms=150').then(() => { out.textContent = 'suggested ' + q.value; });
+}, 0);
 </script>""")
 
 PAGES["/two-fetch"] = ("two fetch", "", """
@@ -511,8 +565,10 @@ setTimeout(() => {
   modal.classList.add('show');
   // The page's script wires the button once the modal has finished opening.
   modal.addEventListener('transitionend', () => {
+    window.wiredAt = performance.now();
     document.getElementById('close').onclick = () => { modal.classList.remove('show'); modal.style.display = 'none'; };
   }, { once: true });
+  document.addEventListener('pointerdown', () => { window.pressedAt = window.pressedAt || performance.now(); }, true);
 }, 100);
 </script>""")
 
@@ -705,6 +761,115 @@ customElements.define('x-panel', class extends HTMLElement {
 </script>""")
 
 
+PAGES["/toggles"] = ("toggles", "#tip{inset:auto;top:240px;left:20px;margin:0}#dlg{top:160px}", """
+<button id=open-tip>Open tip</button> <button id=close-tip>Close tip</button>
+<button id=late-tip>Late tip</button> <button id=late-dlg>Late dialog</button> <button id=noop>Does nothing</button>
+<div id=tip popover=manual>Tip</div>
+<dialog id=dlg>Dialog</dialog>
+<script>
+const tip = document.getElementById('tip'), dlg = document.getElementById('dlg');
+// A popover opening or closing changes no attribute: only its toggle says so.
+document.getElementById('open-tip').onclick = () => tip.showPopover();
+document.getElementById('close-tip').onclick = () => tip.hidePopover();
+// show() and showPopover() queue their toggle as a later task, which can
+// run after the next click has started: these stand in for that late event.
+const late = (n) => n.dispatchEvent(new ToggleEvent('toggle', { oldState: 'closed', newState: 'open' }));
+document.getElementById('late-tip').onclick = () => late(tip);
+document.getElementById('late-dlg').onclick = () => late(dlg);
+dlg.show();
+</script>""")
+
+
+PAGES["/hover-cover"] = ("hover cover", "#cover{position:fixed;inset:0;background:#fff} #cover button{width:100%;height:100%}", """
+<button id=go onclick="document.getElementById('out').textContent = 'clicked ' + (++window.k)">Go</button>
+<span id=out>idle</span>
+<div id=cover hidden><button onclick="document.getElementById('out').textContent = 'subscribed'">Subscribe</button></div>
+<script>
+window.k = 0;
+addEventListener('pointermove', () => {
+  const c = document.getElementById('cover');
+  c.hidden = false;
+  setTimeout(() => { c.hidden = true; }, 300);
+}, { once: true });
+</script>
+""")
+
+
+PAGES["/click-off"] = ("click off", "#go{padding:10px}", """
+<div id=w><button id=go>Go</button></div>
+<p id=out>idle</p>
+<script>
+// A press the page reacts to before the release: a framework that renders
+// the pressed state anew (?replace), a banner that slides the button down
+// (?banner). The release lands on another element than the press, so the
+// click goes to the parent they share and Go's own handler never runs.
+const q = new URLSearchParams(location.search);
+const went = () => { document.getElementById('out').textContent = 'went'; };
+const go = document.getElementById('go');
+go.onclick = went;
+if (q.has('replace')) go.onmousedown = function () {
+  const n = this.cloneNode(true);
+  n.onclick = went;
+  this.replaceWith(n);
+};
+if (q.has('banner')) go.onpointerdown = () => {
+  document.getElementById('w').insertAdjacentHTML('afterbegin', '<div style="height:80px">banner</div>');
+};
+</script>""")
+
+
+PAGES["/wired-late"] = ("wired late", "", """
+<button id=go>Go</button>
+<div id=root><span><button id=inner>Inner</button></span></div>
+<p id=out>idle</p>
+<script>
+// What a page that wires its controls after load does (hydration, a
+// widget that starts later): until then a click on Go reaches nothing.
+window.hits = 0;
+const q = new URLSearchParams(location.search);
+const out = (t) => { document.getElementById('out').textContent = t; };
+function wireGo() { document.getElementById('go').onclick = () => { hits++; out('went ' + hits); }; }
+addEventListener('load', () => {
+  if (q.has('ms')) setTimeout(wireGo, +q.get('ms'));
+  if (q.has('script')) setTimeout(() => {
+    const s = document.createElement('script');
+    s.src = '/late-script?ms=' + q.get('script');
+    document.head.appendChild(s);
+  }, 0);
+  if (q.has('root')) setTimeout(() => document.getElementById('root').addEventListener('click', (e) => {
+    if (e.target.closest('#inner')) { hits++; out('inner ' + hits); }
+  }), +q.get('root'));
+  // A framework that hydrates the whole document listens there.
+  if (q.has('doc')) setTimeout(() => document.addEventListener('click', (e) => {
+    if (e.target.closest('#go')) { hits++; out('went ' + hits); }
+  }), +q.get('doc'));
+});
+// Analytics listen on the document from the start.
+if (q.has('analytics')) document.addEventListener('click', () => { window.beacons = (window.beacons || 0) + 1; }, true);
+// An early event contract: clicks on Go before it is wired are recorded,
+// and replayed once it is (the click counts, later).
+if (q.has('replay')) {
+  const early = [];
+  const contract = (e) => { if (e.target.closest('#go')) early.push(e); };
+  document.addEventListener('click', contract, true);
+  addEventListener('load', () => setTimeout(() => {
+    // &invisible: the replayed click counts and shows nothing.
+    if (q.has('invisible')) document.getElementById('go').onclick = () => { hits++; };
+    else wireGo();
+    document.removeEventListener('click', contract, true);
+    const replay = () => { for (const e of early.splice(0)) document.getElementById('go').onclick(e); };
+    if (q.has('late')) setTimeout(replay, 50); else replay();
+  }, +q.get('replay')));
+}
+// Go counts from the start but shows nothing; a widget then listens on the
+// body. The click was heard, so it must not be sent again.
+if (q.has('quiet')) {
+  document.getElementById('go').onclick = () => { hits++; };
+  addEventListener('load', () => setTimeout(() => document.body.addEventListener('pointerdown', () => {}), 300));
+}
+</script>""")
+
+
 def twin_frames(port):
     """Frames that hold the same ids: two of this origin, two of another
     (localhost in a 127.0.0.1 page), and one inside another."""
@@ -737,6 +902,77 @@ def xo_parent(port, child_host):
 <script>
 addEventListener('message', (e) => {{ if (e.data && e.data.paid) document.getElementById('paid').textContent = 'paid ' + e.data.paid; }});
 </script>""")
+
+
+PAGES["/journal"] = ("journal", ".tip{display:none} #tipped:focus ~ .tip{display:inline} .hint{display:none} "
+    "form:has(#code:placeholder-shown) .hint{display:block}", """
+<input id=name aria-label=Name>
+<textarea id=note aria-label=Note></textarea>
+<input id=count aria-label=Count oninput="document.getElementById('n').textContent = this.value.length + ' chars'">
+<span id=n>0 chars</span>
+<p><input id=tipped aria-label=Tipped><span class=tip>Use your full name</span></p>
+<form><input id=code aria-label=Code placeholder=code><span class=hint>Type a code</span></form>
+<style id=rules>.later{display:none}</style>
+<p><input id=restyle aria-label=Restyle oninput="document.getElementById('rules').sheet.cssRules[0].style.display = 'inline'">
+<span class=later>Restyled by a rule</span></p>
+<style>@import url('/journal-import.css');</style>
+<p><input id=imported aria-label=Imported><span class=itip>Imported tip</span></p>
+<div id=host></div>
+<input id=inclosed aria-label=Closed oninput="if (window.cs) window.cs.querySelector('span').textContent = 'closed changed'">
+<label><input type=checkbox id=agree> Agree</label>
+<label>Size <select id=size><option>Small</option><option>Medium</option><option>Large</option></select></label>
+<input type=radio name=ship id=ground aria-label=Ground checked><input type=radio name=ship id=air aria-label=Air>
+<label><input type=checkbox id=later> Later</label>
+<button id=go onclick="document.getElementById('out').textContent = 'clicked ' + (++window.k)">Go</button>
+<span id=out>idle</span>
+<script>
+window.k = 0;
+// ?closed: a closed shadow root, which only the snapshot reads.
+if (location.search.includes('closed')) {
+  window.cs = document.getElementById('host').attachShadow({ mode: 'closed' });
+  window.cs.innerHTML = '<span>closed idle</span>';
+}
+</script>
+""" + "".join(f"<p>row {i} of the long page</p>" for i in range(1300)))
+
+
+# Many more style rules than elements (a site's whole CSS bundle on a small
+# page): a read leaves walking them to the first action.
+PAGES["/many-rules"] = ("many rules",
+    "".join(f".p{i}{{color:#{i % 4096:03x}}}" for i in range(12000)) + " .row:hover{cursor:pointer}", """
+<button id=add onclick="const li = document.createElement('li'); li.className = 'row'; li.textContent = 'Added row'; rows.prepend(li)">Add</button>
+<ul id=rows></ul>
+<script>
+rows.innerHTML = Array.from({length: 2000}, (_, i) => `<li class=row>Row ${i}</li>`).join('');
+</script>""")
+
+PAGES["/clicks"] = ("clicks", ".menu{display:none} [aria-expanded=true] + .menu{display:block} .hidden{display:none} "
+    ".fade{opacity:0;transition:opacity 100ms} .fade.in{opacity:1} .arrow::before{content:\"\\2192  \"}", """
+<button id=edit onclick="document.querySelector('#r5 td:nth-child(2)').textContent = 'edited ' + (++window.k)">Edit</button>
+<button id=add onclick="const tr = document.createElement('tr'); tr.innerHTML = '<td>NEW</td><td>Inserted</td><td><button>Act</button></td>'; document.querySelector('#rows tbody').insertBefore(tr, document.getElementById('r3'))">Add</button>
+<button id=remove onclick="document.getElementById('r4').remove()">Remove</button>
+<nav><button id=menu aria-expanded=false onclick="this.setAttribute('aria-expanded', 'true')">Menu</button><ul class=menu><li><a href=#a>Alpha</a></li></ul></nav>
+<button id=show onclick="document.getElementById('box').classList.remove('hidden')">Show</button>
+<div id=box class=hidden><h2>Hidden section</h2><a href=#h>hidden link</a></div>
+<details id=more><summary>More</summary><p>Details body</p></details>
+<button id=det onclick="const d = document.getElementById('more'); d.open = !d.open">Toggle details</button>
+<button id=dlg onclick="document.getElementById('dialog').show()">Dialog</button>
+<dialog id=dialog><p>Dialog text</p></dialog>
+<button id=pop onclick="document.getElementById('popover').showPopover()">Popover</button>
+<div id=popover popover><p>Popover body</p></div>
+<button id=redraw onclick="document.getElementById('list').innerHTML = Array.from({length: 20}, (_, i) => '<p class=arrow>Item ' + i + ' <a href=#' + i + '>open</a></p>').join('')">Redraw</button>
+<div id=list></div>
+<button id=wire onclick="document.getElementById('wired').addEventListener('click', () => {})">Wire</button>
+<div id=wired>Wire me</div>
+<button id=val onclick="document.getElementById('field').value = 'set by script'">Value</button>
+<input id=field aria-label=Field>
+<button id=fade onclick="document.getElementById('faded').classList.add('in')">Fade</button>
+<div id=faded class=fade><button>Faded</button></div>
+<button id=ol onclick="const li = document.createElement('li'); li.textContent = 'zeroth'; document.getElementById('steps').prepend(li)">List</button>
+<ol id=steps><li>first</li><li>second</li></ol>
+<script>window.k = 0;</script>
+<table id=rows><tbody>
+""" + "\n".join(f"<tr id=r{i}><td>SKU-{i:05d}</td><td>Item {i}</td><td>{i % 97}.99</td></tr>" for i in range(2000)) + "</tbody></table>")
 
 
 PAGES["/xo-child"] = ("card frame", "", """
@@ -839,6 +1075,12 @@ class Handler(BaseHTTPRequestHandler):
             import time
             time.sleep(int(q.get("ms", ["2000"])[0]) / 1000)
             return self.send("{}", "application/json")
+        if u.path == "/journal-import.css":
+            return self.send(".itip{display:none} #imported:focus ~ .itip{display:inline}", "text/css")
+        if u.path == "/late-script":
+            import time
+            time.sleep(int(q.get("ms", ["300"])[0]) / 1000)
+            return self.send("wireGo();", "text/javascript")
         if u.path == "/slow-echo":
             import time
             time.sleep(int(q.get("ms", ["100"])[0]) / 1000)

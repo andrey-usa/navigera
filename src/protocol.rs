@@ -39,6 +39,19 @@ pub const DEFAULT_AX_LIMIT: usize = 2000;
 /// `navigera install-skill`), so docs always match the binary version.
 pub const SKILL_MD: &str = include_str!("../skills/navigera/SKILL.md");
 
+/// The skill's reference files, installed beside SKILL.md under
+/// `references/` and read by the agent only when the topic comes up.
+pub const SKILL_REFS: [(&str, &str); 8] = [
+    ("acting.md", include_str!("../skills/navigera/references/acting.md")),
+    ("reading.md", include_str!("../skills/navigera/references/reading.md")),
+    ("inspecting.md", include_str!("../skills/navigera/references/inspecting.md")),
+    ("sessions.md", include_str!("../skills/navigera/references/sessions.md")),
+    ("electron.md", include_str!("../skills/navigera/references/electron.md")),
+    ("decider.md", include_str!("../skills/navigera/references/decider.md")),
+    ("setup.md", include_str!("../skills/navigera/references/setup.md")),
+    ("troubleshooting.md", include_str!("../skills/navigera/references/troubleshooting.md")),
+];
+
 /// Accepts a ref as a number or as `"12"`, `"@12"`, `"ref=12"`, `"e12"`
 /// (the forms other agent tools print).
 fn de_ref<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
@@ -937,6 +950,14 @@ pub struct SessionConfig {
     /// `--parent <pid>` (`$NAVIGERA_PARENT_PID`): the session server quits
     /// when that process exits.
     pub parent_pid: Option<u32>,
+    /// `--allow-domains <list>` (`$NAVIGERA_ALLOW_DOMAINS`): hostnames this
+    /// session may navigate to or request from (comma-separated, `*` globs
+    /// for subdomains); everything else is refused at the Fetch request
+    /// stage, before any route rule.
+    pub allow_domains: Option<String>,
+    /// `--allow-domains-docs-only`: check top-level navigation only. A
+    /// navigation restriction, not exfiltration protection.
+    pub allow_domains_docs_only: bool,
 }
 
 /// A snapshot's network-quiet wait runs at most this long (long polls,
@@ -985,11 +1006,22 @@ impl Default for SessionConfig {
             download_dir: None,
             own_browser: false,
             parent_pid: None,
+            allow_domains: None,
+            allow_domains_docs_only: false,
         }
     }
 }
 
 impl SessionConfig {
+    /// The parsed domain allowlist, if one is configured. A malformed list
+    /// is an error, never a silently disabled policy.
+    pub fn allow_policy(&self) -> Result<Option<crate::domains::DomainPolicy>, String> {
+        match &self.allow_domains {
+            None => Ok(None),
+            Some(list) => crate::domains::DomainPolicy::parse(list, self.allow_domains_docs_only).map(Some),
+        }
+    }
+
     /// The browser to connect to instead of launching one, if any.
     pub fn attach_target(&self) -> Option<crate::browser::AttachTarget> {
         if let Some(spec) = &self.attach {
@@ -1103,7 +1135,7 @@ pub struct ParsedArgs {
 
 /// One op's CLI documentation: (name, synopsis, what it does).
 const OPS: &[(&str, &str, &str)] = &[
-    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs"),
+    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
     ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
@@ -1162,7 +1194,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("dialog", "--accept [--prompt-text <t>] | --dismiss", "how alert/confirm/prompt are answered (default: accept; every dialog is reported)"),
     ("quit", "[--close-browser]", "close the browser and the session server; attached (--attach/--profile): only disconnect, unless --close-browser"),
     ("serve", "", "for programs: read one JSON command per line on stdin (`{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}`) and answer each on stdout; the protocol is in docs/navigera.md"),
-    ("mcp", "[--headed] [--profile <name> | --attach [<where>] | --electron <app>]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call"),
+    ("mcp", "[--headed] [--profile <name> | --attach [<where>] | --electron <app>] [--allow-domains <list>] [--allow-domains-docs-only]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call; --allow-domains works as for `start`"),
     ("batch", "[<file> | -] [--keep-going]", "run several steps in one call (one process, one connection): one command per line (`goto /form`, `fill --label Email a@b.c`; # comments) or JSON ops as `serve` takes them; stops at the first failure (--keep-going runs the rest); prints what the steps read and the page state once; reads stdin without a file"),
     ("sessions", "[--clean [--all] [--idle <s>]]", "list the named sessions (pid, idle time, browser, memory) and the shared browsers; --clean quits the ones idle 5 min or more and drops dead ones, --all quits every one"),
     ("profiles", "", "list what a session can be handed: your browsers' profiles (name, email, whether --attach can reach them now) and navigera's own --profile browsers"),
@@ -1196,8 +1228,56 @@ fn wrapped(prefix: &str, text: &str, indent: usize) -> String {
     out
 }
 
-/// Help text for `--help` / argument errors.
+/// The commands an agent needs first, one line each, for the short `--help`.
+const FIRST_COMMANDS: &[(&str, &str, &str)] = &[
+    ("goto", "<url>", "open a page"),
+    ("ax", "[<ref> | --selector <css>]", "read the page, [ref=N] to act on"),
+    ("click", "<ref> | --selector <css> | --text <t>", "click; prints what changed"),
+    ("fill", "<ref> <value>", "set a field's value"),
+    ("select", "<ref> <option>...", "choose a <select> option"),
+    ("check", "<target>", "check a checkbox, radio, switch"),
+    ("press", "<key>", "Enter, Tab, Control+a"),
+    ("text", "[--selector <css>]", "the text of an element or page"),
+    ("eval", "<js>", "run JavaScript, print the result"),
+    ("wait", "--selector <css> | --text <t>", "wait until the page shows it"),
+    ("batch", "[<file> | -]", "several steps in one call"),
+];
+
+/// Short help text for `--help` and for no arguments: one screen. Every
+/// command stays reachable by name; `help <command>` has its flags and
+/// examples and `help --all` the full list ([`usage_full`]).
 pub fn usage(program: &str) -> String {
+    let mut out = format!(
+        "navigera {}: drive Chrome from the shell, one command per step.\n\n\
+         LOOP (-s <name> keeps a warm browser between commands):\n  \
+         {program} -s s start\n  \
+         {program} -s s goto https://example.com\n  \
+         {program} -s s ax                     # read: tree with [ref=N]\n  \
+         {program} -s s click 12               # act on a ref\n  \
+         {program} -s s quit\n\n\
+         FIRST COMMANDS:\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    for (name, args, what) in FIRST_COMMANDS {
+        out.push_str(&format!("  {name:<7}{args:<38}{what}\n"));
+    }
+    let first: Vec<&str> = FIRST_COMMANDS.iter().map(|(n, ..)| *n).collect();
+    let others: Vec<&str> = OPS.iter().map(|(n, ..)| *n).filter(|n| !first.contains(n)).collect();
+    out.push_str("\nOTHER COMMANDS:\n");
+    out.push_str(&wrapped("  ", &others.join(" "), 2));
+    out.push_str("\nFLAGS: -s <name> session; --output compact|raw|json; --timeout-ms <ms>;\n");
+    out.push_str("  --headed; --attach, --profile, --electron with `start` (`help --all`).\n\n");
+    for paragraph in [
+        format!("`{program} help <command>`: its usage, flags and examples."),
+        format!("`{program} help --all`: every command and flag. `{program} skill`: the agent guide."),
+    ] {
+        out.push_str(&wrapped("", &paragraph, 0));
+    }
+    out.trim_end().to_string()
+}
+
+/// The full help text: every command and global flag (`help --all`).
+pub fn usage_full(program: &str) -> String {
     let mut out = format!(
         "navigera {}: drive Chrome from the shell, one command per step, over the\n\
          Chrome DevTools Protocol (CDP).\n\n\
@@ -1551,6 +1631,17 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
     if extract_present(args, "--natural") {
         config.natural = true;
     }
+    if let Some(list) = extract_value(args, "--allow-domains")? {
+        config.allow_domains = Some(list);
+    }
+    if extract_present(args, "--allow-domains-docs-only") {
+        config.allow_domains_docs_only = true;
+    }
+    if config.allow_domains_docs_only && config.allow_domains.is_none() {
+        return Err("--allow-domains-docs-only narrows --allow-domains: add --allow-domains <list>".into());
+    }
+    // A malformed list fails here, at parse time, not at first navigation.
+    config.allow_policy()?;
     check_profile_flags(config)?;
     check_electron_flags(config)?;
     if config.attach.is_some() && config.profile.is_some() {
@@ -1663,6 +1754,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     if let Some(mode) = std::env::var("NAVIGERA_OUTPUT").ok().filter(|m| !m.trim().is_empty()) {
         set_output(&mut config, mode.trim()).map_err(ArgsError::Invalid)?;
     }
+    // The allowlist for every command of a shell (a flag still wins).
+    if let Some(list) = std::env::var("NAVIGERA_ALLOW_DOMAINS").ok().filter(|v| !v.trim().is_empty()) {
+        config.allow_domains = Some(list.trim().to_string());
+    }
 
     // Leading globals (the only place --timeout-ms is global; after a
     // command it is that op's own timeout).
@@ -1710,6 +1805,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             "--from" => config.from = Some(value("--from")?),
             "--from-profile" => config.from_profile = Some(value("--from-profile")?),
             "--natural" => config.natural = true,
+            "--allow-domains" => config.allow_domains = Some(value("--allow-domains")?),
+            "--allow-domains-docs-only" => config.allow_domains_docs_only = true,
             "--own-browser" => config.own_browser = true,
             "--parent" => config.parent_pid = Some(parse_pid(&value("--parent")?).map_err(ArgsError::Invalid)?),
             "--download-dir" => config.download_dir = Some(caller_path(value("--download-dir")?)),
@@ -1726,7 +1823,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             "-V" | "--version" => {
                 return Ok(ParsedArgs { config, command: None, start: false, local: Some(Local::Version), mcp: false })
             }
-            "-h" | "--help" => return Err(ArgsError::Help(usage(&program))),
+            "-h" | "--help" => {
+                let all = args.front().is_some_and(|a| a == "--all");
+                return Err(ArgsError::Help(if all { usage_full(&program) } else { usage(&program) }));
+            }
             other => {
                 return invalid(format!("unknown flag {other:?} (see `{program} --help`)"));
             }
@@ -1738,6 +1838,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     };
     if op == "-h" || op == "--help" || op == "help" {
         return match args.front() {
+            Some(topic) if topic == "--all" || topic == "all" => Err(ArgsError::Help(usage_full(&program))),
             Some(topic) => op_help(&program, topic).map(ArgsError::Help).map(Err).unwrap_or_else(|| {
                 let hint = suggest(topic).map(|s| format!(" — did you mean `{s}`?")).unwrap_or_default();
                 invalid(format!("unknown command {topic:?}{hint}\n(`{program} --help` lists them)"))
@@ -2461,6 +2562,11 @@ pub fn install_skill(dir: &str) -> anyhow::Result<String> {
     std::fs::create_dir_all(&path)?;
     let file = path.join("SKILL.md");
     write_own(&file, SKILL_MD.as_bytes())?;
+    let refs = path.join("references");
+    std::fs::create_dir_all(&refs)?;
+    for (name, text) in SKILL_REFS {
+        write_own(refs.join(name), text.as_bytes())?;
+    }
     Ok(file.display().to_string())
 }
 
@@ -2591,6 +2697,71 @@ pub struct Driver {
     look: Option<Look>,
     /// The last report was compact: an agent reads what actions change.
     compact: bool,
+    /// Reads are an agent's that reads again (the MCP server's), whatever
+    /// the output: each keeps the change journal it arms, so the next read
+    /// is patched, as for compact reports.
+    agent_reads: bool,
+    /// A read ahead of the first `ax` after a `goto` (see
+    /// [`Driver::pre_read_if_idle`]).
+    pre_read: PreRead,
+}
+
+/// When to read a page ahead of its first `ax` (see
+/// [`Driver::pre_read_if_idle`]).
+#[derive(Default)]
+struct PreRead {
+    /// A `goto` answered then, on that document: read it once the
+    /// session is idle and the page quiet.
+    due: Option<(Instant, (String, u64))>,
+    /// A page read ahead was left for another `goto` unread: read ahead no
+    /// more until an `ax` follows a `goto` again.
+    off: bool,
+    /// The last command was a `goto`.
+    after_goto: bool,
+    /// When the last command was answered (or the session came up).
+    answered: Option<Instant>,
+    /// How long the client took to send each of its last commands after
+    /// the one before was answered, newest last.
+    gaps: std::collections::VecDeque<Duration>,
+}
+
+/// How many of the client's last pauses between commands judge whether it
+/// leaves time for a read ahead.
+const PRE_READ_GAPS: usize = 3;
+
+/// How long after a `goto` a page is still read ahead: past this, the
+/// agent is not about to read it.
+const PRE_READ_WITHIN: Duration = Duration::from_secs(30);
+
+/// A read ahead holds up a command that comes in while it runs (it is
+/// Chrome's capture of the page, which nothing can cut short), so it is
+/// made only for a client that paused this long or longer before the
+/// `goto` and before most of its last commands: an agent thinking, not a
+/// script (see [`pre_read_budget`]).
+const PRE_READ_PAUSE: Duration = Duration::from_secs(1);
+
+/// How long a read ahead may keep the client waiting, judged by its last
+/// pauses between commands (`gaps`, newest last: the one before the
+/// `goto`), or `None` for a client that sends its next command at once.
+/// The pause before the `goto` is its pace now; the older ones count by
+/// majority, so a start and a `goto` sent at once (a setup script, or
+/// `start && goto` in one shell) don't keep an agent's own first `goto`
+/// from being read ahead. Half the shortest long pause: it may pause less
+/// this time.
+fn pre_read_budget(gaps: &std::collections::VecDeque<Duration>) -> Option<Duration> {
+    let newest = *gaps.back()?;
+    let long = gaps.iter().filter(|g| **g >= PRE_READ_PAUSE);
+    if newest < PRE_READ_PAUSE || long.clone().count() * 2 < gaps.len() {
+        return None;
+    }
+    long.min().map(|p| *p / 2)
+}
+
+/// Whether a large page is read ahead of its first `ax` after a `goto`
+/// (`NAVIGERA_PRE_READ=0` leaves the capture to that `ax`, to compare).
+fn pre_read_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_PRE_READ").map_or(true, |v| v.trim() != "0"))
 }
 
 /// A text tree as an `ax` read it, and the document it was read from.
@@ -2598,6 +2769,26 @@ struct Look {
     command: Command,
     tree: String,
     page: (String, u64),
+    /// The change journal armed with the read (see
+    /// [`crate::cdp::Page::journal_unchanged`]).
+    journal: Option<u64>,
+    /// Text entered into fields since the read, which `tree` doesn't show
+    /// yet: each is left out of the next report as that entry's own.
+    typed: Vec<String>,
+}
+
+impl Look {
+    fn new(command: Command, tree: String, page: (String, u64), journal: Option<u64>) -> Self {
+        Look { command, tree, page, journal, typed: Vec::new() }
+    }
+}
+
+/// Whether a read arms the change journal that lets a text entry's report
+/// skip reading the page again (`NAVIGERA_CHANGE_JOURNAL=0` turns it off,
+/// to compare against a read after every entry).
+fn change_journal() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_CHANGE_JOURNAL").map_or(true, |v| v.trim() != "0"))
 }
 
 /// At most this many changed lines follow an action; past that the page
@@ -2605,8 +2796,41 @@ struct Look {
 const CHANGE_LINES: usize = 40;
 
 /// How long an action's first request may take to show before the page is
-/// read again to say what the action changed.
+/// read again to say what the action changed, on a page that can't run
+/// the event-loop turn that normally stands in for it.
 const ACTION_TRAFFIC_GRACE: Duration = Duration::from_millis(50);
+
+/// How long a change report that shows the page between states (see
+/// [`shows_transition`]) waits for the page to get past it.
+const TRANSITION_WAIT: Duration = Duration::from_millis(1500);
+
+/// A line the action added or changed shows the page between states: a
+/// placeholder's words ("Loading…", "Saving") or a progress bar.
+fn shows_transition(change: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "loading",
+        "please wait",
+        "saving",
+        "submitting",
+        "processing",
+        "searching",
+        "updating",
+        "sending",
+        "signing in",
+        "logging in",
+    ];
+    let word_at = |l: &str, w: &str| {
+        l.match_indices(w).any(|(i, _)| {
+            let before = l[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+            let after = l[i + w.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+            before && after
+        })
+    };
+    change.lines().filter_map(|l| l.strip_prefix("+ ").or_else(|| l.strip_prefix("~ "))).any(|l| {
+        let l = l.trim_start().to_lowercase();
+        l.starts_with("progressbar") || WORDS.iter().any(|w| word_at(&l, w))
+    })
+}
 
 /// How often the storage snapshot is retaken (the tab list is kept on every op).
 const STORAGE_EVERY: Duration = Duration::from_millis(500);
@@ -2647,6 +2871,40 @@ fn retry_eligible(command: &Command) -> bool {
             | Command::Set { .. }
             | Command::Reset { .. }
     )
+}
+
+#[cfg(test)]
+mod pre_read_budget_tests {
+    use super::pre_read_budget;
+    use std::time::Duration;
+
+    fn budget(ms: &[u64]) -> Option<u64> {
+        let gaps = ms.iter().map(|m| Duration::from_millis(*m)).collect();
+        pre_read_budget(&gaps).map(|b| b.as_millis() as u64)
+    }
+
+    #[test]
+    fn an_agent_is_read_ahead_and_a_script_is_not() {
+        assert_eq!(budget(&[1600, 1500, 2400]), Some(750), "an agent: half its shortest pause");
+        assert_eq!(budget(&[0, 0, 0]), None, "a script");
+        assert_eq!(budget(&[]), None, "no pause seen yet");
+        assert_eq!(budget(&[0]), None, "a goto sent at once after start");
+        assert_eq!(budget(&[1800]), Some(900), "a goto sent after a pause from start");
+    }
+
+    #[test]
+    fn a_setup_sent_at_once_does_not_stop_the_agents_first_goto() {
+        // start + goto from a setup script, then the agent's own goto.
+        assert_eq!(budget(&[40, 2000]), Some(1000));
+        // ... and a shared model turn (two commands at once) among pauses.
+        assert_eq!(budget(&[1500, 0, 1700]), Some(750));
+    }
+
+    #[test]
+    fn a_goto_sent_at_once_or_a_mostly_quick_client_is_not_read_ahead() {
+        assert_eq!(budget(&[2000, 1500, 30]), None, "the goto itself came at once");
+        assert_eq!(budget(&[10, 20, 1500]), None, "one pause in a script");
+    }
 }
 
 #[cfg(test)]
@@ -2863,12 +3121,23 @@ pub struct Outcome {
 }
 
 impl Driver {
+    /// Install the session's domain allowlist, if one is configured. A
+    /// browser that cannot enforce it fails the launch rather than
+    /// running unenforced.
+    fn apply_allow_policy(session: &mut BrowserSession, config: &SessionConfig) -> anyhow::Result<()> {
+        if let Some(policy) = config.allow_policy().map_err(|e| anyhow::anyhow!(e))? {
+            session.set_allow_domains(policy).map_err(|e| e.context("could not install --allow-domains"))?;
+        }
+        Ok(())
+    }
+
     /// Launch the engine described by `config` (Chrome by default).
     pub fn launch(config: &SessionConfig) -> anyhow::Result<Self> {
         Self::apply_settings(config);
         if let Some(app) = &config.electron {
-            let session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
+            let mut session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
                 .map_err(|e| e.context("could not launch the Electron app"))?;
+            Self::apply_allow_policy(&mut session, config)?;
             return Ok(Self {
                 session,
                 history: Vec::new(),
@@ -2876,11 +3145,14 @@ impl Driver {
                 reported: None,
                 look: None,
                 compact: false,
+                agent_reads: false,
+                pre_read: PreRead::default(),
             });
         }
         if let Some(target) = config.attach_target() {
-            let session = BrowserSession::attach(&target, config.timeout_ms)
+            let mut session = BrowserSession::attach(&target, config.timeout_ms)
                 .map_err(|e| e.context("could not connect to the browser"))?;
+            Self::apply_allow_policy(&mut session, config)?;
             return Ok(Self {
                 session,
                 history: Vec::new(),
@@ -2888,9 +3160,11 @@ impl Driver {
                 reported: None,
                 look: None,
                 compact: false,
+                agent_reads: false,
+                pre_read: PreRead::default(),
             });
         }
-        let session = BrowserSession::launch_with(
+        let mut session = BrowserSession::launch_with(
             &config.engine,
             !config.headed,
             config.chromium.as_deref(),
@@ -2900,7 +3174,17 @@ impl Driver {
         .map_err(|e| {
             e.context(format!("browser launch failed (engine={}, headed={})", config.engine, config.headed))
         })?;
-        Ok(Self { session, history: Vec::new(), crash: Crash::default(), reported: None, look: None, compact: false })
+        Self::apply_allow_policy(&mut session, config)?;
+        Ok(Self {
+            session,
+            history: Vec::new(),
+            crash: Crash::default(),
+            reported: None,
+            look: None,
+            compact: false,
+            agent_reads: false,
+            pre_read: PreRead::default(),
+        })
     }
 
     /// A named session's or an MCP server's browser: a context of its own
@@ -2911,10 +3195,20 @@ impl Driver {
             return Self::launch(config);
         }
         Self::apply_settings(config);
-        let session = BrowserSession::launch_shared(!config.headed, config.chromium.as_deref(), config.timeout_ms)
+        let mut session = BrowserSession::launch_shared(!config.headed, config.chromium.as_deref(), config.timeout_ms)
             .map_err(|e| e.context(format!("browser launch failed (shared browser, headed={})", config.headed)))?;
+        Self::apply_allow_policy(&mut session, config)?;
         let crash = Crash { headless: !config.headed, ..Crash::default() };
-        Ok(Self { session, history: Vec::new(), crash, reported: None, look: None, compact: false })
+        Ok(Self {
+            session,
+            history: Vec::new(),
+            crash,
+            reported: None,
+            look: None,
+            compact: false,
+            agent_reads: false,
+            pre_read: PreRead::default(),
+        })
     }
 
     /// The process-wide settings `config` names: natural mode, the element
@@ -2925,10 +3219,13 @@ impl Driver {
         crate::browser::set_download_dir(config.download_dir.as_deref());
     }
 
-    /// Has the connection to a shared browser ended (it crashed or was
-    /// killed)? The session can do nothing more then.
+    /// Has this session given up on its shared browser (it crashed again
+    /// right after a relaunch, or could not be relaunched)? The session can
+    /// do nothing more then. Not tied to the host's connection: the host
+    /// refuses requests to a dead browser before it drops its connections,
+    /// and that refusal alone can end the session.
     pub fn shared_browser_gone(&self) -> bool {
-        self.session.is_shared() && self.session.browser_gone() && self.crash.given_up
+        self.session.is_shared() && self.crash.given_up
     }
 
     /// The active page (tab) this driver's ops target.
@@ -2948,6 +3245,8 @@ impl Driver {
             reported: None,
             look: None,
             compact: false,
+            agent_reads: false,
+            pre_read: PreRead::default(),
         })
     }
 
@@ -2988,6 +3287,11 @@ impl Driver {
         });
         if self.session.closed_tab().is_some() {
             state["closed"] = json!(true);
+        }
+        // The session's allowlist, when one is set, and the hosts it
+        // refused: an agent that hit a refusal sees why without guessing.
+        if let Some(allow) = self.session.allow_status() {
+            state["allow_domains"] = allow;
         }
         // The page is still being parsed (we stopped waiting for it): the
         // agent should `wait` for what it needs rather than trust `ax`.
@@ -3241,7 +3545,8 @@ impl Driver {
     pub(crate) fn report_state(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
         self.compact = compact;
         if let (Command::Ax { .. }, Some(Value::String(tree))) = (command, result.as_ref()) {
-            self.look = Some(Look { command: command.clone(), tree: tree.clone(), page: self.session.page_identity() });
+            self.look =
+                Some(Look::new(command.clone(), tree.clone(), self.session.page_identity(), self.session.journal_id()));
         }
         let Some(value) = result.as_ref() else { return };
         let (own, state) = split_state(value);
@@ -3271,7 +3576,7 @@ impl Driver {
         }
         self.look = match self.run_op_inner(&whole) {
             Ok(Outcome { result: Value::String(tree), .. }) => {
-                Some(Look { command: whole, tree, page: self.session.page_identity() })
+                Some(Look::new(whole, tree, self.session.page_identity(), self.session.journal_id()))
             }
             _ => None,
         };
@@ -3298,20 +3603,77 @@ impl Driver {
         {
             return None;
         }
-        let look = self.look.take()?;
+        let mut look = self.look.take()?;
         if look.page != self.session.page_identity() {
             return None;
         }
         // Read after what the action started, not before it: once its
         // requests show, the read waits for them as an `ax` after an action
         // does (else it would catch the page's "Loading…" in between).
-        self.session.action_traffic_within(ACTION_TRAFFIC_GRACE);
-        let tree = match self.run_op_inner(&look.command) {
-            Ok(Outcome { result: Value::String(tree), .. }) => tree,
-            _ => return None,
+        let traffic = self.session.action_traffic_settled(ACTION_TRAFFIC_GRACE);
+        // Text entered into a field that changed nothing else the tree shows,
+        // as the journal armed with the last read can prove: the report is
+        // what a read would say (nothing beyond the entry), without reading
+        // a large page again. The entry waits in `typed` for the next read.
+        if let (Some(v), Some(id), false) = (typed.filter(|v| !v.is_empty()), look.journal, traffic) {
+            if self.session.journal_unchanged(id, v) {
+                look.typed.push(v.to_string());
+                self.look = Some(look);
+                return None;
+            }
+        }
+        let mut entered: Vec<&str> = look.typed.iter().map(String::as_str).collect();
+        entered.extend(typed);
+        // A check or a choice that changed nothing else the tree shows: its
+        // controls' own lines, rewritten, are what a read would say.
+        if let (true, Some(id), false) =
+            (matches!(command, Command::Select { .. } | Command::SetChecked { .. }), look.journal, traffic)
+        {
+            if let Some(tree) = self.session.journal_restate(id).and_then(|moved| restate(&look.tree, &moved)) {
+                let change = tree_change(&look.tree, &tree, &entered);
+                self.look = Some(Look { tree, ..look });
+                let change = change?;
+                return Some(Value::String(match short {
+                    Value::String(ok) if ok == "ok" => change,
+                    other => format!("{other}\n{change}"),
+                }));
+            }
+        }
+        let read = |me: &mut Self| match me.run_op_inner(&look.command) {
+            Ok(Outcome { result: Value::String(tree), .. }) => Some(tree),
+            _ => None,
         };
-        let change = tree_change(&look.tree, &tree, typed);
-        self.look = Some(Look { tree, ..look });
+        let mut tree = read(self)?;
+        let mut change = tree_change(&look.tree, &tree, &entered);
+        // The page is between states: the action put up a placeholder
+        // ("Loading…", a progress bar) for work it starts a moment later (a
+        // timer, a frame, an effect after paint). Reporting it would cost the
+        // agent a turn to look again, so wait for the page's next change and
+        // read again, until the report shows no placeholder or the wait is
+        // up. A report without one costs nothing more.
+        if change.as_deref().is_some_and(shows_transition) {
+            let deadline = std::time::Instant::now() + TRANSITION_WAIT;
+            if let Some(mut seen) = self.session.count_changes() {
+                loop {
+                    // Read once more after counting starts: a change that came
+                    // just before it would otherwise go unseen until the deadline.
+                    tree = read(self)?;
+                    change = tree_change(&look.tree, &tree, &entered);
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if !change.as_deref().is_some_and(shows_transition) || left.is_zero() {
+                        break;
+                    }
+                    if !self.session.next_change(seen, left) {
+                        break;
+                    }
+                    seen = self.session.count_changes().unwrap_or(seen);
+                    self.session.action_traffic_settled(ACTION_TRAFFIC_GRACE);
+                }
+                self.session.stop_counting_changes();
+            }
+        }
+        let journal = self.session.journal_id();
+        self.look = Some(Look { tree, journal, typed: Vec::new(), ..look });
         let change = change?;
         Some(Value::String(match short {
             Value::String(ok) if ok == "ok" => change,
@@ -3322,6 +3684,7 @@ impl Driver {
     /// Run one op, after relaunching the shared browser if it died since the
     /// last one; its outcome says so, and what was lost.
     pub fn run_op(&mut self, command: &Command) -> anyhow::Result<Outcome> {
+        self.pre_read_before(command);
         self.whole_look_before(command);
         let mut recovered = if self.session.is_shared()
             && self.session.browser_gone()
@@ -3361,6 +3724,12 @@ impl Driver {
             }
         }
         self.remember();
+        if matches!(command, Command::Goto { .. }) && result.is_ok() && !self.pre_read.off && pre_read_on() {
+            self.pre_read.due = Some((Instant::now(), self.session.page_identity()));
+        }
+        if !matches!(command, Command::Status {}) {
+            self.pre_read.answered = Some(Instant::now());
+        }
         match (&mut result, recovered) {
             (Ok(outcome), Some(r)) => {
                 outcome.notes.insert(0, r.note);
@@ -3370,6 +3739,87 @@ impl Driver {
             _ => {}
         }
         result
+    }
+
+    /// What a command says about reading ahead: any command takes the
+    /// session before a read ahead started; a `goto` that finds the last
+    /// page read ahead unread stops it, an `ax` right after a `goto`
+    /// starts it again.
+    fn pre_read_before(&mut self, command: &Command) {
+        if matches!(command, Command::Status {}) {
+            return;
+        }
+        self.pre_read.due = None;
+        if let Some(at) = self.pre_read.answered.take() {
+            if self.pre_read.gaps.len() == PRE_READ_GAPS {
+                self.pre_read.gaps.pop_front();
+            }
+            self.pre_read.gaps.push_back(at.elapsed());
+        }
+        match command {
+            Command::Goto { .. } if self.session.pre_read_unused() => self.pre_read.off = true,
+            Command::Ax { .. } if self.pre_read.after_goto => self.pre_read.off = false,
+            _ => {}
+        }
+        self.pre_read.after_goto = matches!(command, Command::Goto { .. });
+    }
+
+    /// The session server is up and waiting for its first command: the
+    /// client's first pause counts from here.
+    pub fn serving(&mut self) {
+        self.pre_read.answered = Some(Instant::now());
+    }
+
+    /// Reads are an agent's that reads again (see `agent_reads`).
+    pub fn reads_for_an_agent(&mut self) {
+        self.agent_reads = true;
+    }
+
+    /// The client paused this long before the command about to run: an MCP
+    /// server makes its driver on the first call, and the wait before that
+    /// call counts as the client's first pause.
+    pub fn paused_before(&mut self, pause: Duration) {
+        self.pre_read.answered = Instant::now().checked_sub(pause);
+    }
+
+    /// The next op is a later step of the same client command (an MCP call
+    /// of several ops): the client did not pause before it.
+    pub fn same_command(&mut self) {
+        self.pre_read.answered = None;
+    }
+
+    /// Whether a read ahead waits for the session to be idle.
+    pub fn pre_read_due(&self) -> bool {
+        self.pre_read.due.is_some()
+    }
+
+    /// Between commands: read the page a `goto` loaded ahead of its first
+    /// `ax` (see [`crate::cdp::Page::pre_read`]) once its network is
+    /// quiet, as that `ax` would wait for it to be; the session server
+    /// calls this only while no command waits.
+    pub fn pre_read_if_idle(&mut self) {
+        let Some((at, page)) = &self.pre_read.due else { return };
+        if at.elapsed() > PRE_READ_WITHIN || *page != self.session.page_identity() || self.session.browser_gone() {
+            self.pre_read.due = None;
+            return;
+        }
+        if !self.session.network_quiet(self.session.network_quiet_window(), Duration::ZERO) {
+            return;
+        }
+        self.pre_read.due = None;
+        let Some(budget) = pre_read_budget(&self.pre_read.gaps) else {
+            let gaps: Vec<_> = self.pre_read.gaps.iter().map(|g| g.as_millis()).collect();
+            crate::timing::log(&format!("[pre-read] not read ahead: the client paused {gaps:?} ms"));
+            return;
+        };
+        let started = Instant::now();
+        let why = self.session.pre_read(budget);
+        crate::timing::record("pre_read_total", started);
+        if why.is_empty() {
+            crate::timing::log("[pre-read] read ahead");
+        } else {
+            crate::timing::log(&format!("[pre-read] not read ahead: {why}"));
+        }
     }
 
     /// Keep what a crash is recovered from: the tabs on every op (one
@@ -3664,6 +4114,27 @@ impl Driver {
         if command.is_action() {
             self.session.mark_action();
         }
+        if command.steers() {
+            self.session.mark_steered();
+        }
+        // An action after a look: the journal takes the state an entry
+        // (text, a check, a choice) will be judged against, or the read
+        // after any other action patched from (see `page_change`).
+        if (self.compact || self.agent_reads) && reports_page_change(command) {
+            if let Some(id) =
+                self.look.as_ref().filter(|l| l.page == self.session.page_identity()).and_then(|l| l.journal)
+            {
+                let entry = matches!(
+                    command,
+                    Command::Fill { .. }
+                        | Command::Type { .. }
+                        | Command::InsertText { .. }
+                        | Command::Select { .. }
+                        | Command::SetChecked { .. }
+                );
+                self.session.journal_prime(id, entry);
+            }
+        }
         let result = self.dispatch(command).map_err(|e| {
             let msg = format!("{e:#}");
             // Never reached: on the shared browser the op is run again on a
@@ -3919,6 +4390,27 @@ impl Driver {
                 }
                 if let Some(trace) = point.get("effect_trace") {
                     state["effect_trace"] = trace.clone();
+                }
+                if let Some(ms) = point.get("clicked_again").and_then(Value::as_u64) {
+                    // A script that clicks right after `goto` should know
+                    // why this click took longer.
+                    state["clicked_again"] = json!(format!(
+                        "nothing on the page listened for the click yet; the page wired the element up \
+                         {ms} ms later, and it was clicked again"
+                    ));
+                }
+                if let Some(on) = point.get("click_off").and_then(Value::as_str) {
+                    // The page answered the press but not on the element:
+                    // what it printed as changed may be all the click did.
+                    let went = if on.is_empty() {
+                        "the page took the element out during the press and the browser sent no click event".to_string()
+                    } else {
+                        format!("its click event went to {on}: the page moved or replaced the element during the press")
+                    };
+                    state["click_missed"] = json!(format!(
+                        "the press reached the element, but {went}, so the element's own click handler didn't run. \
+                         Check what the click should do before clicking again"
+                    ));
                 }
                 if let Some(fx) = point.get("no_effect") {
                     // Clicked, but the page did nothing: often a control
@@ -4189,6 +4681,7 @@ impl Driver {
                     limit: limit.unwrap_or(DEFAULT_AX_LIMIT),
                     scope: scope.optional("ax")?,
                     full_text: *full_text,
+                    journal: (self.compact || self.agent_reads) && change_journal(),
                 };
                 let mut tree = s.ax(&opts, *timeout_ms).map_err(|e| e.context("ax"))?;
                 if let (Value::Array(nodes), Some(n)) = (&mut tree, limit) {
@@ -4864,6 +5357,28 @@ impl Command {
         )
     }
 
+    /// The agent steers the session: it acts on a page, navigates, or
+    /// chooses a tab. A window an Electron app opens after that is the
+    /// agent's doing and becomes the session's tab; one it opens before is
+    /// chosen among (see `BrowserSession::sync_tabs`).
+    fn steers(&self) -> bool {
+        self.is_action()
+            || matches!(self, Command::Open { url: Some(_) })
+            || matches!(
+                self,
+                Command::Goto { .. }
+                    | Command::Back { .. }
+                    | Command::Forward { .. }
+                    | Command::Reload { .. }
+                    | Command::WebmcpCall { .. }
+                    | Command::Reset { .. }
+                    | Command::TabNew { .. }
+                    | Command::TabSelect { .. }
+                    | Command::TabClose { .. }
+                    | Command::ClosePage { .. }
+            )
+    }
+
     fn no_wait(&self) -> bool {
         match self {
             Command::Screenshot { no_wait, .. } | Command::Find { no_wait, .. } | Command::Check { no_wait, .. } => {
@@ -5456,7 +5971,7 @@ pub fn split_state(result: &Value) -> (Option<Value>, Option<Value>) {
 }
 
 /// Actions whose compact output says what they changed on the page.
-fn reports_page_change(command: &Command) -> bool {
+pub(crate) fn reports_page_change(command: &Command) -> bool {
     matches!(
         command,
         Command::Click { .. }
@@ -5472,6 +5987,148 @@ fn reports_page_change(command: &Command) -> bool {
     )
 }
 
+/// `ref=N` as the tree prints it, in the element's own bracket tag
+/// (`[ref=3]`, `[checked, ref=3]`): not inside a quoted name and not in
+/// the text after `: `, where a page may write anything. Returns the byte
+/// offsets of that tag's `[` and `]` and the ref's range in the line.
+fn ref_tags(line: &str) -> Option<(usize, usize, std::ops::Range<usize>)> {
+    let b = line.as_bytes();
+    let (mut i, mut quoted) = (0, false);
+    while i < b.len() {
+        match b[i] {
+            b'\\' if quoted => i += 1,
+            b'"' => quoted = !quoted,
+            b':' if !quoted && b.get(i + 1) == Some(&b' ') => return None,
+            b'[' if !quoted => {
+                let end = i + line[i..].find(']')?;
+                let mut at = i + 1;
+                for item in line[i + 1..end].split(", ") {
+                    let digits =
+                        item.strip_prefix("ref=").map_or(0, |d| d.bytes().take_while(u8::is_ascii_digit).count());
+                    if digits > 0 && digits + 4 == item.len() {
+                        return Some((i, end, at..at + item.len()));
+                    }
+                    at += item.len() + 2;
+                }
+                i = end;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn node_ref(line: &str) -> Option<&str> {
+    ref_tags(line).map(|(_, _, r)| &line[r])
+}
+
+/// The JSON string `s` starts with, and its length in bytes.
+fn quoted_at(s: &str) -> Option<(String, usize)> {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'"') {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return serde_json::from_str(&s[..=i]).ok().map(|v| (v, i + 1)),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// `tree` with the lines of the controls a check or a choice moved (by
+/// node id, the line's ref) rewritten to their new state as a read prints
+/// it (see [`crate::cdp::Page::journal_restate`]). None when a control's
+/// line isn't there once, or doesn't read as the state it had before: the
+/// page is read again instead.
+fn restate(tree: &str, moved: &[(u64, crate::cdp::Restated)]) -> Option<String> {
+    let mut lines: Vec<String> = tree.split('\n').map(str::to_string).collect();
+    for (node, state) in moved {
+        let want = format!("ref={node}");
+        let at: Vec<usize> = (0..lines.len()).filter(|&i| node_ref(&lines[i]) == Some(want.as_str())).collect();
+        let [i] = at[..] else { return None };
+        lines[i] = match state {
+            crate::cdp::Restated::Checked(on) => checked_line(&lines[i], *on)?,
+            crate::cdp::Restated::Chosen { now, was } => chosen_line(&lines[i], now, was)?,
+        };
+    }
+    Some(lines.join("\n"))
+}
+
+/// A checkbox's or radio's line, checked or not: `checked` is the first of
+/// its tags when it is.
+fn checked_line(line: &str, on: bool) -> Option<String> {
+    let (open, close, _) = ref_tags(line)?;
+    let tags = &line[open + 1..close];
+    let first = tags.split(", ").next()?;
+    let tags = match (first == "checked" || first.starts_with("checked="), on) {
+        (false, true) => format!("checked, {tags}"),
+        (true, false) => tags.strip_prefix("checked, ")?.to_string(),
+        _ => return None,
+    };
+    Some(format!("{}[{tags}]{}", &line[..open], &line[close + 1..]))
+}
+
+/// A select's line with option `now` chosen instead of `was`: its
+/// `value=` (left out when it is the select's name, or empty) and the
+/// option marked `(selected)` in its list. None for a line cut anywhere
+/// that changes, or that doesn't show `was` as chosen.
+fn chosen_line(line: &str, now: &str, was: &str) -> Option<String> {
+    const SELECTED: &str = " (selected)";
+    // As the tree cuts them: a value at a name's length, an option at 60.
+    if now.chars().count() > 150 || now.chars().count() + SELECTED.len() > 60 {
+        return None;
+    }
+    let (open, close, _) = ref_tags(line)?;
+    let name = match line[..open].trim_start().strip_prefix("- combobox")?.trim() {
+        "" => String::new(),
+        quoted => match quoted_at(quoted)? {
+            (name, used) if used == quoted.len() => name,
+            _ => return None,
+        },
+    };
+    let shown = |v: &str| (!v.is_empty() && v != name).then(|| v.to_string());
+    let tail = &line[close + 1..];
+    let (value, rest) = match tail.strip_prefix(" value=") {
+        Some(t) => {
+            let (v, used) = quoted_at(t)?;
+            (Some(v), &t[used..])
+        }
+        None => (None, tail),
+    };
+    if value != shown(was) {
+        return None;
+    }
+    // The options as printed, each a quoted label (a cut one says so after
+    // it), a count of the ones left out last.
+    let mut options: Vec<String> = Vec::new();
+    let mut s = rest.strip_prefix(" options: ")?;
+    while !s.is_empty() {
+        let used = quoted_at(s).map_or(0, |(_, used)| used);
+        let end = s[used..].find(", ").map_or(s.len(), |k| used + k);
+        options.push(s[..end].to_string());
+        s = s[end..].strip_prefix(", ").unwrap_or("");
+    }
+    let whole = |o: &String| quoted_at(o).filter(|&(_, used)| used == o.len()).map(|(v, _)| v);
+    let at = |label: &str| -> Option<usize> {
+        let found: Vec<usize> = (0..options.len()).filter(|&i| whole(&options[i]).as_deref() == Some(label)).collect();
+        match found[..] {
+            [i] => Some(i),
+            _ => None,
+        }
+    };
+    let (old, new) = (at(&format!("{was}{SELECTED}"))?, at(now)?);
+    options[old] = serde_json::to_string(was).ok()?;
+    options[new] = serde_json::to_string(&format!("{now}{SELECTED}")).ok()?;
+    let value =
+        shown(now).map(|v| format!(" value={}", serde_json::to_string(&v).unwrap_or_default())).unwrap_or_default();
+    Some(format!("{}{value} options: {}", &line[..=close], options.join(", ")))
+}
+
 /// The lines that differ between two text trees of one page: `+` a line
 /// that is new, `-` one that is gone, `~` an element (same ref) that reads
 /// differently now, each without its indentation. A line is matched by its
@@ -5481,38 +6138,8 @@ fn reports_page_change(command: &Command) -> bool {
 /// value just typed, while anything else the fill changed (a live count, a
 /// suggestion list) is shown. None when nothing differs; past
 /// [`CHANGE_LINES`] the rest is counted, not shown.
-fn tree_change(before: &str, after: &str, typed: Option<&str>) -> Option<String> {
+fn tree_change(before: &str, after: &str, typed: &[&str]) -> Option<String> {
     use std::collections::HashMap;
-    // `ref=N` as the tree prints it, in the element's own bracket tag
-    // (`[ref=3]`, `[checked, ref=3]`): not inside a quoted name and not in
-    // the text after `: `, where a page may write anything.
-    fn node_ref(line: &str) -> Option<&str> {
-        let b = line.as_bytes();
-        let (mut i, mut quoted) = (0, false);
-        while i < b.len() {
-            match b[i] {
-                b'\\' if quoted => i += 1,
-                b'"' => quoted = !quoted,
-                b':' if !quoted && b.get(i + 1) == Some(&b' ') => return None,
-                b'[' if !quoted => {
-                    let end = i + line[i..].find(']')?;
-                    let mut at = i + 1;
-                    for item in line[i + 1..end].split(", ") {
-                        let digits =
-                            item.strip_prefix("ref=").map_or(0, |d| d.bytes().take_while(u8::is_ascii_digit).count());
-                        if digits > 0 && digits + 4 == item.len() {
-                            return Some(&line[at..at + item.len()]);
-                        }
-                        at += item.len() + 2;
-                    }
-                    i = end;
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        None
-    }
     fn key(line: &str) -> String {
         let line = line.trim_start();
         let Some(r) = node_ref(line) else { return line.to_string() };
@@ -5543,6 +6170,45 @@ fn tree_change(before: &str, after: &str, typed: Option<&str>) -> Option<String>
             }
         }
     }
+    // A tree cut at its line limit: a change above the cut moves lines
+    // across it, and those are not changes. Lines gone from the end of
+    // `before` while `after` is cut too may only have moved past the cut,
+    // and lines new at the end of `after` while `before` was cut may have
+    // been past it: both are left out (a change right at the cut with
+    // them). The line that says the tree is cut is never a change.
+    fn drop_tail(list: &mut Vec<&str>, tree: &str) {
+        let mut left: HashMap<String, usize> = HashMap::new();
+        for line in list.iter() {
+            *left.entry(key(line)).or_default() += 1;
+        }
+        let mut gone: HashMap<String, usize> = HashMap::new();
+        for line in tree.lines().rev().skip_while(|l| crate::cdp::ax::is_cut_line(l)) {
+            match left.get_mut(&key(line)) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    *gone.entry(key(line)).or_default() += 1;
+                }
+                _ => break,
+            }
+        }
+        for i in (0..list.len()).rev() {
+            if let Some(n) = gone.get_mut(&key(list[i])) {
+                if *n > 0 {
+                    *n -= 1;
+                    list.remove(i);
+                }
+            }
+        }
+    }
+    let is_cut = |tree: &str| tree.lines().next_back().is_some_and(crate::cdp::ax::is_cut_line);
+    if is_cut(after) {
+        drop_tail(&mut removed, before);
+    }
+    if is_cut(before) {
+        drop_tail(&mut added, after);
+    }
+    added.retain(|l| !crate::cdp::ax::is_cut_line(l));
+    removed.retain(|l| !crate::cdp::ax::is_cut_line(l));
     let gone_refs: HashMap<&str, &str> = removed.iter().filter_map(|l| node_ref(l).map(|r| (r, *l))).collect();
     let new_refs: HashMap<&str, ()> = added.iter().filter_map(|l| node_ref(l)).map(|r| (r, ())).collect();
     // A bare container (`listitem:`) or a list marker says nothing a reader
@@ -5560,8 +6226,8 @@ fn tree_change(before: &str, after: &str, typed: Option<&str>) -> Option<String>
     for line in &added {
         let was = node_ref(line).and_then(|r| gone_refs.get(r));
         let changed = was.is_some();
-        if let (Some(was), Some(v)) = (was, typed.filter(|v| !v.is_empty())) {
-            if line.contains(v) && !was.contains(v) {
+        if let Some(was) = was {
+            if typed.iter().any(|v| !v.is_empty() && line.contains(v) && !was.contains(v)) {
                 continue;
             }
         }
@@ -5637,7 +6303,8 @@ pub fn batch_response(steps: &[BatchStep], responses: &[Value], elapsed_ms: f64)
             continue;
         }
         let (own, st) = split_state(r.get("result").unwrap_or(&Value::Null));
-        if let Some(own) = own {
+        // A compact step that changed nothing says `ok`: nothing to print.
+        if let Some(own) = own.filter(|o| o.as_str() != Some("ok")) {
             results.push(json!({ "step": n, "do": step.text, "result": own }));
         }
         if let Some(st) = st {
@@ -5674,8 +6341,9 @@ pub fn batch_response(steps: &[BatchStep], responses: &[Value], elapsed_ms: f64)
 }
 
 /// How a batch prints: the whole response as JSON, or (`--raw`) each
-/// result on its own line (the page state when no step read anything),
-/// notes and the failure on stderr.
+/// result on its own line (the page state when no step read anything; in
+/// compact output, what each action changed and any title or URL a step
+/// changed), notes and the failure on stderr.
 pub fn print_batch(output: &mut dyn Write, response: &Value, config: &SessionConfig) -> bool {
     let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
     if !config.raw {
@@ -5695,10 +6363,17 @@ pub fn print_batch(output: &mut dyn Write, response: &Value, config: &SessionCon
             }
         }
     }
-    if results.is_empty() {
-        if let Some(state) = response.pointer("/result/state") {
+    // Compact: the state holds only what changed (a navigation's title and
+    // URL), so it is printed whenever a step changed it; a batch that
+    // changed nothing says `ok`.
+    match response.pointer("/result/state") {
+        Some(state) if results.is_empty() || config.compact => {
             let _ = writeln!(output, "{state}");
         }
+        None if results.is_empty() && ok && config.compact => {
+            let _ = writeln!(output, "ok");
+        }
+        _ => {}
     }
     if let Some(e) = response.get("error").and_then(Value::as_str) {
         eprintln!("error: {e}");
@@ -5740,10 +6415,11 @@ fn run_batch(source: Option<&str>, keep_going: bool, config: &SessionConfig, out
     for (i, step) in steps.iter().enumerate() {
         let t = Instant::now();
         let id = json!(i + 1);
-        let response = match driver.run_op(&step.command) {
+        let mut response = match driver.run_op(&step.command) {
             Ok(outcome) => outcome_response(id, outcome, t),
             Err(e) => err_response(id, format!("{e:#}"), t),
         };
+        driver.report_state(&step.command, &mut response.result, config.compact);
         let response = serde_json::to_value(&response).unwrap_or(Value::Null);
         let failed = response["ok"] != true;
         responses.push(response);
@@ -5817,6 +6493,19 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_placeholder_line_shows_the_page_between_states() {
+        assert!(super::shows_transition("+ text: Loading t3\n- text: idle"));
+        assert!(super::shows_transition("~ button \"Saving...\" [ref=4]"));
+        assert!(super::shows_transition("+ progressbar \"Upload\" [ref=9]"));
+        assert!(super::shows_transition("+ status: Please wait"));
+        // Final states, gone lines and words inside other words are not.
+        assert!(!super::shows_transition("+ text: Loaded t3\n- text: Loading t3"));
+        assert!(!super::shows_transition("+ text: Uploading guide\n+ link \"Downloads\" [ref=2]"));
+        assert!(!super::shows_transition("+ heading \"Saved searches\" [level=2]"));
+        assert!(!super::shows_transition("+ text: Long text … (+120 chars)"));
+    }
+
     #[test]
     fn an_error_reads_without_the_os_error_number() {
         use super::plain_error;
@@ -5946,14 +6635,14 @@ mod tests {
     fn an_action_says_which_lines_of_the_tree_it_changed() {
         let before = "page \"Shop\" http://x/\n- form:\n  - textbox \"Name\" [ref=2]\n  - checkbox \"I agree\" [ref=3]\n  - button \"Send\" [ref=4]";
         // Nothing a reader could see changed: no change, so the action says `ok`.
-        assert_eq!(super::tree_change(before, before, None), None);
+        assert_eq!(super::tree_change(before, before, &[]), None);
         // A node re-rendered as it was (new ref, same text) is not a change.
         let rerendered = before.replace("[ref=4]", "[ref=9]");
-        assert_eq!(super::tree_change(before, &rerendered, None), None);
+        assert_eq!(super::tree_change(before, &rerendered, &[]), None);
         // A flag inside a bracket with the ref: one changed element, `~`.
         let checked = before.replace("\"I agree\" [ref=3]", "\"I agree\" [checked, ref=3]");
         assert_eq!(
-            super::tree_change(before, &checked, None).as_deref(),
+            super::tree_change(before, &checked, &[]).as_deref(),
             Some("~ checkbox \"I agree\" [checked, ref=3]")
         );
         // New text and a removed button; bare containers and list markers are left out.
@@ -5962,32 +6651,99 @@ mod tests {
             before.replace("\n  - button \"Send\" [ref=4]", "")
         );
         assert_eq!(
-            super::tree_change(before, &after, None).as_deref(),
+            super::tree_change(before, &after, &[]).as_deref(),
             Some("+ status: Sent\n+ text: one\n- button \"Send\" [ref=4]")
         );
         // After a fill, the field's own line is the value just typed.
         let filled = before.replace("\"Name\" [ref=2]", "\"Name\" [ref=2]: Ada");
-        assert_eq!(super::tree_change(before, &filled, Some("Ada")), None);
-        assert_eq!(super::tree_change(before, &filled, None).as_deref(), Some("~ textbox \"Name\" [ref=2]: Ada"));
+        assert_eq!(super::tree_change(before, &filled, &["Ada"]), None);
+        assert_eq!(super::tree_change(before, &filled, &[]).as_deref(), Some("~ textbox \"Name\" [ref=2]: Ada"));
         // ...but what else the fill changed is shown (a live count).
         let live_before = "- textbox \"q\" [ref=2]\n- status [ref=5]: Results: 0";
         let live_after = "- textbox \"q\" [ref=2]: shoes\n- status [ref=5]: Results: 12";
         assert_eq!(
-            super::tree_change(live_before, live_after, Some("shoes")).as_deref(),
+            super::tree_change(live_before, live_after, &["shoes"]).as_deref(),
             Some("~ status [ref=5]: Results: 12")
         );
         // A page's own text that reads like a ref is text, not a ref.
         let quoted_before = "- text: \"x [ref=2] y\"\n- button \"B\" [ref=2]";
         let quoted_after = "- text: \"x [ref=2] y2\"";
         assert_eq!(
-            super::tree_change(quoted_before, quoted_after, None).as_deref(),
+            super::tree_change(quoted_before, quoted_after, &[]).as_deref(),
             Some("+ text: \"x [ref=2] y2\"\n- text: \"x [ref=2] y\"\n- button \"B\" [ref=2]")
         );
         // Past the cap the rest is counted.
         let many: String = (0..50).map(|i| format!("\n- text: row {i}")).collect();
-        let out = super::tree_change(before, &format!("{before}{many}"), None).unwrap();
+        let out = super::tree_change(before, &format!("{before}{many}"), &[]).unwrap();
         assert_eq!(out.lines().count(), super::CHANGE_LINES + 1);
         assert!(out.ends_with("... and 10 more changed lines (`ax` reads the page)"));
+    }
+
+    #[test]
+    fn lines_that_only_moved_across_a_cut_are_not_changes() {
+        let cut = "… more lines (scope with `ax --selector <css>`, or raise `--limit`)";
+        let before = format!("- button \"Go\" [ref=1]\n- row:\n  - cell \"a\"\n  - cell \"b\"\n{cut}");
+        // A line added above the cut pushes the last one past it.
+        let opened = format!("- button \"Go\" [ref=1]\n- text: body\n- row:\n  - cell \"a\"\n{cut}");
+        assert_eq!(super::tree_change(&before, &opened, &[]).as_deref(), Some("+ text: body"));
+        // A line gone above it brings the next one in.
+        assert_eq!(super::tree_change(&opened, &before, &[]).as_deref(), Some("- text: body"));
+        // A tree no longer cut is whole: what left its end is gone...
+        let whole = "- button \"Go\" [ref=1]\n- row:\n  - cell \"a\"";
+        assert_eq!(super::tree_change(&before, whole, &[]).as_deref(), Some("- cell \"b\""));
+        // ...and one cut now that wasn't: what came in at its end is new.
+        assert_eq!(super::tree_change(whole, &before, &[]).as_deref(), Some("+ cell \"b\""));
+        // A count on the cut line that changed is not a change either.
+        let counted = |n: usize, body: &str| {
+            format!(
+                "- text: {body}\n- cell \"a\"\n… {n} more lines (scope with `ax --selector <css>`, or raise `--limit`)"
+            )
+        };
+        assert_eq!(
+            super::tree_change(&counted(9, "x"), &counted(8, "y"), &[]).as_deref(),
+            Some("+ text: y\n- text: x")
+        );
+    }
+
+    #[test]
+    fn a_check_or_a_choice_rewrites_its_own_line_as_a_read_prints_it() {
+        use crate::cdp::Restated::{Checked, Chosen};
+        let chosen = |now: &str, was: &str| Chosen { now: now.into(), was: was.into() };
+        let tree =
+            "page \"Shop\" http://x/\n- checkbox \"Agree\" [required, ref=3]\n  - radio \"Air\" [checked, ref=4]\n\
+                    - combobox \"Size\" [ref=5] value=\"S\" options: \"S (selected)\", \"M\", \"Large \\\"L\\\"\"";
+        let checked = super::restate(tree, &[(3, Checked(true)), (4, Checked(false))]).unwrap();
+        assert_eq!(
+            super::tree_change(tree, &checked, &[]).as_deref(),
+            Some("~ checkbox \"Agree\" [checked, required, ref=3]\n~ radio \"Air\" [ref=4]")
+        );
+        let picked = super::restate(tree, &[(5, chosen("Large \"L\"", "S"))]).unwrap();
+        assert!(picked.ends_with(
+            "- combobox \"Size\" [ref=5] value=\"Large \\\"L\\\"\" options: \"S\", \"M\", \"Large \\\"L\\\" (selected)\""
+        ));
+        // The choice that is the select's name is not printed as its value.
+        let named = "- combobox \"M\" [ref=5] value=\"S\" options: \"S (selected)\", \"M\"";
+        assert_eq!(
+            super::restate(named, &[(5, chosen("M", "S"))]).as_deref(),
+            Some("- combobox \"M\" [ref=5] options: \"S\", \"M (selected)\"")
+        );
+        assert_eq!(
+            super::restate(&super::restate(named, &[(5, chosen("M", "S"))]).unwrap(), &[(5, chosen("S", "M"))])
+                .as_deref(),
+            Some(named)
+        );
+        // Whatever the line doesn't show as the state before, or can't show
+        // whole, is left to a read: a line that already reads checked, an
+        // option not among those listed, one listed twice, a cut one.
+        assert_eq!(super::restate(&checked, &[(3, Checked(true))]), None);
+        assert_eq!(super::restate(tree, &[(5, chosen("XL", "S"))]), None);
+        assert_eq!(super::restate(tree, &[(5, chosen("M", "Large"))]), None);
+        assert_eq!(super::restate(tree, &[(9, Checked(true))]), None);
+        let twice = "- combobox [ref=5] value=\"S\" options: \"S (selected)\", \"M\", \"M\"";
+        assert_eq!(super::restate(twice, &[(5, chosen("M", "S"))]), None);
+        let cut = "- combobox [ref=5] value=\"S\" options: \"S (selected)\", \"M\", …(+30)";
+        assert!(super::restate(cut, &[(5, chosen("M", "S"))]).unwrap().ends_with("\"S\", \"M (selected)\", …(+30)"));
+        assert_eq!(super::restate(cut, &[(5, chosen("Option 40", "S"))]), None);
     }
 
     #[test]
@@ -6330,7 +7086,7 @@ mod tests {
         }
         // The help fits 80 columns, names each command once and lists the
         // flags the skill uses.
-        let help = usage("navigera");
+        let help = usage_full("navigera");
         assert!(help.lines().all(|l| l.chars().count() <= 80 && !l.ends_with(' ')), "{help}");
         assert_eq!(help.lines().filter(|l| l.starts_with("  check ")).count(), 1, "{help}");
         for flag in ["-s, --session", "--wait-ms", "--version"] {
@@ -6341,6 +7097,30 @@ mod tests {
         assert!(matches!(missing, ArgsError::Invalid(_)));
         let extra = parse_args(argv(&["navigera", "title", "x"])).expect_err("extra");
         assert!(matches!(extra, ArgsError::Invalid(m) if m.contains("unexpected argument")));
+    }
+
+    #[test]
+    fn short_help_is_one_screen_and_every_command_is_reachable() {
+        let short = usage("navigera");
+        assert!(short.len() <= 3072, "{} bytes: {short}", short.len());
+        assert!(short.lines().all(|l| l.chars().count() <= 80 && !l.ends_with(' ')), "{short}");
+        for (name, ..) in FIRST_COMMANDS {
+            assert!(short.lines().any(|l| l.starts_with(&format!("  {name} "))), "first command {name}: {short}");
+            assert!(OPS.iter().any(|(n, ..)| n == name), "{name} is not a command");
+        }
+        for (name, ..) in OPS {
+            assert!(short.split_whitespace().any(|w| w == *name), "{name} not named in the short help: {short}");
+        }
+        let all = usage_full("navigera");
+        assert!(all.len() > 10_000, "the full help is kept: {} bytes", all.len());
+        for argv_ in [vec!["navigera", "help", "--all"], vec!["navigera", "--help", "--all"]] {
+            match parse_args(argv(&argv_)).expect_err("help --all") {
+                ArgsError::Help(text) => assert_eq!(text, all, "{argv_:?}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(matches!(parse_args(argv(&["navigera", "--help"])), Err(ArgsError::Help(t)) if t == short));
+        assert!(matches!(parse_args(argv(&["navigera"])), Err(ArgsError::Help(t)) if t == short));
     }
 
     #[test]
@@ -6582,6 +7362,34 @@ mod tests {
     }
 
     #[test]
+    fn allow_domains_flags_parse_and_validate() {
+        let p =
+            parse_args(argv(&["navigera", "-s", "s", "start", "--allow-domains", "example.com,*.cdn.org"])).unwrap();
+        assert_eq!(p.config.allow_domains.as_deref(), Some("example.com,*.cdn.org"));
+        assert!(!p.config.allow_domains_docs_only);
+        assert!(p.config.allow_policy().unwrap().is_some());
+        let p = parse_args(argv(&[
+            "navigera",
+            "-s",
+            "s",
+            "start",
+            "--allow-domains=example.com",
+            "--allow-domains-docs-only",
+        ]))
+        .unwrap();
+        assert!(p.config.allow_domains_docs_only);
+        assert!(p.config.allow_policy().unwrap().unwrap().docs_only);
+        // Docs-only without a list, and a malformed list, fail at parse
+        // time rather than at first navigation.
+        assert!(parse_args(argv(&["navigera", "-s", "s", "start", "--allow-domains-docs-only"])).is_err());
+        assert!(parse_args(argv(&["navigera", "-s", "s", "start", "--allow-domains", "https://example.com"])).is_err());
+        assert!(parse_args(argv(&["navigera", "-s", "s", "start", "--allow-domains", ""])).is_err());
+        // The flag also parses on `mcp` and on `serve`.
+        assert!(parse_args(argv(&["navigera", "mcp", "--allow-domains", "example.com"])).unwrap().mcp);
+        assert!(parse_args(argv(&["navigera", "serve", "--allow-domains", "example.com"])).is_ok());
+    }
+
+    #[test]
     fn refs_parse_in_every_spelling() {
         for raw in ["12", "@12", "e12", "ref=12", "[ref=12]", " 12 "] {
             assert_eq!(parse_ref(raw), Some(12), "{raw}");
@@ -6593,6 +7401,7 @@ mod tests {
 
 #[cfg(test)]
 mod fork_send {
+
     /// A forked driver is moved into a worker thread.
     #[test]
     fn a_driver_can_move_to_another_thread() {

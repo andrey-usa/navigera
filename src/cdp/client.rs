@@ -68,8 +68,15 @@ enum Refusal {
     Other(String),
 }
 
-/// A command waiting for its answer, and the tab session it went to.
-type Pending = HashMap<u64, (Option<String>, Responder)>;
+/// A command waiting for its answer, the tab session it went to, and
+/// whether its result is handed over as JSON text (see [`TEXT_RESULT`]).
+type Pending = HashMap<u64, (Option<String>, bool, Responder)>;
+
+/// Commands whose result `send` returns as its JSON text, in a
+/// `Value::String`, not read into a JSON value: the caller reads it
+/// straight into its own types. A 10,000-row table's DOM snapshot is 7 MB,
+/// ~50 ms to read as values (`snap::Snap::from_json` reads it in ~20).
+pub const TEXT_RESULT: [&str; 1] = ["DOMSnapshot.captureSnapshot"];
 
 /// What every incoming message is handed to, as its JSON text, once
 /// [`CdpClient::take_raw`] diverted them (the shared-browser host routes
@@ -132,7 +139,7 @@ fn close_all(closed: &AtomicBool, raw: &RawTap, on_close: &OnClose) {
 /// whether the browser ran it, so the answer is CLOSED, never retried.
 fn drain_closed(pending: &Mutex<Pending>) {
     let mut pending = pending.lock().unwrap();
-    for (_, (_, responder)) in pending.drain() {
+    for (_, (_, _, responder)) in pending.drain() {
         let _ = responder.send(Err(Refusal::Closed));
     }
 }
@@ -214,7 +221,7 @@ impl CdpClient {
             close_all(&closed_pump, &raw_pump, &on_close_pump);
             while let Ok(unsent) = rx.try_recv() {
                 if let Some(id) = framed_id(unsent.as_bytes()) {
-                    if let Some((_, responder)) = pending_pump.lock().unwrap().remove(&id) {
+                    if let Some((_, _, responder)) = pending_pump.lock().unwrap().remove(&id) {
                         let _ = responder.send(Err(Refusal::NeverReached));
                     }
                 }
@@ -283,7 +290,7 @@ impl CdpClient {
                     // unanswered, which may have been written.
                     let failed = String::from_utf8_lossy(&bytes[..bytes.len() - 1]).into_owned();
                     if let Some(id) = framed_id(&bytes) {
-                        if let Some((_, responder)) = pending_w.lock().unwrap().remove(&id) {
+                        if let Some((_, _, responder)) = pending_w.lock().unwrap().remove(&id) {
                             let _ = responder.send(Err(Refusal::NeverReached));
                         }
                     }
@@ -293,7 +300,7 @@ impl CdpClient {
                     while let Ok(rest) = rx.try_recv() {
                         // Never attempted a write: never sent, either.
                         if let Some(id) = framed_id(rest.as_bytes()) {
-                            if let Some((_, responder)) = pending_w.lock().unwrap().remove(&id) {
+                            if let Some((_, _, responder)) = pending_w.lock().unwrap().remove(&id) {
                                 let _ = responder.send(Err(Refusal::NeverReached));
                             }
                         }
@@ -393,7 +400,8 @@ impl CdpClient {
             // whose write may have landed).
             return Err(NeverReached(method.to_string()).into());
         }
-        self.inner.pending.lock().unwrap().insert(id, (session_id.map(str::to_string), tx));
+        let text = TEXT_RESULT.contains(&method);
+        self.inner.pending.lock().unwrap().insert(id, (session_id.map(str::to_string), text, tx));
         // The transport may have closed (and drained `pending`) between the
         // check and the insert.
         if self.inner.closed.load(Ordering::SeqCst) {
@@ -559,9 +567,34 @@ fn shape(value: &Value, depth: usize) -> Value {
     }
 }
 
+/// The id and result text of an answer to a [`TEXT_RESULT`] command, when
+/// one is waiting; None for anything else (an error answer included), which
+/// is then read as a JSON value as usual.
+fn text_result(text: &str, pending: &Mutex<Pending>) -> Option<(u64, String)> {
+    if !pending.lock().unwrap().values().any(|(_, text, _)| *text) {
+        return None;
+    }
+    #[derive(serde::Deserialize)]
+    struct Answer<'a> {
+        id: Option<u64>,
+        #[serde(borrow)]
+        result: Option<&'a serde_json::value::RawValue>,
+    }
+    let answer: Answer = serde_json::from_str(text).ok()?;
+    let id = answer.id?;
+    let result = answer.result?;
+    matches!(pending.lock().unwrap().get(&id), Some((_, true, _))).then(|| (id, result.get().to_string()))
+}
+
 fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Value>, sent: &AtomicU64, raw: &RawTap) {
     if let Some(handler) = raw.lock().unwrap().as_mut() {
         handler(text);
+        return;
+    }
+    if let Some((id, result)) = text_result(text, pending) {
+        if let Some((_, _, responder)) = pending.lock().unwrap().remove(&id) {
+            let _ = responder.send(Ok(Value::String(result)));
+        }
         return;
     }
     let Ok(mut value) = serde_json::from_str::<Value>(text) else {
@@ -569,7 +602,7 @@ fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Val
     };
     if let Some(id) = value.get("id").and_then(Value::as_u64) {
         let responder = pending.lock().unwrap().remove(&id);
-        if let Some((_, responder)) = responder {
+        if let Some((_, _, responder)) = responder {
             if let Some(error) = value.get("error") {
                 let refusal = if error.get("code").and_then(Value::as_i64) == Some(NEVER_REACHED_CODE)
                     && error.get("message").and_then(Value::as_str) == Some(NEVER_REACHED)
@@ -594,9 +627,9 @@ fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Val
             if let Some(gone) = value.pointer("/params/sessionId").and_then(Value::as_str) {
                 let mut pending = pending.lock().unwrap();
                 let ids: Vec<u64> =
-                    pending.iter().filter(|(_, (s, _))| s.as_deref() == Some(gone)).map(|(id, _)| *id).collect();
+                    pending.iter().filter(|(_, (s, _, _))| s.as_deref() == Some(gone)).map(|(id, _)| *id).collect();
                 for id in ids {
-                    if let Some((_, responder)) = pending.remove(&id) {
+                    if let Some((_, _, responder)) = pending.remove(&id) {
                         let _ = responder.send(Err(Refusal::Other(format!(
                             "{SESSION_GONE}: the tab's session ended while this ran"
                         ))));
@@ -643,6 +676,60 @@ mod tests {
         let (a, b) = UnixStream::pair().unwrap();
         let (r, w) = a.into_split();
         (CdpClient::connect_framed(r, w), b)
+    }
+
+    /// A capture's answer is handed over as its JSON text, escapes and all;
+    /// an event and another command's answer around it, and a capture's
+    /// error, arrive as before.
+    #[tokio::test]
+    async fn a_text_result_command_gets_its_answer_as_text() {
+        let (client, mut peer) = framed_pair();
+        let mut events = client.subscribe();
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let (mut captures, mut eval) = (Vec::new(), 0);
+            // All three may come in one read.
+            while buf.iter().filter(|b| **b == 0).count() < 3 {
+                let mut chunk = [0u8; 8192];
+                let n = peer.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "peer: connection ended");
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            for frame in buf.split(|b| *b == 0).take(3) {
+                let v: Value = serde_json::from_slice(frame).unwrap();
+                let id = v["id"].as_u64().unwrap();
+                if v["method"] == TEXT_RESULT[0] {
+                    // The one to fail asks for a style (a real parameter: CI checks
+                    // every traced call against the browser's protocol).
+                    captures.push((id, v["params"]["computedStyles"] != json!([])));
+                } else {
+                    eval = id;
+                }
+            }
+            captures.sort_by_key(|c| c.1);
+            let ids = [captures[0].0, eval, captures[1].0];
+            let answers = [
+                json!({"method": "Page.loadEventFired", "params": {"timestamp": 1}}),
+                json!({"id": ids[1], "result": {"result": {"type": "number", "value": 2}}}),
+                json!({"id": ids[0], "result": {"strings": ["a\"b\u{e9}"], "documents": []}}),
+                json!({"id": ids[2], "error": {"code": -32000, "message": "no"}}),
+            ];
+            for a in answers {
+                let mut bytes = a.to_string().into_bytes();
+                bytes.push(0);
+                peer.write_all(&bytes).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let capture = client.send(TEXT_RESULT[0], json!({ "computedStyles": [] }), None, T);
+        let eval = client.send("Runtime.evaluate", json!({ "expression": "2" }), None, T);
+        let failed = client.send(TEXT_RESULT[0], json!({ "computedStyles": ["display"] }), None, T);
+        let (capture, eval, failed) = tokio::join!(capture, eval, failed);
+        let Value::String(text) = capture.unwrap() else { panic!("not text") };
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), json!({"strings": ["a\"b\u{e9}"], "documents": []}));
+        assert_eq!(eval.unwrap()["result"]["value"], 2);
+        assert!(format!("{:#}", failed.unwrap_err()).contains("refused"));
+        assert_eq!(events.recv().await.unwrap()["method"], "Page.loadEventFired");
     }
 
     /// The peer is already gone: the write fails before a byte lands.

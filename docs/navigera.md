@@ -21,7 +21,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | global flag | meaning |
 |---|---|
 | `-s, --session <name\|path>` | named session. A bare name lives in a directory only you can enter: `$XDG_RUNTIME_DIR/navigera/<name>.sock`, else `$TMPDIR/navigera-<uid>/<name>.sock` (mode 0700; navigera refuses one that is a symlink, someone else's or open to others), `%TEMP%\navigera\` on Windows; a value with a path separator is used as the path. `$NAVIGERA_SESSION` sets a default for client calls |
-| `--output compact\|raw\|json` | what a command prints. `compact`, the default: an action that moved the page prints only its own fields and what changed (`{"title":"Saved"}`); one that left it on the same document, after an `ax` of it, prints the lines of that tree that changed (`+` new, `-` gone, `~` the same element reading differently; at most 40, then a count), read again the way that `ax` read it, waiting as `ax` does for data the action fetches, and `ok` when no line changed (after a `fill`, the field's own new value is not a change); a read prints its value (strings unquoted, the `ax` tree as text). `raw`: the result only, as it is. `json`: one JSON line per command, `{"ok":true,"result":…}` or `{"ok":false,"error":…}`, for programs. Outside `json`, errors go to stderr as `error: …` (exit code 1) and notes as `note: …`. `$NAVIGERA_OUTPUT` sets the mode for every command of a shell; a flag wins. The session remembers the state it last reported. `--compact`: `--output compact`; `--raw`: `--output raw` |
+| `--output compact\|raw\|json` | what a command prints. `compact`, the default: an action that moved the page prints only its own fields and what changed (`{"title":"Saved"}`); one that left it on the same document, after an `ax` of it, prints the lines of that tree that changed (`+` new, `-` gone, `~` the same element reading differently; at most 40, then a count), read again the way that `ax` read it, waiting as `ax` does for data the action fetches, and `ok` when no line changed (after a `fill`, the field's own new value is not a change). On a large page (past 2,500 DOM nodes) a text entry (`fill`, `type`, `insert-text`) that changed nothing else is not read again: a journal kept in the page since the last read (its DOM, frames, shadow roots, form values, and the style rules that follow `:focus`, `:hover`, `:invalid`, `:has()` and the like) shows it, and the report is the same `ok`; a `check`, `uncheck` or `select` that moved only checkboxes, radios or single selects reports their lines rewritten as a read prints them; anything it can't watch (a style sheet of another origin) means a read, as before. `$NAVIGERA_CHANGE_JOURNAL=0` reads after every entry; a read prints its value (strings unquoted, the `ax` tree as text). `raw`: the result only, as it is. `json`: one JSON line per command, `{"ok":true,"result":…}` or `{"ok":false,"error":…}`, for programs. Outside `json`, errors go to stderr as `error: …` (exit code 1) and notes as `note: …`. `$NAVIGERA_OUTPUT` sets the mode for every command of a shell; a flag wins. The session remembers the state it last reported. `--compact`: `--output compact`; `--raw`: `--output raw` |
 | `--pretty` | pretty-print the JSON |
 | `--timeout-ms <ms>` | before the command: navigation/command timeout (default 35000). After an element command: that op's element wait (default 5000) |
 | `--wait-ms <ms>` | element ops' wait when they name no timeout, and on one `wait` for a condition, its timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
@@ -31,6 +31,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | `--idle-timeout-s <s>` | a session server shuts down after this idle time (default 600, 0 = never; also `start --idle <s>`). `status` and `sessions` don't count as use |
 | `--own-browser` | with `start` (or `mcp`): a browser of the session's own instead of a context on the shared browser (`$NAVIGERA_SHARED_BROWSER=0`) |
 | `--parent <pid>` | with `start`: the session quits when that process exits (checked twice a second; `$NAVIGERA_PARENT_PID`) |
+| `--allow-domains <list>` | with `start`/`serve`/`mcp`: hostnames this session may navigate to or request from (comma-separated; `*.example.com` covers its subdomains, not itself; `$NAVIGERA_ALLOW_DOMAINS`, a flag wins). Everything else is refused at the Fetch request stage, before any `route` rule, on every redirect hop; a refused navigation's error names the denied host and the flag, and `status` lists refused hosts. An entry is a hostname only (no scheme, port, path or userinfo); malformed or empty lists are refused at startup, never silently disabled. `--allow-domains-docs-only` checks top-level navigation only: a navigation restriction, not exfiltration protection (subresources, iframes included, still go out). Requests are paused at the browser too, so a popup (`window.open`, `target=_blank`) is refused before its first request goes out, and on a browser of the session's own (`serve`, `start --own-browser`) a service worker's fetches are checked in strict mode. Limits, measured: this is a hostname policy, not an origin policy (scheme and port are ignored); WebSocket handshakes are NOT intercepted by Fetch in Chrome, so neither mode stops exfiltration over them, nor over a service worker of a shared browser; `file:`, `about:`, `blob:` and `data:` URLs carry no host to check and pass through. A session that cannot install the interception fails to start rather than running unenforced; `reset` keeps the policy, `reset --all` drops it, a fork starts without one |
 | `-V, --version`, `-h, --help`, `help <command>` | info |
 
 Every command prints one JSON object: `{"id":…, "ok":true, "result":…,
@@ -87,7 +88,7 @@ another process are reachable by ref only.
 | command | args | result |
 |---|---|---|
 | `start` | (with `-s`) | `{session, socket, log, pid}`; detached server, in a context of its own on the shared browser (started if none runs; see [Browsers and engines](#browsers-and-engines)); `already_running` if it exists |
-| `batch` | `[<file> \| -] [--keep-going]` | several steps in one call, one connection: one command per line as on the command line (without `navigera -s <name>`; `#` comments; quote arguments with spaces as in a shell) or JSON ops as `serve` takes them. Every line is parsed before anything runs. Stops at the first failure (`--keep-going` runs the rest). One response: `{steps, ran, results: [{step, do, result}], state, failed}` where `results` holds only what steps read or said beyond the page state (an `eval`, a `text`, a `select`'s `selected`), `state` is the page once at the end, notes carry their step (`step 3: …`) and `error` names the step and its line. `--raw` prints each result on its own line (the state when no step read anything). Without a session, the steps run on a browser launched for the batch. The shape to use for a multi-step flow: one call, one model turn |
+| `batch` | `[<file> \| -] [--keep-going]` | several steps in one call, one connection: one command per line as on the command line (without `navigera -s <name>`; `#` comments; quote arguments with spaces as in a shell) or JSON ops as `serve` takes them. Every line is parsed before anything runs. Stops at the first failure (`--keep-going` runs the rest). One response: `{steps, ran, results: [{step, do, result}], state, failed}` where `results` holds only what steps read or said beyond the page state (an `eval`, a `text`, a `select`'s `selected`), `state` is the page once at the end, notes carry their step (`step 3: …`) and `error` names the step and its line. `--raw` prints each result on its own line (the state when no step read anything). In compact output (the command line's default) each action says what it changed, as it does alone, a step that changed nothing says nothing, a title or URL a step changed comes last, and a batch that changed nothing prints `ok`. Without a session, the steps run on a browser launched for the batch. The shape to use for a multi-step flow: one call, one model turn |
 | `sessions` | `[--clean [--all] [--idle <s>]]` | no session needed: `{sessions: [{name, state, pid, age_s, idle_s, browser, url, memory_mib, parent}], shared_browsers: [{socket, pid, memory_mib}], memory_mib}`. `state` is `ready`, `busy` (a command is running) or `stale` (no server answers). Memory: the session server and its own browser (proportional set size on Linux, resident elsewhere); a shared browser counts once, under `shared_browsers`. `--clean` quits the sessions idle 300 s or more (`--idle <s>`), or all of them (`--all`), removes stale files and closes a shared browser no session uses any more; adds `quit`, `removed` and `freed_mib` |
 | `goto` | `<url>` or `--url`; `--wait load\|domcontentloaded\|commit`; `--timeout-ms` | state `{tab, tabs, url, title}`; a URL that downloads leaves the page where it was and adds `download` (the file) and a `note`. `example.com` → `https://`, `localhost:3000` → `http://` |
 | `ax` (`snapshot`) | `[<ref> \| --selector <css> \| --text t]` scope; `--limit <lines>` (2000); `--refs all`; `--format json` (old flat list: `{ref, role, name, value?, url?}`; with `--all` `{id, role, name, backendNodeId}`); `--all` | text tree (below) |
@@ -103,7 +104,7 @@ another process are reachable by ref only.
 | `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--idle` (no fetch/XHR for 500 ms; also `--load networkidle`), `--download [<glob>]` (a finished download whose file name matches), `--ms <n>`; `--timeout-ms` | state + `waited_ms` (+ `download`); `--ms` alone: `{waited_ms}` |
 | `downloads` | `--clear`, `--json`, `--dir <path>` | `#n state bytes path (url)` per file the pages downloaded, saved under `--download-dir` with the name the page gave it (`report (2).csv` if taken). With `--attach` the browser keeps its own download folder and `path` is empty. `--dir` saves this session's downloads in `<path>` from now on (created if missing; kept across `reset`), apart from other sessions' and returns `{dir}` |
 | `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value: an expression's, an arrow function's (it is called), or for statements the last expression's; `await` works at the top level, and a body that `return`s gives what it returns; promises are awaited |
-| `text` | `--selector <css>` | `textContent` or `null` |
+| `text` | `--selector <css>` | `textContent` without the `<script>`, `<style>`, `<template>` and `<noscript>` inside the element (one that is itself a script keeps its text), or `null` |
 | `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
 | `check` | `<yes/no question>` (no target given) | `{question, yes, answer}`: the probability the answer is yes |
 | `check` / `uncheck` | target (a ref or a targeting flag) | state + `checked`, `changed`: clicks a checkbox/radio/switch only when its state differs, fails if the click didn't change it |
@@ -129,13 +130,13 @@ another process are reachable by ref only.
 | `init-script` | `<js>`, `--file <path.js>`, `--clear`; no argument lists them | runs before the page's own scripts in every document of every tab; adding returns `{init_scripts: n}`, `--clear` `{removed}` |
 | `webmcp-list` | — | the tools the page registered with WebMCP (`document.modelContext.registerTool`): `{tools: [{name, description, read_only, input_schema?, consequential?, untrusted_content?}], untrusted}` sorted by name. See [WebMCP](#webmcp) |
 | `webmcp-call` | `<name> [--params '{json}'] [--confirm] [--timeout-ms <n>]` | runs the tool in the frame that registered it and waits for its answer: state + `{tool, output, untrusted}`; a tool the page doesn't mark read-only is refused without `--confirm` |
-| `status` | — | `{engine, executable, endpoint, attached, browser, version}` + state (`closed: true` once the session's only tab was closed). `browser`: `shared (N sessions)`, `own` or `attached`. A session server adds `server: {pid, started_at, idle_s, parent}` |
+| `status` | — | `{engine, executable, endpoint, attached, browser, version}` + state (`closed: true` once the session's only tab was closed). `browser`: `shared (N sessions)`, `own` or `attached`. A session server adds `server: {pid, started_at, idle_s, parent}`. With `--allow-domains`, state adds `allow_domains: {entries, docs_only, denied: [{host, count}]}` |
 | `locate` | target (a ref, usually) | `{locators: [{kind, flags}]}`: the flags that find the element again, most stable first (`testid`, `role` + name, `label`, `placeholder`, `text`, `css`), each kept only when the op's own finder picks this element on the page as it is; inside a frame each has `--frame` (a cross-origin frame named from the page that holds it); `secret: true` for a password field (`type=password`, `autocomplete` current/new-password or one-time-code) |
 | `history` | `--clear` empties it | `{history: [{command, at, url, page, locators?}]}` (`page`: the title, the visible `h1` and the status/alert messages showing after the action): the actions the session ran (navigation, clicks, typing, selects, uploads, drags, scrolls, tabs, dialogs, and the waits between; not reads or `eval`), oldest first, the last 1000; one on a ref has the `locate` of its element from just before it ran (and `secret: true` for a password field), so `primavera from-session` can write it as a test |
 | `title` / `url` | — | string / state |
 | `back` / `forward` / `reload` | — | state |
 | `screenshot` | `[<path>]` or `--path`; `--full-page`; `--quality <1-100>` (a JPEG at that quality, not a PNG: about a quarter of the bytes for a page of text); `--timeout-ms <n>` (give up on the capture after n ms; default: the session timeout) | `{path, bytes}` |
-| `reset` | | `{tabs, active, url}`: a new browser context (no cookies, storage or cache from before) with one blank tab, in the same browser (about 40 ms); the old tabs close; `set`, routes, credentials, init scripts, the dialog answer and the `downloads --dir` stay (`reset --all` drops them, as in a new session). Chrome only |
+| `reset` | | `{tabs, active, url}`: a new browser context (no cookies, storage or cache from before) with one blank tab, in the same browser (about 40 ms); the old tabs close; `set`, routes, credentials, init scripts, the dialog answer, the `--allow-domains` policy and the `downloads --dir` stay (`reset --all` drops them, as in a new session). Chrome only |
 | `tab-new` | `[<url>]` | `{tabs:[{index,target,active,url,title}], active, url}`; a tab that was closed under the session (the user closed it, or the page did) shows `closed: true` until `tab-new` replaces it, and ops that need it say so |
 | `tab-list` | — | same |
 | `tab-select` | `<index>` (or `--index <n>`) or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |
@@ -144,7 +145,7 @@ another process are reachable by ref only.
 | `quit` (`close`) | — | `{bye: true}`; a session server exits with its browser context (a browser of its own: with its browser). `--close-browser` on a shared browser closes it with this session unless other sessions use it, and says which |
 | `skill` | — | prints the agent guide (SKILL.md) |
 | `install-browser` | `[chrome-headless-shell \| chrome] [--channel stable\|beta\|dev\|canary] [--where]` | downloads that Chrome from Google's Chrome for Testing into navigera's cache, used from then on (see Browsers and engines): `{installed, version}`; `--where` prints the directory |
-| `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
+| `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` with its `references/` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
 
 Other names the parser takes, for agents used to other tools' names: `navigate`
 (`goto`), `drag-drop` (`drag`), `cookie` (`cookies`), `emulate` (`set`),
@@ -234,8 +235,8 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 - **Snapshots wait for fetched data.** Before `ax` and `screenshot`,
   navigera waits until the tab has had no `fetch`/XHR in flight for 500 ms
   (the usual network-idle window), at most 3 s; requests open longer
-  than 5 s (long polls, streams) don't count. A page that has been quiet —
-  usual when an agent has been thinking — is read at once. So
+  than 5 s (long polls, streams) don't count. A page that has been quiet,
+  as it usually is while an agent thinks, is read at once. So
   `goto … && … ax` shows a single-page app's list, not its "Loading…"
   placeholder. A request to a URL the page has already fetched twice at a
   steady interval is a poll and doesn't count, so a dashboard that refreshes
@@ -298,6 +299,33 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     middle clicks aren't judged, nor pages with same-origin frames it
     doesn't watch. `NAVIGERA_TRACE_EFFECT=1` on `start` adds an
     `effect_trace` to click results (what was seen).
+  - **A click before the page wired the element up is sent again.** On a
+    page whose document started loading less than 10 s ago, the click
+    also counts what listens for it (click, mouse, pointer and touch
+    listeners, handlers set as properties or attributes included,
+    navigera's own left out) on the element, its ancestors, its document
+    and its window. When nothing did and the click changed nothing, no
+    script of the page ran for it: navigera watches the page while it has
+    scripts or data requests in flight, and until 500 ms after the click
+    without any (never past the element wait, at most 5 s), and if the
+    page adds such a listener there (a script after load, hydration of a
+    container or of the whole document), it clicks once more; the result
+    carries `clicked_again` with how long the page took. A click anything
+    heard is never sent again: analytics on the document, or a script
+    that records early clicks to replay them once the page is wired, may
+    act on it later where navigera can't see. A dead button on a page
+    that just loaded reports `no_effect` about 300 ms later than before.
+    Not covered: a page that listens on the document from the start
+    (`no_effect` as before), an element inside a frame, a handler wired
+    more than 500 ms after the click with nothing loading.
+  - **A click the page moved away from says so.** A page that answers the
+    press itself, by moving the element (a banner put in above it on
+    pointerdown) or replacing it (a button rendered anew on mousedown),
+    has the release land elsewhere: the click event goes to the parent
+    the press and the release share, or the browser sends none, and the
+    element's own handler never runs. The result carries `click_missed`
+    with where the click went. The page saw the press, so navigera
+    doesn't press again: check what the click should do first.
 - **Page errors are reported.** An uncaught exception while a command ran
   adds one line to its `notes` (`the page threw TypeError: …; \`errors\`
   lists them`), so a click whose handler crashed doesn't look like a click
@@ -474,6 +502,13 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_handoff` | `show` / `hide`: the browser on the person's screen with the same tabs and sign-ins (a login, 2FA, a CAPTCHA), and back |
 | `browser_run` | several ops in one call (`{"steps": [{"op":"fill","ref":21,"value":"Ada"}, {"op":"click","ref":30}]}`), stopping at the first failure, ending with a snapshot |
 | `browser_close` | close the browser; the next call starts a fresh one |
+| `browser_webmcp_list`, `browser_webmcp_call` | a page's WebMCP tools (page-provided, untrusted; a tool the page doesn't mark read-only needs `confirm: true`), via `browser_more` |
+
+Action tools report what the action changed on the page (the CLI's compact
+way), not the whole state again; pass `state: true` on a call for the full
+page state, and `snapshot: true` for the updated tree in the same call.
+`browser_hover`, `browser_mouse` and `browser_scroll` still return the
+full state (their page change is not tracked).
 
 An MCP client may have no shell of its own, so the browser is not its way to
 the disk: `file:` pages and the browser's own pages (`chrome://`,
@@ -484,8 +519,8 @@ HAR or response body from `network`, a PDF, a screenshot's path, a
 the client opened). `NAVIGERA_MCP_ALLOW_FILES=1` lifts these limits.
 
 Every action takes `snapshot: true` to return the updated tree in the same
-call. The whole tool list (23 tools) is about 16 KB (~4,000 tokens), against
-~26 KB for Chrome DevTools MCP 1.10.1.
+call. The default tool list (13 of the 26 tools, 15 of 28 with a decision model; `browser_more` lists the rest on demand) is about 8 KB
+(~2,000 tokens), against ~30 KB for Chrome DevTools MCP 1.12.0.
 
 Client configuration (all run the same command):
 
@@ -700,8 +735,12 @@ BrowserWindow.getAllWindows().length"`); MCP clients pass `main: true` to
 `browser_evaluate`. An app that turns the switch off (Electron's
 `EnableNodeCliInspectArguments` fuse) still runs; `eval --main` then says
 so. Every window the app
-opens is adopted as a tab and becomes the active one, though it has no
-opener as a popup does; DevTools windows are not. A window that closes
+opens is adopted as a tab (DevTools windows are not). One it opens after
+the agent has acted, navigated or picked a tab becomes the active one,
+though it has no opener as a popup does; one it opens on its own before
+that (a start-up window that shows up after `start` chose one) is chosen
+among as at `start`, so the session stays in the largest window the app
+shows. A window that closes
 itself is dropped and the session goes on in the one before it. `quit`
 ends the app (its whole process group, or its job object on Windows). A
 sandbox this machine can't give it (root, Ubuntu 24.04's AppArmor rule for
@@ -751,8 +790,9 @@ machine without a GPU still reports a software renderer).
 - Off switches, for telling a navigera behaviour from the page's:
   `NAVIGERA_NO_NETWORK=1` (no Network domain: `network` stays empty and ops
   don't wait for data), `NAVIGERA_NO_CLICK_CHECK=1` (clicks don't watch what
-  they changed: no `no_effect`), `NAVIGERA_NO_DISCOVER=1` (popups aren't
-  adopted as tabs).
+  they changed: no `no_effect`), `NAVIGERA_CLICK_AGAIN=0` (a click nothing
+  listened for isn't sent again once the page wires it up),
+  `NAVIGERA_NO_DISCOVER=1` (popups aren't adopted as tabs).
 
 ## agent-browser → navigera
 

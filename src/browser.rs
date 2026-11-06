@@ -761,6 +761,9 @@ pub struct BrowserSession {
     /// Modifiers held with `keydown` (Shift, Control, Alt, Meta): later
     /// `press`es carry them until `keyup`.
     held: std::sync::Mutex<Vec<String>>,
+    /// The agent has steered the session since it started: an action, a
+    /// navigation or a tab command (see [`BrowserSession::mark_steered`]).
+    steered: std::sync::atomic::AtomicBool,
     /// The browser context `reset` made (its tabs are the session's).
     context: Option<String>,
     /// False for a session `fork` made: closing it closes its context, not
@@ -869,6 +872,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
+            steered: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -945,6 +949,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
+            steered: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1094,6 +1099,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
+            steered: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1208,6 +1214,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: Default::default(),
+            steered: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1452,6 +1459,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             held: std::sync::Mutex::new(Vec::new()),
+            steered: Default::default(),
             context: Some(context),
             owner: false,
             shared: self.shared,
@@ -1501,10 +1509,18 @@ impl BrowserSession {
     /// and drop tabs the page closed (`window.close()`). A newly opened tab
     /// becomes active, as it would in a visible browser. Returns the
     /// indices of adopted tabs.
+    ///
+    /// An Electron app's windows that open before the agent has steered the
+    /// session (its own start-up windows, whose targets can come after
+    /// `start` chose one) are more windows to choose from, as at start: the
+    /// session goes on in the one the app shows ([`best_window`]), not in
+    /// whichever window's target came last.
     pub fn sync_tabs(&mut self) -> Vec<usize> {
         self.browser.caught_up();
         let shared = std::sync::Arc::clone(self.browser.shared());
         let mut adopted = Vec::new();
+        let choose = self.is_electron() && !self.steered.load(std::sync::atomic::Ordering::Relaxed);
+        let mut candidates = Vec::new();
         let forked = shared.forked.load(std::sync::atomic::Ordering::Relaxed);
         let mine: Vec<String> = self.pages.iter().map(|p| p.target_id().to_string()).collect();
         let opened = if forked {
@@ -1543,11 +1559,24 @@ impl BrowserSession {
                     };
                     self.pages.push(page);
                     if !hidden && !embedded {
-                        self.active = self.pages.len() - 1;
-                        adopted.push(self.active);
+                        if choose {
+                            candidates.push(self.pages.len() - 1);
+                        } else {
+                            self.active = self.pages.len() - 1;
+                            adopted.push(self.active);
+                        }
                     }
                 }
                 Err(e) => eprintln!("[browser] could not adopt new tab {target_id}: {e:#}"),
+            }
+        }
+        // Every window answers, or the session stays where it is.
+        if !candidates.is_empty() {
+            if let Some(i) = best_window(&self.pages, &self.browser, Duration::from_millis(1000), true) {
+                if candidates.contains(&i) {
+                    self.active = i;
+                    adopted.push(i);
+                }
             }
         }
         let mine: Vec<String> = self.pages.iter().map(|p| p.target_id().to_string()).collect();
@@ -2129,6 +2158,43 @@ impl BrowserSession {
         self.sync_fetch()
     }
 
+    /// Set this session's domain allowlist: every tab's requests to other
+    /// hosts are refused at the Fetch request stage, before any route
+    /// rule. On failure the policy is not left half-installed: it is
+    /// removed again and the Fetch override recomputed without it.
+    pub fn set_allow_domains(&mut self, policy: crate::domains::DomainPolicy) -> Result<()> {
+        self.browser.shared().set_allow_policy(&self.scope(), Some(policy));
+        if let Err(e) = self.sync_fetch().and_then(|()| self.intercept_popups()) {
+            self.browser.shared().set_allow_policy(&self.scope(), None);
+            let _ = self.sync_fetch();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// The allowlist's pause at the browser, for the requests no tab's own
+    /// interception sees: a popup's first ones (window.open, target=_blank),
+    /// before navigera has attached to it. Lightpanda opens popups as frames
+    /// of the tab, which its interception already covers.
+    fn intercept_popups(&self) -> Result<()> {
+        if self.browser.shared().is_single_target() {
+            return Ok(());
+        }
+        self.browser.intercept_all(self.is_shared())
+    }
+
+    /// The session's allowlist for `status`: its entries, whether only
+    /// top-level navigation is checked, and the hosts it refused, if any.
+    pub fn allow_status(&self) -> Option<serde_json::Value> {
+        let policy = self.browser.shared().allow_policy(&self.scope())?;
+        let denied = self.browser.shared().denied_summary(&self.scope());
+        Some(serde_json::json!({
+            "entries": policy.display_entries(),
+            "docs_only": policy.docs_only,
+            "denied": denied.iter().map(|(h, n)| serde_json::json!({ "host": h, "count": n })).collect::<Vec<_>>(),
+        }))
+    }
+
     /// Remove the rule for `pattern`, or every rule; returns how many went.
     pub fn remove_routes(&mut self, pattern: Option<&str>) -> Result<usize> {
         let removed = {
@@ -2166,12 +2232,15 @@ impl BrowserSession {
         let shared = self.browser.shared();
         let scope = self.scope();
         let auth = shared.credentials.lock().unwrap().contains_key(&scope);
+        // An allowlist pauses every request at the request stage, whatever
+        // the routes say: removing all routes must not disable it.
+        let allowlisted = shared.allow.lock().unwrap().contains_key(&scope);
         // Modify rules pause at the response stage; the rest (and auth,
         // which needs every request) at the request stage.
         let patterns: Vec<serde_json::Value> = {
             let routes = shared.routes.lock().unwrap();
             let rules = routes.get(&scope).into_iter().flatten();
-            let mut patterns: Vec<serde_json::Value> = if auth {
+            let mut patterns: Vec<serde_json::Value> = if auth || allowlisted {
                 vec![serde_json::json!({ "urlPattern": "*" })]
             } else {
                 rules
@@ -2359,10 +2428,80 @@ impl BrowserSession {
         self.active_tab().mark_action();
     }
 
+    /// The agent acted, navigated or chose a tab: from now on a window an
+    /// Electron app opens becomes the session's tab, as the agent's doing
+    /// (see [`BrowserSession::sync_tabs`]).
+    pub fn mark_steered(&self) {
+        self.steered.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The last action's own requests have started on the active tab, with
     /// no navigation since.
     pub fn action_traffic_seen(&self) -> bool {
         self.active_tab().action_traffic_seen()
+    }
+
+    /// [`Self::action_traffic_seen`] once the action's own requests can
+    /// have shown: after one turn of the page's event loop (handlers,
+    /// their microtasks and zero-delay timers have run, see
+    /// [`cdp::Page::event_loop_turn`]) and the event watcher has caught up
+    /// with what arrived before it. About a millisecond, where a fixed wait
+    /// for a request that never comes cost every action `grace`; the fixed
+    /// wait is kept for a page that can't run the turn.
+    pub fn action_traffic_settled(&self, grace: Duration) -> bool {
+        if self.action_traffic_seen() {
+            return true;
+        }
+        if !self.active_tab().event_loop_turn(grace) {
+            return self.action_traffic_within(grace);
+        }
+        self.browser.caught_up();
+        self.action_traffic_seen()
+    }
+
+    /// [`cdp::Page::journal_id`] on the active tab.
+    pub fn journal_id(&self) -> Option<u64> {
+        self.active_tab().journal_id()
+    }
+
+    /// [`cdp::Page::pre_read`] on the active tab.
+    pub fn pre_read(&self, budget: Duration) -> &'static str {
+        self.active_tab().pre_read(budget, self.timeout(None))
+    }
+
+    /// [`cdp::Page::pre_read_unused`] on the active tab.
+    pub fn pre_read_unused(&self) -> bool {
+        self.active_tab().pre_read_unused()
+    }
+
+    /// [`cdp::Page::journal_prime`] on the active tab.
+    pub fn journal_prime(&self, id: u64, entry: bool) -> bool {
+        self.active_tab().journal_prime(id, entry, self.timeout(None))
+    }
+
+    /// [`cdp::Page::journal_unchanged`] on the active tab.
+    pub fn journal_unchanged(&self, id: u64, typed: &str) -> bool {
+        self.active_tab().journal_unchanged(id, typed, self.timeout(None))
+    }
+
+    /// [`cdp::Page::journal_restate`] on the active tab.
+    pub fn journal_restate(&self, id: u64) -> Option<Vec<(u64, cdp::Restated)>> {
+        self.active_tab().journal_restate(id, self.timeout(None))
+    }
+
+    /// [`cdp::Page::count_changes`] on the active tab.
+    pub fn count_changes(&self) -> Option<u64> {
+        self.active_tab().count_changes(self.timeout(None))
+    }
+
+    /// [`cdp::Page::next_change`] on the active tab.
+    pub fn next_change(&self, seen: u64, max: Duration) -> bool {
+        self.active_tab().next_change(seen, max)
+    }
+
+    /// [`cdp::Page::stop_counting_changes`] on the active tab.
+    pub fn stop_counting_changes(&self) {
+        self.active_tab().stop_counting_changes(self.timeout(None))
     }
 
     /// [`Self::action_traffic_seen`], given up to `grace` for the action's
@@ -2444,6 +2583,9 @@ impl BrowserSession {
         if !matches!(wait, "load" | "domcontentloaded" | "commit") {
             bail!("--wait takes load|domcontentloaded|commit, got {wait:?}");
         }
+        // When this navigation started: only a refusal from this navigation
+        // may name its host (a redirect's target, not the starting URL).
+        let nav_started = std::time::Instant::now();
         // Honors --timeout-ms (was a hard-coded 40 s per attempt).
         let timeout = self.timeout(timeout_ms);
         let max_attempts = 3;
@@ -2472,6 +2614,27 @@ impl BrowserSession {
                             bail!(
                                 "the server answered {code} with no page; the tab now shows Chrome's error page \
                                  (net::ERR_HTTP_RESPONSE_CODE_FAILURE)"
+                            );
+                        }
+                    }
+                    // A navigation the session's allowlist refused: name the
+                    // host and the flag, not just Chrome's error code. The
+                    // host is this navigation's own, or a host refused
+                    // during it (a redirect's target): a route rule's abort
+                    // is never misreported as an allowlist refusal.
+                    if msg.contains("ERR_BLOCKED_BY_CLIENT") {
+                        let host = crate::domains::refusal_host(url);
+                        let denied_here = !host.is_empty()
+                            && self.browser.shared().denied_summary(&self.scope()).iter().any(|(h, _)| *h == host);
+                        let host = if denied_here {
+                            host
+                        } else {
+                            self.browser.shared().last_denied_since(&self.scope(), nav_started).unwrap_or_default()
+                        };
+                        if !host.is_empty() {
+                            bail!(
+                                "refused by --allow-domains: {host} is not in this session's allowlist, \
+                                 so the navigation was blocked (net::ERR_BLOCKED_BY_CLIENT)"
                             );
                         }
                     }
@@ -3112,6 +3275,14 @@ impl BrowserSession {
     /// emulation, `init-script`s and the downloads directory, applied to this
     /// session's tab and to the tabs it opens later.
     pub fn inherit_settings(&mut self, old: &BrowserSession) {
+        // The recovered tabs keep the Fetch override: they keep the policy
+        // with it, or the override would run with no policy at all.
+        self.browser.shared().copy_allow_policy(&old.scope(), &self.scope());
+        if self.browser.shared().allow_policy(&self.scope()).is_some() {
+            if let Err(e) = self.intercept_popups() {
+                eprintln!("[browser] the allowlist's pause for popups, after the relaunch: {e:#}");
+            }
+        }
         self.overrides = old.overrides.clone();
         self.init_scripts = old.init_scripts.clone();
         if let Some(dir) = old.downloads_dir.clone() {

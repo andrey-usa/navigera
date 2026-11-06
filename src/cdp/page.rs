@@ -19,7 +19,9 @@ use super::ax;
 use super::client::CdpClient;
 use super::domax;
 use super::events::Shared;
+use super::fxhash::{FxMap, FxSet};
 use super::logs::Report;
+use super::snap::{Child, NewLayout, NewNode, Op, Snap, CAPTURE_STYLES, STYLES};
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -41,6 +43,45 @@ enum Loader<'a> {
 /// long enough for SPA rendering, short enough that an agent with a wrong
 /// selector hears about it quickly.
 pub const DEFAULT_ELEMENT_WAIT: Duration = Duration::from_millis(5000);
+
+/// A control's new state after a check or select, as the change journal
+/// saw it (see [`Page::journal_restate`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Restated {
+    /// A checkbox or radio, checked or not now.
+    Checked(bool),
+    /// A select's chosen option, by its label, now and before.
+    Chosen { now: String, was: String },
+}
+
+/// How many more times a click is pressed when its element moved as it
+/// was pressed (see [`Page::click`]).
+const MOVED_TRIES: u8 = 3;
+
+/// Where a click stands among the presses one `click` may take: `again`
+/// more may follow it once the page wires its element up, `first` is when
+/// the first of those pressed, and `moved` presses before it landed on
+/// something else (see [`Page::click`]).
+#[derive(Clone, Copy)]
+struct Tries {
+    again: u8,
+    first: Option<Instant>,
+    moved: u8,
+}
+
+/// What the page saw of a click's press (see [`Page::press_arrived`]).
+struct Arrival {
+    /// Some of the press's events reached the page.
+    arrived: bool,
+    /// What listens for the click, when asked for.
+    heard: Option<u64>,
+    /// What the press landed on instead of the element, which moved as it
+    /// was pressed: the page was kept from that press.
+    missed: Option<String>,
+    /// What the press's click event went to instead of the element, which
+    /// the page moved or replaced during the press: the page saw that one.
+    off: Option<String>,
+}
 
 /// What an element op acts on.
 #[derive(Clone, Debug, PartialEq)]
@@ -169,14 +210,24 @@ pub const DEEP: &str = r#"(() => {
     const MIN_GAP = 8;
     let lastEnd = -1e9;
     const wake = (ms) => new Promise((resolve) => {
-        let mo = null, timer = 0, done = false;
+        let mo = null, timer = 0, eventTimer = 0, done = false;
+        const watching = [], events = ['focusin', 'focusout', 'input', 'change'];
         const finish = () => {
             if (done) return;
             done = true;
             lastEnd = performance.now();
             clearTimeout(timer);
+            clearTimeout(eventTimer);
+            for (const r of watching) for (const type of events) r.removeEventListener(type, onEvent, true);
             if (mo) mo.disconnect();
             resolve();
+        };
+        // Defer until the page's own handlers finish, including controlled
+        // inputs. Silent property writes still use the unchanged timer.
+        const onEvent = () => {
+            if (done || eventTimer) return;
+            const gap = Math.max(0, MIN_GAP - (performance.now() - lastEnd));
+            eventTimer = setTimeout(finish, gap);
         };
         timer = setTimeout(finish, ms);
         try {
@@ -189,7 +240,11 @@ pub const DEEP: &str = r#"(() => {
                 if (gap > 0) setTimeout(finish, gap); else finish();
             });
             const what = { subtree: true, childList: true, attributes: true, characterData: true };
-            for (const r of roots()) mo.observe(r, what);
+            for (const r of roots()) {
+                mo.observe(r, what);
+                watching.push(r);
+                for (const type of events) r.addEventListener(type, onEvent, true);
+            }
         } catch (_) {}
     });
     const pierced = (sel) => {
@@ -255,9 +310,13 @@ pub const DEEP: &str = r#"(() => {
 /// with no box at all always gets those.
 ///
 /// With `effects`, it also starts watching what the click will change (see
-/// [`Page::click_effect`]).
-const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects) {
+/// [`Page::click_effect`]), and on a page younger than `youngMs` keeps the
+/// element and its ancestors (`__nvPath`), to tell whether anything
+/// listened for the click (see [`Page::wired_later`]).
+const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects, youngMs) {
     const deadline = Date.now() + (force ? 0 : settleMs);
+    // navigera's own listeners, told from the page's by PATH_LISTENERS.
+    const ours = (f) => { f.__nv = true; return f; };
     // The element's ancestors through shadow hosts: what can move it.
     const chain = new Set();
     for (let n = el; n; n = n.parentElement || (n.getRootNode && n.getRootNode().host) || null) chain.add(n);
@@ -270,11 +329,33 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             return Number.isFinite(t.endTime);
         });
     };
+    // The end event of a CSS transition or animation (`transitionend`,
+    // `animationend`, or its cancel) for one property on its own element:
+    // pages wire a dialog's buttons in such a handler, which can run after
+    // `finished` resolves. Listening from here, after the page's own
+    // listener, means the page's handler has run when this resolves. Web
+    // Animations (`el.animate`) have no end event: nothing to wait for.
+    const ended = (a) => new Promise((res) => {
+        const t = a.effect.target, kind = a.transitionProperty !== undefined ? 'transition'
+            : a.animationName !== undefined ? 'animation' : null;
+        if (!kind || !t || !t.addEventListener) return res();
+        const done = (e) => {
+            if (e.target !== t) return;
+            if (kind === 'transition' ? e.propertyName !== a.transitionProperty : e.animationName !== a.animationName) return;
+            t.removeEventListener(kind + 'end', done);
+            t.removeEventListener(kind + 'cancel', done);
+            res();
+        };
+        t.addEventListener(kind + 'end', done);
+        t.addEventListener(kind + 'cancel', done);
+        // Never held past a moment after `finished` (an event a page stopped).
+        a.finished.then(() => setTimeout(() => { t.removeEventListener(kind + 'end', done); t.removeEventListener(kind + 'cancel', done); res(); }, 100), () => res());
+    });
     const settle = async () => {
         const anims = moving();
         if (!anims.length) return;
         await Promise.race([
-            Promise.all(anims.map((a) => a.finished.catch(() => null))),
+            Promise.all(anims.map((a) => a.finished.catch(() => null).then(() => null)).concat(anims.map(ended))),
             new Promise((res) => setTimeout(res, Math.max(0, deadline - Date.now()))),
         ]);
         // A frame, but not forever: a renderer that paints nothing (a
@@ -315,6 +396,46 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         const c = e.closest('button, input');
         if (!(c && c.form && (c.type === 'submit' || c.type === 'image'))) return false;
         return here(c.getAttribute('formtarget') || c.form.getAttribute('target'), e);
+    };
+    // Whether the click then loads a new document is up to the page: a
+    // router cancels a link's click and pushes a route instead, a script
+    // cancels a submit and sends the form itself, a form fails validation.
+    // Watched from before the press, and read after it
+    // (`Page::nav_planned`), so a click waits for a navigation only when
+    // one was planned. Unknown (null) when a listener ahead of these hid
+    // the events: then the click waits, as before.
+    const armNav = (w, form) => {
+        const n = { click: null, submit: null, invalid: false, planned: false, offs: [] };
+        const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
+        on(w, 'click', ours((e) => { if (!n.click) n.click = e; }));
+        on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
+        on(w, 'invalid', () => { n.invalid = true; });
+        // A handler that navigates by script (`location`, `form.submit()`).
+        const api = w.navigation;
+        if (api && api.addEventListener) {
+            on(api, 'navigate', (e) => { if (!(e.destination && e.destination.sameDocument)) n.planned = true; });
+        }
+        const F = w.HTMLFormElement && w.HTMLFormElement.prototype, submit = F && F.submit;
+        if (typeof submit === 'function') {
+            // Put back only while ours is there: a method the page put in
+            // meanwhile stays.
+            const mine = function () { n.planned = true; return submit.apply(this, arguments); };
+            F.submit = mine;
+            n.offs.push(() => { if (F.submit === mine) F.submit = submit; });
+        }
+        n.off = () => { for (const off of n.offs.splice(0)) off(); };
+        // Never left behind, whatever happens to the click.
+        setTimeout(n.off, 10000);
+        n.verdict = () => {
+            n.off();
+            if (n.planned) return true;
+            if (!n.click) return null;
+            if (n.click.defaultPrevented) return false;
+            if (!form) return true;
+            if (n.submit) return !n.submit.defaultPrevented;
+            return n.invalid ? false : null;
+        };
+        Object.defineProperty(w.top, '__nvNav', { value: n, configurable: true, enumerable: false, writable: true });
     };
     // A styled checkbox/radio is often a hidden or covered <input> inside a
     // visible <label>: clicking the label is what a user does and toggles it.
@@ -361,6 +482,20 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             for (const d of docs) walk(d);
         }
         const partial = roots.length >= 1000;
+        // `show()`, `showPopover()` and `details.open` queue their `toggle`
+        // as a later task, so an earlier action's can land in this click's
+        // window: one saying a dialog, <details> or popover went to the
+        // state it already had when this click was armed is that earlier
+        // change's, not this click's. (`toggle` doesn't leave a shadow
+        // tree, so the documents are enough.)
+        const openAtArm = new Set();
+        if (!skip) {
+            for (const d of docs) {
+                try { for (const n of d.querySelectorAll('dialog[open], details[open], :popover-open')) openAtArm.add(n); } catch (_) {
+                    try { for (const n of d.querySelectorAll('dialog[open], details[open]')) openAtArm.add(n); } catch (_) {}
+                }
+            }
+        }
         if (!skip) {
             for (const r of roots) {
                 const o = new MutationObserver((recs) => { fx.m += recs.length; });
@@ -372,6 +507,8 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 // the document or an ancestor a frame later: not the click's.
                 const t = e.target;
                 if (e.type === 'scroll' && (t.nodeType === 9 || (t.contains && t.contains(el)))) return;
+                if (e.type === 'toggle' && e.oldState !== e.newState
+                    && e.newState === (openAtArm.has(t) ? 'open' : 'closed')) return;
                 fx.e++;
             };
             const wins = w === top ? [top] : [top, w];
@@ -394,8 +531,9 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 for (const k of ['writeText', 'write']) {
                     const orig = C[k];
                     if (typeof orig !== 'function') continue;
-                    C[k] = { [k](...a) { fx.e++; return orig.apply(this, a); } }[k];
-                    fx.offs.push(() => { C[k] = orig; });
+                    const mine = { [k](...a) { fx.e++; return orig.apply(this, a); } }[k];
+                    C[k] = mine;
+                    fx.offs.push(() => { if (C[k] === mine) C[k] = orig; });
                 }
             }
         }
@@ -422,10 +560,12 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         const unwatched = () => partial || docs.some((d) => [...d.querySelectorAll('iframe, frame')].some((f) => {
             try { const fd = f.contentDocument; return !!(fd && !seen.has(fd) && fd.body && fd.body.childElementCount); } catch (_) { return false; }
         }));
-        const done = () => {
+        // The path is kept only after a click that changed nothing: then
+        // `Page::wired_later` reads it, and removes it.
+        const done = (keepPath) => {
             for (const o of fx.obs) o.disconnect();
             for (const off of fx.offs) off();
-            try { delete top.__nvFx; delete top.__nvSeen; } catch (_) {}
+            try { delete top.__nvFx; delete top.__nvSeen; if (!keepPath && top.__nvPath) top.__nvPath.end(); } catch (_) {}
         };
         fx.check = (last) => {
             for (const o of fx.obs) fx.m += o.takeRecords().length;
@@ -436,7 +576,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             }
             if (!what && !skip && state() !== before) what = 'state';
             const unsure = !what && !skip && !!last && unwatched();
-            if (what || skip || last) done();
+            if (what || skip || last) done(!what && !skip && !unsure);
             return { what, skip, unsure };
         };
         Object.defineProperty(top, '__nvFx', { value: fx, configurable: true, enumerable: false, writable: true });
@@ -525,6 +665,15 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             r = r2;
             if ((same && (framed || idle >= 5 || box.ownerDocument.hidden)) || Date.now() >= Math.min(deadline, steadyBy)) break;
         }
+        // The element can appear during those frames and start to slide in:
+        // a slide's first frame hasn't moved yet, and the end of an ease-out
+        // slide moves less than a pixel a frame, so the box read as still.
+        // Settle that slide (and the page's end handler) first, from the
+        // same alignment.
+        if (moving().length && Date.now() < deadline) {
+            tries--;
+            continue;
+        }
         let x = r.left + r.width / 2, y = r.top + r.height / 2;
         const root = box.getRootNode(), doc = box.ownerDocument;
         const at = (x, y) => root.elementFromPoint ? root.elementFromPoint(x, y) : doc.elementFromPoint(x, y);
@@ -546,10 +695,103 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 // dispatched mouse event it never delivered (see click()).
                 const w = doc.defaultView;
                 w.top.__nvSeen = 0;
+                // The element can move between this hit test and the press
+                // (a page that shifts every frame): a press that lands on
+                // something else is kept from the page whole, down to its
+                // click, and said in `__nvMissed`, so the caller presses
+                // again where the element is now instead of clicking what
+                // took its place. First in the window's capture order.
+                try { if (w.top.__nvGuard) w.top.__nvGuard(); } catch (_) {}
+                delete w.top.__nvMissed;
+                const guards = [];
+                const unguard = () => { for (const [t, f] of guards.splice(0)) w.removeEventListener(t, f, true); };
+                const swallow = ours((e) => {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    if (e.type === 'click' || e.type === 'auxclick' || e.type === 'contextmenu') unguard();
+                });
+                const onDown = ours((e) => {
+                    unguard();
+                    const h = at(e.clientX, e.clientY);
+                    if (h && (h === el || el.contains(h) || (h.shadowRoot && h.shadowRoot.contains(el)) || onLabel(h))) return;
+                    if (e.composedPath && e.composedPath().includes(el)) return;
+                    w.top.__nvSeen++;
+                    w.top.__nvMissed = describe(h) || 'nothing';
+                    for (const t of ['mousedown', 'pointerup', 'mouseup', 'click', 'auxclick', 'contextmenu']) {
+                        guards.push([t, swallow]);
+                        w.addEventListener(t, swallow, true);
+                    }
+                    setTimeout(unguard, 1000);
+                    swallow(e);
+                });
+                guards.push(['pointerdown', onDown]);
+                w.addEventListener('pointerdown', onDown, true);
+                w.top.__nvGuard = unguard;
                 for (const t of ['pointerdown', 'mousedown', 'mouseup', 'click'])
-                    w.addEventListener(t, () => { w.top.__nvSeen++; }, { capture: true, once: true });
+                    w.addEventListener(t, ours(() => { w.top.__nvSeen++; }), { capture: true, once: true });
+                // Where the press's click event goes. A page that replaces
+                // the element on mousedown, or moves it on pointerdown (a
+                // banner put in above it), has the click sent to what the
+                // down and up targets share, an ancestor, or not sent at all
+                // when the pressed element left the page (Chrome 153 and 157
+                // send none): the page saw the press, but the element's own
+                // handler never ran.
+                // `__nvOff()`, read with the press's arrival, says where the
+                // click went, '' for nowhere. A click through the element's
+                // label is the element's. Inside a closed shadow root the
+                // window sees only the host: then only the element's own
+                // listener tells, and nothing is said when it heard none.
+                try { if (w.top.__nvOffEnd) w.top.__nvOffEnd(); } catch (_) {}
+                const kind = button === 'right' ? 'contextmenu' : button === 'middle' ? 'auxclick' : 'click';
+                let on = false, went = null, seen = false, up = false, outer = el, closed = false;
+                for (let r = el.getRootNode(); r && r.host; r = outer.getRootNode()) {
+                    if (r.mode === 'closed') closed = true;
+                    outer = r.host;
+                }
+                const onEl = ours(() => { on = true; });
+                const onUp = ours(() => { up = true; });
+                const onWin = ours((e) => {
+                    seen = true;
+                    if (on || went) return;
+                    const t = e.target;
+                    if (closed && t === outer) return;
+                    if (t === el || (e.composedPath && e.composedPath().includes(el))
+                        || (t && t.nodeType === 1 && (el.contains(t) || onLabel(t)))) { on = true; return; }
+                    went = (t && t.nodeType === 1 && describe(t)) || 'the document';
+                });
+                const off = () => (on || w.top.__nvMissed ? null : went || (up && !seen && !el.isConnected ? '' : null));
+                const offEnd = () => {
+                    w.removeEventListener(kind, onWin, true);
+                    w.removeEventListener('mouseup', onUp, true);
+                    el.removeEventListener(kind, onEl, true);
+                    if (w.top.__nvOff === off) delete w.top.__nvOff;
+                    if (w.top.__nvOffEnd === offEnd) delete w.top.__nvOffEnd;
+                };
+                w.addEventListener(kind, onWin, true);
+                w.addEventListener('mouseup', onUp, true);
+                el.addEventListener(kind, onEl, true);
+                w.top.__nvOff = off;
+                w.top.__nvOffEnd = offEnd;
+                setTimeout(offEnd, 10000);
                 if (effects) armEffects(w);
-                return Object.assign(p, { nav: mayNavigate(el), check: true, effects: !!effects });
+                // A page that loaded a moment ago may not have wired the
+                // element up yet: keep what a click on it reaches, the
+                // element, its ancestors through shadow hosts, its document
+                // and window. In the top document only: DevTools' listener
+                // count, read there, doesn't see a frame's nodes.
+                const young = !!effects && youngMs > 0 && w === w.top && w.performance.now() < youngMs;
+                if (young) {
+                    const nodes = [];
+                    for (let n = el; n; n = n.parentNode || (n.nodeType === 11 && n.host) || null) nodes.push(n);
+                    nodes.push(w);
+                    const path = { nodes };
+                    path.end = () => { if (w.top.__nvPath === path) delete w.top.__nvPath; };
+                    Object.defineProperty(w.top, '__nvPath', { value: path, configurable: true, enumerable: false, writable: true });
+                    setTimeout(path.end, 10000);
+                }
+                const nav = mayNavigate(el);
+                if (nav) armNav(w, !el.closest('a[href]'));
+                return Object.assign(p, { nav, check: true, effects: !!effects, young });
             }
             // Inside a cross-origin frame: our coordinates are frame-local;
             // the caller asks CDP for the box instead.
@@ -605,6 +847,946 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     return { synthetic: true, covered: !!hit && !force, covered_by: hit && hit !== el ? describe(hit) : null, nav: mayNavigate(el) };
 }"#;
 
+/// The change journal, armed in the top document just before a tree read
+/// so that a later text entry can be shown to have changed nothing else
+/// the tree shows, and the read need not be taken again (see
+/// [`Page::journal_unchanged`]). What can change the tree: the DOM of every
+/// document and open shadow root (observed from the read on), events that
+/// change no DOM (a popover's toggle, a hash change, media play/pause),
+/// and, from just before the entry ([`JOURNAL_PRIME`]), form values and
+/// states a script sets and styles that follow an element's state:
+/// `:focus`, `:hover`, `:invalid`, `:has()` and the like. Each such rule
+/// that sets a property the tree reads (display, visibility, opacity,
+/// content, cursor, pointer-events, or a custom property) has its selector
+/// kept with what it matched. What can't be watched (a style sheet of
+/// another origin, `:host` rules, nested selectors, more than the caps)
+/// leaves the journal broken: the page is read again. Arming costs a walk
+/// for shadow roots; the rest is paid only before an entry.
+const JOURNAL_ARM: &str = r#"(id) => {
+    const W = window, ROOTS_MAX = 2000, CONTROLS_MAX = 5000, RECORDS_MAX = 5000;
+    const old = W.__nvJournal;
+    if (old) { try { old.stop(); } catch (_) {} }
+    // `recs`, `toggled`, `e2`, `controls0`, `inv0`, `view0` and `anim0`
+    // serve a read after an action (see JOURNAL_DELTA); the rest a text entry.
+    const j = { id, m: 0, e: 0, e2: 0, broken: '', obs: [], offs: [], typedAttr: [], inputs: [], primed: false, recs: [], over: false, toggled: [] };
+    j.unhook = () => false;
+    j.stop = () => { for (const o of j.obs) o.disconnect(); for (const off of j.offs) off(); j.unhook(); };
+    j.docsOf = () => {
+        const out = [];
+        const visit = (d) => {
+            if (!d || out.includes(d)) return;
+            out.push(d);
+            for (const f of d.querySelectorAll('iframe, frame')) {
+                let fd = null;
+                try { fd = f.contentDocument; } catch (_) {}
+                if (fd) visit(fd);
+            }
+        };
+        visit(document);
+        return out;
+    };
+    j.rootsOf = (docs) => {
+        const roots = [];
+        const walk = (scope) => {
+            const all = scope.getElementsByTagName ? scope.getElementsByTagName('*') : scope.querySelectorAll('*');
+            for (let i = 0; i < all.length; i++) {
+                const r = all[i].shadowRoot;
+                if (r) { roots.push(r); if (roots.length > ROOTS_MAX) return; walk(r); }
+            }
+        };
+        for (const d of docs) walk(d);
+        return roots;
+    };
+    // A scope's sheets, and the sheets they @import (which `styleSheets`
+    // leaves out). Imports come first in a sheet: the walk stops at the
+    // first rule that is none of @charset, @import or a @layer statement.
+    j.sheetsOf = (scope) => {
+        const out = [];
+        const add = (sh) => {
+            if (!sh || out.includes(sh)) return;
+            out.push(sh);
+            let rules = null;
+            try { rules = sh.cssRules; } catch (_) {}
+            for (const r of rules || []) {
+                if (r.type === 3) add(r.styleSheet);
+                else if (r.type !== 2 && r.type !== 0) break;
+            }
+        };
+        for (const sh of [...(scope.styleSheets || []), ...(scope.adoptedStyleSheets || [])]) add(sh);
+        return out;
+    };
+    j.docs = j.docsOf();
+    j.roots = j.rootsOf(j.docs);
+    if (j.roots.length > ROOTS_MAX) j.broken = 'shadow roots';
+    j.scopes = [...j.docs, ...j.roots];
+    // Form values and states: a script that sets one changes no DOM, so
+    // what the read shows of them is kept here, and an entry is judged
+    // against it (null past the cap: no entry is judged).
+    j.sig = (c) => {
+        let s = c.value + '\u0001' + c.checked + '\u0001' + c.indeterminate + '\u0001' + c.selectedIndex;
+        if (c.multiple && c.selectedOptions) for (const o of c.selectedOptions) s += ',' + o.index;
+        return s;
+    };
+    j.formOf = () => {
+        const out = [];
+        for (const scope of j.scopes) {
+            const cs = scope.querySelectorAll('input, textarea, select');
+            for (let i = 0; i < cs.length; i++) out.push([cs[i], j.sig(cs[i])]);
+            if (out.length > CONTROLS_MAX) return null;
+        }
+        return out;
+    };
+    j.controls = j.formOf();
+    j.controls0 = j.controls;
+    // Per sheet: its rule count and whether it is switched off; a sheet a
+    // script builds (adopted) can be rewritten whole, so its text too.
+    j.sheetCount = (scope) => {
+        const own = new Set(scope.adoptedStyleSheets || []);
+        return j.sheetsOf(scope).map((sh) => {
+            let n = -1;
+            try { n = sh.cssRules.length; } catch (_) {}
+            let text = '';
+            if (own.has(sh)) { try { for (const r of sh.cssRules) text += r.cssText; } catch (_) {} }
+            return n + (sh.disabled ? 'off' : 'on') + text;
+        });
+    };
+    j.inv0 = j.scopes.map((scope) => [scope, j.sheetsOf(scope), j.sheetCount(scope)]);
+    j.view = () => innerWidth + 'x' + innerHeight + 'x' + devicePixelRatio;
+    j.view0 = j.view();
+    // Elements whose animation or transition moves what the tree reads.
+    const ANIMATED = new Set(['opacity', 'visibility', 'display', 'content', 'cursor', 'pointerEvents', 'textTransform', 'contentVisibility']);
+    j.animated = () => {
+        const out = [];
+        for (const d of j.docs) {
+            let list = [];
+            try { list = d.getAnimations(); } catch (_) {}
+            for (const a of list) {
+                const ef = a.effect;
+                if (!ef || !ef.target) continue;
+                let keys = [];
+                try { keys = ef.getKeyframes().flatMap((k) => Object.keys(k)); } catch (_) {}
+                if (keys.some((k) => ANIMATED.has(k))) out.push(ef.target);
+            }
+        }
+        return out;
+    };
+    j.anim0 = j.animated();
+    const counted = (r) => {
+        if (j.recs.length < RECORDS_MAX) j.recs.push(r); else j.over = true;
+        // A framework writing a field's value attribute as it is typed.
+        if (r.type === 'attributes' && r.attributeName === 'value' && r.target.tagName === 'INPUT') j.typedAttr.push(r.target);
+        else j.m++;
+    };
+    j.flush = () => { for (const o of j.obs) for (const r of o.takeRecords()) counted(r); };
+    for (const scope of j.scopes) {
+        const o = new MutationObserver((recs) => { for (const r of recs) counted(r); });
+        o.observe(scope, { subtree: true, childList: true, attributes: true, characterData: true });
+        j.obs.push(o);
+    }
+    for (const d of j.docs) {
+        const v = d.defaultView;
+        if (!v) continue;
+        const onEvent = () => { j.e++; j.e2++; };
+        const onToggle = (e) => { j.e++; if (j.toggled.length < 64) j.toggled.push(e.target); else j.e2++; };
+        const onInput = (e) => { if (j.inputs.length < 64) j.inputs.push(e.target); else j.e++; };
+        for (const t of ['hashchange', 'play', 'pause', 'fullscreenchange']) {
+            v.addEventListener(t, onEvent, true);
+            j.offs.push(() => v.removeEventListener(t, onEvent, true));
+        }
+        for (const t of ['toggle', 'beforetoggle']) {
+            v.addEventListener(t, onToggle, true);
+            j.offs.push(() => v.removeEventListener(t, onToggle, true));
+        }
+        for (const t of ['input', 'change']) {
+            v.addEventListener(t, onInput, true);
+            j.offs.push(() => v.removeEventListener(t, onInput, true));
+        }
+    }
+    Object.defineProperty(W, '__nvJournal', { value: j, configurable: true, enumerable: false, writable: true });
+    return { id, docs: j.docs.length, broken: j.broken };
+}"#;
+
+/// Just before a text entry, what the journal (see [`JOURNAL_ARM`]) needs
+/// to judge it by: the state-dependent style rules and what each matches,
+/// and every form control's value and state. "" when primed, else why not.
+///
+/// `rest`: with the arming, in the same evaluation, so the next read can
+/// be patched whether an action comes first or not. Its matches and its
+/// watch on style rule writes then stand until that read: another
+/// action keeps them (what changed since the read is the read's to
+/// show), and a text entry is judged from the read only if nothing a
+/// rule styles changed in between. No timer takes these hooks off. Not
+/// when the style rules it would walk first outnumber twice the page's
+/// elements: walking one costs about half what capturing an element does
+/// (2.8 us a rule, GitHub's 42,000), so the walk would cost more than the
+/// capture it saves; the first action's prime walks them then, as before.
+///
+/// The walk stops once the state-dependent selectors pass the cap (the
+/// prime fails then, whatever comes after), and a sheet it stopped in
+/// remembers how many it had, so a later prime in the document fails
+/// without walking it again.
+const JOURNAL_PRIME: &str = r#"(id, entry, rest) => {
+    const W = window, SELECTORS_MAX = 400, MATCHED_MAX = 20000;
+    const j = W.__nvJournal;
+    if (!j || j.id !== id) return 'gone';
+    if (j.broken) return j.broken;
+    if (!j.controls) return 'form controls';
+    if (j.primed && !rest) {
+        // Primed at the read: its matches and watch speak for everything
+        // since, the action included.
+        if (!entry) return '';
+        if (j.cssom) return 'changed before the entry';
+        for (let i = 0; i < j.tracked.length; i++) {
+            const m = j.matches(j.tracked[i][0], j.tracked[i][1]);
+            const was = j.matched[i];
+            if (!m || m.length !== was.length || m.some((e, k) => e !== was[k])) return 'changed before the entry';
+        }
+    }
+    // What happened before a text entry is the read's to show, not the
+    // entry's: the DOM, an event, or a value or state a script set since
+    // the read. Before any other action, the records since the read are
+    // what the next read is patched from (see JOURNAL_DELTA).
+    j.flush();
+    if (entry) {
+        if (j.m || j.e || j.typedAttr.length || j.inputs.length) return 'changed before the entry';
+        const form = j.formOf();
+        if (!form || form.length !== j.controls.length || form.some((x, i) => x[0] !== j.controls[i][0] || x[1] !== j.controls[i][1])) {
+            return 'changed before the entry';
+        }
+    }
+    const DYN = /:(focus|focus-within|focus-visible|hover|active|checked|indeterminate|invalid|valid|user-invalid|user-valid|placeholder-shown|blank|in-range|out-of-range|autofill|has|defined|popover-open|open|modal|state|target|default|read-write|read-only|enabled|disabled|required|optional|playing|paused|fullscreen|picture-in-picture|empty)\b/;
+    // Rules that reach past the changed element's subtree: through a
+    // sibling, a child's place among its siblings, or `:has()`. Kept like
+    // the state-dependent ones, so a read after an action knows which
+    // elements they now style (see JOURNAL_DELTA).
+    const REACH = /[+~]|:nth-|:(first|last|only)-(child|of-type)|:empty\b|:has\(/;
+    const PROPS = ['display', 'visibility', 'opacity', 'content', 'cursor', 'pointer-events', 'text-transform', 'list-style-type', 'list-style-image', 'content-visibility', '-webkit-text-security'];
+    // Pseudo-elements, which querySelectorAll can't match (`:placeholder-shown`
+    // is a state, not `::placeholder`: a name ends at neither a letter nor a dash).
+    const ELEMENT_PSEUDO = /::(before|after|marker|placeholder|selection|backdrop|file-selector-button|first-line|first-letter|cue|spelling-error|grammar-error|target-text)(?![\w-])|:(before|after|first-line|first-letter)(?![\w-])/g;
+    const cache = W.__nvJournalSheets || new WeakMap();
+    try { Object.defineProperty(W, '__nvJournalSheets', { value: cache, configurable: true, enumerable: false, writable: true }); } catch (_) {}
+    // A sheet's selectors (null: one this can't track), or false when it
+    // has more than `room` (it is not walked past that).
+    const sheetSelectors = (sheet, room) => {
+        let rules;
+        try { rules = sheet.cssRules; } catch (_) { return null; }
+        if (!rules) return [];
+        const hit = cache.get(sheet);
+        if (hit && hit.n === rules.length) {
+            if (hit.over === undefined) return hit.sel;
+            if (hit.over > room) return false;
+        }
+        const sel = [];
+        let bad = false, over = false;
+        const walk = (list) => {
+            for (const r of list) {
+                if (over) return;
+                const text = r.selectorText;
+                if (text !== undefined && (DYN.test(text) || REACH.test(text))) {
+                    const st = r.style;
+                    let relevant = PROPS.some((p) => st.getPropertyValue(p));
+                    for (let i = 0; !relevant && i < st.length; i++) if (st[i].startsWith('--')) relevant = true;
+                    if (relevant) {
+                        if (/&|:host|::part|::slotted|:scope/.test(text)) bad = true;
+                        else if (sel.push(text.replace(ELEMENT_PSEUDO, '')) > room) over = true;
+                    }
+                }
+                if (r.cssRules && r.cssRules.length) walk(r.cssRules);
+            }
+        };
+        walk(rules);
+        if (over) {
+            cache.set(sheet, { n: rules.length, over: sel.length });
+            return false;
+        }
+        const out = bad ? null : sel;
+        cache.set(sheet, { n: rules.length, sel: out });
+        return out;
+    };
+    j.matches = (scope, sel) => { try { return [...scope.querySelectorAll(sel)]; } catch (_) { return null; } };
+    j.tracked = [];
+    j.inventory = [];
+    const sheets = [];
+    for (const scope of j.scopes) {
+        j.inventory.push([scope, j.sheetsOf(scope), j.sheetCount(scope)]);
+        for (const sheet of j.sheetsOf(scope)) sheets.push([scope, sheet]);
+    }
+    if (rest) {
+        let rules = 0, elements = 0;
+        for (const [, sheet] of sheets) {
+            const hit = cache.get(sheet);
+            try { if (!hit || hit.n !== sheet.cssRules.length) rules += sheet.cssRules.length; } catch (_) {}
+        }
+        for (const d of j.docs) elements += d.getElementsByTagName('*').length;
+        if (rules > 2 * elements) return 'style rules';
+    }
+    for (const [scope, sheet] of sheets) {
+        const sel = sheetSelectors(sheet, SELECTORS_MAX - j.tracked.length);
+        if (sel === null) return 'style sheet';
+        if (sel === false) return 'state styles';
+        for (const x of sel) j.tracked.push([scope, x]);
+        if (j.tracked.length > SELECTORS_MAX) return 'state styles';
+    }
+    j.matched = [];
+    let total = 0;
+    for (const [scope, sel] of j.tracked) {
+        const m = j.matches(scope, sel);
+        if (m === null) return 'selector';
+        total += m.length;
+        if (total > MATCHED_MAX) return 'state styles';
+        j.matched.push(m);
+    }
+    // A script that writes a style rule (its declarations, its selector, a
+    // media list, a rule inserted into a group) changes no DOM and may
+    // change no rule count, and reading every rule's text costs ms per
+    // thousand rules: the ways in are watched instead, in every document's
+    // realm, from here to the check, which takes them off (as does the
+    // next arming, or a timer for an entry that never comes back; primed
+    // with the read, until the next read). Not seen: a declaration a
+    // script kept from before and writes by property name (`st.display =
+    // ...`, which no prototype carries in Chrome), now or while no command
+    // runs.
+    j.unhook();
+    j.cssom = false;
+    const hooks = [];
+    const flag = () => { j.cssom = true; };
+    const wrap = (proto, k, when) => {
+        const d = proto && Object.getOwnPropertyDescriptor(proto, k);
+        if (!d || !d.configurable) return;
+        const w = { ...d };
+        if (typeof d.value === 'function') {
+            const f = d.value;
+            w.value = { [k](...a) { if (!when || when(this)) flag(); return f.apply(this, a); } }[k];
+        } else {
+            if (d.get) { const g = d.get; w.get = function () { if (!when || when(this)) flag(); return g.call(this); }; }
+            if (d.set) { const st = d.set; w.set = function (v) { if (!when || when(this)) flag(); return st.call(this, v); }; }
+        }
+        Object.defineProperty(proto, k, w);
+        // Put back only while ours is in place: a script that put its own
+        // there meanwhile keeps it.
+        hooks.push(() => {
+            const now = Object.getOwnPropertyDescriptor(proto, k);
+            if (now && now.value === w.value && now.get === w.get && now.set === w.set) Object.defineProperty(proto, k, d);
+        });
+    };
+    const ofRule = (st) => !!st.parentRule;
+    for (const d of j.docs) {
+        const v = d.defaultView;
+        if (!v) continue;
+        for (const C of [v.CSSStyleRule, v.CSSNestedDeclarations, v.CSSKeyframeRule]) {
+            if (C) for (const k of ['style', 'styleMap', 'selectorText']) wrap(C.prototype, k);
+        }
+        if (v.CSSStyleDeclaration) {
+            const P = v.CSSStyleDeclaration.prototype;
+            wrap(P, 'setProperty', ofRule); wrap(P, 'removeProperty', ofRule); wrap(P, 'cssText', ofRule);
+        }
+        if (v.MediaList) for (const k of ['mediaText', 'appendMedium', 'deleteMedium']) wrap(v.MediaList.prototype, k);
+        if (v.CSSGroupingRule) for (const k of ['insertRule', 'deleteRule']) wrap(v.CSSGroupingRule.prototype, k);
+        if (v.CSSStyleSheet) for (const k of ['insertRule', 'deleteRule', 'addRule', 'removeRule', 'replace', 'replaceSync']) wrap(v.CSSStyleSheet.prototype, k);
+    }
+    const unhook = () => { for (const off of hooks.splice(0)) { try { off(); } catch (_) {} } return j.cssom; };
+    j.unhook = unhook;
+    if (!rest) setTimeout(() => { if (hooks.length) { unhook(); j.cssom = true; } }, 10000);
+    j.primed = true;
+    return '';
+}"#;
+
+/// What changed since the journal (see [`JOURNAL_ARM`]) was armed with a
+/// tree read, for patching that read's snapshot instead of capturing the
+/// page again (see [`Page::read_delta`]). Run just before the next
+/// arming, in the same task, so nothing happens in between. The journal
+/// must have been primed before the action (see [`JOURNAL_PRIME`]), which
+/// keeps the state-dependent style rules' matches and watches style rule
+/// writes. Returns why not as a string, or `{ ops, n }`: `ops` are
+/// `{ k: 'r', d, f }` (node `d` of `window.__nvDeltaRoots` and its
+/// subtree, read again as facts `f`) and `{ k: 'c', d, ch, gone }` (node
+/// `d`'s children are now `ch`: `{ d, f }` for a new one, `{ ws: f }` for
+/// new whitespace text; of the read's own, a run length when none was
+/// taken away (`gone` 0), else its name, or `{ w }` for whitespace text,
+/// and `{ ws: f, old }` for whitespace text of its own read again, its
+/// neighbour having changed), `n` the facts in all.
+///
+/// Which subtrees: the target of each attribute change, each changed text
+/// node, each parent whose children changed (its whole subtree when small;
+/// a numbered list whole, its markers count its items), each control whose
+/// value or state a script set, each element a state-dependent rule or one
+/// reaching past its subtree (a sibling, a child's place, `:has()`) now
+/// matches or no longer does, each popover or `<details>` that toggled, and
+/// each element animated in what the tree reads (a listener added or taken
+/// off is told apart by [`Page::read_delta`]). Why not: a container query
+/// or a first letter or line in any sheet, a new style sheet, a style rule
+/// a script wrote, a new or gone frame or shadow root, a changed viewport,
+/// a change inside `<head>`, a shadow tree or a frame, content under
+/// `content-visibility: auto`, or more than `max` nodes to read. Content a
+/// display lock skips (a closed `<details>`) is listed without a box and
+/// its style is never read: reading it would lay it out, and the next
+/// capture would show it. A capture drops the boxes Chrome keeps for such
+/// content by the same rule ([`Snap::from_value`]), so the two agree.
+///
+/// Not seen, as a capture would: a box outside the subtrees read that
+/// grows from nothing or shrinks to it with no DOM change (an image that
+/// finishes loading; only whether a box has an area is read, for the
+/// clickable elements), and whitespace text whose neighbour's style, not
+/// its DOM, changed (whether it has a box follows what comes before it).
+///
+/// The facts per node, in preorder (`p` its parent's place, -1 for the
+/// root): type `t`, name `n`, value `v`, `w` for whitespace text (which
+/// `DOM.describeNode` leaves out), laid out `l`, layout text `lt`, the six
+/// styles `s` (a text node has its parent's), box `b`, clickable `c` (by
+/// Chrome's rules but listeners, which `getEventListeners` gives), form
+/// state `iv`/`tv`/`ck`/`sel`, and pseudo-elements `ps` (before, after,
+/// marker: each `{ pt, s, lt }`). Anything this can't state as the
+/// snapshot would (generated content from counters, a marker other than
+/// disc, circle, square, decimal or a disclosure triangle, a text
+/// transform but upper or lower case, text security, a frame, a slot, a
+/// shadow root) is why not.
+const JOURNAL_DELTA: &str = r#"(id, max) => {
+    const j = window.__nvJournal;
+    if (!j || j.id !== id) return 'gone';
+    if (j.broken) return j.broken;
+    let cssom;
+    if (j.primed) { cssom = j.unhook(); j.primed = false; }
+    else if (j.used) cssom = j.used.cssom || j.unhook();
+    else return 'not primed';
+    j.used = null;
+    if (cssom) return 'style rule';
+    if (!j.controls0 || !j.tracked) return 'form controls';
+    j.flush();
+    if (j.over) return 'records';
+    if (j.e2) return 'event';
+    const docs = j.docsOf();
+    if (docs.length !== j.docs.length || docs.some((d, i) => d !== j.docs[i])) return 'frames';
+    if (j.rootsOf(docs).length !== j.roots.length) return 'shadow roots';
+    for (const [scope, sheets, counts] of j.inv0) {
+        const now = j.sheetsOf(scope);
+        if (now.length !== sheets.length || now.some((sh, i) => sh !== sheets[i])) return 'style sheet';
+        const n = j.sheetCount(scope);
+        if (n.some((c, i) => c !== counts[i])) return 'style sheet';
+    }
+    if (j.view() !== j.view0) return 'viewport';
+    // Container queries follow a box's size, which no record shows.
+    const W = window;
+    const PROPS = ['display', 'visibility', 'opacity', 'content', 'cursor', 'pointer-events', 'text-transform', 'list-style-type', 'list-style-image', 'content-visibility', '-webkit-text-security', 'white-space'];
+    const shapes = W.__nvDeltaShapes || new WeakMap();
+    try { Object.defineProperty(W, '__nvDeltaShapes', { value: shapes, configurable: true, enumerable: false, writable: true }); } catch (_) {}
+    const shapeOf = (sheet) => {
+        let rules;
+        try { rules = sheet.cssRules; } catch (_) { return null; }
+        if (!rules) return { container: false, letter: false, generated: false };
+        const hit = shapes.get(sheet);
+        if (hit && hit.n === rules.length) return hit.v;
+        const v = { container: false, letter: false, generated: false };
+        const walk = (list, inContainer) => {
+            for (const r of list) {
+                const text = r.selectorText;
+                if (text !== undefined) {
+                    // A first letter or line is a layout object of its own.
+                    if (/:first-(letter|line)/.test(text)) v.letter = true;
+                    if (/:(before|after)\b/.test(text)) v.generated = true;
+                }
+                if (inContainer && r.style) {
+                    const st = r.style;
+                    let relevant = PROPS.some((p) => st.getPropertyValue(p));
+                    for (let i = 0; !relevant && i < st.length; i++) if (st[i].startsWith('--')) relevant = true;
+                    if (relevant) v.container = true;
+                }
+                if (r.cssRules && r.cssRules.length) walk(r.cssRules, inContainer || r.type === 17 || (r.constructor && r.constructor.name === 'CSSContainerRule'));
+            }
+        };
+        walk(rules, false);
+        shapes.set(sheet, { n: rules.length, v });
+        return v;
+    };
+    // Generated content is looked for only where a sheet could set it
+    // (and in <q>, whose quotes are the browser's own).
+    let anyGenerated = false;
+    for (const scope of j.scopes) {
+        for (const sheet of j.sheetsOf(scope)) {
+            const v = shapeOf(sheet);
+            if (!v) return 'style sheet';
+            if (v.container) return 'container';
+            if (v.letter) return 'first letter';
+            anyGenerated = anyGenerated || v.generated;
+        }
+    }
+    const WS = /^[\t\n\v\f\r \u1680\u2000-\u200a\u2028\u2029\u205f\u3000]*$/;
+    const styling = (n) => n.nodeType === 1 && (n.matches('style, link') || !!n.querySelector('style, link'));
+    const rep = new Set(), kids = new Set(), added = new Set(), lost = new Set(), touched = new Set();
+    for (const r of j.recs) {
+        const t = r.target;
+        if (t.nodeType !== 9 && t.ownerDocument !== document) return 'frame';
+        if (r.type === 'childList') {
+            for (const a of r.addedNodes) { added.add(a); if (styling(a)) return 'style sheet'; }
+            for (const a of r.removedNodes) if (styling(a)) return 'style sheet';
+            if (r.removedNodes.length) lost.add(t);
+            if (r.nextSibling) touched.add(r.nextSibling);
+            kids.add(t);
+        } else if (r.type === 'attributes') {
+            if (t.tagName === 'STYLE' || t.tagName === 'LINK') return 'style sheet';
+            rep.add(t);
+        } else {
+            const p = t.parentNode;
+            if (p && p.nodeName === 'STYLE') return 'style sheet';
+            rep.add(WS.test(t.data) || !p ? p : t);
+        }
+    }
+    for (const [c, sig] of j.controls0) if (j.sig(c) !== sig) rep.add(c);
+    for (let i = 0; i < j.tracked.length; i++) {
+        const m = j.matches(j.tracked[i][0], j.tracked[i][1]);
+        if (!m) return 'selector';
+        const was = new Set(j.matched[i]), now = new Set(m);
+        for (const e of m) if (!was.has(e)) rep.add(e);
+        for (const e of j.matched[i]) if (!now.has(e)) rep.add(e);
+    }
+    for (const t of j.toggled) rep.add(t);
+    for (const t of j.anim0) rep.add(t);
+    for (const t of j.animated()) rep.add(t);
+    const head = document.head;
+    const placed = (n) => {
+        if (n.nodeType === 9 || n.nodeType === 11) return 'document';
+        if (n.getRootNode() !== document) return 'shadow';
+        if (head && head.contains(n)) return 'head';
+        return '';
+    };
+    // A list's markers count its items: a change to one renumbers the rest.
+    const widen = (n) => {
+        const p = n.parentElement;
+        return p && p.tagName === 'OL' ? p : n;
+    };
+    const all = new Set();
+    for (const n0 of rep) {
+        if (!n0 || !n0.isConnected) continue;
+        const n = widen(n0);
+        const why = placed(n);
+        if (why) return why;
+        all.add(n);
+    }
+    const parents = [];
+    for (const p0 of kids) {
+        if (!p0.isConnected) continue;
+        const why = placed(p0);
+        if (why) return why;
+        const p = widen(p0);
+        if (p !== p0 || p.tagName === 'OL' || p.getElementsByTagName('*').length <= 200) all.add(p);
+        else parents.push(p);
+    }
+    const isNew = (n) => added.has(n) && n.isConnected;
+    const under = (n, set) => { for (let a = n.parentNode; a; a = a.parentNode) if (set.has(a)) return true; return false; };
+    const inNew = (n) => { for (let a = n; a; a = a.parentNode) if (isNew(a)) return true; return false; };
+    const reps = [...all].filter((n) => !inNew(n) && !under(n, all));
+    const repSet = new Set(reps);
+    const lists = parents.filter((p) => !inNew(p) && !under(p, repSet) && !repSet.has(p));
+    // The facts.
+    const STY = ['cursor', 'pointer-events', 'opacity', 'visibility', 'display', 'content'];
+    const styleOf = (cs) => STY.map((p) => cs.getPropertyValue(p));
+    const REPLACED = new Set(['INPUT', 'IMG', 'SELECT', 'TEXTAREA', 'VIDEO', 'AUDIO', 'CANVAS', 'IFRAME', 'OBJECT', 'EMBED', 'FRAME', 'METER', 'PROGRESS', 'HR', 'BR', 'WBR']);
+    const FRAMED = new Set(['IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'PORTAL', 'FENCEDFRAME', 'SLOT']);
+    const csOf = new Map(), box = new Map(), wsLaid = new Map();
+    // Content a display lock skips (a closed <details>' body,
+    // `content-visibility: hidden`, `hidden=until-found`) has no box in a
+    // snapshot, and reading its style or box from script lays it out:
+    // the next snapshot would show it. Told from the parent's style only.
+    const skips = (p, child) => {
+        const c = getComputedStyle(p);
+        if (c.contentVisibility === 'auto') return null;
+        if (c.contentVisibility === 'hidden') return true;
+        if (p.tagName === 'DETAILS' && !p.open) return !(child.nodeType === 1 && child.tagName === 'SUMMARY' && p.querySelector(':scope > summary') === child);
+        return false;
+    };
+    const skippedAt = (n) => {
+        const up = [];
+        for (let a = n.parentElement; a; a = a.parentElement) up.push(a);
+        up.reverse();
+        for (let i = 0; i < up.length; i++) {
+            const v = skips(up[i], up[i + 1] || n);
+            if (v === null) return null;
+            if (v) return true;
+            if (getComputedStyle(up[i]).display === 'none') return false;
+        }
+        return false;
+    };
+    const cs = (el) => { let c = csOf.get(el); if (!c) { c = getComputedStyle(el); csOf.set(el, c); } return c; };
+    const elLayout = (el) => {
+        let v = box.get(el);
+        if (v !== undefined) return v;
+        const c = cs(el);
+        v = c.display !== 'none' && c.display !== 'contents'
+            && (el.tagName === 'WBR' ? !!layoutParent(el) : el.checkVisibility() && el.getClientRects().length > 0);
+        box.set(el, v);
+        return v;
+    };
+    const layoutParent = (n) => {
+        for (let p = n.parentElement; p; p = p.parentElement) {
+            if (elLayout(p)) return p;
+            if (cs(p).display !== 'contents') return null;
+        }
+        return null;
+    };
+    const preserves = (c) => /pre|break-spaces/.test(c.whiteSpace) || /preserve|break-spaces/.test(c.whiteSpaceCollapse || '');
+    const inlineLevel = (c) => c.display.startsWith('inline') || c.display === 'ruby';
+    // The in-flow box before `n` among its siblings, through
+    // `display: contents` parents: a text node, an element, or null.
+    const before = (n) => {
+        for (let at = n; at; at = at.parentNode) {
+            for (let s = at.previousSibling; s; s = s.previousSibling) {
+                if (s.nodeType === 3) { if (textLayout(s)) return s; continue; }
+                if (s.nodeType !== 1) continue;
+                const c = cs(s);
+                if (c.display === 'contents') { const last = lastIn(s); if (last) return last; continue; }
+                if (!elLayout(s) || c.position === 'absolute' || c.position === 'fixed') continue;
+                return s;
+            }
+            const p = at.parentNode;
+            if (!p || p.nodeType !== 1 || cs(p).display !== 'contents') return null;
+        }
+        return null;
+    };
+    const lastIn = (el) => {
+        for (let s = el.lastChild; s; s = s.previousSibling) {
+            if (s.nodeType === 3) { if (textLayout(s)) return s; continue; }
+            if (s.nodeType !== 1) continue;
+            const c = cs(s);
+            if (c.display === 'contents') { const last = lastIn(s); if (last) return last; continue; }
+            if (elLayout(s) && c.position !== 'absolute' && c.position !== 'fixed') return s;
+        }
+        return null;
+    };
+    const textLayout = (t) => {
+        let v = wsLaid.get(t);
+        if (v !== undefined) return v;
+        v = textLaid(t);
+        wsLaid.set(t, v);
+        return v;
+    };
+    const textLaid = (t) => {
+        const p = t.parentElement;
+        if (!p || !t.data.length) return false;
+        const lp = layoutParent(t);
+        if (!lp || REPLACED.has(lp.tagName) || p.closest('option, optgroup')) return false;
+        if (cs(p).contentVisibility === 'hidden' || (p.tagName === 'DETAILS' && !p.open)) return false;
+        if (p !== lp && !p.checkVisibility() && cs(p).display !== 'contents') return false;
+        if (!WS.test(t.data)) return true;
+        const pd = cs(lp).display;
+        if (/table|flex|grid/.test(pd) && !/table-cell|table-caption/.test(pd)) return false;
+        if (preserves(cs(p))) return true;
+        const b = before(t);
+        if (!b) return inlineLevel(cs(lp));
+        if (b.nodeType === 3) return !/[ \t\n\r\f]$/.test(b.data);
+        if (b.tagName === 'BR') return false;
+        const bc = cs(b);
+        return inlineLevel(bc) && bc.float === 'none';
+    };
+    const clickable = (n) => {
+        if (n.nodeType === 3) return !!(n.parentElement && n.parentElement.isContentEditable);
+        if (n.nodeType !== 1) return false;
+        if (n.isContentEditable) return true;
+        if ((n.localName === 'a' || n.localName === 'area') && (n.hasAttribute('href') || n.hasAttributeNS('http://www.w3.org/1999/xlink', 'href'))) return true;
+        if (n.tagName === 'INPUT') return !n.matches(':disabled');
+        if (n.tagName === 'LABEL') return !!(n.control && n.control !== n && clickable(n.control));
+        const d = n.parentElement;
+        return n.tagName === 'SUMMARY' && !!d && d.tagName === 'DETAILS' && d.querySelector(':scope > summary') === n;
+    };
+    const rect = (r) => [r.left + scrollX, r.top + scrollY, r.width, r.height];
+    const marker = (li, pc) => {
+        if (pc.content !== 'normal') return null;
+        const t = pc.listStyleType;
+        const glyphs = { disc: '\u2022 ', circle: '\u25e6 ', square: '\u25a0 ', 'disclosure-closed': '\u25b8 ', 'disclosure-open': '\u25be ' };
+        if (glyphs[t]) return glyphs[t];
+        if (t !== 'decimal') return null;
+        const list = li.parentElement;
+        const items = list ? [...list.children].filter((e) => cs(e).display === 'list-item') : [li];
+        const ol = list && list.tagName === 'OL' ? list : null;
+        const rev = !!(ol && ol.reversed);
+        let v = ol && ol.hasAttribute('start') ? ol.start : (rev ? items.length : 1);
+        for (const e of items) {
+            if (e.tagName === 'LI' && e.hasAttribute('value') && !isNaN(parseInt(e.getAttribute('value')))) v = parseInt(e.getAttribute('value'));
+            if (e === li) return v + '. ';
+            v += rev ? -1 : 1;
+        }
+        return null;
+    };
+    // Generated content made of quoted strings only (before any "/ alt").
+    const generated = (c) => {
+        let out = '', i = 0;
+        while (i < c.length) {
+            if (c[i] === ' ') { i++; continue; }
+            if (c[i] === '/') return out;
+            if (c[i] !== '"') return null;
+            let k = i + 1;
+            while (k < c.length && c[k] !== '"') { if (c[k] === '\\') k++; out += c[k]; k++; }
+            if (k >= c.length) return null;
+            i = k + 1;
+        }
+        return out;
+    };
+    let total = 0, why = '';
+    const facts = (root) => {
+        const list = [];
+        const top = skippedAt(root);
+        if (top === null) { why = 'content visibility'; return null; }
+        const stack = [[root, -1, top]];
+        while (stack.length) {
+            const [n, p, skipped] = stack.pop();
+            if (++total > max) { why = 'large'; return null; }
+            const f = { t: n.nodeType, n: n.nodeName, p };
+            if (skipped) {
+                // As the snapshot has it: no box, no style.
+                if (n.nodeType === 1 && (FRAMED.has(n.tagName) || n.shadowRoot)) { why = 'frame or shadow root'; return null; }
+                if (n.nodeType === 3 || n.nodeType === 8) f.v = n.data;
+                if (n.nodeType === 3 && WS.test(n.data)) f.w = 1;
+                if (n.nodeType === 1) {
+                    if (n.closest('[contenteditable]:not([contenteditable=false])')) { why = 'editable'; return null; }
+                    f.c = (n.localName === 'a' || n.localName === 'area') ? n.hasAttribute('href') : n.tagName === 'INPUT' ? !n.matches(':disabled') : false;
+                    if (n.tagName === 'INPUT') { if (n.value !== '') f.iv = n.value; if (n.checked) f.ck = 1; }
+                    if (n.tagName === 'TEXTAREA' && n.value !== '') f.tv = n.value;
+                    if (n.tagName === 'OPTION' && n.selected) f.sel = 1;
+                }
+                const at = list.length;
+                list.push(f);
+                if (n.nodeName !== 'TEMPLATE') {
+                    const ks = n.childNodes;
+                    for (let i = ks.length - 1; i >= 0; i--) stack.push([ks[i], at, true]);
+                }
+                continue;
+            }
+            if (n.nodeType === 1) {
+                if (FRAMED.has(n.tagName) || n.shadowRoot) { why = 'frame or shadow root'; return null; }
+                if (n.tagName === 'SELECT' && cs(n).appearance === 'base-select') { why = 'customizable select'; return null; }
+                f.l = elLayout(n);
+                if (f.l) { f.s = styleOf(cs(n)); f.b = rect(n.getBoundingClientRect()); }
+                f.c = clickable(n);
+                if (n.tagName === 'INPUT') { if (n.value !== '') f.iv = n.value; if (n.checked) f.ck = 1; }
+                if (n.tagName === 'TEXTAREA' && n.value !== '') f.tv = n.value;
+                if (n.tagName === 'OPTION' && n.selected) f.sel = 1;
+                if (f.l) {
+                    const ps = [];
+                    for (const pt of ['before', 'after', 'marker']) {
+                        if (pt !== 'marker' && !anyGenerated && n.tagName !== 'Q') continue;
+                        if (pt === 'marker' && cs(n).display !== 'list-item') continue;
+                        const pc = getComputedStyle(n, '::' + pt);
+                        if (pt === 'marker') {
+                            if (cs(n).display !== 'list-item' || (pc.listStyleType === 'none' && cs(n).listStyleImage === 'none' && pc.content === 'normal')) continue;
+                        } else if (pc.content === 'none' || pc.content === 'normal' || pc.display === 'none') continue;
+                        const lt = pt === 'marker' ? marker(n, pc) : generated(pc.content);
+                        if (lt === null) { why = 'generated content'; return null; }
+                        ps.push({ pt, s: styleOf(pc), lt });
+                    }
+                    // A modal dialog's or an open popover's backdrop, in the top layer.
+                    if (n.matches(':modal, :popover-open')) ps.push({ pt: 'backdrop', s: styleOf(getComputedStyle(n, '::backdrop')), lt: null });
+                    if (ps.length) f.ps = ps;
+                }
+            } else if (n.nodeType === 3) {
+                f.v = n.data;
+                if (WS.test(n.data)) f.w = 1;
+                f.l = textLayout(n);
+                const pe = n.parentElement;
+                if (f.l) {
+                    const pc = cs(pe);
+                    const tt = pc.textTransform;
+                    if (!/^(none|uppercase|lowercase)$/.test(tt) || (pc.webkitTextSecurity && pc.webkitTextSecurity !== 'none')) { why = 'text transform'; return null; }
+                    const lang = (pe.closest('[lang]') || {}).lang || undefined;
+                    f.lt = tt === 'uppercase' ? n.data.toLocaleUpperCase(lang) : tt === 'lowercase' ? n.data.toLocaleLowerCase(lang) : n.data;
+                    f.s = styleOf(pc);
+                    const r = document.createRange();
+                    r.selectNodeContents(n);
+                    f.b = rect(r.getBoundingClientRect());
+                }
+                f.c = clickable(n);
+            } else if (n.nodeType === 8) {
+                f.v = n.data;
+            }
+            const at = list.length;
+            list.push(f);
+            if (n.nodeName !== 'TEMPLATE') {
+                const ks = n.childNodes;
+                for (let i = ks.length - 1; i >= 0; i--) {
+                    const k = ks[i];
+                    let sk = false;
+                    if (n.nodeType === 1) {
+                        sk = skips(n, k);
+                        if (sk === null) { why = 'content visibility'; return null; }
+                    }
+                    stack.push([k, at, sk]);
+                }
+            }
+        }
+        return list;
+    };
+    // What reading would cost, counted cheaply first (elements and about
+    // as many text nodes): a change past `max` is captured whole without
+    // reading any of it.
+    let guess = 0;
+    for (const r of reps) guess += r.nodeType === 1 ? 2 * r.getElementsByTagName('*').length + 1 : 1;
+    for (const p of lists) for (const c of p.childNodes) if (added.has(c)) guess += c.nodeType === 1 ? 2 * c.getElementsByTagName('*').length + 1 : 1;
+    if (guess > max) return 'large';
+    const objs = [], ops = [];
+    for (const r of reps) {
+        const f = facts(r);
+        if (!f) return why;
+        objs.push(r);
+        ops.push({ k: 'r', d: objs.length - 1, f });
+    }
+    // A parent's children: new ones read; the rest are the read's own.
+    // Where none was taken away, the rest are its old children in order,
+    // given as run lengths. Else each is named (its id comes from
+    // describeNode), and old whitespace text, which describeNode leaves
+    // out, is the old child after the last one named.
+    for (const p of lists) {
+        if (p.shadowRoot) return 'shadow root';
+        objs.push(p);
+        const d = objs.length - 1, ch = [], gone = lost.has(p);
+        let run = 0;
+        for (const c of p.childNodes) {
+            const ws = c.nodeType === 3 && WS.test(c.data);
+            if (added.has(c)) {
+                if (run) { ch.push(run); run = 0; }
+                const f = facts(c);
+                if (!f) return why;
+                if (ws) ch.push({ ws: f });
+                else { objs.push(c); ch.push({ d: objs.length - 1, f }); }
+            } else if (ws && (touched.has(c) || (c.previousSibling && added.has(c.previousSibling)))) {
+                // Whether whitespace has a box follows what comes before it.
+                if (run) { ch.push(run); run = 0; }
+                const f = facts(c);
+                if (!f) return why;
+                ch.push({ ws: f, old: c.data });
+            } else if (!gone) {
+                run++;
+            } else if (c.nodeType === 3 && WS.test(c.data)) {
+                ch.push({ w: c.data });
+            } else {
+                ch.push(c.nodeName);
+            }
+        }
+        if (run) ch.push(run);
+        ops.push({ k: 'c', d, ch, gone: gone ? 1 : 0 });
+    }
+    Object.defineProperty(W, '__nvDeltaRoots', { value: objs, configurable: true, enumerable: false, writable: true });
+    return { ops, n: total };
+}"#;
+
+/// Asks the journal (see [`JOURNAL_ARM`]) whether anything the tree shows
+/// changed since it was armed, other than what the entry itself did: with
+/// `typed`, that text entered into the focused text field ("" for nothing
+/// else, else what did, or "gone"); with `typed` null, a state entry
+/// (check, select), whose own change is the checked state or the chosen
+/// option of the controls it moved: `{ changes }`, one per control, the
+/// controls themselves left in `changed` for their node ids ("" when it
+/// moved none).
+const JOURNAL_CHECK: &str = r#"(id, typed) => {
+    const j = window.__nvJournal;
+    if (!j || j.id !== id) return 'gone';
+    if (j.broken) return j.broken;
+    const cssom = j.unhook();
+    if (!j.primed) return 'not primed';
+    j.primed = false;
+    // A read follows a check that can't answer: it is patched from the
+    // records (see JOURNAL_DELTA), and the style rules seen written count.
+    j.used = { cssom };
+    j.flush();
+    if (j.m) return 'dom';
+    if (cssom) return 'style rule';
+    if (j.e) return 'event';
+    // An element named by its content shows what a control in it holds too.
+    const NAMED = 'td, th, button, a[href], summary, option, h1, h2, h3, h4, h5, h6, '
+        + ['button', 'cell', 'gridcell', 'link', 'heading', 'option', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+            'treeitem', 'checkbox', 'radio', 'switch', 'columnheader', 'rowheader', 'tooltip', 'row', 'term']
+            .map((r) => `[role="${r}"]`).join(', ');
+    const named = (t) => {
+        for (let e = t; e; e = e.getRootNode().host) {
+            if (e.parentElement && e.parentElement.closest(NAMED)) return true;
+        }
+        return false;
+    };
+    const own = new Set();
+    const changes = [];
+    if (typed === null) {
+        const sq = (s) => String(s).split(/\s+/).filter(Boolean).join(' ');
+        const label = (o) => (o ? sq(o.getAttribute('label') || '') || sq(o.textContent) : null);
+        // A select's choice is part of a name wherever its text is: a label
+        // that names another control, an element that names another by
+        // its id (aria-labelledby).
+        const quoted = (t) => {
+            const l = t.closest('label');
+            if (l && l.control !== t) return true;
+            for (const scope of j.scopes) {
+                for (const e of scope.querySelectorAll('[aria-labelledby], [aria-describedby]')) {
+                    const ids = ((e.getAttribute('aria-labelledby') || '') + ' ' + (e.getAttribute('aria-describedby') || '')).split(/\s+/);
+                    for (const x of ids) {
+                        const r = x && e.getRootNode().getElementById && e.getRootNode().getElementById(x);
+                        if (r && r.contains(t)) return true;
+                    }
+                }
+            }
+            return false;
+        };
+        const moved = j.controls.filter((x) => j.sig(x[0]) !== x[1]);
+        if (moved.length > 8) return 'form state';
+        for (const [c, before] of moved) {
+            const type = c.tagName === 'INPUT' ? (c.getAttribute('type') || 'text').toLowerCase() : '';
+            if (type === 'checkbox' || type === 'radio') {
+                // A required radio group shows as invalid until one is checked.
+                if (type === 'radio') {
+                    const scope = c.form || c.getRootNode();
+                    for (const r of scope.querySelectorAll('input[type=radio]')) if (r.name === c.name && r.required) return 'radio group';
+                }
+                changes.push({ checked: !!c.checked });
+            } else if (c.tagName === 'SELECT' && !c.multiple && !(c.size > 1)) {
+                const was = Number(before.split('\u0001')[3]);
+                if (was < 0 || c.selectedIndex < 0 || named(c) || quoted(c)) return 'named';
+                changes.push({ value: label(c.options[c.selectedIndex]), was: label(c.options[was]) });
+            } else {
+                return 'form state';
+            }
+            own.add(c);
+        }
+    } else {
+        let t = document.activeElement;
+        for (;;) {
+            let n = t && t.shadowRoot && t.shadowRoot.activeElement;
+            if (!n && t && (t.tagName === 'IFRAME' || t.tagName === 'FRAME')) { try { n = t.contentDocument && t.contentDocument.activeElement; } catch (_) { n = null; } }
+            if (!n) break;
+            t = n;
+        }
+        const type = t && t.tagName === 'INPUT' ? (t.getAttribute('type') || 'text').toLowerCase() : '';
+        const text = t && (t.tagName === 'TEXTAREA' || ['text', 'search', 'email', 'url', 'tel'].includes(type));
+        if (!text || !String(t.value).includes(typed)) return 'target';
+        // The diff leaves out a field that shows the typed text and did not
+        // before; one that showed it already is reported as changed.
+        const mine = j.controls.find((x) => x[0] === t);
+        if (!mine) return 'target';
+        const before = mine[1].slice(0, mine[1].indexOf('\u0001'));
+        if (before !== String(t.value) && before.includes(typed)) return 'target';
+        if (named(t)) return 'named';
+        own.add(t);
+    }
+    if (j.typedAttr.some((x) => !own.has(x)) || j.inputs.some((x) => !own.has(x))) return 'event';
+    const docs = j.docsOf();
+    if (docs.length !== j.docs.length || docs.some((d, i) => d !== j.docs[i])) return 'frames';
+    if (j.rootsOf(docs).length !== j.roots.length) return 'shadow roots';
+    for (const [scope, sheets, counts] of j.inventory) {
+        const now = j.sheetsOf(scope);
+        if (now.length !== sheets.length || now.some((sh, i) => sh !== sheets[i])) return 'style sheet';
+        const n = j.sheetCount(scope);
+        if (n.some((c, i) => c !== counts[i])) return 'style sheet';
+    }
+    for (let i = 0; i < j.tracked.length; i++) {
+        const m = j.matches(j.tracked[i][0], j.tracked[i][1]);
+        const was = j.matched[i];
+        if (!m || m.length !== was.length || m.some((e, k) => e !== was[k])) return 'state style';
+    }
+    for (const [c, s] of j.controls) if (!own.has(c) && j.sig(c) !== s) return 'form state';
+    // The entry is the read's now: the next one is judged from here.
+    j.used = null;
+    j.inputs = [];
+    j.typedAttr = [];
+    j.controls = j.formOf();
+    if (!changes.length) return '';
+    j.changed = [...own];
+    return { changes };
+}"#;
+
 /// A script sent to a document that a navigation then replaced gets this
 /// long after the new document commits to answer (see `Page::send`).
 const ABANDON_AFTER_COMMIT: Duration = Duration::from_secs(1);
@@ -627,6 +1809,70 @@ const EFFECT_WINDOW: Duration = Duration::from_millis(200);
 /// watches the page for [`AFTER_RESPONSE`] more.
 const REQUEST_WAIT: Duration = Duration::from_millis(1500);
 const AFTER_RESPONSE: Duration = Duration::from_millis(150);
+
+/// A click on a page whose document started loading less than this long
+/// ago checks whether anything on the element or its ancestors listened
+/// for it: a page often wires its controls a moment after load (hydration,
+/// a script it loads then), and a click before that reaches nothing (see
+/// [`Page::wired_later`]).
+const YOUNG_PAGE: Duration = Duration::from_secs(10);
+
+/// After a click that changed nothing and that nothing on the element or
+/// its ancestors listened for: the page is believed not to wire the
+/// element up once it has had no script or data request in flight for
+/// this long since the click, or after [`WIRING_MAX`] in all (and never
+/// past the element wait).
+const WIRING_QUIET: Duration = Duration::from_millis(500);
+const WIRING_MAX: Duration = Duration::from_secs(5);
+
+/// How many times a click nothing listened for is sent again. The second
+/// click is heard by whatever the page wired, so it is never sent again.
+const CLICK_AGAIN: u8 = 1;
+
+/// Whether a click nothing listened for is sent again once the page wires
+/// the element up (`NAVIGERA_CLICK_AGAIN=0` turns it off, to compare).
+fn wiring_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_CLICK_AGAIN").map_or(true, |v| v.trim() != "0"))
+}
+
+/// How many listeners for the events a click sends are on the path a young
+/// page's click kept (`__nvPath`, see CLICK_PREP): the element, its
+/// ancestors, its document and its window. Counted with DevTools'
+/// `getEventListeners` (needs `includeCommandLineAPI`), so a handler set as
+/// a property or an attribute counts too, and navigera's own don't. Null
+/// when there is no path, its element left the page, or the page has a
+/// `getEventListeners` of its own. `DROP` ends the path when anything
+/// listens: a click something heard is never sent again.
+const PATH_LISTENERS: &str = r#"((drop) => {
+    const p = window.__nvPath;
+    if (!p) return null;
+    // A page's own global of that name hides DevTools' one: no count then.
+    if (typeof getEventListeners !== 'function' || !String(getEventListeners).includes('[Command Line API]')) { p.end(); return null; }
+    if (!p.nodes[0].isConnected) { p.end(); return null; }
+    let n = 0;
+    for (const node of p.nodes) {
+        const l = getEventListeners(node);
+        for (const t of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend'])
+            for (const x of l[t] || []) if (!(x.listener && x.listener.__nv)) n++;
+    }
+    if (drop && n) p.end();
+    return n;
+})(DROP)"#;
+
+/// [`PATH_LISTENERS`] with its flag.
+fn path_listeners(drop: bool) -> String {
+    PATH_LISTENERS.replace("DROP", &drop.to_string())
+}
+
+/// What [`Page::wired_later`] watches for after a click: since the press,
+/// until when, and the browser's activity counters at the press (see
+/// `Shared::activity`).
+struct Wiring {
+    pressed_at: Instant,
+    until: Instant,
+    activity: [u64; 5],
+}
 
 /// What a delivered click did, as far as navigera can see.
 #[derive(Debug, PartialEq)]
@@ -1894,6 +3140,10 @@ pub struct AxOptions {
     pub scope: Option<Target>,
     /// Texts, names and values uncut (`ax --full-text`).
     pub full_text: bool,
+    /// Arm the change journal before a read from the DOM snapshot (see
+    /// [`JOURNAL_ARM`]): what an agent's next text entry changed can then
+    /// be told without reading the page again.
+    pub journal: bool,
 }
 
 /// Where the mouse is and which buttons it holds (bits: 1 left, 2 right,
@@ -1921,7 +3171,93 @@ pub struct Page {
     stalled: Arc<std::sync::atomic::AtomicBool>,
     /// What each ref a snapshot printed was (see [`Page::refind`]).
     seen_refs: Arc<std::sync::Mutex<std::collections::HashMap<u64, SeenRef>>>,
+    /// The change journal the last tree read armed (see [`JOURNAL_ARM`]):
+    /// its id, when that read could be watched whole. None after a read
+    /// that armed none.
+    journal: Arc<std::sync::Mutex<Option<u64>>>,
+    /// That read's snapshot, for the next read to patch (see
+    /// [`Page::read_delta`]).
+    kept: Arc<std::sync::Mutex<Option<Kept>>>,
+    /// The journal an action primed (see [`JOURNAL_PRIME`]): a read after
+    /// one can be patched, as can any read after a journal primed with its
+    /// arming ([`Kept::rested`]).
+    primed: Arc<std::sync::Mutex<Option<u64>>>,
+    /// The journal of the last [`Page::pre_read`] (0: none yet).
+    pre_journal: Arc<std::sync::atomic::AtomicU64>,
 }
+
+/// A tree read's snapshot, kept with the journal armed with it.
+struct Kept {
+    journal: u64,
+    snap: Snap,
+    /// The journal was primed with its arming (see [`JOURNAL_PRIME`]'s
+    /// `rest`): the next read is patched, an action before it or not.
+    rested: bool,
+}
+
+/// A journal armed in the page: its id, how many documents it watches,
+/// and whether it was primed with its arming.
+type Arming = Option<(u64, u64, bool)>;
+
+/// The arming expression for journal `id`: armed, and primed for the
+/// next read, whose style rule watch then stays in the page between
+/// commands. Not with `--natural` (a page can see the watch), nor with
+/// `NAVIGERA_REST_PRIME=0` (to compare against).
+fn arm_expression(id: u64) -> String {
+    if rest_prime() {
+        format!("(() => {{ const a = ({JOURNAL_ARM})({id}); if (a && !a.broken) a.rest = ({JOURNAL_PRIME})({id}, false, true); return a; }})()")
+    } else {
+        format!("({JOURNAL_ARM})({id})")
+    }
+}
+
+/// Whether a journal is primed for the next read as it is armed, and
+/// again after a check that answered an entry (see [`arm_expression`]).
+fn rest_prime() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !crate::browser::natural() && std::env::var("NAVIGERA_REST_PRIME").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// The check of an entry against journal `id` (see [`JOURNAL_CHECK`]);
+/// one that answers leaves the journal primed for the next read, which
+/// is then patched as after an arming.
+fn check_expression(id: u64, typed: &str) -> String {
+    if rest_prime() {
+        format!(
+            "(() => {{ const r = ({JOURNAL_CHECK})({id}, {typed});              if (r === '' || (r !== null && typeof r === 'object')) ({JOURNAL_PRIME})({id}, false, true); return r; }})()"
+        )
+    } else {
+        format!("({JOURNAL_CHECK})({id}, {typed})")
+    }
+}
+
+/// What an arming evaluation returned (see [`arm_expression`]).
+fn arming_of(id: u64, a: &Value) -> Arming {
+    match a.get("broken").and_then(Value::as_str) {
+        Some("") => {
+            let rested = a.get("rest").and_then(Value::as_str) == Some("");
+            if !rested {
+                if let Some(why) = a.get("rest").and_then(Value::as_str) {
+                    crate::timing::log(&format!("[journal] not primed with the read: {why}"));
+                }
+            }
+            a.get("docs").and_then(Value::as_u64).map(|docs| (id, docs, rested))
+        }
+        _ => None,
+    }
+}
+
+/// Change journal ids, one per arming.
+static JOURNAL_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Ids for whitespace text read by [`JOURNAL_DELTA`], which
+/// `DOM.describeNode` leaves out: never a ref, so any id no node has.
+static SYNTHETIC_IDS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1 << 40);
+
+/// The listener types that make a node `isClickable` in a snapshot.
+const CLICK_LISTENERS: [&str; 3] = ["click", "mousedown", "mouseup"];
 
 /// A ref as a snapshot printed it: its element's role and full name, its
 /// place among the snapshot's elements of that role and name (and how many
@@ -1958,6 +3294,10 @@ impl Page {
             pointer: Default::default(),
             stalled: Default::default(),
             seen_refs: Default::default(),
+            journal: Default::default(),
+            kept: Default::default(),
+            primed: Default::default(),
+            pre_journal: Default::default(),
         }
     }
 
@@ -2093,6 +3433,181 @@ impl Page {
         .ok()
         .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
         .unwrap_or(false)
+    }
+
+    /// One turn of the page's event loop: a zero-delay timer queued now,
+    /// awaited. By its answer the handlers an action ran, their microtasks
+    /// (framework re-renders) and the zero-delay timers they queued have
+    /// run, and Chrome has sent every request they started before the
+    /// answer on the same connection. False when no script could run (the
+    /// page is gone or busy past `max`).
+    pub fn event_loop_turn(&self, max: Duration) -> bool {
+        let ms = max.as_millis();
+        let js = format!("new Promise(r => {{ setTimeout(() => r(true), 0); setTimeout(() => r(false), {ms}); }})");
+        self.send(
+            "Runtime.evaluate",
+            json!({ "expression": js, "awaitPromise": true, "returnByValue": true }),
+            max + Duration::from_secs(1),
+        )
+        .ok()
+        .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
+        .unwrap_or(false)
+    }
+
+    /// Arm the change journal in the top document (see [`JOURNAL_ARM`]):
+    /// its id and how many documents it watches, or None when it could
+    /// not watch the page whole (it says what it could not, e.g. a style
+    /// sheet of another origin).
+    fn arm_journal(&self, timeout: Duration) -> Arming {
+        let id = JOURNAL_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let r = self
+            .send("Runtime.evaluate", json!({ "expression": arm_expression(id), "returnByValue": true }), timeout)
+            .ok();
+        crate::timing::record("journal_arm", started);
+        let v = r?.pointer("/result/value").cloned()?;
+        let broken = v.get("broken").and_then(Value::as_str).unwrap_or("?");
+        if !broken.is_empty() {
+            crate::timing::log(&format!("[journal] not armed: {broken}"));
+            return None;
+        }
+        arming_of(id, &v)
+    }
+
+    /// Take what the journal needs to judge the text entry about to run
+    /// (`entry`), or to patch the read after another action (see
+    /// [`JOURNAL_PRIME`]); false when it can't.
+    pub fn journal_prime(&self, id: u64, entry: bool, timeout: Duration) -> bool {
+        let started = std::time::Instant::now();
+        let r = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": format!("({JOURNAL_PRIME})({id}, {entry})"), "returnByValue": true }),
+            timeout,
+        );
+        crate::timing::record("journal_prime", started);
+        let verdict = r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_str).map(str::to_string));
+        *self.primed.lock().unwrap() = verdict.as_deref().filter(|v| v.is_empty()).map(|_| id);
+        match verdict.as_deref() {
+            Some("") => true,
+            other => {
+                crate::timing::log(&format!("[journal] not primed: {}", other.unwrap_or("no answer")));
+                false
+            }
+        }
+    }
+
+    /// The journal the last tree read armed and could watch whole.
+    pub fn journal_id(&self) -> Option<u64> {
+        *self.journal.lock().unwrap()
+    }
+
+    /// Nothing the tree shows has changed since journal `id` was armed, but
+    /// for `typed` entered into the focused text field (see
+    /// [`JOURNAL_ARM`]). False when anything did, or can't be told.
+    pub fn journal_unchanged(&self, id: u64, typed: &str, timeout: Duration) -> bool {
+        let started = std::time::Instant::now();
+        let r = self.send(
+            "Runtime.evaluate",
+            json!({
+                "expression": check_expression(id, &serde_json::to_string(typed).unwrap_or_default()),
+                "returnByValue": true,
+            }),
+            timeout,
+        );
+        crate::timing::record("journal_check", started);
+        let verdict = r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_str).map(str::to_string));
+        match verdict.as_deref() {
+            Some("") => true,
+            other => {
+                crate::timing::log(&format!("[journal] read again: {}", other.unwrap_or("no answer")));
+                false
+            }
+        }
+    }
+
+    /// What a state entry (check, select) changed, when the journal armed
+    /// as `id` can prove it changed nothing else the tree shows (see
+    /// [`JOURNAL_CHECK`]): each control it moved, by node id (the tree's
+    /// `ref`), with its new state. Empty when it moved none; None when
+    /// anything else changed, or can't be told.
+    pub fn journal_restate(&self, id: u64, timeout: Duration) -> Option<Vec<(u64, Restated)>> {
+        let started = std::time::Instant::now();
+        let r = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": check_expression(id, "null"), "returnByValue": true }),
+            timeout,
+        );
+        let verdict = r.ok().and_then(|r| r.pointer("/result/value").cloned());
+        let changes = match verdict {
+            Some(Value::String(s)) if s.is_empty() => Some(Vec::new()),
+            Some(Value::Object(o)) => o.get("changes").and_then(Value::as_array).cloned(),
+            other => {
+                crate::timing::log(&format!(
+                    "[journal] read again: {}",
+                    other.as_ref().map_or("no answer".into(), Value::to_string)
+                ));
+                None
+            }
+        };
+        let mut out = Vec::new();
+        for (i, c) in changes?.iter().enumerate() {
+            let state = match (c.get("checked").and_then(Value::as_bool), c.get("value").and_then(Value::as_str)) {
+                (Some(on), _) => Restated::Checked(on),
+                (None, Some(v)) => Restated::Chosen { now: v.to_string(), was: c.get("was")?.as_str()?.to_string() },
+                _ => return None,
+            };
+            let el = self
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": format!("window.__nvJournal.changed[{i}]"), "objectGroup": "nv-journal" }),
+                    timeout,
+                )
+                .ok()?;
+            let object = el.pointer("/result/objectId").and_then(Value::as_str)?.to_string();
+            let node = self.send("DOM.describeNode", json!({ "objectId": object }), timeout).ok()?;
+            out.push((node.pointer("/node/backendNodeId").and_then(Value::as_u64)?, state));
+        }
+        let _ = self.send("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-journal" }), timeout);
+        crate::timing::record("journal_check", started);
+        Some(out)
+    }
+
+    /// Start counting the top document's DOM changes (one observer, kept
+    /// until [`Page::stop_counting_changes`]); returns the count so far.
+    pub fn count_changes(&self, timeout: Duration) -> Option<u64> {
+        let js = "(() => { let c = window.__nvMut; if (!c) { c = { n: 0, w: null }; \
+                  c.o = new MutationObserver((r) => { c.n += r.length; const w = c.w; if (w) { c.w = null; w(); } }); \
+                  c.o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true }); \
+                  Object.defineProperty(window, '__nvMut', { value: c, configurable: true, enumerable: false }); } \
+                  return c.n; })()";
+        self.send("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }), timeout)
+            .ok()
+            .and_then(|r| r.pointer("/result/value").and_then(Value::as_u64))
+    }
+
+    /// Wait, at most `max`, for the DOM to change past `seen` (a count from
+    /// [`Page::count_changes`]). False when nothing changed in time.
+    pub fn next_change(&self, seen: u64, max: Duration) -> bool {
+        let js = format!(
+            "new Promise((r) => {{ const c = window.__nvMut; if (!c || c.n > {seen}) return r(true); \
+             const t = setTimeout(() => {{ c.w = null; r(false); }}, {}); c.w = () => {{ clearTimeout(t); r(true); }}; }})",
+            max.as_millis()
+        );
+        self.send(
+            "Runtime.evaluate",
+            json!({ "expression": js, "awaitPromise": true, "returnByValue": true }),
+            max + Duration::from_secs(1),
+        )
+        .ok()
+        .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
+        .unwrap_or(false)
+    }
+
+    /// Stop counting DOM changes (see [`Page::count_changes`]).
+    pub fn stop_counting_changes(&self, timeout: Duration) {
+        let js =
+            "(() => { const c = window.__nvMut; if (c) { c.o.disconnect(); delete window.__nvMut; } return 0; })()";
+        let _ = self.send("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }), timeout);
     }
 
     /// Wait until no fetch/XHR is in flight and none started or ended for
@@ -3028,7 +4543,26 @@ impl Page {
     /// or `force` says so (see [`CLICK_PREP`]). An element that stays under
     /// another one is an error naming that one, not a click a user couldn't
     /// make. Returns `{synthetic: true}` when DOM events were used.
+    ///
+    /// A click that changed nothing, on a page that loaded a moment ago,
+    /// with nothing listening for it when it came (on the element, its
+    /// ancestors, its document or window), is sent again if the page wires
+    /// it up while it settles (see [`Page::wired_later`]): `clicked_again`
+    /// says how long after the first press the page did.
     pub fn click(&self, target: &Target, opts: &ClickOptions, wait: Duration, timeout: Duration) -> Result<Value> {
+        self.click_once(target, opts, wait, timeout, Tries { again: CLICK_AGAIN, first: None, moved: 0 })
+    }
+
+    /// One click, and the ones it may take after it (see [`Tries`]).
+    fn click_once(
+        &self,
+        target: &Target,
+        opts: &ClickOptions,
+        wait: Duration,
+        timeout: Duration,
+        tries: Tries,
+    ) -> Result<Value> {
+        let Tries { again, first, moved } = tries;
         let settle = json!(self.hit_settle_ms(wait));
         let strict = json!(!self.shared.is_single_target());
         let button = json!(opts.button);
@@ -3048,13 +4582,14 @@ impl Page {
         // Watch what the click changes (not on Lightpanda: no layout, so its
         // clicks are DOM events anyway).
         let effects = !self.shared.is_single_target() && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none();
+        let young_ms = if again > 0 && wiring_check() { YOUNG_PAGE.as_millis() as u64 } else { 0 };
         let started = std::time::Instant::now();
         let prep = |settle: &Value| {
             self.on_element(
                 target,
                 "click",
                 CLICK_PREP,
-                &[json!(false), settle.clone(), strict.clone(), button.clone(), json!(effects)],
+                &[json!(false), settle.clone(), strict.clone(), button.clone(), json!(effects), json!(young_ms)],
                 wait,
                 timeout,
             )
@@ -3142,21 +4677,58 @@ impl Page {
             }
         }
         let armed = point.get("effects").and_then(Value::as_bool) == Some(true);
+        let young = point.get("young").and_then(Value::as_bool) == Some(true);
+        let nav = point.get("nav").and_then(Value::as_bool) == Some(true);
         let before = (self.shared.activity(&self.session_id), self.shared.logs.lock().unwrap().requests_started());
+        let pressed_at = Instant::now();
         match self.mouse_click(&point, &opts.button, timeout) {
             Ok(true) => {}
             other => {
                 if armed {
                     self.drop_effects(timeout);
                 }
+                if nav {
+                    self.nav_planned(timeout);
+                }
                 // Engine without the Input domain: DOM events.
                 other?;
                 return dom(self);
             }
         }
+        // What listened for the click (the element, its ancestors, its
+        // document and window), read with the press's arrival in the same
+        // round trip: the press has been handled by then, so a listener
+        // the page adds later isn't counted. A handler the click itself
+        // added is, which only ever stops another click.
         let check = point.get("check").and_then(Value::as_bool) == Some(true)
             && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none(); // diagnostic knob
-        if check && !self.press_arrived(timeout) {
+        let Arrival { arrived, heard, missed, mut off } = if check {
+            self.press_arrived(young, timeout)
+        } else {
+            Arrival { arrived: true, heard: None, missed: None, off: None }
+        };
+        if let Some(instead) = missed {
+            // The element moved as it was pressed: the press reached
+            // something else, which the page never saw. Press again where
+            // the element is now, while the element wait lasts.
+            if armed {
+                self.drop_effects(timeout);
+            }
+            if nav {
+                self.nav_planned(timeout);
+            }
+            let left = wait.saturating_sub(started.elapsed());
+            if moved < MOVED_TRIES && !left.is_zero() {
+                let tries = Tries { again, first, moved: moved + 1 };
+                return self.click_once(target, opts, left.max(Duration::from_millis(500)), timeout, tries);
+            }
+            bail!(
+                "the element kept moving as it was pressed: the press landed on {instead} instead ({} tries), \
+                 and nothing was clicked. Wait for it to settle, or --force sends the click to the element without the mouse",
+                moved + 1
+            );
+        }
+        if !arrived {
             eprintln!(
                 "[click] the browser did not deliver the mouse events at ({}, {}); sending them again",
                 point["x"], point["y"]
@@ -3168,10 +4740,15 @@ impl Page {
             // happened on the page, so sending it again can't double-click.
             self.wait_frame(Duration::from_millis(500));
             self.mouse_click(&point, &opts.button, timeout)?;
-            if !self.press_arrived(timeout) {
+            let resent = self.press_arrived(false, timeout);
+            off = resent.off;
+            if !resent.arrived {
                 eprintln!("[click] still not delivered; dispatching DOM events");
                 if armed {
                     self.drop_effects(timeout);
+                }
+                if nav {
+                    self.nav_planned(timeout);
                 }
                 let mut res = dom(self)?;
                 res["dropped"] = json!(true);
@@ -3179,16 +4756,95 @@ impl Page {
             }
             point["redelivered"] = json!(true);
         }
+        if let Some(on) = off {
+            // The page has already reacted to this press: not pressed again.
+            point["click_off"] = json!(on);
+        }
+        if nav && self.nav_planned(timeout) == Some(false) {
+            // The page cancelled what the click would have loaded (a
+            // router's link, a submit a script handles) or the form failed
+            // validation: no navigation to wait for.
+            point["nav"] = json!(false);
+        }
         if armed {
             let effect = self.click_effect(&before, timeout);
             if std::env::var_os("NAVIGERA_TRACE_EFFECT").is_some() {
                 point["effect_trace"] = json!(format!("{effect:?}")); // diagnostic knob
             }
             if let Effect::Nothing { watched_ms, requests } = effect {
+                // Nothing heard it, so no script of the page ran for it:
+                // a listener the page adds later is the page wiring up.
+                // Anything that did hear it (analytics, a script that
+                // records clicks to replay them once the page is wired)
+                // may act on it later, unseen: never sent again then.
+                if heard == Some(0) {
+                    let until = (started + wait).min(pressed_at + WIRING_MAX);
+                    let watch = Wiring { pressed_at, until, activity: before.0 };
+                    if let Some(seen) = self.wired_later(&watch, timeout) {
+                        let first = first.unwrap_or(pressed_at);
+                        // The element is there and was hittable a moment
+                        // ago: what is left of the wait, enough to settle.
+                        let left = wait.saturating_sub(started.elapsed()).max(Duration::from_secs(1));
+                        let tries = Tries { again: again - 1, first: Some(first), moved };
+                        let mut point = self.click_once(target, opts, left, timeout, tries)?;
+                        if point.get("clicked_again").is_none() {
+                            point["clicked_again"] = json!(seen.duration_since(first).as_millis() as u64);
+                        }
+                        return Ok(point);
+                    }
+                }
                 point["no_effect"] = json!({ "watched_ms": watched_ms, "requests": requests });
             }
         }
         Ok(point)
+    }
+
+    /// After a click that changed nothing and that nothing listened for
+    /// (`__nvPath`, see [`PATH_LISTENERS`]): does the page wire it up while
+    /// it settles? When it saw that, or None when the page stayed without a
+    /// script or data request in flight for [`WIRING_QUIET`] since the
+    /// press, the time ran out, the element left the page, or the browser
+    /// saw it navigate, open a dialog, a tab or a download.
+    fn wired_later(&self, watch: &Wiring, timeout: Duration) -> Option<Instant> {
+        let expression = path_listeners(false);
+        let mut quiet_from = watch.pressed_at;
+        let wired = loop {
+            let listening = self
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": expression, "includeCommandLineAPI": true, "returnByValue": true }),
+                    timeout,
+                )
+                .ok()
+                .and_then(|r| r.pointer("/result/value").and_then(Value::as_u64));
+            let Some(listening) = listening else { break None };
+            if self.shared.activity(&self.session_id) != watch.activity {
+                break None;
+            }
+            if listening > 0 {
+                break Some(Instant::now());
+            }
+            if self.shared.net_state(&self.session_id).0 > 0
+                || self.shared.logs.lock().unwrap().scripts_loading(&self.session_id) > 0
+            {
+                quiet_from = Instant::now();
+            }
+            if quiet_from.elapsed() >= WIRING_QUIET || Instant::now() >= watch.until {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        self.forget_path(timeout);
+        wired
+    }
+
+    /// End the path a young page's click kept (see CLICK_PREP).
+    fn forget_path(&self, timeout: Duration) {
+        let _ = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": "window.__nvPath && window.__nvPath.end()", "returnByValue": true }),
+            timeout,
+        );
     }
 
     /// Did a delivered click change anything? Polls what CLICK_PREP set up
@@ -3265,11 +4921,29 @@ impl Page {
         }
     }
 
+    /// Did the click on a link or a submit button plan a navigation (see
+    /// `armNav` in CLICK_PREP)? Stops watching. None when it can't be told.
+    fn nav_planned(&self, timeout: Duration) -> Option<bool> {
+        self.send(
+            "Runtime.evaluate",
+            json!({
+                "expression": "(() => { const n = window.__nvNav; if (!n) return null; delete window.__nvNav; return n.verdict(); })()",
+                "returnByValue": true,
+            }),
+            timeout,
+        )
+        .ok()
+        .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
+    }
+
     /// Stop watching a click's effects (see [`Page::click_effect`]).
     fn drop_effects(&self, timeout: Duration) {
         let _ = self.send(
             "Runtime.evaluate",
-            json!({ "expression": "window.__nvFx && window.__nvFx.check(true), 0", "returnByValue": true }),
+            json!({
+                "expression": "window.__nvFx && window.__nvFx.check(true), window.__nvPath && window.__nvPath.end(), 0",
+                "returnByValue": true,
+            }),
             timeout,
         );
     }
@@ -3292,17 +4966,48 @@ impl Page {
     /// arrived: only a definite "nothing came" triggers a resend.
     /// A slow page gets 300 ms to process the events before "nothing came"
     /// is believed (a dropped event never arrives; a queued one does).
-    fn press_arrived(&self, timeout: Duration) -> bool {
+    /// With `listeners`, the first look also counts what listens for the
+    /// click ([`PATH_LISTENERS`]). Then what the press landed on instead
+    /// of the element when it moved before the press (`__nvMissed`), and
+    /// where its click event went when not to the element (`__nvOff`).
+    fn press_arrived(&self, listeners: bool, timeout: Duration) -> Arrival {
         let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        let mut heard = None;
+        let (mut missed, mut off) = (None, None);
+        let mut first = listeners;
         loop {
+            let (expression, api) = if first {
+                (
+                    format!(
+                        "[window.__nvSeen, window.__nvMissed, window.__nvOff && window.__nvOff(), {}]",
+                        path_listeners(true)
+                    ),
+                    true,
+                )
+            } else {
+                ("[window.__nvSeen, window.__nvMissed, window.__nvOff && window.__nvOff()]".to_string(), false)
+            };
             let seen = self
-                .send("Runtime.evaluate", json!({ "expression": "window.__nvSeen", "returnByValue": true }), timeout)
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": expression, "includeCommandLineAPI": api, "returnByValue": true }),
+                    timeout,
+                )
                 .ok()
-                .map(|r| r.pointer("/result/value").and_then(Value::as_u64));
+                .map(|r| {
+                    let v = r.pointer("/result/value");
+                    if first {
+                        heard = v.and_then(|v| v.get(3)).and_then(Value::as_u64);
+                    }
+                    missed = v.and_then(|v| v.get(1)).and_then(Value::as_str).map(str::to_string);
+                    off = v.and_then(|v| v.get(2)).and_then(Value::as_str).map(str::to_string);
+                    v.and_then(|v| v.get(0)).and_then(Value::as_u64)
+                });
+            first = false;
             match seen {
                 Some(Some(0)) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-                Some(Some(0)) => return false,
-                _ => return true,
+                Some(Some(0)) => return Arrival { arrived: false, heard, missed, off },
+                _ => return Arrival { arrived: true, heard, missed, off },
             }
         }
     }
@@ -3337,20 +5042,47 @@ impl Page {
             "middle" => ("middle", 4),
             _ => ("left", 1),
         };
+        let event = |kind: &str, button: &str, buttons: u32| {
+            json!({
+                "type": kind, "x": x, "y": y,
+                "button": button, "buttons": buttons, "clickCount": 1,
+            })
+        };
+        if !self.shared.is_single_target() {
+            // Chrome: all three at once. They reach the page in the order
+            // sent, the move first (its handlers run before the press is hit
+            // tested), but no round trip waits for the move's frame-aligned
+            // dispatch before the press goes out: one wait for the three.
+            let session = Some(self.session_id.as_str());
+            let send = |params: Value| self.client.send("Input.dispatchMouseEvent", params, session, timeout);
+            let (moved, pressed, released) = self.block_on(async {
+                tokio::join!(
+                    send(event("mouseMoved", "none", 0)),
+                    send(event("mousePressed", button, held)),
+                    send(event("mouseReleased", button, 0))
+                )
+            });
+            use std::sync::atomic::Ordering;
+            let unanswered = |r: &Result<Value>| {
+                r.as_ref().err().is_some_and(|e| format!("{e:#}").contains(super::client::NO_ANSWER))
+            };
+            let stalled = unanswered(&moved) || unanswered(&pressed) || unanswered(&released);
+            self.stalled.store(stalled, Ordering::SeqCst);
+            // Refused outright, all three (no Input domain): nothing was
+            // pressed, so the caller's DOM-event click can't double it.
+            if !stalled && moved.is_err() && pressed.is_err() && released.is_err() {
+                return Ok(false);
+            }
+            pressed?;
+            released?;
+            return Ok(true);
+        }
         for (i, (kind, button, buttons)) in
             [("mouseMoved", "none", 0), ("mousePressed", button, held), ("mouseReleased", button, 0)]
                 .into_iter()
                 .enumerate()
         {
-            let sent = self.send(
-                "Input.dispatchMouseEvent",
-                json!({
-                    "type": kind, "x": x, "y": y,
-                    "button": button, "buttons": buttons, "clickCount": 1,
-                }),
-                timeout,
-            );
-            match sent {
+            match self.send("Input.dispatchMouseEvent", event(kind, button, buttons), timeout) {
                 Ok(_) => {}
                 Err(_) if i == 0 => return Ok(false),
                 Err(e) => return Err(e),
@@ -4117,7 +5849,18 @@ impl Page {
 
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
-        let value = self.evaluate_raw(&format!("({DEEP}.first({sel}) || {{}}).textContent ?? null"), timeout)?;
+        // Code and styles inside the element aren't text a user reads (an
+        // element that is itself a script, e.g. a JSON blob, keeps its own).
+        let value = self.evaluate_raw(
+            &format!(
+                "(() => {{ const el = {DEEP}.first({sel}); if (!el) return null; \
+                 if (!el.querySelector || !el.querySelector('script, style, template, noscript')) return el.textContent; \
+                 const c = el.cloneNode(true); \
+                 for (const n of c.querySelectorAll('script, style, template, noscript')) n.remove(); \
+                 return c.textContent; }})()"
+            ),
+            timeout,
+        )?;
         Ok(value.as_str().map(str::to_string))
     }
 
@@ -4263,7 +6006,7 @@ impl Page {
     /// `.class` for each element, to tell apart actionable elements that
     /// have no name or text.
     fn clickables(&self, timeout: Duration) -> ax::Clickables {
-        match self.dom_snapshot(timeout) {
+        match self.dom_snapshot(timeout).as_deref().and_then(snap_from_text) {
             Some(snap) => clickables_from(&snap),
             None => ax::Clickables::default(),
         }
@@ -4271,96 +6014,329 @@ impl Page {
 
     /// `DOMSnapshot.captureSnapshot` with the styles [`clickables_from`]
     /// and the tree built from the snapshot read (cursor, pointer-events,
-    /// opacity, visibility, display, content). No `includeDOMRects`: `layout.bounds`
+    /// opacity, visibility, display, content), and `content-visibility`
+    /// to drop what a display lock skips. No `includeDOMRects`: `layout.bounds`
     /// is always there, and the extra offset/client/scroll rects were about
     /// two thirds of the call's time on a 2,000-row table.
-    fn dom_snapshot(&self, timeout: Duration) -> Option<Value> {
-        let params =
-            json!({ "computedStyles": ["cursor", "pointer-events", "opacity", "visibility", "display", "content"] });
-        self.send("DOMSnapshot.captureSnapshot", params, timeout).ok()
+    /// The answer comes as its JSON text ([`super::client::TEXT_RESULT`]):
+    /// read it with [`snap_from_text`].
+    fn dom_snapshot(&self, timeout: Duration) -> Option<String> {
+        let params = json!({ "computedStyles": CAPTURE_STYLES });
+        match self.send("DOMSnapshot.captureSnapshot", params, timeout).ok()? {
+            Value::String(text) => Some(text),
+            value => Some(value.to_string()),
+        }
     }
 }
 
+/// A capture's columns from its JSON text: read straight into them, or,
+/// if Chrome's answer has a shape the typed read doesn't take, through
+/// JSON values as before.
+fn snap_from_text(text: &str) -> Option<Snap> {
+    Snap::from_json(text).or_else(|| Snap::from_value(&serde_json::from_str(text).ok()?))
+}
+
+/// Whether a DOM snapshot holds a closed shadow root: the page's scripts
+/// can't reach one, so neither can the change journal (see
+/// [`JOURNAL_ARM`]).
+fn has_closed_shadow_root(snap: &Snap) -> bool {
+    snap.has_closed_shadow_root()
+}
+
+/// Whether a read after an action patches the last read's snapshot (see
+/// [`Page::read_delta`]); `NAVIGERA_DELTA_READ=0` captures the page whole
+/// every time, to compare against.
+fn delta_reads() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_DELTA_READ").map_or(true, |v| v.trim() != "0"))
+}
+
+/// Whether a read from the DOM snapshot makes only the tree nodes its
+/// printer reaches (see [`domax::Lazy`]); `NAVIGERA_LAZY_BUILD=0` makes
+/// the whole tree first, to compare against.
+fn lazy_build() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_LAZY_BUILD").map_or(true, |v| v.trim() != "0"))
+}
+
+/// Whether element `i` of document `d` is `isClickable` without a
+/// listener, as Chrome tells it: a link with an address, an enabled
+/// field, a label of one, the summary that opens its `<details>`,
+/// editable content. None where the snapshot can't tell (a field in a
+/// disabled fieldset).
+fn clickable_by_rule(snap: &Snap, d: usize, i: usize) -> Option<bool> {
+    let doc = &snap.docs[d];
+    let attr = |k: usize, name: &str| {
+        doc.attrs[k]
+            .chunks(2)
+            .find(|p| snap.at(p[0]).eq_ignore_ascii_case(name))
+            .map(|p| snap.at(p.get(1).copied().unwrap_or(-1)))
+    };
+    let has = |k: usize, name: &str| attr(k, name).is_some();
+    let tag = snap.at(doc.name[i]);
+    // The nearest `contenteditable` decides.
+    let mut at = i as i64;
+    for _ in 0..256 {
+        if at < 0 {
+            break;
+        }
+        if let Some(v) = attr(at as usize, "contenteditable") {
+            if !v.trim().eq_ignore_ascii_case("false") {
+                return Some(true);
+            }
+            break;
+        }
+        at = doc.parent[at as usize];
+    }
+    let within = |k: usize, root: usize| {
+        let mut at = doc.parent[k];
+        for _ in 0..256 {
+            if at < 0 {
+                return false;
+            }
+            if at as usize == root {
+                return true;
+            }
+            at = doc.parent[at as usize];
+        }
+        false
+    };
+    match tag {
+        "A" | "AREA" | "a" | "area" => Some(has(i, "href") || has(i, "xlink:href")),
+        "LABEL" => {
+            // Its control: the element `for` names, else the first field inside.
+            let control = match attr(i, "for") {
+                Some(id) => (0..doc.parent.len()).find(|&k| doc.ty[k] == 1 && attr(k, "id") == Some(id)),
+                None => (i + 1..doc.parent.len()).take_while(|&k| within(k, i)).find(|&k| {
+                    matches!(
+                        snap.at(doc.name[k]),
+                        "INPUT" | "SELECT" | "TEXTAREA" | "BUTTON" | "METER" | "OUTPUT" | "PROGRESS"
+                    )
+                }),
+            };
+            match control {
+                Some(c) if snap.at(doc.name[c]) == "INPUT" => clickable_by_rule(snap, d, c),
+                _ => Some(false),
+            }
+        }
+        "INPUT" => {
+            if has(i, "disabled") {
+                return Some(false);
+            }
+            let mut at = doc.parent[i];
+            for _ in 0..256 {
+                if at < 0 {
+                    return Some(true);
+                }
+                if snap.at(doc.name[at as usize]) == "FIELDSET" && has(at as usize, "disabled") {
+                    return None;
+                }
+                at = doc.parent[at as usize];
+            }
+            None
+        }
+        "SUMMARY" => {
+            let p = doc.parent[i];
+            if p < 0 || snap.at(doc.name[p as usize]) != "DETAILS" {
+                return Some(false);
+            }
+            let first = (0..doc.parent.len()).find(|&k| doc.parent[k] == p && snap.at(doc.name[k]) == "SUMMARY");
+            Some(first == Some(i))
+        }
+        _ => Some(false),
+    }
+}
+
+/// The nodes of one subtree as [`Snap::patch`] takes them: the page's
+/// facts ([`JOURNAL_DELTA`], preorder, each with its parent's place) with
+/// the ids, names, values and attributes of `DOM.describeNode` of the same
+/// subtree (`desc`, Null for a lone whitespace text node, which it leaves
+/// out). Fails where the two don't line up: the page changed between them.
+fn zip_facts(
+    desc: &Value,
+    facts: &[Value],
+    listened: &dyn Fn(i64) -> bool,
+) -> std::result::Result<Vec<NewNode>, &'static str> {
+    let str_of = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let mut kids: Vec<Vec<usize>> = vec![Vec::new(); facts.len()];
+    for (i, f) in facts.iter().enumerate() {
+        match f.get("p").and_then(Value::as_i64) {
+            Some(p) if p >= 0 && (p as usize) < i => kids[p as usize].push(i),
+            Some(-1) if i == 0 => {}
+            _ => return Err("facts out of order"),
+        }
+    }
+    let layout_of = |f: &Value, text: Option<String>, bounds: Option<&Value>| -> Option<NewLayout> {
+        if f.get("l").and_then(Value::as_bool) != Some(true) && f.get("pt").is_none() {
+            return None;
+        }
+        let mut styles: [String; STYLES] = Default::default();
+        for (slot, v) in styles.iter_mut().zip(f.get("s").and_then(Value::as_array).into_iter().flatten()) {
+            *slot = v.as_str().unwrap_or("").to_string();
+        }
+        let mut b = [0.0; 4];
+        for (slot, v) in b.iter_mut().zip(bounds.or(f.get("b")).and_then(Value::as_array).into_iter().flatten()) {
+            *slot = v.as_f64().unwrap_or(0.0);
+        }
+        Some(NewLayout { text, styles, bounds: b })
+    };
+    let mut out: Vec<NewNode> = Vec::new();
+    let mut stack: Vec<(usize, Option<&Value>, usize)> = vec![(0, (!desc.is_null()).then_some(desc), usize::MAX)];
+    while let Some((fi, d, parent)) = stack.pop() {
+        let f = facts.get(fi).ok_or("facts")?;
+        let ty = f.get("t").and_then(Value::as_i64).ok_or("facts")?;
+        let name = str_of(f, "n").ok_or("facts")?;
+        let whitespace = f.get("w").is_some();
+        let backend = match d {
+            Some(d) => {
+                if d.get("nodeName").and_then(Value::as_str) != Some(name.as_str()) {
+                    return Err("the page moved under the read");
+                }
+                if d.get("contentDocument").is_some() {
+                    return Err("a frame");
+                }
+                let shadowed = d.get("shadowRoots").and_then(Value::as_array).into_iter().flatten();
+                if shadowed.into_iter().any(|r| r.get("shadowRootType").and_then(Value::as_str) != Some("user-agent")) {
+                    return Err("a shadow root");
+                }
+                d.get("backendNodeId").and_then(Value::as_i64).ok_or("no id")?
+            }
+            None if whitespace => SYNTHETIC_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            None => return Err("the page moved under the read"),
+        };
+        let attrs: Vec<(String, String)> = d
+            .and_then(|d| d.get("attributes"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.chunks(2)
+                    .map(|p| {
+                        (
+                            p[0].as_str().unwrap_or("").to_string(),
+                            p.get(1).and_then(Value::as_str).unwrap_or("").to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let text = (ty == 3).then(|| str_of(f, "lt")).flatten();
+        let at = out.len();
+        out.push(NewNode {
+            parent,
+            ty,
+            value: if ty == 3 || ty == 8 { Some(str_of(f, "v").unwrap_or_default()) } else { None },
+            name,
+            backend,
+            attrs,
+            pseudo: None,
+            input_value: str_of(f, "iv"),
+            text_value: str_of(f, "tv"),
+            checked: f.get("ck").is_some(),
+            selected: f.get("sel").is_some(),
+            clickable: f.get("c").and_then(Value::as_bool) == Some(true) || (ty == 1 && listened(backend)),
+            layout: layout_of(f, text, None),
+        });
+        // Pseudo-elements come first among an element's children, in
+        // the order both the snapshot and describeNode give them.
+        let shown: &[Value] =
+            d.and_then(|d| d.get("pseudoElements")).and_then(Value::as_array).map_or(&[], Vec::as_slice);
+        let read: &[Value] = f.get("ps").and_then(Value::as_array).map_or(&[], Vec::as_slice);
+        if shown.len() != read.len() {
+            return Err("pseudo-elements");
+        }
+        for dp in shown {
+            let pt = dp.get("pseudoType").and_then(Value::as_str).ok_or("pseudo-elements")?.to_string();
+            let fp = read
+                .iter()
+                .find(|fp| fp.get("pt").and_then(Value::as_str) == Some(pt.as_str()))
+                .ok_or("pseudo-elements")?;
+            out.push(NewNode {
+                parent: at,
+                ty: 1,
+                name: str_of(dp, "nodeName").unwrap_or_else(|| format!("::{pt}")),
+                backend: dp.get("backendNodeId").and_then(Value::as_i64).ok_or("no id")?,
+                layout: layout_of(fp, str_of(fp, "lt"), f.get("b")),
+                pseudo: Some(pt),
+                ..NewNode::default()
+            });
+        }
+        let shown: &[Value] = d.and_then(|d| d.get("children")).and_then(Value::as_array).map_or(&[], Vec::as_slice);
+        let mut shown = shown.iter();
+        let mut items = Vec::new();
+        for &k in &kids[fi] {
+            if facts[k].get("w").is_some() {
+                items.push((k, None, at));
+            } else {
+                items.push((k, Some(shown.next().ok_or("the page moved under the read")?), at));
+            }
+        }
+        if shown.next().is_some() {
+            return Err("the page moved under the read");
+        }
+        stack.extend(items.into_iter().rev());
+    }
+    Ok(out)
+}
+
 /// What a snapshot shows a user could click (see [`Page::clickables`]).
-fn clickables_from(snap: &Value) -> ax::Clickables {
+fn clickables_from(snap: &Snap) -> ax::Clickables {
     {
         let mut out = ax::Clickables::default();
-        let strings: Vec<&str> = snap
-            .get("strings")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|v| v.as_str().unwrap_or(""))
-            .collect();
-        let text =
-            |i: Option<&Value>| i.and_then(Value::as_u64).and_then(|i| strings.get(i as usize).copied()).unwrap_or("");
-        let documents: &[Value] = snap.get("documents").and_then(Value::as_array).map_or(&[], Vec::as_slice);
-        let page_origin = documents.first().and_then(|d| http_origin(text(d.get("documentURL"))));
-        for doc in documents {
-            let nodes = &doc["nodes"];
-            let foreign = match (&page_origin, http_origin(text(doc.get("documentURL")))) {
+        let text = |i: i64| snap.at(i);
+        let page_origin = snap.docs.first().and_then(|d| http_origin(text(d.url)));
+        for doc in &snap.docs {
+            let foreign = match (&page_origin, http_origin(text(doc.url))) {
                 (Some(page), Some(own)) => *page != own,
                 _ => false,
             };
-            let ints = |key: &str| -> Vec<i64> {
-                nodes
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .map(|v| v.as_i64().unwrap_or(-1))
-                    .collect()
-            };
-            let (parents, types, backends, names, values) =
-                (ints("parentIndex"), ints("nodeType"), ints("backendNodeId"), ints("nodeName"), ints("nodeValue"));
-            let mut children: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+            let (parents, types, backends, names, values) = (&doc.parent, &doc.ty, &doc.backend, &doc.name, &doc.value);
+            // Per node, by index (every node is looked at, most more than
+            // once: arrays, not maps).
+            let n = parents.len();
+            let at = |v: i64| usize::try_from(v).ok().filter(|&i| i < n);
+            // Each element's element children, in order.
+            let mut children: Vec<Vec<i64>> = vec![Vec::new(); n];
             // Each element's own text nodes, in order.
-            let mut own_text: std::collections::HashMap<i64, Vec<&str>> = std::collections::HashMap::new();
+            let mut own_text: Vec<Vec<&str>> = vec![Vec::new(); n];
             // Elements with text of their own somewhere inside.
-            let mut texted = std::collections::HashSet::new();
+            let mut texted = vec![false; n];
             for (i, &parent) in parents.iter().enumerate() {
-                if types.get(i) == Some(&1) && parent >= 0 {
-                    children.entry(parent).or_default().push(i as i64);
+                let Some(p) = at(parent) else { continue };
+                if types.get(i) == Some(&1) {
+                    children[p].push(i as i64);
                 }
-                let value = values.get(i).and_then(|&v| strings.get(v as usize)).copied().unwrap_or("");
+                let value = values.get(i).map_or("", |&v| text(v));
                 if types.get(i) == Some(&3) && !value.trim().is_empty() {
-                    own_text.entry(parent).or_default().push(value);
-                    let mut at = parent;
+                    own_text[p].push(value);
+                    let mut up = parent;
                     for _ in 0..64 {
-                        if at < 0 || !texted.insert(at) {
-                            break;
+                        match at(up) {
+                            Some(u) if !texted[u] => texted[u] = true,
+                            _ => break,
                         }
-                        at = parents.get(at as usize).copied().unwrap_or(-1);
+                        up = parents[up as usize];
                     }
                 }
             }
-            let listening: std::collections::HashSet<i64> = nodes
-                .get("isClickable")
-                .and_then(|c| c.get("index"))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_i64)
-                .collect();
-            let layout = &doc["layout"];
+            let children_of = |i: i64| -> &[i64] { at(i).map_or(&[], |i| children[i].as_slice()) };
+            let own_text_of = |i: i64| -> &[&str] { at(i).map_or(&[], |i| own_text[i].as_slice()) };
+            let texted = |i: i64| at(i).is_some_and(|i| texted[i]);
+            let mut listening = vec![false; n];
+            for &i in doc.clickable.iter().filter(|&&i| i < n) {
+                listening[i] = true;
+            }
             // Per laid-out node: (cursor, pointer-events, opacity, has an area,
             // visibility).
-            let mut boxes = std::collections::HashMap::new();
-            let styles = layout.get("styles").and_then(Value::as_array);
-            let bounds = layout.get("bounds").and_then(Value::as_array);
-            for (i, node) in layout.get("nodeIndex").and_then(Value::as_array).into_iter().flatten().enumerate() {
-                let style = |k: usize| text(styles.and_then(|s| s.get(i)).and_then(|s| s.get(k)));
-                let area = bounds
-                    .and_then(|b| b.get(i))
-                    .and_then(Value::as_array)
-                    .map(|r| r.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
-                    .is_some_and(|r| r.len() == 4 && r[2] > 0.0 && r[3] > 0.0);
-                boxes.insert(node.as_i64().unwrap_or(-1), (style(0), style(1), style(2), area, style(3)));
+            let mut boxes = vec![None; n];
+            for l in doc.layout.iter().filter(|l| l.node < n) {
+                let style = |k: usize| text(l.styles[k]);
+                let area = l.bounds[2] > 0.0 && l.bounds[3] > 0.0;
+                boxes[l.node] = Some((style(0), style(1), style(2), area, style(3)));
             }
-            let pointer = |i: i64| boxes.get(&i).is_some_and(|b| b.0 == "pointer");
+            let box_of = |i: i64| at(i).and_then(|i| boxes[i]);
+            let pointer = |i: i64| box_of(i).is_some_and(|b| b.0 == "pointer");
             let transparent = |mut i: i64| {
                 for _ in 0..64 {
-                    if boxes.get(&i).is_some_and(|b| b.2 == "0") {
+                    if box_of(i).is_some_and(|b| b.2 == "0") {
                         return true;
                     }
                     match parents.get(i as usize) {
@@ -4370,12 +6346,10 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                 }
                 false
             };
-            let tag_of = |i: i64| names.get(i as usize).and_then(|&n| strings.get(n as usize)).copied().unwrap_or("");
-            let attributes = nodes.get("attributes").and_then(Value::as_array);
+            let tag_of = |i: i64| names.get(i as usize).map_or("", |&n| text(n));
+            let pairs_of = |i: i64| -> &[i64] { doc.attrs.get(i as usize).map_or(&[], Vec::as_slice) };
             let attr_of = |i: i64, name: &str| -> &str {
-                let pairs = attributes.and_then(|a| a.get(i as usize)).and_then(Value::as_array);
-                let pairs = pairs.map(|a| a.as_slice()).unwrap_or(&[]);
-                pairs.chunks(2).find(|p| text(p.first()) == name).map(|p| text(p.get(1))).unwrap_or("")
+                pairs_of(i).chunks(2).find(|p| text(p[0]) == name).map_or("", |p| text(p.get(1).copied().unwrap_or(-1)))
             };
             let first_class = |i: i64| attr_of(i, "class").split_whitespace().next().unwrap_or("");
             // A list item or table row by its tag or role. The parts of one
@@ -4394,13 +6368,13 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                             | "treeitem"
                     )
             };
-            let boxed = |i: &i64| boxes.get(i).is_some_and(|b| b.3);
+            let boxed = |i: &i64| box_of(*i).is_some_and(|b| b.3);
             // The items of a list or rows of a table that `i` holds (through
             // wrappers of one child each): two or more list items or rows of
             // one tag and class, most of its children, each with text.
             let items = |mut i: i64| -> Option<Vec<i64>> {
                 for _ in 0..4 {
-                    let kids: Vec<i64> = children.get(&i).into_iter().flatten().copied().filter(boxed).collect();
+                    let kids: Vec<i64> = children_of(i).iter().copied().filter(boxed).collect();
                     match kids.as_slice() {
                         [] => return None,
                         [only] => i = *only,
@@ -4413,19 +6387,16 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                             let group = groups.into_values().max_by_key(Vec::len)?;
                             let listed = group.len() >= 2
                                 && group.len() * 2 > kids.len()
-                                && group.iter().all(|&k| item(k) && texted.contains(&k));
+                                && group.iter().all(|&k| item(k) && texted(k));
                             return listed.then_some(group);
                         }
                     }
                 }
                 None
             };
-            let has_attr = |i: i64, name: &str| {
-                let pairs = attributes.and_then(|a| a.get(i as usize)).and_then(Value::as_array);
-                pairs.map(|a| a.as_slice()).unwrap_or(&[]).chunks(2).any(|p| text(p.first()) == name)
-            };
+            let has_attr = |i: i64, name: &str| pairs_of(i).chunks(2).any(|p| text(p[0]) == name);
             // `i` and its ancestors, nearest first.
-            let parent_of: &[i64] = &parents;
+            let parent_of: &[i64] = parents;
             let up = move |mut i: i64| {
                 std::iter::from_fn(move || {
                     let at = i;
@@ -4453,18 +6424,24 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                     }
                 })
             };
-            let by_id: std::collections::HashMap<&str, i64> = (0..names.len() as i64)
-                .filter(|&i| types.get(i as usize) == Some(&1))
-                .map(|i| (attr_of(i, "id"), i))
-                .filter(|(id, _)| !id.is_empty())
-                .collect();
+            // Only a label asks (the last element with an id wins).
+            let by_id = std::cell::OnceCell::new();
+            let by_id = || {
+                by_id.get_or_init(|| -> std::collections::HashMap<&str, i64> {
+                    (0..names.len() as i64)
+                        .filter(|&i| types.get(i as usize) == Some(&1))
+                        .map(|i| (attr_of(i, "id"), i))
+                        .filter(|(id, _)| !id.is_empty())
+                        .collect()
+                })
+            };
             // A label clicks its control, which has a ref of its own, unless
             // the control is hidden: then the label is what a user clicks.
             let control_hidden = |label: i64| {
-                let control = by_id.get(attr_of(label, "for")).copied().or_else(|| {
+                let control = by_id().get(attr_of(label, "for")).copied().or_else(|| {
                     let mut stack = vec![(label, 0)];
                     while let Some((at, depth)) = stack.pop() {
-                        for &k in children.get(&at).into_iter().flatten() {
+                        for &k in children_of(at) {
                             if matches!(tag_of(k), "INPUT" | "SELECT" | "TEXTAREA") {
                                 return Some(k);
                             }
@@ -4479,7 +6456,7 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
             };
             // A user's click could land on it.
             let landable = |i: i64| {
-                let Some(&(_, events, _, area, visibility)) = boxes.get(&i) else { return false };
+                let Some((_, events, _, area, visibility)) = box_of(i) else { return false };
                 let tag = tag_of(i);
                 !foreign
                     && !matches!(tag, "HTML" | "BODY")
@@ -4496,14 +6473,14 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                 let mut words = String::new();
                 let mut stack = vec![(i, 0)];
                 while let Some((at, depth)) = stack.pop() {
-                    for value in own_text.get(&at).into_iter().flatten() {
+                    for value in own_text_of(at) {
                         words.push(' ');
                         words.push_str(value.trim());
                     }
                     if words.len() > 80 || depth >= 8 {
                         continue;
                     }
-                    for &k in children.get(&at).into_iter().flatten().rev() {
+                    for &k in children_of(at).iter().rev() {
                         stack.push((k, depth + 1));
                     }
                 }
@@ -4583,7 +6560,7 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                         _ => {}
                     }
                     if depth < 4 {
-                        for &k in children.get(&at).into_iter().flatten() {
+                        for &k in children_of(at) {
                             queue.push_back((k, depth + 1));
                         }
                     }
@@ -4597,10 +6574,11 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                 }
                 let index = i as i64;
                 let backend = backend as u64;
-                let attrs = attributes.and_then(|a| a.get(i)).and_then(Value::as_array);
                 let attr = |name: &str| {
-                    let pairs = attrs.map(|a| a.as_slice()).unwrap_or(&[]);
-                    pairs.chunks(2).find(|p| text(p.first()) == name).map(|p| text(p.get(1)).trim().to_string())
+                    pairs_of(index)
+                        .chunks(2)
+                        .find(|p| text(p[0]) == name)
+                        .map(|p| text(p.get(1).copied().unwrap_or(-1)).trim().to_string())
                 };
                 let selector = if let Some(id) = attr("id").filter(|id| !id.is_empty()) {
                     Some(format!("#{id}"))
@@ -4608,20 +6586,20 @@ fn clickables_from(snap: &Value) -> ax::Clickables {
                     attr("class").and_then(|c| c.split_whitespace().next().map(|c| format!(".{c}")))
                 };
                 // With no text inside (an icon button): what the page says it is.
-                let what = if texted.contains(&index) { None } else { icon_hint(index) };
+                let what = if texted(index) { None } else { icon_hint(index) };
                 match (selector, what) {
                     (Some(s), Some(w)) => out.hints.insert(backend, format!("{s} {w}")),
                     (Some(h), None) | (None, Some(h)) => out.hints.insert(backend, h),
                     (None, None) => None,
                 };
-                if !landable(index) {
-                    continue;
-                }
                 let parent = parents.get(i).copied().unwrap_or(-1);
                 // `draggable=true` is a handle a user grabs, handler or not.
-                if listening.contains(&index)
+                // The cheap tests first: most elements fail them, and
+                // whether a click could land walks the ancestors.
+                if (listening[i]
                     || (pointer(index) && !pointer(parent))
-                    || attr("draggable").as_deref() == Some("true")
+                    || attr("draggable").as_deref() == Some("true"))
+                    && landable(index)
                 {
                     match items(index) {
                         Some(items) => out.nodes.extend(
@@ -4793,6 +6771,48 @@ impl Page {
         }
     }
 
+    /// Read a large page ahead of its first `ax`, while the agent reads
+    /// what `goto` said: a journal armed and primed, then the page
+    /// captured, and the snapshot kept as a read keeps it, unprinted. The
+    /// `ax` that comes next is then patched with what changed since (see
+    /// [`Page::read_delta`]) instead of capturing the page itself. Not on
+    /// a page small enough to capture quickly, nor where a read would not
+    /// keep its snapshot, nor one whose capture would take longer than
+    /// `budget`. Says why not, or "" once kept.
+    pub fn pre_read(&self, budget: Duration, timeout: Duration) -> &'static str {
+        if !delta_reads() || !rest_prime() || self.shared.is_single_target() {
+            return "off";
+        }
+        let Some(nodes) = self.dom_nodes(timeout) else { return "no node count" };
+        if nodes <= JOURNAL_NODES {
+            return "small page";
+        }
+        if Duration::from_micros(nodes * PRE_READ_NODE_US) > budget {
+            return "too large for the client's pause";
+        }
+        let Some((id, watched, rested)) = self.arm_journal(timeout) else { return "no journal" };
+        if !rested {
+            return "not primed";
+        }
+        let started = std::time::Instant::now();
+        let Some(text) = self.dom_snapshot(timeout) else { return "no snapshot" };
+        let Some(snap) = snap_from_text(&text) else { return "no document" };
+        drop(std::thread::spawn(move || drop(text)));
+        crate::timing::record("pre_read", started);
+        if watched < snap.docs.len() as u64 || has_closed_shadow_root(&snap) {
+            return "not watched whole";
+        }
+        *self.kept.lock().unwrap() = Some(Kept { journal: id, snap, rested: true });
+        self.pre_journal.store(id, std::sync::atomic::Ordering::Relaxed);
+        ""
+    }
+
+    /// The snapshot [`Page::pre_read`] kept is still there: no read took it.
+    pub fn pre_read_unused(&self) -> bool {
+        let pre = self.pre_journal.load(std::sync::atomic::Ordering::Relaxed);
+        pre != 0 && self.kept.lock().unwrap().as_ref().is_some_and(|k| k.journal == pre)
+    }
+
     /// Accessibility snapshot for agents (see [`ax`]): an indented text
     /// tree with `[ref=N]` on actionable nodes, iframes included. `json`
     /// keeps the older flat `[{ref, role, name, value?}]` list.
@@ -4804,6 +6824,10 @@ impl Page {
     }
 
     fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        // Only a read that arms a journal leaves one standing for itself,
+        // and its snapshot.
+        *self.journal.lock().unwrap() = None;
+        let prior = self.kept.lock().unwrap().take();
         let tree_opts = !opts.json && opts.max_depth.is_none() && !self.shared.is_single_target();
         // A large page's tree is built from the DOM snapshot; anything that
         // path can't serve falls back to Chrome's tree below.
@@ -4814,7 +6838,7 @@ impl Page {
         // the same page load (for checking one against the other).
         if tree_opts && forced.as_deref().map(str::trim) == Some("both") {
             let chrome = self.ax_tree_full(timeout, opts, None)?;
-            let dom = self.ax_tree_dom(timeout, opts)?;
+            let dom = self.ax_tree_dom(timeout, opts, None)?;
             return Ok(Value::String(format!(
                 "{}\n=== DOM snapshot tree ===\n{}",
                 chrome.as_str().unwrap_or(""),
@@ -4828,7 +6852,9 @@ impl Page {
                 None => nodes.is_some_and(|n| n > DOM_TREE_NODES),
             };
         if from_dom {
-            match self.ax_tree_dom(timeout, opts) {
+            // A journal pays where reading again costs more than keeping it.
+            let journal = opts.journal && nodes.is_some_and(|n| n > JOURNAL_NODES);
+            match self.ax_tree_dom(timeout, &AxOptions { journal, ..opts.clone() }, prior) {
                 Ok(text) => return Ok(text),
                 Err(e) => crate::timing::log(&format!("[ax] DOM snapshot tree failed, reading Chrome's: {e:#}")),
             }
@@ -4867,62 +6893,421 @@ impl Page {
 
     /// The text tree built from the DOM snapshot (see `domax`): one
     /// snapshot serves the tree and the clickable elements.
-    fn ax_tree_dom(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+    fn ax_tree_dom(&self, timeout: Duration, opts: &AxOptions, prior: Option<Kept>) -> Result<Value> {
         // A scope is found first: only its subtree is built.
         let root_backend_id = match &opts.scope {
             Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
             None => None,
         };
+        // After an action, the last read's snapshot with what changed
+        // since read again; else the page captured whole.
+        let mut armed = None;
+        let mut patched = None;
+        let primed = self.primed.lock().unwrap().take();
+        // An action primed the journal, or its arming did: patched.
+        let prior = prior
+            .filter(|k| opts.journal && delta_reads() && (primed == Some(k.journal) || (primed.is_none() && k.rested)));
+        if let Some(prior) = prior {
+            let started = std::time::Instant::now();
+            match self.read_delta(prior, timeout) {
+                Ok((snap, arming)) => {
+                    patched = Some(snap);
+                    armed = arming;
+                }
+                Err((why, arming)) => {
+                    crate::timing::log(&format!("[delta] captured whole: {why}"));
+                    armed = arming;
+                }
+            }
+            crate::timing::record("ax_delta", started);
+        }
+        let snap = match patched {
+            Some(snap) => snap,
+            None => {
+                // Armed before the capture: a change between the two leaves the
+                // journal dirty (a read again), never unseen.
+                if opts.journal && armed.is_none() {
+                    armed = self.arm_journal(timeout);
+                }
+                let started = std::time::Instant::now();
+                let text = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
+                crate::timing::record("ax_dom_snapshot", started);
+                let started = std::time::Instant::now();
+                let snap = snap_from_text(&text).ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
+                crate::timing::record("ax_dom_columns", started);
+                snap
+            }
+        };
+        // It speaks for the read only if it watched every document the
+        // snapshot holds (a frame of another origin in the page's process
+        // can't be watched from the page).
+        let docs = snap.docs.len() as u64;
+        // Nor can it watch inside a closed shadow root, which the snapshot
+        // reads.
+        let closed = armed.is_some() && has_closed_shadow_root(&snap);
+        let journal = armed.filter(|&(_, watched, _)| watched >= docs && !closed).map(|(id, _, rested)| (id, rested));
+        *self.journal.lock().unwrap() = journal.map(|(id, _)| id);
         let started = std::time::Instant::now();
-        let snap = self.dom_snapshot(timeout).ok_or_else(|| anyhow::anyhow!("no DOM snapshot"))?;
-        crate::timing::record("ax_dom_snapshot", started);
-        let started = std::time::Instant::now();
+        // The whole page's tree is made only for a scope (which must be
+        // found in it) or to compare against; else the printer makes the
+        // nodes it reaches, and stops at its limit.
+        let whole = root_backend_id.is_some() || !lazy_build();
+        let strings = domax::strings(&snap);
         // The clickable elements and the tree read the same snapshot, side
         // by side.
-        let (clicks, built) = std::thread::scope(|s| {
+        let (clicks, built, source) = std::thread::scope(|s| {
             let clicks = s.spawn(|| clickables_from(&snap));
-            let built = match root_backend_id {
-                Some(backend) => domax::build_scoped(&snap, backend),
-                None => domax::build(&snap),
+            let (built, source) = match root_backend_id {
+                Some(backend) => (domax::build_scoped(&snap, backend), None),
+                None if whole => (domax::build(&snap), None),
+                None => (None, domax::Lazy::new(&snap, &strings)),
             };
-            (clicks.join(), built)
+            (clicks.join(), built, source)
         });
         let clicks = clicks.map_err(|_| anyhow::anyhow!("reading the snapshot's clickable elements failed"))?;
-        let built = built.ok_or_else(|| anyhow::anyhow!("the snapshot has no document"))?;
-        // Freeing a large snapshot takes milliseconds: not on the way to
-        // the answer.
-        std::thread::spawn(move || drop(snap));
+        if built.is_none() && source.is_none() {
+            bail!("the snapshot has no document");
+        }
         crate::timing::record("ax_dom_build", started);
-        if let Some(backend) = root_backend_id {
+        if let (Some(backend), Some(built)) = (root_backend_id, &built) {
             let has = |nodes: &[ax::Node]| nodes.iter().any(|n| n.backend == Some(backend));
             if !has(&built.nodes) && !built.frames.iter().any(|f| has(&f.nodes)) {
                 bail!("the scope is not in the snapshot's tree");
             }
         }
-        let url = built.url.clone();
+        let (title, url) = match (&built, &source) {
+            (Some(b), _) => (b.title.clone(), b.url.clone()),
+            (None, Some(l)) => (l.title.clone(), l.url.clone()),
+            (None, None) => unreachable!(),
+        };
         let origin = url
             .find("://")
             .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
             .unwrap_or_default();
         let started = std::time::Instant::now();
-        let rendered = ax::render_nodes(
-            &format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default()),
-            &built.nodes,
-            &built.frames,
-            &ax::Options {
-                full_text: opts.full_text,
-                all_refs: opts.all_refs,
-                limit: opts.limit,
-                root_backend_id,
-                origin,
-                clicks,
-                lazy_budget: None,
-            },
-        );
+        let header = format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default());
+        let render_opts = ax::Options {
+            full_text: opts.full_text,
+            all_refs: opts.all_refs,
+            limit: opts.limit,
+            root_backend_id,
+            origin,
+            clicks,
+            lazy_budget: None,
+        };
+        let rendered = match (&built, &source) {
+            (Some(b), _) => ax::render_nodes(&header, &b.nodes, &b.frames, &render_opts),
+            (None, Some(l)) => ax::render_source(&header, l, &render_opts),
+            (None, None) => unreachable!(),
+        };
         crate::timing::record("ax_render", started);
-        std::thread::spawn(move || drop(built));
+        drop(source);
+        drop(strings);
+        // Freeing a large tree or snapshot takes milliseconds: not on the
+        // way to the answer.
+        std::thread::spawn(move || drop((built, render_opts)));
+        match journal {
+            Some((journal, rested)) => *self.kept.lock().unwrap() = Some(Kept { journal, snap, rested }),
+            None => drop(std::thread::spawn(move || drop(snap))),
+        }
         self.remember_refs(&rendered.refs, &url, root_backend_id);
         Ok(Value::String(rendered.text))
+    }
+
+    /// The elements with a click, mousedown or mouseup listener of their
+    /// own (what `isClickable` counts besides links, fields and editable
+    /// text), in every document: one call, ~5 ms on a 10,000-row page.
+    fn listeners(&self, timeout: Duration) -> Option<std::collections::HashSet<i64>> {
+        let started = std::time::Instant::now();
+        let doc = self
+            .send("Runtime.evaluate", json!({ "expression": "document", "objectGroup": "nv-listen" }), timeout)
+            .ok()?;
+        let object = doc.pointer("/result/objectId").and_then(Value::as_str)?.to_string();
+        let got = self.send(
+            "DOMDebugger.getEventListeners",
+            json!({ "objectId": object, "depth": -1, "pierce": true }),
+            timeout,
+        );
+        let _ = self.send("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-listen" }), timeout);
+        crate::timing::record("ax_listeners", started);
+        let got = got.ok()?;
+        Some(
+            got.get("listeners")?
+                .as_array()?
+                .iter()
+                .filter(|l| l.get("type").and_then(Value::as_str).is_some_and(|t| CLICK_LISTENERS.contains(&t)))
+                .filter_map(|l| l.get("backendNodeId").and_then(Value::as_i64))
+                .collect(),
+        )
+    }
+
+    /// The tree read after an action, as the last read's snapshot (`prior`)
+    /// with what changed since read again from the page (see
+    /// [`JOURNAL_DELTA`]): the cost of the change, not of the page. The new
+    /// journal is armed in the same evaluation (its id and documents come
+    /// back either way, for the whole capture to reuse). Why not when the
+    /// journal can't say what changed, the change is too big to read
+    /// faster than a capture, or the page moved under the reading.
+    fn read_delta(&self, prior: Kept, timeout: Duration) -> std::result::Result<(Snap, Arming), (String, Arming)> {
+        if prior.snap.docs.is_empty() {
+            return Err(("no document".into(), None));
+        }
+        // A listener added or taken off since the read changes no DOM: the
+        // elements with one now, against what the snapshot marked.
+        let listened = self.listeners(timeout).ok_or_else(|| ("no listeners".to_string(), None))?;
+        let mut ops = Vec::new();
+        // Clickable then, not listened now, and not by its kind: fine where
+        // the node is read again or gone, else a listener came off.
+        let mut unsure = Vec::new();
+        for (d, doc) in prior.snap.docs.iter().enumerate() {
+            let mut was = vec![false; doc.parent.len()];
+            for &i in &doc.clickable {
+                was[i] = true;
+            }
+            for (i, &b) in doc.backend.iter().enumerate() {
+                if doc.ty[i] != 1 {
+                    continue;
+                }
+                // Listened now: clickable. Not clickable then, nor listened
+                // now: still not (what else makes it clickable is its kind,
+                // and a change to that is read again). Clickable then and
+                // not listened now: still, if its kind makes it so; else a
+                // listener came off, or it is a kind this can't tell.
+                let now = if listened.contains(&b) {
+                    true
+                } else if !was[i] || clickable_by_rule(&prior.snap, d, i) == Some(true) {
+                    continue;
+                } else if d == 0 {
+                    unsure.push(b);
+                    continue;
+                } else {
+                    return Err(("a listener taken off in a frame".into(), None));
+                };
+                if now != was[i] {
+                    if d > 0 {
+                        return Err(("a listener in a frame".into(), None));
+                    }
+                    ops.push(Op::Clickable { backend: b, on: now });
+                }
+            }
+        }
+        let doc = &prior.snap.docs[0];
+        // Reading a node here costs more than capturing one does (about
+        // 10 us against 6.5 on a 10,000-row page, Chrome 153), and both
+        // then build the whole tree: past an eighth of the page, capture.
+        let max = (doc.parent.len() / 8).max(500);
+        let id = JOURNAL_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let r = self.send(
+            "Runtime.evaluate",
+            json!({
+                "expression": format!(
+                    "(() => {{ const d = ({JOURNAL_DELTA})({}, {max}); const a = {}; return {{ d, a }}; }})()",
+                    prior.journal,
+                    arm_expression(id)
+                ),
+                "returnByValue": true,
+            }),
+            timeout,
+        );
+        crate::timing::record("delta_read", started);
+        let v = r.map_err(|e| (format!("{e:#}"), None))?;
+        if let Some(details) = v.get("exceptionDetails") {
+            return Err((exception_message(details), None));
+        }
+        let v = v.pointer("/result/value").ok_or_else(|| ("no answer".to_string(), None))?;
+        let arm = &v["a"];
+        let armed = arming_of(id, arm);
+        let fail = |why: String| (why, armed);
+        let d = &v["d"];
+        if let Some(why) = d.as_str() {
+            return Err(fail(why.to_string()));
+        }
+        let js_ops = d.get("ops").and_then(Value::as_array).ok_or_else(|| fail("no ops".into()))?;
+        let started = std::time::Instant::now();
+        let described = self.describe_roots(js_ops, timeout).map_err(|e| fail(format!("{e:#}")))?;
+        crate::timing::record("delta_describe", started);
+        let listened_now = |b: i64| listened.contains(&b);
+        let mut index: Option<FxMap<i64, usize>> = None;
+        for op in js_ops {
+            let at = |key: &str| op.get(key).and_then(Value::as_u64).map(|i| i as usize);
+            let desc = |i: usize| described.get(&i).ok_or_else(|| fail("a root not described".into()));
+            match op.get("k").and_then(Value::as_str) {
+                Some("r") => {
+                    let d = desc(at("d").ok_or_else(|| fail("op".into()))?)?;
+                    let facts = op.get("f").and_then(Value::as_array).ok_or_else(|| fail("facts".into()))?;
+                    let nodes = zip_facts(d, facts, &listened_now).map_err(|e| fail(e.into()))?;
+                    let backend = d.get("backendNodeId").and_then(Value::as_i64).ok_or_else(|| fail("id".into()))?;
+                    ops.push(Op::Replace { backend, nodes });
+                }
+                Some("c") => {
+                    let parent = desc(at("d").ok_or_else(|| fail("op".into()))?)?;
+                    let backend =
+                        parent.get("backendNodeId").and_then(Value::as_i64).ok_or_else(|| fail("id".into()))?;
+                    let gone = op.get("gone").and_then(Value::as_u64) == Some(1);
+                    let index =
+                        index.get_or_insert_with(|| doc.backend.iter().enumerate().map(|(i, &b)| (b, i)).collect());
+                    let at_old = *index.get(&backend).ok_or_else(|| fail("parent not in the snapshot".into()))?;
+                    // Its children in the read, in order (not its pseudo-elements).
+                    let old = doc.dom_children(at_old).ok_or_else(|| fail("a shadow tree".into()))?;
+                    let old_at: FxMap<i64, usize> = if gone {
+                        old.iter().enumerate().map(|(k, &o)| (doc.backend[o], k)).collect()
+                    } else {
+                        FxMap::default()
+                    };
+                    // The next old whitespace text with this value, from `pos`.
+                    let old_text = |pos: usize, value: &str| {
+                        (pos..old.len()).find(|&k| doc.ty[old[k]] == 3 && prior.snap.at(doc.value[old[k]]) == value)
+                    };
+                    let shown: &[Value] = parent.get("children").and_then(Value::as_array).map_or(&[], Vec::as_slice);
+                    let mut shown = shown.iter();
+                    let mut pos = 0usize;
+                    let mut children = Vec::new();
+                    for c in op.get("ch").and_then(Value::as_array).into_iter().flatten() {
+                        if let Some(run) = c.as_u64() {
+                            if gone {
+                                return Err(fail("op".into()));
+                            }
+                            for _ in 0..run {
+                                let o = old.get(pos).ok_or_else(|| fail("children moved".into()))?;
+                                children.push(Child::Keep(doc.backend[*o]));
+                                pos += 1;
+                            }
+                        } else if let Some(ws) = c.get("ws").and_then(Value::as_array) {
+                            // Whitespace text read again in place of the read's own.
+                            if let Some(value) = c.get("old").and_then(Value::as_str) {
+                                pos = if gone {
+                                    old_text(pos, value).ok_or_else(|| fail("children moved".into()))? + 1
+                                } else if old.get(pos).is_some_and(|&o| doc.ty[o] == 3) {
+                                    pos + 1
+                                } else {
+                                    return Err(fail("children moved".into()));
+                                };
+                            }
+                            children.push(Child::New(
+                                zip_facts(&Value::Null, ws, &listened_now).map_err(|e| fail(e.into()))?,
+                            ));
+                        } else if let Some(value) = c.get("w").and_then(Value::as_str) {
+                            let k = old_text(pos, value).ok_or_else(|| fail("children moved".into()))?;
+                            children.push(Child::Keep(doc.backend[old[k]]));
+                            pos = k + 1;
+                        } else if let Some(name) = c.as_str() {
+                            let d = shown.next().ok_or_else(|| fail("children".into()))?;
+                            if d.get("nodeName").and_then(Value::as_str) != Some(name) {
+                                return Err(fail("children moved".into()));
+                            }
+                            let b = d.get("backendNodeId").and_then(Value::as_i64).ok_or_else(|| fail("id".into()))?;
+                            let k = *old_at.get(&b).ok_or_else(|| fail("children moved".into()))?;
+                            if k < pos {
+                                return Err(fail("children moved".into()));
+                            }
+                            pos = k + 1;
+                            children.push(Child::Keep(b));
+                        } else {
+                            let root =
+                                desc(c.get("d").and_then(Value::as_u64).ok_or_else(|| fail("op".into()))? as usize)?;
+                            if gone {
+                                let d = shown.next().ok_or_else(|| fail("children".into()))?;
+                                if d.get("backendNodeId") != root.get("backendNodeId") {
+                                    return Err(fail("children moved".into()));
+                                }
+                            }
+                            let facts = c.get("f").and_then(Value::as_array).ok_or_else(|| fail("facts".into()))?;
+                            children
+                                .push(Child::New(zip_facts(root, facts, &listened_now).map_err(|e| fail(e.into()))?));
+                        }
+                    }
+                    if (!gone && pos != old.len()) || shown.next().is_some() {
+                        return Err(fail("children moved".into()));
+                    }
+                    ops.push(Op::Children { backend, children });
+                }
+                _ => return Err(fail("op".into())),
+            }
+        }
+        let mut read: FxSet<i64> = FxSet::default();
+        if !unsure.is_empty() {
+            for op in &ops {
+                let nodes: Box<dyn Iterator<Item = &NewNode>> = match op {
+                    Op::Replace { nodes, .. } => Box::new(nodes.iter()),
+                    Op::Children { children, .. } => Box::new(children.iter().flat_map(|c| match c {
+                        Child::New(nodes) => nodes.as_slice(),
+                        Child::Keep(_) => &[],
+                    })),
+                    Op::Clickable { .. } => Box::new(std::iter::empty()),
+                };
+                read.extend(nodes.map(|n| n.backend));
+            }
+        }
+        let started = std::time::Instant::now();
+        let snap = prior.snap.patch(ops).map_err(|e| fail(e.into()))?;
+        crate::timing::record("delta_patch", started);
+        if !unsure.is_empty() {
+            let kept: FxSet<i64> = snap.docs[0].backend.iter().copied().collect();
+            if unsure.iter().any(|b| kept.contains(b) && !read.contains(b)) {
+                return Err(fail("a listener taken off".into()));
+            }
+        }
+        crate::timing::log(&format!("[delta] read {} nodes", d.get("n").and_then(Value::as_u64).unwrap_or(0)));
+        Ok((snap, armed))
+    }
+
+    /// `DOM.describeNode` of each root [`JOURNAL_DELTA`] left in
+    /// `window.__nvDeltaRoots`, by its place there: a parent whose children
+    /// changed one level deep, the rest whole.
+    fn describe_roots(&self, ops: &[Value], timeout: Duration) -> Result<std::collections::HashMap<usize, Value>> {
+        let mut depth: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+        for op in ops {
+            let Some(d) = op.get("d").and_then(Value::as_u64) else { continue };
+            let list = op.get("k").and_then(Value::as_str) == Some("c");
+            let gone = op.get("gone").and_then(Value::as_u64) == Some(1);
+            depth.insert(
+                d as usize,
+                if !list {
+                    -1
+                } else if gone {
+                    1
+                } else {
+                    0
+                },
+            );
+            for c in op.get("ch").and_then(Value::as_array).into_iter().flatten() {
+                if let Some(d) = c.get("d").and_then(Value::as_u64) {
+                    depth.insert(d as usize, -1);
+                }
+            }
+        }
+        let group = json!({ "objectGroup": "nv-delta" });
+        let result = (|| -> Result<std::collections::HashMap<usize, Value>> {
+            let list = self.send(
+                "Runtime.evaluate",
+                json!({ "expression": "window.__nvDeltaRoots", "objectGroup": "nv-delta" }),
+                timeout,
+            )?;
+            let list = list.pointer("/result/objectId").and_then(Value::as_str).context("no roots")?.to_string();
+            let props =
+                self.send("Runtime.getProperties", json!({ "objectId": list, "ownProperties": true }), timeout)?;
+            let mut out = std::collections::HashMap::new();
+            for p in props.get("result").and_then(Value::as_array).into_iter().flatten() {
+                let Some(i) = p.get("name").and_then(Value::as_str).and_then(|n| n.parse::<usize>().ok()) else {
+                    continue;
+                };
+                let Some(&depth) = depth.get(&i) else { continue };
+                let object = p.pointer("/value/objectId").and_then(Value::as_str).context("a root is gone")?;
+                let node = self.send(
+                    "DOM.describeNode",
+                    json!({ "objectId": object, "depth": depth, "pierce": true }),
+                    timeout,
+                )?;
+                out.insert(i, node.get("node").cloned().context("no node")?);
+            }
+            if out.len() != depth.len() {
+                bail!("a root not described");
+            }
+            Ok(out)
+        })();
+        let _ = self.send("Runtime.releaseObjectGroup", group, timeout);
+        result
     }
 
     /// The page's DOM node count (`Memory.getDOMCounters`), what one full
@@ -5194,6 +7579,16 @@ const LAZY_CALLS_PER_NODE: f64 = 0.25;
 /// ms, keep Chrome's tree.
 const DOM_TREE_NODES: u64 = 800;
 
+/// Past this many DOM nodes a tree read arms the change journal (see
+/// [`JOURNAL_ARM`]): reading again costs tens of milliseconds there, and
+/// keeping the journal a few. Below it, a read is about as cheap.
+const JOURNAL_NODES: u64 = 2500;
+
+/// What capturing a DOM node costs at most, for judging whether a read
+/// ahead ends before the client's next command (see [`Page::pre_read`]):
+/// a 10,000-row page's 80,000 nodes took 350-660 ms, Chrome 153, 4 cores.
+const PRE_READ_NODE_US: u64 = 8;
+
 /// How long `close_target` waits for the page to go after `Page.close`.
 const CLOSE_WAIT: Duration = Duration::from_millis(1500);
 
@@ -5256,6 +7651,148 @@ fn flat_ax(nodes: &[Value], all: bool) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// Phase times of a read from a captured snapshot (`NAVIGERA_SNAP_FILE`,
+    /// a `DOMSnapshot.captureSnapshot` answer saved as JSON).
+    #[test]
+    #[ignore]
+    fn read_phases_of_a_saved_snapshot() {
+        use super::*;
+        let path = std::env::var("NAVIGERA_SNAP_FILE").expect("NAVIGERA_SNAP_FILE");
+        let raw = std::fs::read_to_string(path).unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let reps: usize = std::env::var("REPS").ok().and_then(|r| r.parse().ok()).unwrap_or(5);
+        let time = |label: &str, f: &mut dyn FnMut()| {
+            let mut ts: Vec<f64> = (0..reps)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    f();
+                    t.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            ts.sort_by(f64::total_cmp);
+            eprintln!("{label:14} median {:8.2} ms  min {:8.2}", ts[ts.len() / 2], ts[0]);
+        };
+        time("parse", &mut || drop(serde_json::from_str::<Value>(&raw).unwrap()));
+        time("typed", &mut || drop(Snap::from_json(&raw).unwrap()));
+        assert_eq!(
+            format!("{:?}", Snap::from_json(&raw).unwrap()),
+            format!("{:?}", Snap::from_value(&value).unwrap()),
+            "typed read differs"
+        );
+        let snap = Snap::from_value(&value).unwrap();
+        time("columns", &mut || drop(Snap::from_value(&value)));
+        time("clickables", &mut || drop(clickables_from(&snap)));
+        time("build", &mut || drop(domax::build(&snap)));
+        let built = domax::build(&snap).unwrap();
+        let opts = ax::Options { limit: 2000, ..Default::default() };
+        time("render", &mut || drop(ax::render_nodes("page", &built.nodes, &built.frames, &opts)));
+        let strings = domax::strings(&snap);
+        time("lazy", &mut || {
+            let source = domax::Lazy::new(&snap, &strings).unwrap();
+            drop(ax::render_source("page", &source, &opts))
+        });
+        time("lazy index", &mut || drop(domax::Lazy::new(&snap, &strings)));
+        let source = domax::Lazy::new(&snap, &strings).unwrap();
+        time("lazy walk", &mut || drop(ax::render_source("page", &source, &opts)));
+        for limit in [0, 10, 2000] {
+            let opts = ax::Options { limit, ..opts.clone() };
+            let whole = ax::render_nodes("page", &built.nodes, &built.frames, &opts).text;
+            assert!(whole == ax::render_source("page", &source, &opts).text, "lazy differs at limit {limit}");
+        }
+        let d = &snap.docs[0];
+        let text = (0..d.parent.len()).rev().find(|&i| d.ty[i] == 3).unwrap();
+        let backend = d.backend[text];
+        time("patch", &mut || {
+            let node = NewNode {
+                parent: usize::MAX,
+                ty: 3,
+                name: "#text".into(),
+                value: Some("x".into()),
+                backend,
+                ..Default::default()
+            };
+            drop(snap.clone().patch(vec![Op::Replace { backend, nodes: vec![node] }]).unwrap())
+        });
+        time("clone", &mut || drop(snap.clone()));
+        time("patch rows", &mut || {
+            // A row added near the top: a table body's children, one new.
+            let d = &snap.docs[0];
+            let Some(body) = (0..d.parent.len()).find(|&i| snap.at(d.name[i]) == "TBODY") else { return };
+            let mut children: Vec<Child> = (0..d.parent.len())
+                .filter(|&k| d.parent[k] == body as i64)
+                .map(|k| Child::Keep(d.backend[k]))
+                .collect();
+            children.insert(
+                2.min(children.len()),
+                Child::New(vec![NewNode {
+                    parent: usize::MAX,
+                    ty: 1,
+                    name: "TR".into(),
+                    backend: -5,
+                    ..Default::default()
+                }]),
+            );
+            drop(snap.clone().patch(vec![Op::Children { backend: d.backend[body], children }]).unwrap())
+        });
+    }
+
+    /// The clickable elements of every snapshot in `NAVIGERA_SNAP_DIR`, one
+    /// JSON line per file (sorted), to compare two builds by.
+    #[test]
+    #[ignore]
+    fn clickables_of_saved_snapshots() {
+        use super::*;
+        let dir = std::env::var("NAVIGERA_SNAP_DIR").expect("NAVIGERA_SNAP_DIR");
+        let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        for f in files {
+            let value: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+            let snap = Snap::from_value(&value).unwrap();
+            let c = clickables_from(&snap);
+            let mut nodes: Vec<_> = c.nodes.iter().copied().collect();
+            nodes.sort();
+            let hints: std::collections::BTreeMap<_, _> = c.hints.iter().collect();
+            let texts: std::collections::BTreeMap<_, _> = c.texts.iter().collect();
+            println!(
+                "{} {}",
+                f.file_name().unwrap().to_string_lossy(),
+                json!({"nodes": nodes, "hints": hints, "texts": texts})
+            );
+        }
+    }
+
+    /// The tree made as it prints is the whole tree's text, on every
+    /// snapshot in `NAVIGERA_SNAP_DIR`, at several limits, with and without
+    /// full text and every ref.
+    #[test]
+    #[ignore]
+    fn lazy_tree_of_saved_snapshots() {
+        use super::*;
+        let dir = std::env::var("NAVIGERA_SNAP_DIR").expect("NAVIGERA_SNAP_DIR");
+        let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        let mut checked = 0;
+        for f in files {
+            let value: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+            let snap = Snap::from_value(&value).unwrap();
+            let built = domax::build(&snap).unwrap();
+            let strings = domax::strings(&snap);
+            let source = domax::Lazy::new(&snap, &strings).unwrap();
+            let clicks = clickables_from(&snap);
+            for limit in [0, 1, 7, 50, 2000] {
+                for (full_text, all_refs) in [(false, false), (true, false), (false, true)] {
+                    let opts = ax::Options { limit, full_text, all_refs, clicks: clicks.clone(), ..Default::default() };
+                    let whole = ax::render_nodes("page", &built.nodes, &built.frames, &opts);
+                    let lazy = ax::render_source("page", &source, &opts);
+                    assert!(whole.text == lazy.text, "{}: lazy differs at limit {limit}", f.display());
+                    assert_eq!(whole.refs, lazy.refs, "{}: refs differ at limit {limit}", f.display());
+                    checked += 1;
+                }
+            }
+        }
+        eprintln!("{checked} renders equal");
+    }
+
     #[test]
     fn http_origin_names_the_site_and_nothing_else() {
         assert_eq!(super::http_origin("https://Shop.Example:8443/a?b#c").as_deref(), Some("https://shop.example:8443"));

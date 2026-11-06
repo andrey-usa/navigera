@@ -113,6 +113,46 @@ impl Drop for Session {
     }
 }
 
+/// Something that takes the element's place between the hit test and the
+/// press (here an overlay the mouse move opens) gets no press: the page
+/// never sees it, and the click is pressed again once the element is
+/// there. Before, the press clicked the overlay's own button, and the
+/// report said what that changed, as if it were the click's.
+#[test]
+fn a_press_that_would_land_on_something_else_is_held_back_and_sent_again() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("hover-cover", &[]);
+    for _ in 0..3 {
+        s.ok(&["goto", &format!("{}/hover-cover", site.url)]);
+        s.ok(&["click", "--selector", "#go"]);
+        assert_eq!(s.text(&["text", "--selector", "#out"]), "clicked 1");
+    }
+}
+
+/// A page that answers the press by moving the element (a banner put in
+/// above it on pointerdown) has the click event go to the parent the press
+/// and the release share; one that replaces it on mousedown gets that too,
+/// or no click event at all (Chrome 153, 157). Either way the element's own
+/// handler never runs. The page saw the press, so it isn't pressed again,
+/// but the result says so. Before, it read as a plain success.
+#[test]
+fn a_click_whose_click_event_lands_off_the_element_says_so() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("click-off", &[]);
+    for q in ["replace", "banner"] {
+        s.ok(&["goto", &format!("{}/click-off?{q}", site.url)]);
+        let r = s.ok(&["click", "--selector", "#go"]);
+        let said = r["click_missed"].as_str().unwrap_or_default();
+        let told = said.contains("went to div#w") || (q == "replace" && said.contains("sent no click event"));
+        assert!(told && said.contains("handler didn't run"), "{q}: {r}");
+        assert_eq!(s.text(&["text", "--selector", "#out"]), "idle", "{q}: pressed again");
+    }
+    s.ok(&["goto", &format!("{}/click-off", site.url)]);
+    let r = s.ok(&["click", "--selector", "#go"]);
+    assert!(r.get("click_missed").is_none(), "a still button: {r}");
+    assert_eq!(s.text(&["text", "--selector", "#out"]), "went");
+}
+
 /// A locator by role and name, or by label, costs one pass over the page:
 /// each candidate's `el.labels` used to scan the document on its first read,
 /// so the first call on 12000 buttons took about 9 s. Timed at two sizes so a
@@ -423,6 +463,13 @@ fn a_click_waits_for_a_sliding_modal_to_settle() {
     for _ in 0..2 {
         s.ok(&["goto", &format!("{}/entry-modal", site.url)]);
         s.ok(&["click", "--role", "button", "--name", "Close"]);
+        // The press came after the page's own `transitionend` handler that
+        // wires the button, not merely after the slide stopped.
+        let order = s.ok(&["eval", "[window.wiredAt, window.pressedAt]"]);
+        assert!(
+            order[0].as_f64().unwrap_or(f64::MAX) <= order[1].as_f64().unwrap_or(0.0),
+            "pressed before wired: {order}"
+        );
         s.ok(&["wait", "--gone", "#modal"]);
     }
 }
@@ -772,6 +819,90 @@ fn a_click_that_changes_nothing_says_so() {
     s.ok(&["wait", "--text", "saved"]);
     let r = s.ok(&["click", "--selector", "#agree"]);
     assert!(r.get("no_effect").is_none(), "checkbox: {r}");
+}
+
+/// `show()` and `showPopover()` queue their `toggle` as a later task, so an
+/// earlier click's can land while the next click watches for its effect: a
+/// toggle saying a dialog or popover went to the state it already had is
+/// not that click's, and a click that did nothing still says so. Opening
+/// and closing a popover (no attribute changes, only the toggle) still count.
+#[test]
+fn a_toggle_an_earlier_click_queued_is_not_the_next_clicks_effect() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("toggles", &[]);
+    s.ok(&["goto", &format!("{}/toggles", site.url)]);
+    for target in ["#open-tip", "#close-tip", "#open-tip"] {
+        let r = s.ok(&["click", "--selector", target]);
+        assert!(r.get("no_effect").is_none(), "{target}: {r}");
+    }
+    for target in ["#late-tip", "#late-dlg", "#noop"] {
+        let r = s.ok(&["click", "--selector", target]);
+        assert!(r.get("no_effect").is_some(), "{target}: {r}");
+    }
+}
+
+/// A script that clicks right after `goto` can beat the page to wiring the
+/// button up: a timer after load, a script the page loads then, a listener
+/// on the button's container or on the document. Nothing listened for that
+/// click, so once the page wires the element up it is clicked again, and
+/// counts once. A click something heard is never sent again: not when the
+/// page adds a listener later, not when analytics on the document heard it,
+/// and not when a script there recorded it to replay once the button is
+/// wired, even a replay that shows nothing. A button never wired still says
+/// the click did nothing.
+#[test]
+fn a_click_before_the_page_wired_the_element_is_sent_again() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("wired-late", &[]);
+    let steps = std::env::temp_dir().join(format!("nv-wired-late-{}.txt", std::process::id()));
+    let steps_arg = steps.display().to_string();
+    // `again`: Some(true) the click must have been sent again (the script
+    // that wires the button takes 1.5 s to load, so the click is always
+    // first), Some(false) it must not have been, None either way: a click
+    // that lands after a timer already wired the button (a loaded runner)
+    // just works. Whatever the path, it counts once.
+    for (query, target, out, hits, again) in [
+        ("script=1500", "#go", "went 1", 1, Some(true)),
+        ("ms=400", "#go", "went 1", 1, None),
+        ("ms=150", "#go", "went 1", 1, None),
+        ("root=400", "#inner", "inner 1", 1, None),
+        ("doc=400", "#go", "went 1", 1, None),
+        ("analytics&ms=400", "#go", "idle", 0, Some(false)),
+        ("replay=400", "#go", "went 1", 1, Some(false)),
+        ("replay=400&late", "#go", "went 1", 1, Some(false)),
+        ("replay=400&invisible", "#go", "idle", 1, Some(false)),
+        ("quiet", "#go", "idle", 1, Some(false)),
+        ("ms=99999", "#go", "idle", 0, Some(false)),
+    ] {
+        // goto and click in one call: no pause between them.
+        std::fs::write(&steps, format!("goto {}/wired-late?{query}\nclick --selector {target}\n", site.url)).unwrap();
+        let r = s.ok(&["batch", &steps_arg]);
+        let click = r["results"]
+            .as_array()
+            .and_then(|rs| rs.iter().find(|x| x["do"].as_str().is_some_and(|d| d.starts_with("click"))))
+            .map(|x| x["result"].clone())
+            .unwrap_or_default();
+        let sent_again = click.get("clicked_again").is_some();
+        if let Some(expected) = again {
+            assert_eq!(sent_again, expected, "{query}: {r}");
+        }
+        // A click sent again reports the second one's effect; one that
+        // never had any says so. (A replayed click is seen only later.)
+        if sent_again {
+            assert!(click.get("no_effect").is_none(), "{query}: {r}");
+        }
+        if out == "idle" {
+            assert!(click.get("no_effect").is_some(), "{query}: {r}");
+        }
+        // A page that replays a recorded click does it after the click
+        // returned; navigera's own clicks are all done by then.
+        if hits > 0 {
+            s.ok(&["wait", "--js", "window.hits > 0"]);
+        }
+        assert_eq!(s.text(&["get", "text", "--selector", "#out"]), out, "{query}: {r}");
+        assert_eq!(s.ok(&["eval", "window.hits"]), hits, "{query}: {r}");
+    }
+    let _ = std::fs::remove_file(&steps);
 }
 
 #[test]
@@ -1311,6 +1442,15 @@ fn drag_without_a_drag_is_a_held_mouse() {
 
 /// How long `args` takes to run on the session, in ms (the CLI start-up is in
 /// it for every sample alike).
+/// Held by the tests that time an op against another, and by the ones that
+/// load the machine with large-page reads: run side by side, the second
+/// kind slowed the first past its margin on two-core runners.
+static TIMED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn timed_alone() -> std::sync::MutexGuard<'static, ()> {
+    TIMED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn timed(s: &Session, args: &[&str]) -> (f64, Value) {
     let t = std::time::Instant::now();
     let r = s.ok(args);
@@ -1327,6 +1467,7 @@ fn median(mut v: Vec<f64>) -> f64 {
 /// a second for the held request, and later ones don't wait on either.
 #[test]
 fn long_polls_and_beacons_dont_hold_snapshots() {
+    let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("bg", &[]);
     s.ok(&["goto", &format!("{}/long-poll?hold=2500", site.url)]);
@@ -1388,6 +1529,7 @@ fn a_snapshot_does_not_wait_on_polls_and_no_wait_skips_the_wait() {
 /// says how long it waited.
 #[test]
 fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
+    let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("quiet-skip", &[]);
     let has_quiet_note = |r: &Value| {
@@ -1415,6 +1557,594 @@ fn a_snapshot_after_a_wait_skips_the_quiet_wait_and_reports_it() {
     let (_, r) = s.run(&["ax"]);
     assert!(has_quiet_note(&r), "a snapshot that waited should say so: {r}");
     assert!(r["result"].as_str().unwrap_or("").contains("Alpha"));
+}
+
+/// A click on a link or a submit button waits for the page it loads only
+/// when the page lets it load one: a router that cancels the link's click,
+/// a script that handles the submit, or a form that fails validation leave
+/// nothing to wait for, so such a click costs what a plain click costs, not
+/// a navigation's grace on top. A script that submits the form itself is a
+/// navigation and is waited for. Nothing navigera watched is left behind.
+#[test]
+fn a_click_waits_for_a_navigation_only_when_the_page_plans_one() {
+    let _alone = timed_alone();
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("nav-intent", &[]);
+    let page = format!("{}/nav-intent", site.url);
+    for name in ["Real submit", "Script submit", "Real link"] {
+        s.ok(&["goto", &page]);
+        let r = s.ok(&["click", "--text", name]);
+        assert!(r["url"].as_str().unwrap_or_default().contains("/posted"), "{name}: {r}");
+    }
+    for (name, out, path) in [
+        ("Handled submit", "handled", "/nav-intent"),
+        ("Routed link", "routed", "/routed"),
+        ("Invalid submit", "idle", "/nav-intent"),
+    ] {
+        s.ok(&["goto", &page]);
+        s.ok(&["click", "--text", name]);
+        assert_eq!(s.ok(&["eval", "location.pathname"]), path, "{name}");
+        let shown = s.ok(&["text", "--selector", "#out"]);
+        assert!(shown.as_str().unwrap_or_default().starts_with(out), "{name}: {shown}");
+        let clean =
+            "window.__nvNav === undefined && HTMLFormElement.prototype.submit.toString().includes('[native code]')";
+        assert_eq!(s.ok(&["eval", clean]), true, "{name}: watchers left behind");
+    }
+    let best = |name: &str| {
+        (0..3)
+            .map(|_| {
+                s.ok(&["goto", &page]);
+                timed(&s, &["click", "--text", name]).0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let (plain, handled) = (best("Plain"), best("Handled submit"));
+    assert!(
+        handled < plain + 100.0,
+        "a handled submit waited for a navigation: {handled:.0} ms against {plain:.0} ms for a plain click"
+    );
+}
+
+/// What an action changed is read after the requests it started, also one
+/// a timer starts a turn later with nothing shown first (typing that asks
+/// for suggestions): the report has the answer, not the page as it was. The
+/// page has been quiet for longer than the quiet window (an agent that
+/// thought before typing), so the quiet wait alone would read it at once.
+#[test]
+fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
+    let _alone = timed_alone();
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("turn-fetch", &[]);
+    let compact = |args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .arg("--session")
+            .arg(&s.name)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    for word in ["ab", "cd", "ef"] {
+        s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+        compact(&["ax"]);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let out = compact(&["fill", "--selector", "#q", word]);
+        assert!(out.contains(&format!("suggested {word}")), "{out}");
+    }
+    // A placeholder the click put up for work it starts 30 ms later is not
+    // the report: the page's next change is waited for.
+    for _ in 0..3 {
+        s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+        compact(&["ax"]);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let out = compact(&["click", "--text", "Save later"]);
+        assert!(out.contains("saved") && !out.contains("Saving"), "{out}");
+    }
+    // An action that starts nothing isn't held for a request that never
+    // comes: saying what it changed costs a read of the page, not a fixed
+    // wait (it was 50 ms).
+    let best = |report: bool| {
+        (0..3)
+            .map(|i| {
+                s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+                compact(&["ax"]);
+                let value = format!("v{i}");
+                let t = std::time::Instant::now();
+                if report {
+                    compact(&["fill", "--selector", "[name=x]", &value]);
+                } else {
+                    s.ok(&["fill", "--selector", "[name=x]", &value]);
+                }
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let (plain, reported) = (best(false), best(true));
+    assert!(reported < plain + 40.0, "saying what a fill changed took {reported:.0} ms against {plain:.0} ms");
+}
+
+/// On a large page, text entered into a field that changes nothing else
+/// is reported without reading the page again: the journal armed with the
+/// last read proves it. The report is what a read after the entry says,
+/// entry by entry and for the click after them (the typed text stays out
+/// of it), whichever way the page changed: its DOM, a style that follows
+/// focus, a `:has()` rule. A check, a radio switch and a choice are their
+/// controls' own lines, rewritten; a state a script set after the read is
+/// reported with the next entry. Compared against a session that reads
+/// the page after every entry (`NAVIGERA_CHANGE_JOURNAL=0`), and timed
+/// against it. A plain `ax` after an entry the journal answered is
+/// patched (no `DOMSnapshot.captureSnapshot` in the session's CDP trace)
+/// and says what the other session's says.
+#[test]
+fn a_text_entry_that_changes_nothing_else_skips_reading_the_page_again() {
+    let _alone = timed_alone();
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let page = format!("{}/journal", site.url);
+    let trace_of =
+        |on: &str| std::env::temp_dir().join(format!("nv-interactions-journal{on}-{}.jsonl", std::process::id()));
+    let sessions: Vec<(String, &str)> = ["1", "0"]
+        .iter()
+        .map(|on| {
+            let name = std::env::temp_dir()
+                .join(format!("nv-interactions-journal{on}-{}.sock", std::process::id()))
+                .display()
+                .to_string();
+            let _ = std::fs::remove_file(trace_of(on));
+            let out = Command::new(tool_exe())
+                .env("NAVIGERA_CHANGE_JOURNAL", on)
+                .env("NAVIGERA_CDP_TRACE", trace_of(on))
+                .args(["--session", &name, "start"])
+                .stdin(Stdio::null())
+                .output()
+                .expect("run navigera");
+            assert!(out.status.success(), "start failed: {}", String::from_utf8_lossy(&out.stdout));
+            (name, *on)
+        })
+        .collect();
+    let compact = |name: &str, args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .args(["--session", name])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let steps: [&[&str]; 15] = [
+        &["fill", "--selector", "#name", "Ada Lovelace"],
+        &["fill", "--selector", "#note", "first note"],
+        &["fill", "--selector", "#count", "abc"],
+        &["fill", "--selector", "#tipped", "Grace"],
+        &["fill", "--selector", "#code", "X1"],
+        &["fill", "--selector", "#name", "Ada"],
+        &["fill", "--selector", "#restyle", "on"],
+        &["fill", "--selector", "#imported", "x"],
+        &["click", "--selector", "#go"],
+        &["check", "--selector", "#agree"],
+        &["select", "--selector", "#size", "Large"],
+        &["check", "--selector", "#air"],
+        &["eval", "document.getElementById('later').checked = true"],
+        &["fill", "--selector", "#name", "Grace Hopper"],
+        &["click", "--selector", "#go"],
+    ];
+    let mut reports: Vec<Vec<String>> = Vec::new();
+    for (name, _) in &sessions {
+        compact(name, &["goto", &page]);
+        compact(name, &["ax"]);
+        let mut r: Vec<String> = steps.iter().map(|a| compact(name, a)).collect();
+        // A closed shadow root, which the page's scripts (and so the
+        // journal) can't reach: its change is reported all the same.
+        compact(name, &["goto", &format!("{page}?closed")]);
+        compact(name, &["ax"]);
+        r.push(compact(name, &["fill", "--selector", "#inclosed", "z"]));
+        reports.push(r);
+    }
+    // Refs are node ids: each browser numbers its own.
+    let unref = |r: &Vec<String>| -> Vec<String> {
+        r.iter()
+            .map(|l| {
+                l.split("ref=")
+                    .enumerate()
+                    .map(|(i, p)| if i == 0 { p } else { p.trim_start_matches(|c: char| c.is_ascii_digit()) })
+                    .collect()
+            })
+            .collect()
+    };
+    assert_eq!(unref(&reports[0]), unref(&reports[1]), "the journal changed what an entry reported");
+    let r = &reports[0];
+    assert_eq!(r[0], "ok", "{r:?}");
+    assert_eq!(r[1], "ok", "{r:?}");
+    assert!(r[2].contains("+ text: 3 chars"), "a live count is the entry's change: {r:?}");
+    assert!(r[3].contains("Use your full name"), "a style that follows focus: {r:?}");
+    assert!(r[4].contains("- text: Type a code"), "a :has() rule: {r:?}");
+    // "Ada" after "Ada Lovelace": the field showed it already, so it changed.
+    assert!(r[5].contains("~ textbox \"Name\""), "{r:?}");
+    assert!(r[6].contains("+ text: Restyled by a rule"), "a style rule a script rewrote: {r:?}");
+    assert!(r[7].contains("Imported tip"), "a style from an @imported sheet: {r:?}");
+    assert!(r[8].contains("clicked 1") && !r[8].contains("Lovelace") && !r[8].contains("first note"), "{r:?}");
+    assert!(r[9].contains("~ checkbox \"Agree\" [checked, ref="), "{r:?}");
+    assert!(r[10].contains("value=\"Large\"") && r[10].contains("\"Large (selected)\""), "{r:?}");
+    assert!(r[11].contains("~ radio \"Ground\" [ref=") && r[11].contains("~ radio \"Air\" [checked, ref="), "{r:?}");
+    assert!(r[13].contains("~ checkbox \"Later\" [checked, ref="), "a state a script set after the read: {r:?}");
+    assert!(
+        r[14].contains("clicked 2") && !["Agree", "Large", "Air", "Later"].iter().any(|s| r[14].contains(s)),
+        "{r:?}"
+    );
+    assert!(r[15].contains("closed changed"), "inside a closed shadow root: {r:?}");
+    let best = |name: &str| {
+        (0..3)
+            .map(|i| {
+                compact(name, &["goto", &page]);
+                compact(name, &["ax"]);
+                let t = std::time::Instant::now();
+                assert_eq!(compact(name, &["fill", "--selector", "#name", &format!("v{i}")]), "ok");
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let (journal, read) = (best(&sessions[0].0), best(&sessions[1].0));
+    assert!(
+        journal < read * 0.75,
+        "an entry with the journal took {journal:.0} ms, reading the page again {read:.0} ms"
+    );
+    // A read after each entry the journal answered.
+    let captures = |on: &str| {
+        std::fs::read_to_string(trace_of(on))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
+            .count()
+    };
+    let entries: [&[&str]; 4] = [
+        &["fill", "--selector", "#name", "Ada Lovelace"],
+        &["check", "--selector", "#agree"],
+        &["select", "--selector", "#size", "Large"],
+        &["fill", "--selector", "#note", "a note"],
+    ];
+    let mut reads: Vec<Vec<String>> = Vec::new();
+    let mut caps = Vec::new();
+    for (name, on) in &sessions {
+        compact(name, &["goto", &page]);
+        compact(name, &["ax"]);
+        let before = captures(on);
+        reads.push(
+            entries
+                .iter()
+                .flat_map(|a| {
+                    let report = compact(name, a);
+                    [report, compact(name, &["ax"])]
+                })
+                .collect(),
+        );
+        caps.push(captures(on) - before);
+    }
+    for (name, _) in &sessions {
+        compact(name, &["quit"]);
+    }
+    if let Some(ci) = std::env::var_os("NAVIGERA_CDP_TRACE") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ci) {
+            for on in ["1", "0"] {
+                let _ = f.write_all(std::fs::read_to_string(trace_of(on)).unwrap_or_default().as_bytes());
+            }
+        }
+    }
+    for on in ["1", "0"] {
+        let _ = std::fs::remove_file(trace_of(on));
+    }
+    assert_eq!(unref(&reads[0]), unref(&reads[1]), "a read after an entry the journal answered differs");
+    assert!(reads[0].iter().step_by(2).all(|r| !r.is_empty()), "{:?}", reads[0]);
+    assert_eq!(caps[0], 0, "reads after entries the journal answered captured the page {} times", caps[0]);
+    assert_eq!(caps[1], 8, "the session without the journal captured the page {} times", caps[1]);
+}
+
+/// On a large page, the read that says what a click changed patches the
+/// last read's snapshot with the subtrees the change journal names, read
+/// from the page, instead of capturing the page whole. Whatever the click
+/// changed (a cell, a row added or removed, a menu a sibling rule shows, a
+/// dialog, a popover, a list drawn again, a listener, a value a script set,
+/// a fade, a numbered list), each report and the look after them are what
+/// a session that captures the page every time says
+/// (`NAVIGERA_DELTA_READ=0`), and the closed `<details>` stays closed
+/// (reading the style of content a display lock skips would lay it out for
+/// the next capture). Opened and closed again, its body is reported shown
+/// and then gone in both sessions, though Chrome keeps the boxes it had.
+/// No report lists rows that only moved across the cut of the 2,000-line
+/// tree. A plain `ax` after each click (what an agent reads next) is
+/// patched too, and says what that session says. While clicks on that
+/// page, each with an `ax` after it, are timed, the patching session sends
+/// no `DOMSnapshot.captureSnapshot` and the other sends one per read (the
+/// CDP trace of each session); the times are printed, not asserted, as a
+/// shared runner's debug build can't tell them apart reliably.
+#[test]
+fn a_click_on_a_large_page_reads_only_what_it_changed() {
+    let _alone = timed_alone();
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let page = format!("{}/clicks", site.url);
+    let trace_of =
+        |on: &str| std::env::temp_dir().join(format!("nv-interactions-delta{on}-{}.jsonl", std::process::id()));
+    let sessions: Vec<String> = ["1", "0"]
+        .iter()
+        .map(|on| {
+            let name = std::env::temp_dir()
+                .join(format!("nv-interactions-delta{on}-{}.sock", std::process::id()))
+                .display()
+                .to_string();
+            let _ = std::fs::remove_file(trace_of(on));
+            let out = Command::new(tool_exe())
+                .env("NAVIGERA_DELTA_READ", on)
+                .env("NAVIGERA_CDP_TRACE", trace_of(on))
+                .args(["--session", &name, "start"])
+                .stdin(Stdio::null())
+                .output()
+                .expect("run navigera");
+            assert!(out.status.success(), "start failed: {}", String::from_utf8_lossy(&out.stdout));
+            name
+        })
+        .collect();
+    let compact = |name: &str, args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .args(["--session", name])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let buttons = [
+        "#edit", "#add", "#remove", "#menu", "#show", "#dlg", "#pop", "#redraw", "#wire", "#val", "#fade", "#ol",
+        "#edit", "#det", "#det",
+    ];
+    let mut reports: Vec<Vec<String>> = Vec::new();
+    let mut rereads: Vec<Vec<String>> = Vec::new();
+    for name in &sessions {
+        compact(name, &["goto", &page]);
+        compact(name, &["ax"]);
+        let mut again = Vec::new();
+        let mut r: Vec<String> = buttons
+            .iter()
+            .map(|b| {
+                let report = compact(name, &["click", "--selector", b]);
+                again.push(compact(name, &["ax"]));
+                report
+            })
+            .collect();
+        r.push(compact(name, &["ax"]));
+        reports.push(r);
+        rereads.push(again);
+    }
+    // Refs are node ids: each browser numbers its own.
+    let unref = |r: &Vec<String>| -> Vec<String> {
+        r.iter()
+            .map(|l| {
+                l.split("ref=")
+                    .enumerate()
+                    .map(|(i, p)| if i == 0 { p } else { p.trim_start_matches(|c: char| c.is_ascii_digit()) })
+                    .collect()
+            })
+            .collect()
+    };
+    // A click that changed nothing says how long it watched.
+    let unms = |r: Vec<String>| -> Vec<String> {
+        r.iter()
+            .map(|l| {
+                let parts: Vec<&str> = l.split(" ms").collect();
+                let last = parts.len() - 1;
+                parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| if i < last { p.trim_end_matches(|c: char| c.is_ascii_digit()) } else { p })
+                    .collect::<Vec<_>>()
+                    .join(" ms")
+            })
+            .collect()
+    };
+    assert_eq!(
+        unms(unref(&reports[0])),
+        unms(unref(&reports[1])),
+        "patching the snapshot changed what a click reported"
+    );
+    assert_eq!(
+        unms(unref(&rereads[0])),
+        unms(unref(&rereads[1])),
+        "patching the snapshot changed what a read after a click said"
+    );
+    let r = &reports[0];
+    assert!(r[0].contains("edited 1"), "{r:?}");
+    assert!(r[1].contains("Inserted"), "a row added: {r:?}");
+    assert!(r[2].contains("- cell \"SKU-00004\""), "a row removed: {r:?}");
+    assert!(r[3].contains("Alpha"), "a menu a sibling rule shows: {r:?}");
+    assert!(r[4].contains("Hidden section"), "{r:?}");
+    assert!(r[5].contains("Dialog text"), "{r:?}");
+    assert!(r[6].contains("Popover body"), "{r:?}");
+    assert!(r[7].contains("Item 0"), "a list drawn again: {r:?}");
+    assert!(r[9].contains("set by script"), "a value a script set: {r:?}");
+    assert!(r[11].contains("zeroth"), "{r:?}");
+    assert!(r[12].contains("edited 2"), "{r:?}");
+    assert!(r[..13].iter().all(|l| !l.contains("Details body")), "a closed <details> showed its body: {r:?}");
+    assert!(r[13].contains("+ paragraph: Details body"), "a <details> opened: {r:?}");
+    assert!(r[14].contains("- paragraph: Details body"), "a <details> closed again: {r:?}");
+    assert!(!r[15].contains("Details body"), "a <details> closed again showed its body: {r:?}");
+    // The changes are all near the top: a row past the first hundred in a
+    // report only moved across the cut.
+    let past_top = |line: &str| {
+        ["SKU-", "\"Item "].iter().any(|tag| {
+            line.split(tag).skip(1).any(|p| {
+                let n: String = p.chars().take_while(char::is_ascii_digit).collect();
+                n.parse::<u32>().is_ok_and(|n| n >= 100)
+            })
+        })
+    };
+    assert!(
+        r[..15].iter().all(|l| !l.lines().any(past_top)),
+        "a report listed rows that only moved across the cut: {r:?}"
+    );
+    let captures = |on: &str| {
+        std::fs::read_to_string(trace_of(on))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
+            .count()
+    };
+    // Best of 3 clicks, each with a read after it, and the full captures
+    // sent while they ran.
+    let best = |name: &str, on: &str| {
+        compact(name, &["goto", &page]);
+        compact(name, &["ax"]);
+        let before = captures(on);
+        let ms = (0..3)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                assert!(compact(name, &["click", "--selector", "#edit"]).contains("edited"));
+                assert!(compact(name, &["ax"]).contains("edited"));
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min);
+        (ms, captures(on) - before)
+    };
+    let ((patched, patched_caps), (read, read_caps)) = (best(&sessions[0], "1"), best(&sessions[1], "0"));
+    eprintln!("a click's report and a read: {patched:.0} ms patched, {read:.0} ms captured whole");
+    for name in &sessions {
+        compact(name, &["quit"]);
+    }
+    // Keep CI's protocol check seeing what these sessions sent.
+    if let Some(ci) = std::env::var_os("NAVIGERA_CDP_TRACE") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(ci) {
+            for on in ["1", "0"] {
+                let _ = f.write_all(std::fs::read_to_string(trace_of(on)).unwrap_or_default().as_bytes());
+            }
+        }
+    }
+    for on in ["1", "0"] {
+        let _ = std::fs::remove_file(trace_of(on));
+    }
+    assert_eq!(
+        read_caps, 6,
+        "the session capturing every read captured the page {read_caps} times for 3 clicks and reads"
+    );
+    assert_eq!(patched_caps, 0, "patched reads captured the page whole {patched_caps} times in 3 clicks and reads");
+}
+
+/// A read on a page whose style rules far outnumber its elements doesn't
+/// walk them for the next read (walking costs more than capturing that
+/// page): the plain `ax` after it captures again. The first action's prime
+/// walks them, as it did before reads primed, and from then on the read
+/// after an action and the plain `ax` after that are patched (no
+/// `DOMSnapshot.captureSnapshot` in the session's CDP trace).
+#[test]
+fn a_read_leaves_walking_a_large_style_sheet_to_the_first_action() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let trace = std::env::temp_dir().join(format!("nv-interactions-rules-{}.jsonl", std::process::id()));
+    let name =
+        std::env::temp_dir().join(format!("nv-interactions-rules-{}.sock", std::process::id())).display().to_string();
+    let _ = std::fs::remove_file(&trace);
+    let out = Command::new(tool_exe())
+        .env("NAVIGERA_CDP_TRACE", &trace)
+        .env_remove("NAVIGERA_REST_PRIME")
+        .args(["--session", &name, "start"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run navigera");
+    assert!(out.status.success(), "start failed: {}", String::from_utf8_lossy(&out.stdout));
+    let run = |args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .args(["--session", &name])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let captures = || {
+        std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
+            .count()
+    };
+    run(&["goto", &format!("{}/many-rules", site.url)]);
+    assert!(run(&["ax"]).contains("Row 0"));
+    let first = captures();
+    assert!(run(&["ax"]).contains("Row 0"));
+    assert_eq!(captures(), first + 1, "the read after a read that walked no rules captures the page");
+    let report = run(&["click", "--selector", "#add"]);
+    assert!(report.contains("Added row"), "{report}");
+    assert!(run(&["ax"]).contains("Added row"));
+    assert_eq!(captures(), first + 1, "after the action walked the rules, its read and the next are patched");
+    run(&["quit"]);
+    let _ = std::fs::remove_file(&trace);
+}
+
+/// A client that pauses between commands (an agent reading what `goto`
+/// said) has the large page read ahead while it pauses: its first `ax`
+/// captures nothing and still shows what changed after `goto`, even when
+/// a setup sent `start` and a first `goto` at once. A client that sends
+/// its next command at once (a script) gets no read ahead.
+#[test]
+fn the_first_read_after_a_paused_goto_was_read_ahead() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let trace = std::env::temp_dir().join(format!("nv-interactions-ahead-{}.jsonl", std::process::id()));
+    let name =
+        std::env::temp_dir().join(format!("nv-interactions-ahead-{}.sock", std::process::id())).display().to_string();
+    let _ = std::fs::remove_file(&trace);
+    let out = Command::new(tool_exe())
+        .env("NAVIGERA_CDP_TRACE", &trace)
+        .env_remove("NAVIGERA_PRE_READ")
+        .env_remove("NAVIGERA_REST_PRIME")
+        .args(["--session", &name, "start"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run navigera");
+    assert!(out.status.success(), "start failed: {}", String::from_utf8_lossy(&out.stdout));
+    let run = |args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .args(["--session", &name])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let captures = || {
+        std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"DOMSnapshot.captureSnapshot\""))
+            .count()
+    };
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(1500));
+    let page = format!("{}/clicks", site.url);
+    // A setup's goto, sent at once after start: not read ahead itself,
+    // and it doesn't stop the paused goto that follows.
+    run(&["goto", &page]);
+    pause();
+    run(&["goto", &page]);
+    pause();
+    let before = captures();
+    assert!(before >= 1, "the page was read ahead while the client paused");
+    // A change between the read ahead and the read is shown.
+    run(&["eval", "document.querySelector('#r5 td:nth-child(2)').textContent = 'changed after goto'"]);
+    pause();
+    let tree = run(&["ax"]);
+    assert!(tree.contains("changed after goto") && tree.contains("SKU-00000"), "{tree}");
+    assert_eq!(captures(), before, "the first read patched what was read ahead");
+    // Commands sent at once: no read ahead, the read captures.
+    for _ in 0..3 {
+        run(&["title"]);
+    }
+    run(&["goto", &page]);
+    let before = captures();
+    assert!(run(&["ax"]).contains("SKU-00000"));
+    assert_eq!(captures(), before + 1, "a script's read captures for itself");
+    run(&["quit"]);
+    let _ = std::fs::remove_file(&trace);
 }
 
 /// After a click whose fetch has started, the snapshot waits for that fetch
@@ -1834,4 +2564,123 @@ fn bench_site() -> Option<Site> {
     BufReader::new(child.stdout.take()?).read_line(&mut line).ok()?;
     let url = line.trim().strip_prefix("LISTENING ")?.to_string();
     Some(Site { child, url })
+}
+
+/// Property changes with input/change/focus events wake a paused predicate;
+/// a silent property assignment still has the timer fallback.
+#[test]
+fn property_events_wake_the_wait_after_the_pages_handlers() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("event-wake", &[]);
+    s.ok(&["goto", "data:text/html,<input id=c type=checkbox><input id=v><div id=m></div>"]);
+    let js = format!(
+        r#"(async () => {{
+        const deep = {}, c = document.getElementById('c'), v = document.getElementById('v');
+        let added = 0, removed = 0;
+        const add = document.addEventListener.bind(document), remove = document.removeEventListener.bind(document);
+        document.addEventListener = (...args) => {{ added++; return add(...args); }};
+        document.removeEventListener = (...args) => {{ removed++; return remove(...args); }};
+        const samples = [];
+        for (const kind of ['change', 'input', 'focus', 'silent']) {{
+            c.checked = false; v.blur(); v.value = ''; let changed = 0;
+            const predicate = () => kind === 'focus' ? document.activeElement === v : kind === 'input' ? v.value === 'committed' : c.checked;
+            // The page's handler must run before the wait is rechecked.
+            const handler = () => {{ v.value = 'committed'; }};
+            v.addEventListener('input', handler);
+            setTimeout(() => {{
+                if (kind === 'focus') v.focus();
+                else if (kind === 'input') {{ v.value = 'draft'; v.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
+                else {{ c.checked = true; if (kind === 'change') c.dispatchEvent(new Event('change', {{ bubbles: true }})); }}
+                changed = performance.now();
+            }}, 25);
+            while (!predicate()) await deep.wake(100);
+            samples.push([kind, performance.now() - changed, predicate(), kind !== 'input' || v.value === 'committed']);
+            v.removeEventListener('input', handler);
+        }}
+        return {{ samples, added, removed, value: v.value }};
+    }})()"#,
+        navigera::cdp::DEEP
+    );
+    let r = s.ok(&["eval", &js]);
+    assert!(r["added"].as_u64().unwrap() >= 16, "listeners not installed: {r}");
+    assert_eq!(r["added"], r["removed"], "listeners leaked: {r}");
+    assert_eq!(r["samples"].as_array().unwrap().len(), 4, "{r}");
+    // These are correctness checks, not machine-dependent performance gates.
+    for row in r["samples"].as_array().unwrap() {
+        assert!(row[1].as_f64().unwrap().is_finite(), "{r}");
+        assert_eq!(row[2], true, "predicate not met: {r}");
+        assert_eq!(row[3], true, "page handler not seen: {r}");
+    }
+}
+
+/// Input events from fill and non-composed events in nested roots also wake
+/// the pause. Every watched root loses its capture listeners afterwards.
+#[test]
+fn event_wakes_cover_fill_shadow_roots_and_frame_documents() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("event-wake-roots", &[]);
+    s.ok(&["goto", "data:text/html,<input id=v><div id=host></div><iframe></iframe>"]);
+    let js = format!(
+        r#"(() => {{
+        const deep = {}, doc = document.querySelector('iframe').contentDocument;
+        doc.body.innerHTML = '<input>';
+        const shadow = document.getElementById('host').attachShadow({{mode:'open'}});
+        shadow.innerHTML = '<input>';
+        const roots = [document, shadow, doc], counts = roots.map(() => [0, 0]);
+        roots.forEach((root, i) => {{
+            const add = root.addEventListener.bind(root), remove = root.removeEventListener.bind(root);
+            root.addEventListener = (...args) => {{ if (args[2] === true) counts[i][0]++; return add(...args); }};
+            root.removeEventListener = (...args) => {{ if (args[2] === true) counts[i][1]++; return remove(...args); }};
+        }});
+        window.fillDone = (async () => {{
+            const v = document.getElementById('v');
+            while (v.value !== 'ready') await deep.wake(100);
+            for (const root of [shadow, doc]) {{
+                const input = root.querySelector('input');
+                setTimeout(() => {{ input.value = 'ready'; input.dispatchEvent(new Event('input', {{bubbles:true, composed:false}})); }}, 25);
+                while (input.value !== 'ready') await deep.wake(100);
+            }}
+            return counts;
+        }})();
+        return true;
+    }})()"#,
+        navigera::cdp::DEEP
+    );
+    s.ok(&["eval", &js]);
+    s.ok(&["fill", "--selector", "#v", "ready"]);
+    let counts = s.ok(&["eval", "window.fillDone"]);
+    for row in counts.as_array().unwrap() {
+        assert!(row[0].as_u64().unwrap() >= 12, "root not watched: {counts}");
+        assert_eq!(row[0], row[1], "listeners leaked: {counts}");
+    }
+}
+
+/// What a click puts in the page to watch it (a form's `submit`, for a
+/// navigation it plans; the clipboard's writes, for an effect) is taken
+/// out only while it is there: a method the page put in during the click
+/// stays.
+#[test]
+fn a_click_leaves_the_methods_the_page_put_in_meanwhile() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("own-methods", &[]);
+    s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+    s.ok(&[
+        "eval",
+        "document.querySelector('#f1').addEventListener('submit', () => { window.mine = function submit() {}; \
+         HTMLFormElement.prototype.submit = window.mine; }); true",
+    ]);
+    s.ok(&["click", "--text", "Handled submit"]);
+    assert_eq!(s.ok(&["eval", "HTMLFormElement.prototype.submit === window.mine"]), true);
+    s.ok(&["goto", &format!("{}/effects", site.url)]);
+    s.ok(&[
+        "eval",
+        "document.getElementById('copy').addEventListener('click', () => { window.mine = function writeText() \
+         { return Promise.resolve(); }; Clipboard.prototype.writeText = window.mine; }); true",
+    ]);
+    s.ok(&["click", "--selector", "#copy"]);
+    assert_eq!(s.ok(&["eval", "Clipboard.prototype.writeText === window.mine"]), true);
 }

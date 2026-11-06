@@ -245,6 +245,13 @@ impl Logs {
         self.next_request
     }
 
+    /// Scripts a tab is still loading: code that may wire up what is on the
+    /// page once it runs (see `Page::wired_later`).
+    pub fn scripts_loading(&self, session: &str) -> usize {
+        let Some(tab) = self.tabs.get(session) else { return 0 };
+        tab.requests.iter().filter(|r| r.kind == "Script" && r.ended.is_none() && r.failed.is_none()).count()
+    }
+
     /// Requests a tab started after request `#after` (a number from
     /// [`Logs::requests_started`]).
     pub fn requests_after(&self, session: &str, after: u64) -> Vec<Sent> {

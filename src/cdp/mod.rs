@@ -21,11 +21,13 @@ mod client;
 mod domax;
 pub mod downloads;
 mod events;
+mod fxhash;
 pub mod import;
 pub mod logs;
 mod page;
 mod procjob;
 mod profile;
+mod snap;
 pub(crate) mod transport;
 
 pub use browser::{Browser, LaunchOptions};
@@ -35,7 +37,9 @@ pub use client::NEVER_REACHED;
 pub use client::SESSION_GONE;
 pub use client::{NeverReached, NEVER_REACHED_CODE};
 pub use events::{glob_match, DialogPolicy, HarEntry, Route, RouteAction};
-pub use page::{locate_fn as locate_js, AxOptions, ClickOptions, Locator, Page, Target, DEEP, DEFAULT_ELEMENT_WAIT};
+pub use page::{
+    locate_fn as locate_js, AxOptions, ClickOptions, Locator, Page, Restated, Target, DEEP, DEFAULT_ELEMENT_WAIT,
+};
 pub use transport::electron_exit_note;
 
 /// Element functions shared with the session layer.

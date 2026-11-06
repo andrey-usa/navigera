@@ -147,15 +147,23 @@ needs two files in this repository, used by nothing else:
 Neither goes into a release: the crate is an allowlist (`include` in
 `Cargo.toml`, checked by the "Glama files stay out of the packages" step in
 `ci.yml`), and npm, PyPI, Homebrew, Scoop and the archives carry the binary
-alone. Glama's admin form holds the rest: the build step runs
-`packaging/glama/build.sh`, the command is
-`["/root/.local/bin/navigera", "mcp"]`, and the only settings it offers
-users are the decision model's (`NAVIGERA_DECIDER_*`).
+alone. Glama's admin form holds the rest: the build step is
+`sh packaging/glama/build.sh`, run in Glama's copy of this repository (the
+build's working directory), the command is
+`["mcp-proxy", "--", "/root/.local/bin/navigera", "mcp"]` (Glama's proxy in
+front of navigera's stdio server), and the settings it offers users are
+`CHROME_BIN` and the decision model's endpoint, `NAVIGERA_DECIDER_URL` (no
+key fields).
 
-A navigera release is a Glama release: auto-release builds the new version
-from the release tag once PyPI has it, under the same version number. After
-it, check the listing in Glama's "try it": `tools/list` gives the 23 tools,
-and `browser_navigate` to https://example.com followed by `browser_snapshot`
-returns the page's tree. A fix to Glama's image alone, between navigera
-releases, rebuilds the same navigera version; it never takes a version
-number of its own that reads like a navigera release.
+A navigera release is a Glama release under the same number: auto-release
+names it after the tag without the `v` (`v0.8.0` is `0.8.0`). Glama builds
+from its copy of the repository, not from the tag, and `build.sh` takes the
+version from that copy's `Cargo.toml`. So after the release merge reaches
+`master`, sync Glama's copy (the link next to its head commit) before the
+build. A stale copy fails the build, or builds the version before. After it,
+check the listing in Glama's "try it": `tools/list` gives the 13 default tools, and
+`browser_navigate` to https://example.com followed by `browser_snapshot`
+returns the page's tree. Glama can't rebuild a version it has released, so a
+fix to Glama's image alone would need a number of its own. Wait for the next
+navigera release instead: a Glama-only number reads like a navigera release
+that doesn't exist.

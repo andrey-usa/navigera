@@ -46,7 +46,21 @@ exp = [r for r in rows if r["experimental"]]
 best = lambda key, rs: min(rs, key=key)
 fast_wall = chrome[0]["session"]["wall_s"]
 fast_eval = min(r["eval"]["mean_ms"] for r in chrome if r.get("eval"))
-fast_cold = min(r["cold"]["wall_s"] for r in chrome if r.get("cold"))
+
+
+def mid(stage):
+    """The wall that ranks a cold or live-site row: its median (runs from
+    before medians were recorded: the best run)."""
+    m = (stage or {}).get("median_wall_s")
+    return m if m is not None else (stage or {}).get("wall_s")
+
+
+def reps_of(key, fallback):
+    return max((len(r[key].get("runs_wall_s") or []) for r in rows if r.get(key)), default=0) or fallback
+
+
+fast_cold = min(mid(r["cold"]) for r in chrome if r.get("cold"))
+cold_reps = reps_of("cold", 5)
 low_cpu = min(r["session"]["driver_cpu_s"] for r in chrome)
 low_rss = min(r["session"]["driver_rss_mb"] for r in chrome)
 
@@ -66,6 +80,12 @@ def med(stage):
     return f" ({m:.2f})" if m is not None else ""
 
 
+def best_of(stage):
+    """' (best)' after a median."""
+    w = (stage or {}).get("wall_s")
+    return f" ({w:.2f})" if w is not None else ""
+
+
 lines = [
     "## Benchmarks",
     "",
@@ -76,17 +96,17 @@ lines = [
     "1000-row detail). navigera is the static Linux binary the releases ship.",
     "Reps are interleaved across contenders. Run in CI via `.github/workflows/bench.yml`.",
     "",
-    f"| contender | session wall, best (median) of {doc['reps']} | warm eval mean (200×) | cold start, best (median) of 5 | driver CPU (own) | driver peak RSS (own) | browser memory (PSS) |",
+    f"| contender | session wall, best (median) of {doc['reps']} | warm eval mean (200×) | cold start, median (best) of {cold_reps} | driver CPU (own) | driver peak RSS (own) | browser memory (PSS) |",
     "|---|---|---|---|---|---|---|",
 ]
 for r in chrome + exp:
     s = r["session"]
     ev = r.get("eval", {}).get("mean_ms")
-    cold = r.get("cold", {}).get("wall_s")
+    cold = mid(r.get("cold"))
     lines.append(
         f"| {NAMES.get(r['name'], r['name'])} | {b(f'{s['wall_s']:.2f}s', s['wall_s'] == fast_wall)}{med(s)} | "
         f"{b(f'{ev:.2f} ms', ev == fast_eval and not r['experimental']) if ev is not None else '—'} | "
-        f"{b(f'{cold:.2f}s', cold == fast_cold and not r['experimental']) + med(r.get('cold')) if cold is not None else '—'} | "
+        f"{b(f'{cold:.2f}s', cold == fast_cold and not r['experimental']) + best_of(r.get('cold')) if cold is not None else '—'} | "
         f"{b(cpu(s['driver_cpu_s']), s['driver_cpu_s'] < 0.05)} | "
         f"{b(f'{s['driver_rss_mb']:.0f} MB', round(s['driver_rss_mb']) == round(low_rss))} | "
         f"{mem(s['browser_pss_mb'])} |"
@@ -99,7 +119,8 @@ lines += [
     # where the link would not resolve for readers.
     f"Measured {date} on GitHub-hosted `ubuntu-latest` ({env}).",
     "Every driver produced byte-identical extracted data and counts (correctness",
-    "gate); wall is best-of-N.",
+    "gate). Session wall is best-of-N (median in brackets); cold start and the",
+    "live-site rows are ranked by their median, with the best run in brackets.",
     "The ladder reruns weekly ([`bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/bench.yml)) against",
     "the latest contender releases. GitHub runners vary between runs, so compare",
     "rows within one run.",
@@ -123,9 +144,12 @@ serve_row = next((r for r in chrome if r["name"] == "nv-serve"), None)
 other = next((r for r in chrome if not r["name"].startswith("nv-")), None)
 rank = chrome.index(nv_best) + 1
 shell_row = next((r for r in chrome if r["name"] == "nv-shell"), None)
+# Rows that run a browser other than the regular Google Chrome.
+off = [f"`{n}`" for n in ("nv-shell", "nv-edge", "nv-brave") if any(r["name"] == n for r in chrome)]
+off_text = off[0] if len(off) == 1 else ", ".join(off[:-1]) + " and " + off[-1] if off else ""
 lines += [
-    f"**Reading the table.** Session wall order: {order}. Every driver but"
-    + (f" `nv-shell` runs the same Google Chrome; on it, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
+    f"**Reading the table.** Session wall order: {order}"
+    + (f". Every driver{' but ' + off_text if off else ''} runs the same Google Chrome; on it, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
        + ("ahead of" if serve_row["session"]["wall_s"] < other["session"]["wall_s"] else "behind")
        + f" the fastest other driver, {other['name']} ({other['session']['wall_s']:.2f}s)"
        if serve_row and other else "")
@@ -142,14 +166,19 @@ br = [r for r in chrome if r.get("browse")]
 if rw and br:
     rw_ok = sum(1 for r in rw if r["realworld"]["ok"])
     br_ok = sum(1 for r in br if r["browse"]["ok"])
+    live_reps = reps_of("realworld", 3)
+    live_how = "median" if any(r["realworld"].get("median_wall_s") is not None for r in rw) else "best"
+
+    def live(rs, key):
+        ranked = sorted((r for r in rs if mid(r[key]) is not None), key=lambda r: mid(r[key]))
+        return ", ".join(f"{r['name']} {mid(r[key]):.2f}s" for r in ranked)
     lines += [
-        "### Real-world (public internet, best of 3, same run)",
+        f"### Real-world (public internet, {live_how} of {live_reps}, same run)",
         "",
-        f"example.com goto → title check: {rw_ok} of {len(rw)} pass; "
-        + ", ".join(f"{r['name']} {r['realworld']['wall_s']:.2f}s" for r in sorted(rw, key=lambda r: r["realworld"]["wall_s"])) + ".",
+        f"example.com goto → title check: {rw_ok} of {len(rw)} pass; " + live(rw, "realworld") + ".",
         "",
         f"GitHub browse (awesome-list scroll + trending click-through): {br_ok} of {len(br)} pass; "
-        + ", ".join(f"{r['name']} {r['browse']['wall_s']:.2f}s" for r in sorted(br, key=lambda r: r["browse"]["wall_s"])) + ".",
+        + live(br, "browse") + ".",
         "navigera's click returns once the new page has settled; the other drivers'",
         "clicks return at once and they then poll the URL, so the browse rows do not",
         "time the same readiness. The example.com check is the title; h1 is read, not checked.",
@@ -164,7 +193,7 @@ shell = next((r for r in rows if r["name"] == "nv-shell"), None)
 if shell and serve and shell.get("cold") and serve.get("cold"):
     lines += [
         "**chrome-headless-shell** (the same Chrome build without its browser UI",
-        f"layer): cold start {serve['cold']['wall_s']:.2f}s → {shell['cold']['wall_s']:.2f}s, session "
+        f"layer): cold start {mid(serve['cold']):.2f}s → {mid(shell['cold']):.2f}s (medians), session "
         f"{serve['session']['wall_s']:.2f}s → {shell['session']['wall_s']:.2f}s, browser memory "
         f"{mem(serve['session']['browser_pss_mb'])} → {mem(shell['session']['browser_pss_mb'])}.",
         "",
@@ -173,7 +202,7 @@ if ws and serve and ws.get("cold") and serve.get("cold"):
     spread = serve["session"].get("runs_wall_s") or []
     lines += [
         "**CDP transport A/B** (same build and run): `--remote-debugging-pipe` (default on Linux/macOS)",
-        f"vs a DevTools WebSocket port: cold start {serve['cold']['wall_s']:.2f}s vs {ws['cold']['wall_s']:.2f}s,",
+        f"vs a DevTools WebSocket port: cold start {mid(serve['cold']):.2f}s vs {mid(ws['cold']):.2f}s (medians),",
         f"session {serve['session']['wall_s']:.2f}s vs {ws['session']['wall_s']:.2f}s"
         + (". No speed difference"
            if abs(serve['session']['wall_s'] / ws['session']['wall_s'] - 1) < 0.05
@@ -196,8 +225,8 @@ if baseline and serve:
         "built the same way by the ladder's `baseline_ref` A/B):",
         f"session {baseline['session']['wall_s']:.2f}s → {serve['session']['wall_s']:.2f}s "
         f"({pct(serve['session']['wall_s'], baseline['session']['wall_s'])}), "
-        f"cold start {baseline['cold']['wall_s']:.2f}s → {serve['cold']['wall_s']:.2f}s "
-        f"({pct(serve['cold']['wall_s'], baseline['cold']['wall_s'])}), "
+        f"cold start {mid(baseline['cold']):.2f}s → {mid(serve['cold']):.2f}s median "
+        f"({pct(mid(serve['cold']), mid(baseline['cold']))}), "
         f"browser CPU per session {baseline['session']['browser_cpu_s']:.2f}s → "
         f"{serve['session']['browser_cpu_s']:.2f}s." + (f" {change_note}" if change_note else ""),
         "",
