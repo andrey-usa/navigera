@@ -1,0 +1,15 @@
+{"trap": "idle", "rep": 0, "final": true, "wall_ms": 432.3, "rc": 0, "out": "+ text: final: idle two\n- text: idle\n"}
+{"trap": "idle", "rep": 1, "final": true, "wall_ms": 423.7, "rc": 0, "out": "+ text: final: idle two\n- text: idle\n"}
+{"trap": "idle", "rep": 2, "final": true, "wall_ms": 422.9, "rc": 0, "out": "+ text: final: idle two\n- text: idle\n"}
+{"trap": "idle", "rep": 3, "final": true, "wall_ms": 436.7, "rc": 0, "out": "+ text: final: idle two\n- text: idle\n"}
+{"trap": "idle", "rep": 4, "final": true, "wall_ms": 426.5, "rc": 0, "out": "+ text: final: idle two\n- text: idle\n"}
+{"trap": "worker", "rep": 0, "final": true, "wall_ms": 437.1, "rc": 0, "out": "+ text: final: worker two\n- text: idle\n"}
+{"trap": "worker", "rep": 1, "final": true, "wall_ms": 437.6, "rc": 0, "out": "+ text: final: worker two\n- text: idle\n"}
+{"trap": "worker", "rep": 2, "final": true, "wall_ms": 437.7, "rc": 0, "out": "+ text: final: worker two\n- text: idle\n"}
+{"trap": "worker", "rep": 3, "final": true, "wall_ms": 436.7, "rc": 0, "out": "+ text: final: worker two\n- text: idle\n"}
+{"trap": "worker", "rep": 4, "final": true, "wall_ms": 435.6, "rc": 0, "out": "+ text: final: worker two\n- text: idle\n"}
+{"trap": "img", "rep": 0, "final": true, "wall_ms": 432.3, "rc": 0, "out": "+ text: final: img two\n- text: idle\n"}
+{"trap": "img", "rep": 1, "final": true, "wall_ms": 426.0, "rc": 0, "out": "+ text: final: img two\n- text: idle\n"}
+{"trap": "img", "rep": 2, "final": true, "wall_ms": 437.8, "rc": 0, "out": "+ text: final: img two\n- text: idle\n"}
+{"trap": "img", "rep": 3, "final": true, "wall_ms": 435.3, "rc": 0, "out": "+ text: final: img two\n- text: idle\n"}
+{"trap": "img", "rep": 4, "final": true, "wall_ms": 424.2, "rc": 0, "out": "+ text: final: img two\n- text: idle\n"}

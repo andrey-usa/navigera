@@ -12,9 +12,13 @@ Traps:
   microtask    response -> DOM write -> second fetch in queueMicrotask
   timer0       ... in setTimeout 0
   timer30      ... in setTimeout 30 ms
+  timer50..90  ... in setTimeout 50/60/70/80/90 ms (the window's edge)
   timer120     ... in setTimeout 120 ms
   raf          ... in requestAnimationFrame
   msgchan      ... in a post-paint MessageChannel (rAF, then port.postMessage)
+  idle         ... in requestIdleCallback
+  worker       ... after a round trip to a Worker
+  img          ... after an image load (a request of its own)
   placeholder  response -> "Loading..." placeholder -> second fetch at once
   analytics    response -> analytics POST, no DOM change, no second fetch
   longpoll     click starts a fetch the server holds open 30 s
@@ -42,12 +46,23 @@ BODIES = {
     "microtask": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); queueMicrotask(second); });",
     "timer0": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); setTimeout(second, 0); });",
     "timer30": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); setTimeout(second, 30); });",
+    "timer50": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); setTimeout(second, 50); });",
+    "timer60": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); setTimeout(second, 60); });",
+    "timer70": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); setTimeout(second, 70); });",
+    "timer80": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); setTimeout(second, 80); });",
+    "timer90": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); setTimeout(second, 90); });",
     "timer120": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); setTimeout(second, 120); });",
     "raf": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); requestAnimationFrame(() => second()); });",
     "msgchan": """fetch('/first').then(r => r.text()).then(() => { out('phase one');
       const c = new MessageChannel();
       c.port1.onmessage = () => second();
       requestAnimationFrame(() => c.port2.postMessage(1)); });""",
+    "idle": "fetch('/first').then(r => r.text()).then(() => { out('phase one'); requestIdleCallback(() => second()); });",
+    "worker": """fetch('/first').then(r => r.text()).then(() => { out('phase one');
+      const w = new Worker(URL.createObjectURL(new Blob(['onmessage = (e) => postMessage(e.data)'], {type: 'text/javascript'})));
+      w.onmessage = () => second(); w.postMessage(1); });""",
+    "img": """fetch('/first').then(r => r.text()).then(() => { out('phase one');
+      const i = new Image(); i.onload = i.onerror = () => second(); i.src = '/pixel?' + Date.now(); });""",
     "placeholder": "fetch('/first').then(r => r.text()).then(() => { out('Loading...'); second(); });",
     "analytics": "out('working'); fetch('/first').then(() => { fetch('/beacon', {method: 'POST', body: 'x'}); });",
     "longpoll": "out('listening'); fetch('/slow').then(() => out('polled'));",
