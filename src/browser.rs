@@ -2411,11 +2411,6 @@ impl BrowserSession {
         self.active_tab().network_quiet_waited(quiet, max)
     }
 
-    /// [`Page::action_settle_wait`] on the active tab.
-    pub fn action_settle_wait(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
-        self.active_tab().action_settle_wait(quiet, max)
-    }
-
     /// Whether the next snapshot may skip the quiet wait (a `wait`
     /// already synced with the active tab, no request since).
     pub fn quiet_synced(&self) -> bool {
