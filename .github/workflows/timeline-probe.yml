@@ -69,4 +69,4 @@ jobs:
           git pull --rebase origin experiment-24 || true
           git add bench/ladder/timeline/results-experiment-24.jsonl bench/ladder/timeline/summary-experiment-24.md bench/ladder/timeline/probe-stdout.txt bench/ladder/timeline/probe-stderr.txt
           git commit -m "Timeline probe results (run ${{ github.run_id }}) [skip ci]" || echo "nothing to commit"
-          git push
+          git push origin HEAD:experiment-24
