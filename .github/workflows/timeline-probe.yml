@@ -54,7 +54,7 @@ jobs:
           python3 bench/ladder/timeline/drive.py \
             --reps 9 \
             --navigera target/release/navigera \
-            --gorod ladder-gorod-probe \
+            --gorod "$GITHUB_WORKSPACE/ladder-gorod-probe" \
             --chrome "$CHROME_BIN" \
             --out bench/ladder/timeline/results-experiment-24.jsonl \
             --summary bench/ladder/timeline/summary-experiment-24.md \
