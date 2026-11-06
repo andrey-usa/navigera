@@ -8,17 +8,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- MCP: action tools (`browser_click`, `browser_fill`, `browser_type`,
-  `browser_press_key`, `browser_select_option`, `browser_file_upload`,
-  `browser_run`) report what the action changed on the page (the CLI's
-  compact way) instead of the full page state; `state: true` on the call
-  keeps the full state. `browser_hover`, `browser_mouse` and
-  `browser_scroll` still return the full state (their page change is not
-  tracked). New deferred tools `browser_webmcp_list` and
-  `browser_webmcp_call` expose a page's WebMCP tools (page-provided,
-  untrusted; a tool the page doesn't mark read-only needs
-  `confirm: true`) - via `browser_more`.
-
 - `start --allow-domains <list>` (also `$NAVIGERA_ALLOW_DOMAINS` and
   `mcp --allow-domains`): a session's domain allowlist. Navigation and
   requests to other hosts are refused at the Fetch request stage, before

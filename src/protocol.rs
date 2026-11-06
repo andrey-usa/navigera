@@ -5946,7 +5946,7 @@ pub fn split_state(result: &Value) -> (Option<Value>, Option<Value>) {
 }
 
 /// Actions whose compact output says what they changed on the page.
-pub(crate) fn reports_page_change(command: &Command) -> bool {
+fn reports_page_change(command: &Command) -> bool {
     matches!(
         command,
         Command::Click { .. }
