@@ -3648,21 +3648,26 @@ impl Page {
     pub fn action_settle_wait(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
         let started = std::time::Instant::now();
         let deadline = started + max;
-        loop {
-            let (pending, _) = self.shared.net_state(&self.session_id);
-            if pending == 0 {
-                break;
+        // A request that starts during the proof (a fetch the page defers
+        // past the first drain) is drained and proven again, a few times;
+        // the proof failing without new traffic falls to the plain window.
+        let mut rounds = 0;
+        'retry: loop {
+            loop {
+                let (pending, _) = self.shared.net_state(&self.session_id);
+                if pending == 0 {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return (false, started.elapsed());
+                }
+                std::thread::sleep(Duration::from_millis(5));
             }
-            if std::time::Instant::now() >= deadline {
-                return (false, started.elapsed());
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let (seq0, _) = self.shared.net_seq_pending(&self.session_id);
-        let ms = quiet.as_millis();
-        let floor = (quiet / 2).as_millis();
-        let js = format!(
-            "new Promise((r) => {{ const c = window.__nvMut; \
+            let (seq0, _) = self.shared.net_seq_pending(&self.session_id);
+            let ms = quiet.as_millis();
+            let floor = (quiet / 2).as_millis();
+            let js = format!(
+                "new Promise((r) => {{ const c = window.__nvMut; \
              if (!c) return r(false); \
              let proved = false; let floor = false; \
              const t = setTimeout(() => r(false), {ms}); \
@@ -3671,19 +3676,24 @@ impl Page {
              const probe = () => requestAnimationFrame(() => {{ const ch = new MessageChannel(); \
                ch.port1.onmessage = () => {{ proved = true; maybe(); }}; ch.port2.postMessage(1); }}); \
              if (c.n > c.a) probe(); else c.w2 = probe; }})"
-        );
-        let proved = self
-            .send(
-                "Runtime.evaluate",
-                json!({ "expression": js, "awaitPromise": true, "returnByValue": true }),
-                quiet + Duration::from_secs(1),
-            )
-            .ok()
-            .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
-            .unwrap_or(false);
-        let (seq1, pending1) = self.shared.net_seq_pending(&self.session_id);
-        if proved && seq0 == seq1 && pending1 == 0 {
-            return (true, started.elapsed());
+            );
+            let proved = self
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": js, "awaitPromise": true, "returnByValue": true }),
+                    quiet + Duration::from_secs(1),
+                )
+                .ok()
+                .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
+                .unwrap_or(false);
+            let (seq1, pending1) = self.shared.net_seq_pending(&self.session_id);
+            if proved && seq0 == seq1 && pending1 == 0 {
+                return (true, started.elapsed());
+            }
+            rounds += 1;
+            if (seq1 == seq0 && pending1 == 0) || rounds >= 8 || std::time::Instant::now() >= deadline {
+                break 'retry;
+            }
         }
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
