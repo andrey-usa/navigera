@@ -301,6 +301,19 @@ fetch('/slow-echo?ms=100').then(() => {
 });
 </script>""")
 
+PAGES["/action-chain"] = ("action chain", "", """
+<button id=go>Load</button><div id=out>idle</div>
+<script>
+// A click whose response starts a second fetch at once: the report must
+// show what the second fetch rendered, not the first's.
+go.onclick = () => {
+  fetch('/slow-echo?ms=150').then(() => {
+    out.textContent = 'phase one';
+    fetch('/slow-echo?ms=150').then(() => { out.textContent = 'chain complete'; });
+  });
+};
+</script>""")
+
 PAGES["/big-table"] = ("big table", "", """
 <table><tbody id=rows></tbody></table><p id=out></p>
 <script>

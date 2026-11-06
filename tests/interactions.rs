@@ -1610,6 +1610,41 @@ fn a_click_waits_for_a_navigation_only_when_the_page_plans_one() {
 /// for suggestions): the report has the answer, not the page as it was. The
 /// page has been quiet for longer than the quiet window (an agent that
 /// thought before typing), so the quiet wait alone would read it at once.
+/// A click whose response starts a second fetch at once reports what the
+/// second fetch rendered: the after-action settle never returns between
+/// states of a chain.
+#[test]
+fn an_action_reports_a_fetches_chained_fetch() {
+    let _alone = timed_alone();
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("action-chain", &[]);
+    let compact = |args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .arg("--session")
+            .arg(&s.name)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    for _ in 0..3 {
+        s.ok(&["goto", &format!("{}/action-chain", site.url)]);
+        let tree = compact(&["ax"]);
+        let reference = tree
+            .lines()
+            .find(|l| l.contains("button \"Load\""))
+            .and_then(|l| l.split("[ref=").nth(1))
+            .map(|r| r.trim_end_matches(']').to_string())
+            .unwrap_or_else(|| panic!("no Load ref in {tree}"));
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let out = compact(&["click", &reference]);
+        assert!(out.contains("chain complete"), "{out}");
+        assert!(!out.contains("phase one"), "{out}");
+    }
+}
+
 #[test]
 fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
     let _alone = timed_alone();
