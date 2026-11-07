@@ -21,7 +21,9 @@ checks of bench/agent-eval), never from the agent's own claim.
 plays `lookup` through whichever tools the agent offers: no API key, and a
 deterministic check that each agent really reaches the browser and hands the
 results back. `--model gemini:<id>` uses GEMINI_API_KEY with each agent's own
-Gemini provider.
+Gemini provider. `--model openrouter:<id>` uses OPENROUTER_API_KEY through
+OpenRouter's OpenAI-compatible endpoint (each agent's openai-compatible
+provider), e.g. `--model openrouter:google/gemini-3.5-flash-lite`.
 """
 import argparse
 import importlib.util
@@ -126,6 +128,8 @@ def write_cline(home: Path, work: Path, server: dict | None, model: tuple, env: 
     kind, model_id, base = model
     auth = ([args.cline, "auth", "--provider", "openai-compatible", "--apikey", "test", "--modelid", model_id,
              "--baseurl", base] if kind == "mock" else
+            [args.cline, "auth", "--provider", "openai-compatible", "--apikey", env["OPENROUTER_API_KEY"],
+             "--modelid", model_id, "--baseurl", base] if kind == "openrouter" else
             [args.cline, "auth", "--provider", "gemini", "--apikey", env["GEMINI_API_KEY"], "--modelid", model_id])
     subprocess.run(auth, cwd=work, env=env, capture_output=True, timeout=120, check=True)
     # Act mode with auto-approve (the default), not --yolo: the yolo tool
@@ -141,6 +145,11 @@ def write_kilo(home: Path, work: Path, server: dict | None, model: tuple, env: d
                                        "options": {"baseURL": base, "apiKey": "test"},
                                        "models": {model_id: {"name": model_id, "tool_call": True}}}}
         name = f"mock/{model_id}"
+    elif kind == "openrouter":
+        config["provider"] = {"openrouter": {"npm": "@ai-sdk/openai-compatible", "name": "OpenRouter",
+                                       "options": {"baseURL": base, "apiKey": env["OPENROUTER_API_KEY"]},
+                                       "models": {model_id: {"name": model_id, "tool_call": True}}}}
+        name = f"openrouter/{model_id}"
     else:
         env["GOOGLE_GENERATIVE_AI_API_KEY"] = env["GEMINI_API_KEY"]
         name = f"google/{model_id}"
@@ -156,6 +165,8 @@ def write_continue(home: Path, work: Path, server: dict | None, model: tuple, en
     kind, model_id, base = model
     if kind == "mock":
         entry = {"name": model_id, "provider": "openai", "model": model_id, "apiBase": base, "apiKey": "test"}
+    elif kind == "openrouter":
+        entry = {"name": model_id, "provider": "openai", "model": model_id, "apiBase": base, "apiKey": env["OPENROUTER_API_KEY"]}
     else:
         entry = {"name": model_id, "provider": "gemini", "model": model_id, "apiKey": env["GEMINI_API_KEY"]}
     entry.update({"roles": ["chat"], "capabilities": ["tool_use"]})
@@ -239,7 +250,9 @@ def run_one(agent: str, browser: str, task: dict, model_spec: str, args, rep: in
             mock = Mock(root)
             model = ("mock", "mock", mock.url)
         else:
-            model = ("gemini", model_spec.split(":", 1)[1], None)
+            kind, mid = model_spec.split(":", 1)
+            base = "https://openrouter.ai/api/v1" if kind == "openrouter" else None
+            model = (kind, mid, base)
         server = mcp_server(browser, args)
         if server is None:
             subprocess.run(["navigera", "install-skill", "--dir", str(work / SKILL_DIR[agent])], env=env,
@@ -336,7 +349,7 @@ def main() -> int:
     ap.add_argument("--agents", default=",".join(AGENTS))
     ap.add_argument("--browsers", default=",".join(BROWSERS))
     ap.add_argument("--tasks", default="lookup")
-    ap.add_argument("--model", default="mock", help="mock, or gemini:<model id> (needs GEMINI_API_KEY)")
+    ap.add_argument("--model", default="mock", help="mock, gemini:<model id> (needs GEMINI_API_KEY), or openrouter:<model id> (needs OPENROUTER_API_KEY)")
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--cline", default="cline")
@@ -349,9 +362,11 @@ def main() -> int:
     if not os.environ.get("CHROME_BIN"):
         print("set CHROME_BIN to the Chrome every browser setup should use", file=sys.stderr)
         return 2
-    if args.model != "mock" and not os.environ.get("GEMINI_API_KEY"):
-        print(f"--model {args.model} needs GEMINI_API_KEY", file=sys.stderr)
-        return 2
+    if args.model != "mock":
+        need = {"gemini": "GEMINI_API_KEY", "openrouter": "OPENROUTER_API_KEY"}.get(args.model.split(":", 1)[0])
+        if need is None or not os.environ.get(need):
+            print(f"--model {args.model} needs {need or 'a known provider prefix'}", file=sys.stderr)
+            return 2
     all_tasks = json.loads((REPO / "bench" / "agent-eval" / "tasks.json").read_text())["tasks"]
     wanted = args.tasks.split(",")
     tasks = [t for t in all_tasks if t["id"] in wanted]
