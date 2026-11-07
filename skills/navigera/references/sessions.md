@@ -13,17 +13,26 @@ read its error and fix the command.
 
 ```bash
 navigera profiles                     # the user's browsers and profiles that can be handed over
-navigera -s me start --attach         # their running Chrome 144+ (they enable chrome://inspect/#remote-debugging once, then click Allow)
+navigera -s me start --auto-connect   # their running browser (Chrome 144+: they turn on chrome://inspect/#remote-debugging once, then click Allow); same as --attach
+navigera -s me tab-list               # your tabs, then theirs under user_tabs ("current": true is the one they are on)
+navigera -s me tab-select current     # work in the tab they are on (or a target id from user_tabs)
+navigera -s me start --auto-connect --tab current   # start in their tab, with no window of your own
 navigera -s me start --profile agent --from chrome   # a browser of your own, starting with a copy of their sign-ins
 navigera -s me start --profile work   # a separate persistent browser: sign in once, it stays open between sessions
-navigera -s me quit                   # disconnects; the browser stays open (--close-browser closes it)
+navigera -s me show                   # bring your tab to the front for them: it is theirs now, and quit leaves it open
+navigera -s me quit                   # closes your own tabs, leaves theirs (--keep-tabs leaves yours too; --close-browser closes the browser)
 ```
 
-navigera works in a window of its own and never closes the user's tabs.
-`start --natural` helps when a site treats headless browsers differently. A
-step only the person can do (a login, 2FA, a CAPTCHA): `navigera -s me show`
-puts the browser on their screen with its tabs and sign-ins; tell them what
-to do, `wait --url /dashboard --timeout-ms 300000`, then `hide` and carry on.
+In their browser navigera opens a window of its own behind theirs, and
+never brings a tab forward by itself, so their keyboard and view stay where
+they are; a tab behind another still reads and takes clicks and typing.
+When they say "this page" or "my tab", `tab-select current` works in the tab
+they are on: it stays theirs, and `quit` leaves it open. To hand them
+something you opened, `show` it. `start --natural` helps when a site treats headless browsers
+differently. A step only the person can do (a login, 2FA, a CAPTCHA):
+`navigera -s me show` puts the browser on their screen with its tabs and
+sign-ins; tell them what to do, `wait --url /dashboard --timeout-ms
+300000`, then `hide` and carry on.
 
 ## Sessions
 

@@ -121,7 +121,7 @@ another process are reachable by ref only.
 | `cookies` | `[--all] [--url <u>] [--json]`; `set <name> <value> [--url <u> \| --domain <d>] [--path] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax\|Strict\|None]`; `delete <name>`; `clear` | one cookie per line (`--all`: every cookie in the browser); `set` → `{set}`, `delete` → `{deleted}`, `clear` → `{cleared: true}` |
 | `storage` | `[local\|session] [get [<key>] \| set <key> <value> \| remove <key> \| clear]` | the value, or the whole store as an object |
 | `state` | `save\|load <file.json>` | every cookie (HttpOnly too) and the open tabs' localStorage to a file, or back: `{saved\|loaded, cookies, origins}`. The file is the common storage-state JSON, so one saved by another browser tool loads here, and back. `load` sets the cookies at once and gives each origin's keys to documents of that origin that lack them |
-| `show` / `hide` | — | the session's browser on screen, or off it, with the same tabs (the active one stays active) and sign-ins: a `--profile` browser restarts on its profile, which keeps everything; one navigera launched is replaced by one carrying its cookies and the open tabs' storage. For a step only a person can do (a login, 2FA, a CAPTCHA). `show` needs a display. Not for `--attach`, which is already on screen, or `--electron`, an app with windows of its own | state + `visible` |
+| `show` / `hide` | — | the session's browser on screen, or off it, with the same tabs (the active one stays active) and sign-ins: a `--profile` browser restarts on its profile, which keeps everything; one navigera launched is replaced by one carrying its cookies and the open tabs' storage. For a step only a person can do (a login, 2FA, a CAPTCHA). `show` needs a display. In your own browser (`--attach`), `show` brings the session's tab to the front for you and hands it to you (`quit` leaves it open), and `hide` is refused. Not for `--electron`, an app with windows of its own | state + `visible` |
 | `profiles` | — | no session needed: `{browsers: [{browser, user_data_dir, attach_ready, hand_off, profiles: [{dir, name, email, last_used}]}], navigera_profiles: [{name, dir, running}]}`: what `--attach` and `--from` can be pointed at |
 | `pdf` | `[<path>]` or `--path`; `--landscape`; `--background` | `{path, bytes}` |
 | `set` | `viewport <w> <h> [--scale <dpr>] [--mobile]`, `device <name>` (55 devices: iPhone SE to 17 Pro Max, Pixel 5 to 10 Pro XL, Galaxy S, A, Z Flip, Z Fold and Tab models, iPads, Laptop, Desktop, Desktop HD, Desktop HD HiDPI), `media dark\|light\|print\|reduced-motion\|forced-colors`, `geo <lat> <lon> [--accuracy <m>]`, `offline on\|off`, `permissions grant\|deny\|reset <name>…` (geolocation, notifications, camera, microphone, clipboard, midi, sensors, background-sync), `headers 'Name: value'…` (or a JSON object), `ua <string>`, `locale <tag>`, `timezone <zone>`, `credentials <user> <password>`; `off` resets one | what was set. Applies to every tab and to tabs opened later |
@@ -130,7 +130,7 @@ another process are reachable by ref only.
 | `init-script` | `<js>`, `--file <path.js>`, `--clear`; no argument lists them | runs before the page's own scripts in every document of every tab; adding returns `{init_scripts: n}`, `--clear` `{removed}` |
 | `webmcp-list` | — | the tools the page registered with WebMCP (`document.modelContext.registerTool`): `{tools: [{name, description, read_only, input_schema?, consequential?, untrusted_content?}], untrusted}` sorted by name. See [WebMCP](#webmcp) |
 | `webmcp-call` | `<name> [--params '{json}'] [--confirm] [--timeout-ms <n>]` | runs the tool in the frame that registered it and waits for its answer: state + `{tool, output, untrusted}`; a tool the page doesn't mark read-only is refused without `--confirm` |
-| `status` | — | `{engine, executable, endpoint, attached, browser, version}` + state (`closed: true` once the session's only tab was closed). `browser`: `shared (N sessions)`, `own` or `attached`. A session server adds `server: {pid, started_at, idle_s, parent}`. With `--allow-domains`, state adds `allow_domains: {entries, docs_only, denied: [{host, count}]}` |
+| `status` | — | `{engine, executable, endpoint, attached, browser, version}` + state (`closed: true` once the session's only tab was closed). `browser`: `shared (N sessions)`, `own` or `attached`. In your own browser (`--attach`), `user_tabs`: how many of your other tabs are open. A session server adds `server: {pid, started_at, idle_s, parent}`. With `--allow-domains`, state adds `allow_domains: {entries, docs_only, denied: [{host, count}]}` |
 | `locate` | target (a ref, usually) | `{locators: [{kind, flags}]}`: the flags that find the element again, most stable first (`testid`, `role` + name, `label`, `placeholder`, `text`, `css`), each kept only when the op's own finder picks this element on the page as it is; inside a frame each has `--frame` (a cross-origin frame named from the page that holds it); `secret: true` for a password field (`type=password`, `autocomplete` current/new-password or one-time-code) |
 | `history` | `--clear` empties it | `{history: [{command, at, url, page, locators?}]}` (`page`: the title, the visible `h1` and the status/alert messages showing after the action): the actions the session ran (navigation, clicks, typing, selects, uploads, drags, scrolls, tabs, dialogs, and the waits between; not reads or `eval`), oldest first, the last 1000; one on a ref has the `locate` of its element from just before it ran (and `secret: true` for a password field), so `primavera from-session` can write it as a test |
 | `title` / `url` | — | string / state |
@@ -138,11 +138,11 @@ another process are reachable by ref only.
 | `screenshot` | `[<path>]` or `--path`; `--full-page`; `--quality <1-100>` (a JPEG at that quality, not a PNG: about a quarter of the bytes for a page of text); `--timeout-ms <n>` (give up on the capture after n ms; default: the session timeout) | `{path, bytes}` |
 | `reset` | | `{tabs, active, url}`: a new browser context (no cookies, storage or cache from before) with one blank tab, in the same browser (about 40 ms); the old tabs close; `set`, routes, credentials, init scripts, the dialog answer, the `--allow-domains` policy and the `downloads --dir` stay (`reset --all` drops them, as in a new session). Chrome only |
 | `tab-new` | `[<url>]` | `{tabs:[{index,target,active,url,title}], active, url}`; a tab that was closed under the session (the user closed it, or the page did) shows `closed: true` until `tab-new` replaces it, and ops that need it say so |
-| `tab-list` | — | same |
-| `tab-select` | `<index>` (or `--index <n>`) or a `target` id (or its first characters) from `tab-list`, which stays right when tabs open and close | state |
+| `tab-list` | — | same; a tab of yours the session works in has `user: true`. In your own browser (`--attach`) also `user_tabs: [{target, url, title}]`, your other tabs, and `current: true` on the tab you are on, of either list: the one whose window has your keyboard, else the one that came on screen last (you may be typing in a terminal) |
+| `tab-select` | `<index>` (or `--index <n>`), `current` (the tab you are on; in your own browser it can be one of yours), or a `target` id (or its first characters) from `tab-list`, one of `user_tabs` too, which stays right when tabs open and close | state |
 | `tab-close` | `[<index>]` (default: active) | state |
 | `dialog` | `--accept [--prompt-text t]` or `--dismiss` | `{dialogs: "accept"\|"dismiss"}` |
-| `quit` (`close`) | — | `{bye: true}`; a session server exits with its browser context (a browser of its own: with its browser). `--close-browser` on a shared browser closes it with this session unless other sessions use it, and says which |
+| `quit` (`close`) | `--close-browser`, `--keep-tabs` | `{bye: true}`; a session server exits with its browser context (a browser of its own: with its browser). `--close-browser` on a shared browser closes it with this session unless other sessions use it, and says which. Attached (`--attach`, `--profile`): `browser: "left open"`, and the tabs navigera opened close (`closed_tabs: n`) while yours stay (`user_tabs_left: n`), never the browser's last tab; `--keep-tabs` leaves navigera's open too |
 | `skill` | — | prints the agent guide (SKILL.md) |
 | `install-browser` | `[chrome-headless-shell \| chrome] [--channel stable\|beta\|dev\|canary] [--where]` | downloads that Chrome from Google's Chrome for Testing into navigera's cache, used from then on (see Browsers and engines): `{installed, version}`; `--where` prints the directory |
 | `install-skill` | `[--dir <skills dir>] [--claude \| --continue] [--global]` | writes `<dir>/navigera/SKILL.md` with its `references/` (default `./.agents/skills`, read by Cline and Kilo; `--claude`: `.claude/skills`; `--continue`: `.continue/skills`; `--global`: under your home directory) |
@@ -488,7 +488,9 @@ on stdio, for agents that take their tools over MCP: Cline, Roo Code, Kilo
 Code, Continue, VS Code, Claude Desktop, Cursor. Each tool is one serve op, so
 it behaves exactly like the CLI. The browser starts on the first tool call.
 `--headed`, `--profile <name>` (a persistent, signed-in browser),
-`--attach` and `--electron <app>` work as they do for sessions.
+`--attach`, `--auto-connect`, `--tab current` and `--electron <app>` work as
+they do for sessions: `mcp --auto-connect` serves the tools in your own
+browser, and the agent's tabs close when the MCP client ends the server.
 
 | tool | does |
 |---|---|
@@ -496,7 +498,7 @@ it behaves exactly like the CLI. The browser starts on the first tool call.
 | `browser_snapshot` | `ax`: the tree with `[ref=N]` (optional `ref`/`selector` scope, `limit`) |
 | `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_select_option`, `browser_hover`, `browser_scroll`, `browser_file_upload` | the element ops, by `ref`, `selector` or `text` |
 | `browser_mouse` | `mouse`: raw input at a point (a canvas, a map, a game), or from an element's corner |
-| `browser_wait_for`, `browser_evaluate`, `browser_screenshot` (returns the image), `browser_tabs`, `browser_history`, `browser_handle_dialog` | as the CLI |
+| `browser_wait_for`, `browser_evaluate`, `browser_screenshot` (returns the image), `browser_tabs` (`select` takes `index`, or `target`: an id from `list`, one of the user's tabs too, or `current`, the tab the user is on), `browser_history`, `browser_handle_dialog` | as the CLI |
 | `browser_console_messages`, `browser_network_requests` | `console`, `network` |
 | `browser_resize` | `set viewport` |
 | `browser_handoff` | `show` / `hide`: the browser on the person's screen with the same tabs and sign-ins (a login, 2FA, a CAPTCHA), and back |
@@ -670,21 +672,42 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
 
 | Way | what it connects to | closes the browser? |
 |---|---|---|
-| `--attach` / `--attach chrome` | your running Chrome (also `beta`, `dev`, `canary`, `chromium`, `edge`): Chrome 144+ serves remote debugging for your default profile once you turn it on at `chrome://inspect/#remote-debugging`, and asks you to Allow each connection. navigera reads the endpoint from `DevToolsActivePort` in that browser's user data directory | never |
+| `--auto-connect` / `--attach` / `--attach auto` | whichever of your browsers serves remote debugging, looked for in this order: Chrome, Chrome Beta, Dev and Canary, Chromium, Edge and Brave by their default profiles (Chrome 144+ serves its default profile once you turn it on at `chrome://inspect/#remote-debugging`, and asks you to Allow each connection; navigera reads the endpoint from `DevToolsActivePort` in the browser's user data directory), then a browser started with `--remote-debugging-port` 9222 or 9229. `$NAVIGERA_AUTO_CONNECT=1` does the same for every `start` and `mcp` given no other browser | never |
+| `--attach chrome` | your running Chrome (also `beta`, `dev`, `canary`, `chromium`, `edge`, `brave`) and no other | never |
 | `--attach <dir>` | a Chrome started with `--remote-debugging-port` and `--user-data-dir=<dir>` | never |
 | `--attach ws://…` / `http://host:port` / `<port>` | that DevTools endpoint | never |
 | `--attach ws://host:port/devtools/page/<id>` | that one tab, worked in as it is (no window of its own): a tab another program left open for a look, like a paused test run | never |
 | `--profile <name> --from <browser>` | the same, its profile first replaced with a copy of one of your browser's profiles (`chrome`, `beta`, `dev`, `canary`, `chromium`, `edge`, or a user data directory; `--from-profile` picks one by directory, name or email, default the one used last): cookies (HttpOnly too), Local Storage, IndexedDB, saved logins and autofill, bookmarks, preferences, and `Local State` with the cookie key. Not caches, history, tabs, sync or extensions. The key stays where Chrome keeps it (Keychain, DPAPI, the desktop keyring), so the copy opens for the same user on the same machine. Refused while that profile's browser runs, and for a directory that is not a browser profile. On Windows close Chrome for the copy; it locks its cookie database | only with `quit --close-browser` |
 | `--profile <name>` | a visible Chrome on its own persistent profile (`%LOCALAPPDATA%\navigera\profiles\<name>`, `~/Library/Application Support/navigera/profiles/<name>`, `~/.local/share/navigera/profiles/<name>`; a path works too), started when it isn't running and reused when it is. Sign in once; cookies, settings and extensions stay. `--headless` hides it | only with `quit --close-browser` |
 
-The agent gets a window of its own; your tabs are never touched, and only
-popups from navigera's own tabs are adopted. `quit` disconnects and leaves
-every window open. Because Chrome asks to Allow every new connection, these
-modes need a session (one connection for all commands): a one-shot command
-with `--attach` is refused. Chrome 136–143 can't serve its default profile
-at all (the `--remote-debugging-port` switch is ignored for it, and the
-inspect toggle arrives in 144): use `--profile` there, which works on any
-version.
+In your own browser the agent gets a window of its own, opened behind
+yours so the window you are typing in keeps the keyboard; `tab-new` opens
+another such window rather than a tab among yours. `start` says which
+browser it found and how many of your tabs are open. `tab-list` lists your
+other tabs under `user_tabs` and marks the one you are on `current`, and
+`tab-select current` (or a target id from `user_tabs`) works in that tab:
+it becomes the session's active tab and stays yours, and a window of
+navigera's own that was never used closes. `start --attach --tab current`
+starts in the tab you are on and opens no window at all. The tab you are on
+is one of yours on screen, the one whose window has your keyboard, else
+the one you switched to last; navigera's window counts only when none of
+yours is on screen. `tab-select` never brings a tab forward here: the tab
+you look at and the window you type in stay as they are, and a tab behind
+another still reads, takes clicks and typing, and gives screenshots
+(Chrome slows its timers). `show` brings the session's tab to the front
+when the agent wants you to look at it, and it is yours from then on. Only
+popups from the session's tabs are adopted, and popups from a tab of yours
+are yours too.
+
+`quit` closes the tabs navigera opened and leaves yours open (`--keep-tabs`
+leaves its own too, `--close-browser` closes the browser); the browser's
+last tab is never closed. An idle or `--parent` shutdown does the same as
+`quit`. `reset` lets go of your tabs rather than closing them. Because
+Chrome asks to Allow every new connection, these modes need a session (one
+connection for all commands): a one-shot command with `--attach` is
+refused. Chrome 136–143 can't serve its default profile at all (the
+`--remote-debugging-port` switch is ignored for it, and the inspect toggle
+arrives in 144): use `--profile` there, which works on any version.
 
 **Electron apps: `--electron <app>`** (with `start`, or `serve`). navigera
 launches the app with a DevTools port of the app's choosing

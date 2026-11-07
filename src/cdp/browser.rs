@@ -28,6 +28,50 @@ pub struct LaunchOptions {
     pub pipe: bool,
 }
 
+/// Read in a tab: whether it is on screen, whether its window has the
+/// keyboard, and when it last came on screen (Chrome 115+ records each
+/// change as a `visibility-state` performance entry; the tab's own clock
+/// plus its time origin makes them comparable across tabs).
+const TAB_VIEW_JS: &str = "(() => { let shown = 0; try { const v = performance.getEntriesByType('visibility-state').filter(e => e.name === 'visible'); if (v.length) shown = performance.timeOrigin + v[v.length - 1].startTime; } catch (e) {} return [document.visibilityState === 'visible', document.hasFocus(), shown]; })()";
+
+/// What a tab shows the person at the browser (see [`Browser::tab_views`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TabView {
+    /// The active tab of a window that is on screen.
+    pub visible: bool,
+    /// In the window that has the keyboard: none while the person types
+    /// somewhere else (a terminal, an editor). A tab navigera typed in
+    /// says so too, on screen or not.
+    pub focused: bool,
+    /// When it last came on screen, in ms since the epoch (0: unknown).
+    pub shown_at: f64,
+}
+
+impl TabView {
+    fn from_answer(v: &Value) -> Self {
+        TabView {
+            visible: v.get(0).and_then(Value::as_bool).unwrap_or(false),
+            focused: v.get(1).and_then(Value::as_bool).unwrap_or(false),
+            shown_at: v.get(2).and_then(Value::as_f64).unwrap_or(0.0),
+        }
+    }
+
+    /// The tab the person is on, of several: of those on screen (one per
+    /// window), the one whose window has the keyboard, else the one that
+    /// came on screen last; with none on screen, the one seen last. A tab
+    /// off screen is never the one, whatever focus it says it has.
+    pub fn current<'a, K>(views: impl IntoIterator<Item = (K, &'a TabView)>) -> Option<K> {
+        views
+            .into_iter()
+            .max_by(|(_, a), (_, b)| {
+                (a.visible, a.focused)
+                    .cmp(&(b.visible, b.focused))
+                    .then(a.shown_at.partial_cmp(&b.shown_at).unwrap_or(std::cmp::Ordering::Equal))
+            })
+            .map(|(k, _)| k)
+    }
+}
+
 /// A launched browser: one CDP client on the browser target, plus the child
 /// process handle so `close` can reap it without orphans.
 pub struct Browser {
@@ -560,6 +604,28 @@ impl Browser {
         self.new_page_with(url, new_window, None)
     }
 
+    /// A tab in a window of its own; `behind`: opened without taking the
+    /// keyboard from the window that has it (a browser that can't, the
+    /// headless shell, opens it as usual).
+    pub fn new_window(&self, url: Option<&str>, behind: bool) -> Result<Page> {
+        self.new_window_in(url, behind, None)
+    }
+
+    /// [`Browser::new_window`] in a browser context (`None`: the default one).
+    pub fn new_window_in(&self, url: Option<&str>, behind: bool, context: Option<&str>) -> Result<Page> {
+        if behind {
+            match self.new_page_opts(url, true, true, context) {
+                Err(e) if format!("{e:#}").contains("Target.createTarget") => {
+                    crate::timing::log(&format!(
+                        "[browser] a window behind the others was refused ({e:#}); opening it in front"
+                    ));
+                }
+                other => return other,
+            }
+        }
+        self.new_page_with(url, true, context)
+    }
+
     /// A new browser context: its own cookies, storage and cache, as a
     /// fresh incognito profile has.
     pub fn create_context(&self) -> Result<String> {
@@ -594,9 +660,22 @@ impl Browser {
 
     /// A tab, in a window of its own or not, in a context or the default one.
     pub fn new_page_with(&self, url: Option<&str>, new_window: bool, context: Option<&str>) -> Result<Page> {
+        self.new_page_opts(url, new_window, false, context)
+    }
+
+    fn new_page_opts(
+        &self,
+        url: Option<&str>,
+        new_window: bool,
+        background: bool,
+        context: Option<&str>,
+    ) -> Result<Page> {
         let mut params = json!({ "url": url.unwrap_or("about:blank") });
         if new_window {
             params["newWindow"] = json!(true);
+        }
+        if background {
+            params["background"] = json!(true);
         }
         if let Some(context) = context {
             params["browserContextId"] = json!(context);
@@ -667,6 +746,53 @@ impl Browser {
                 .map(|t| (text(t, "targetId"), (text(t, "url"), text(t, "title"))))
                 .collect())
         })
+    }
+
+    /// The browser's page targets, in the order it lists them: (target id,
+    /// url, title). Its DevTools windows are left out.
+    pub fn page_rows(&self) -> Result<Vec<(String, String, String)>> {
+        self.block_on(async {
+            let targets = self.client.send("Target.getTargets", json!({}), None, CMD_TIMEOUT).await?;
+            let text = |t: &Value, key: &str| t.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+            Ok(targets
+                .get("targetInfos")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|t| t.get("type").and_then(Value::as_str) == Some("page"))
+                .map(|t| (text(t, "targetId"), text(t, "url"), text(t, "title")))
+                .filter(|(_, url, _)| !url.starts_with("devtools://"))
+                .collect())
+        })
+    }
+
+    /// What each tab shows the person at the browser, asked of the tab's
+    /// document in a session of its own, opened and closed again here, so
+    /// that a tab navigera doesn't work in is only looked at. A tab that
+    /// doesn't answer within `wait` (a frozen background tab, one held by
+    /// an `alert`) is left out.
+    pub fn tab_views(&self, targets: &[String], wait: Duration) -> std::collections::HashMap<String, TabView> {
+        let views = self.block_on(futures_util::future::join_all(targets.iter().map(|target| async move {
+            let attached = self
+                .client
+                .send("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None, wait)
+                .await
+                .ok()?;
+            let session = attached.get("sessionId").and_then(Value::as_str)?.to_string();
+            let answer = self
+                .client
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": TAB_VIEW_JS, "returnByValue": true }),
+                    Some(&session),
+                    wait,
+                )
+                .await;
+            let _ = self.client.send("Target.detachFromTarget", json!({ "sessionId": session }), None, wait).await;
+            let value = answer.ok()?.pointer("/result/value").cloned()?;
+            Some((target.clone(), TabView::from_answer(&value)))
+        })));
+        views.into_iter().flatten().collect()
     }
 
     /// List open tab targets: (target_id, url). In an Electron app, its
@@ -875,6 +1001,30 @@ fn wait_exit(child: &mut std::process::Child, wait: Duration) -> Option<std::pro
 
 #[cfg(test)]
 mod tests {
+    use super::TabView;
+
+    #[test]
+    fn the_users_tab_is_the_focused_one_else_the_one_shown_last() {
+        let view = |visible, focused, shown_at| TabView { visible, focused, shown_at };
+        // The window with the keyboard wins, even over a tab shown later.
+        let tabs = [("a", view(true, false, 900.0)), ("b", view(true, true, 100.0)), ("c", view(false, false, 950.0))];
+        assert_eq!(TabView::current(tabs.iter().map(|(k, v)| (*k, v))), Some("b"));
+        // A tab off screen that says it has focus (navigera typed in it)
+        // is not the one the person looks at.
+        let tabs = [("a", view(true, false, 100.0)), ("d", view(false, true, 950.0))];
+        assert_eq!(TabView::current(tabs.iter().map(|(k, v)| (*k, v))), Some("a"));
+        // They type in a terminal: no tab has focus; of the tabs on screen
+        // (one per window), the one that came on screen last.
+        let tabs = [("a", view(true, false, 900.0)), ("b", view(true, false, 100.0)), ("c", view(false, false, 950.0))];
+        assert_eq!(TabView::current(tabs.iter().map(|(k, v)| (*k, v))), Some("a"));
+        // Every window minimized: the tab seen last.
+        let tabs = [("a", view(false, false, 900.0)), ("c", view(false, false, 950.0))];
+        assert_eq!(TabView::current(tabs.iter().map(|(k, v)| (*k, v))), Some("c"));
+        assert_eq!(TabView::current(std::iter::empty::<(&str, &TabView)>()), None);
+        let answer = serde_json::json!([true, false, 1.5e12]);
+        assert_eq!(TabView::from_answer(&answer), view(true, false, 1.5e12));
+    }
+
     use super::*;
 
     #[test]

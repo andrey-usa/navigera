@@ -30,7 +30,7 @@ mod profile;
 mod snap;
 pub(crate) mod transport;
 
-pub use browser::{Browser, LaunchOptions};
+pub use browser::{Browser, LaunchOptions, TabView};
 pub use client::CdpClient;
 pub use client::CLOSED as CONNECTION_CLOSED;
 pub use client::NEVER_REACHED;

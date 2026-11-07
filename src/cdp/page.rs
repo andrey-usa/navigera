@@ -7520,6 +7520,19 @@ impl Page {
     /// decides whether the tab is gone, not the replies: the reply to
     /// `Page.close` can be lost with the session it was sent on, and a
     /// `closeTarget` that comes too late finds no target.
+    /// Stop working in the tab and leave it open: a user's tab the session
+    /// was handed. What the session set on it (emulation, scripts) ends
+    /// with its DevTools session.
+    pub fn detach(&self, timeout: Duration) {
+        self.shared.unregister(&self.session_id);
+        let _ = self.block_on(self.client.send(
+            "Target.detachFromTarget",
+            json!({ "sessionId": self.session_id }),
+            None,
+            timeout,
+        ));
+    }
+
     pub fn close_target(&self, timeout: Duration) -> Result<()> {
         self.shared.unregister(&self.session_id);
         self.block_on(async {

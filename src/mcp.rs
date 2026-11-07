@@ -275,11 +275,14 @@ fn deferred_tools() -> Vec<Value> {
         tool("browser_hover", "Move the mouse over an element (hover menus).", object(action(json!({})), &[]), false),
         tool(
             "browser_tabs",
-            "List, open, switch to or close tabs. Tabs a page opens are adopted and made active automatically.",
+            "List, open, switch to or close tabs. Tabs a page opens are adopted and made active automatically. \
+             In the user's own browser (--attach) the list also shows their tabs; select with target \"current\" \
+             works in the one they are on.",
             object(
                 props(&[json!({
                     "action": {"type": "string", "enum": ["list", "new", "select", "close"], "description": "What to do"},
                     "index": {"type": "integer", "description": "Tab number in list, from 0"},
+                    "target": {"type": "string", "description": "For select: a tab's target id from list (one of the user's too), or \"current\": the tab the user is on"},
                     "url": {"type": "string", "description": "For new: the address"},
                 })]),
                 &["action"],
@@ -559,6 +562,39 @@ fn plan(name: &str, arguments: &Value) -> Result<Plan, String> {
 fn describe(result: &Value) -> String {
     match result {
         Value::String(s) => s.clone(),
+        // `tab-list`: a line per tab, the user's after the session's.
+        Value::Object(map) if map.get("tabs").is_some_and(Value::is_array) => {
+            let line = |t: &Value, first: String| {
+                let mut marks = Vec::new();
+                for (key, mark) in [
+                    ("active", "active"),
+                    ("current", "the user is on it"),
+                    ("user", "the user's"),
+                    ("closed", "closed"),
+                ] {
+                    if t.get(key) == Some(&json!(true)) {
+                        marks.push(mark);
+                    }
+                }
+                let marks = if marks.is_empty() { String::new() } else { format!(" ({})", marks.join(", ")) };
+                format!(
+                    "- {first} {} — {}{marks}",
+                    t.get("title").and_then(Value::as_str).unwrap_or(""),
+                    t.get("url").and_then(Value::as_str).unwrap_or("")
+                )
+            };
+            let mut lines = vec!["Tabs:".to_string()];
+            for t in map["tabs"].as_array().into_iter().flatten() {
+                lines.push(line(t, format!("{}", t.get("index").and_then(Value::as_u64).unwrap_or(0))));
+            }
+            if let Some(theirs) = map.get("user_tabs").and_then(Value::as_array) {
+                lines.push("The user's other tabs (select with their target, or target \"current\"):".to_string());
+                for t in theirs {
+                    lines.push(line(t, t.get("target").and_then(Value::as_str).unwrap_or("").to_string()));
+                }
+            }
+            lines.join("\n")
+        }
         Value::Object(map) if map.contains_key("url") => {
             let mut lines = vec![format!(
                 "Page: {} — {} (tab {} of {})",
@@ -1169,6 +1205,17 @@ mod tests {
 
     #[test]
     fn page_state_reads_as_one_line() {
+        let list = describe(&json!({
+            "tabs": [{"index": 0, "target": "AB", "active": true, "url": "about:blank", "title": ""},
+                     {"index": 1, "target": "CD", "url": "https://mail/", "title": "Mail", "user": true}],
+            "user_tabs": [{"target": "EF12", "url": "https://news/", "title": "News", "current": true}],
+            "active": 0, "url": "about:blank"
+        }));
+        assert_eq!(
+            list,
+            "Tabs:\n- 0  — about:blank (active)\n- 1 Mail — https://mail/ (the user's)\n\
+             The user's other tabs (select with their target, or target \"current\"):\n- EF12 News — https://news/ (the user is on it)"
+        );
         let text = describe(&json!({"tab": 0, "tabs": 2, "url": "http://x/", "title": "Shop", "loading": true}));
         assert_eq!(text, "Page: Shop — http://x/ (tab 1 of 2)\nloading: true");
     }

@@ -16,12 +16,16 @@ pub const EXAMPLES: &[Help] = &[
             ("navigera -s s start --natural", "browser that looks less headless"),
             ("navigera -s s start --parent 4242", "the session ends when process 4242 (the agent) exits"),
             ("navigera -s app start --electron ./my-app", "an Electron app; its windows are the tabs"),
+            ("navigera -s me start --auto-connect", "your running browser, in a window of the agent's own behind yours"),
+            ("navigera -s me start --auto-connect --tab current", "your running browser, in the tab you are on"),
         ],
         &[
             ("--own-browser", "a browser for this session alone (default: one shared browser, a context each)"),
             ("--idle <s>", "end the session after this long unused (default 600; 0 = never)"),
             ("--parent <pid>", "end the session when that process exits ($NAVIGERA_PARENT_PID)"),
-            ("--attach [<where>]", "use a running browser; it stays open after quit"),
+            ("--attach [<where>]", "use a running browser; it stays open after quit (chrome, edge, a port, a profile dir)"),
+            ("--auto-connect", "--attach to whichever of your browsers serves remote debugging ($NAVIGERA_AUTO_CONNECT=1)"),
+            ("--tab current", "with --attach: start in the tab you are on, not a window of the agent's own"),
             ("--profile <name>", "a persistent navigera browser, kept between sessions"),
             ("--from <browser>", "seed the profile with a copy of a browser's sign-ins"),
             ("--from-profile <p>", "which profile --from copies (dir, name or email)"),
@@ -531,13 +535,31 @@ pub const EXAMPLES: &[Help] = &[
         &[("navigera -s s tab-new https://example.com", ""), ("navigera -s s tab-new", "")],
         &[("<url>", "the URL for the new tab; none opens a blank tab")],
     ),
-    ("tab-list", &[("navigera -s s tab-list", "")], &[]),
-    ("show", &[("navigera -s s show", "")], &[]),
+    (
+        "tab-list",
+        &[("navigera -s s tab-list", "the session's tabs; in your own browser, your other tabs too (user_tabs)")],
+        &[],
+    ),
+    (
+        "show",
+        &[
+            ("navigera -s s show", ""),
+            ("navigera -s me show", "in your own browser: the agent's tab, in front of you"),
+        ],
+        &[],
+    ),
     ("hide", &[("navigera -s s hide", "")], &[]),
     (
         "tab-select",
-        &[("navigera -s s tab-select 0", ""), ("navigera -s s tab-select 1", "")],
-        &[("<index>", "the tab's index from tab-list"), ("<target id>", "the tab's id from tab-list")],
+        &[
+            ("navigera -s s tab-select 0", ""),
+            ("navigera -s me tab-select current", "the tab you are on: in your own browser, one of yours"),
+        ],
+        &[
+            ("<index>", "the tab's index from tab-list"),
+            ("<target id>", "the tab's id from tab-list (one of user_tabs too)"),
+            ("current", "the tab you are on; quit leaves a tab of yours open"),
+        ],
     ),
     (
         "tab-close",
@@ -556,7 +578,10 @@ pub const EXAMPLES: &[Help] = &[
     (
         "quit",
         &[("navigera -s s quit", ""), ("navigera -s s quit --close-browser", "")],
-        &[("--close-browser", "also close an attached/--profile browser (a shared one stays for its other sessions)")],
+        &[
+            ("--close-browser", "also close an attached/--profile browser (a shared one stays for its other sessions)"),
+            ("--keep-tabs", "attached: leave navigera's own tabs open too (by default only yours stay)"),
+        ],
     ),
     (
         "serve",
@@ -576,6 +601,8 @@ pub const EXAMPLES: &[Help] = &[
             ("--headed", "run the browser visibly instead of headless"),
             ("--profile <name>", "serve tools against this persistent browser"),
             ("--attach [<where>]", "serve tools against a running browser"),
+            ("--auto-connect", "against whichever of your browsers serves remote debugging"),
+            ("--tab current", "with --attach: in the tab you are on"),
         ],
     ),
     ("profiles", &[("navigera profiles", "")], &[]),

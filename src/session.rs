@@ -857,6 +857,9 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     if let Some(spec) = &config.attach {
         cmd.arg(format!("--attach={spec}"));
     }
+    if config.in_current_tab {
+        cmd.arg("--tab").arg("current");
+    }
     if let Some(name) = &config.profile {
         cmd.arg("--profile").arg(name);
     }
@@ -925,6 +928,11 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
             // can reach its main process.
             if config.electron.is_some() || config.attach.is_some() {
                 if let Probe::Ready(status) = probe(&path) {
+                    // The user's own browser: what the agent has in front of
+                    // it, and how it works there without getting in their way.
+                    if let Some(theirs) = status.get("user_tabs").and_then(Value::as_u64) {
+                        response["notes"] = json!([attached_note(&status, theirs, config.in_current_tab)]);
+                    }
                     if let Some(electron) = status.get("electron").filter(|e| e.is_object()) {
                         response["result"]["electron"] = electron.clone();
                         if electron["main_process"] == false {
@@ -1035,6 +1043,25 @@ mod tests {
 const PROBE: &str = "probe";
 
 /// `start --electron` on an app whose main process can't be reached.
+/// What `start --attach` tells the agent about the user's browser.
+fn attached_note(status: &Value, theirs: u64, in_current_tab: bool) -> String {
+    let browser = status.get("executable").and_then(Value::as_str).unwrap_or("").trim_start_matches("attach ");
+    let tabs = match theirs {
+        0 => "no other tab of theirs is open".to_string(),
+        1 => "1 other tab of theirs is open".to_string(),
+        n => format!("{n} other tabs of theirs are open"),
+    };
+    let here = if in_current_tab {
+        format!("working in the user's tab {:?}", status.get("title").and_then(Value::as_str).unwrap_or(""))
+    } else {
+        "working in a window of its own, behind theirs".to_string()
+    };
+    format!(
+        "the user's browser ({browser}): {here}; {tabs}. `tab-list` lists them (`current`: the one they are on), \
+         `tab-select current` works in that one; `quit` closes only the agent's own tabs"
+    )
+}
+
 const ELECTRON_ATTACHED_NOTE: &str = "an Electron app navigera attached to: its windows are the tabs, quit \
      leaves it running (quit --close-browser ends it), and eval --main needs the launch with --electron <app>";
 

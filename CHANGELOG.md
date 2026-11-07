@@ -6,6 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `--auto-connect` (also `--autoconnect`, and a bare `--attach`) works in
+  whichever of your browsers serves remote debugging: Chrome, Chrome Beta,
+  Dev and Canary, Chromium, Edge and Brave by their default profiles, then
+  a browser started with `--remote-debugging-port` 9222 or 9229.
+  `NAVIGERA_AUTO_CONNECT=1` does the same for every `start` and `mcp`.
+  `start` says which browser it found and how many of your tabs are open.
+- In your own browser `tab-list` lists your other tabs too, under
+  `user_tabs`, and marks the tab you are on `current: true`: the one whose
+  window has your keyboard, else the one that came on screen last.
+- `tab-select current` works in the tab you are on, and `tab-select` takes
+  a target id from `user_tabs`. The tab stays yours: `quit` and `reset`
+  leave it open. `start --attach --tab current` starts there and opens no
+  window of navigera's own. MCP: `browser_tabs` `select` takes `target`
+  (an id, or `current`).
+- `quit --keep-tabs` leaves navigera's own tabs open in a browser it
+  attached to.
+
+### Behaviour changes
+
+- In a browser navigera attached to, `quit` closes the tabs navigera
+  opened and leaves yours open, where it left them all. An idle or
+  `--parent` shutdown does the same. The browser's last tab is never
+  closed.
+- navigera's window in your own browser opens behind yours, so the window
+  you type in keeps the keyboard. `tab-new` there opens another such
+  window, where it opened a tab in the window you used last. `tab-select`
+  and `reset` there no longer bring a tab to the front: the tab you look at
+  stays in front, and a tab behind it still reads, takes clicks and typing,
+  and gives screenshots.
+- `show` in your own browser brings the session's tab to the front for
+  you and hands it to you (`quit` leaves it open), where it was refused.
+- When the agent moves to one of your tabs, navigera's own window closes
+  if it was never used.
+- A bare `--attach` looks for any of your browsers (as `--auto-connect`),
+  where it meant Chrome only; `--attach chrome` still means Chrome.
+
+### Fixed
+
+- `tab-list` in the default compact output printed only `{"active": n}`
+  once the tab list had been printed before; it now always lists the tabs.
+  MCP: `browser_tabs` `list` returned the page line without the tabs; it
+  now lists them, a line each.
+
 ## [0.9.0] - 2026-11-06
 
 ### Behaviour changes

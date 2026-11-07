@@ -708,6 +708,10 @@ pub fn launch_host(headless: bool, executable: Option<&str>) -> Result<(tokio::r
 /// its driver" guarantee (see `cdp::procjob`).
 pub const DEFAULT_TRANSPORT: &str = if cfg!(unix) { "pipe" } else { "ws" };
 
+/// How long a tab may take to say what it shows the user (see
+/// `cdp::Browser::tab_views`): a frozen background tab never answers.
+const TAB_VIEW_WAIT: Duration = Duration::from_millis(1000);
+
 /// How long a click on a link/submit button or an Enter key waits for the
 /// navigation it probably triggers to be requested (it can trail the input
 /// event's CDP reply by a task or two). Ends early once it arrives.
@@ -764,6 +768,13 @@ pub struct BrowserSession {
     /// The agent has steered the session since it started: an action, a
     /// navigation or a tab command (see [`BrowserSession::mark_steered`]).
     steered: std::sync::atomic::AtomicBool,
+    /// Tabs of the session that are the user's, not navigera's: in a
+    /// browser it attached to, a tab the agent was handed (`tab-select
+    /// current`, a tab's own endpoint) and the popups those open. `quit`,
+    /// `reset` and an idle shutdown leave them open.
+    user_tabs: std::collections::HashSet<String>,
+    /// `quit --keep-tabs`: navigera's own tabs stay open too.
+    keep_tabs: std::sync::atomic::AtomicBool,
     /// The browser context `reset` made (its tabs are the session's).
     context: Option<String>,
     /// False for a session `fork` made: closing it closes its context, not
@@ -873,6 +884,8 @@ impl BrowserSession {
             init_ids: Default::default(),
             held: Default::default(),
             steered: Default::default(),
+            user_tabs: Default::default(),
+            keep_tabs: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -950,6 +963,8 @@ impl BrowserSession {
             init_ids: Default::default(),
             held: Default::default(),
             steered: Default::default(),
+            user_tabs: Default::default(),
+            keep_tabs: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -986,6 +1001,13 @@ impl BrowserSession {
     /// gets a window of its own; closing the session only disconnects —
     /// the browser, its profile and every window stay open.
     pub fn attach(target: &AttachTarget, nav_timeout_ms: f64) -> Result<Self> {
+        Self::attach_in(target, nav_timeout_ms, false)
+    }
+
+    /// [`BrowserSession::attach`]; with `in_current_tab` (`start --attach
+    /// --tab current`), in the tab the user is on instead of a window of the
+    /// agent's own: the session starts there, and `quit` leaves it open.
+    pub fn attach_in(target: &AttachTarget, nav_timeout_ms: f64, in_current_tab: bool) -> Result<Self> {
         let started = std::time::Instant::now();
         let runtime = engine_runtime()?;
         let handle = runtime.handle().clone();
@@ -1002,6 +1024,11 @@ impl BrowserSession {
         let (ws_url, what) = match target {
             AttachTarget::Running(spec) => match &adopt {
                 Some((http, _)) => (cdp::attach::resolve(http)?, format!("attach {spec}")),
+                None if spec == cdp::attach::AUTO => {
+                    let (url, which) = cdp::attach::discover().map_err(|e| anyhow::anyhow!("--attach: {e:#}"))?;
+                    eprintln!("navigera: attaching to {which}");
+                    (url, format!("attach {which}"))
+                }
                 None => (cdp::attach::resolve(spec)?, format!("attach {spec}")),
             },
             AttachTarget::Profile { name, executable, headless, from, from_profile } => {
@@ -1032,7 +1059,7 @@ impl BrowserSession {
         let electron = matches!(target, AttachTarget::Running(_))
             && adopt.is_none()
             && browser.user_agent().is_ok_and(|agent| agent.contains("Electron/"));
-        let (pages, active) = if electron {
+        let (pages, active, handed) = if electron {
             browser.shared().adopt_windows.store(true, std::sync::atomic::Ordering::Relaxed);
             let mut pages = Vec::new();
             for (id, url) in browser.tab_targets()? {
@@ -1063,14 +1090,32 @@ impl BrowserSession {
             // still to be adopted.
             let adopted: Vec<String> = pages.iter().map(|p| p.target_id().to_string()).collect();
             browser.shared().opened.lock().unwrap().retain(|(id, _)| !adopted.contains(id));
-            (pages, active)
+            (pages, active, None)
         } else {
-            let page = match &adopt {
-                Some((_, id)) => browser.attach_page(id, "").with_context(|| format!("no tab {id} in that browser"))?,
-                None => browser.new_page_in(Some("about:blank"), true)?,
+            // The tab the user is on, when the agent is to work there.
+            let current = match (&adopt, in_current_tab) {
+                (Some((_, id)), _) => Some(id.clone()),
+                (None, true) => {
+                    let ids: Vec<String> = browser.page_rows()?.into_iter().map(|(id, _, _)| id).collect();
+                    let views = browser.tab_views(&ids, TAB_VIEW_WAIT);
+                    let current = cdp::TabView::current(views.iter().map(|(id, v)| (id.clone(), v)));
+                    if current.is_none() {
+                        eprintln!("navigera: no tab of yours is open; the agent works in a window of its own");
+                    }
+                    current
+                }
+                (None, false) => None,
             };
-            (vec![page], 0)
+            let page = match &current {
+                Some(id) => browser.attach_page(id, "").with_context(|| format!("no tab {id} in that browser"))?,
+                // Beside the user's windows, and behind them: the window
+                // that has their keyboard keeps it (a `--profile` browser
+                // is navigera's own, and comes to the front).
+                None => browser.new_window(Some("about:blank"), profile_dir.is_none())?,
+            };
+            (vec![page], 0, current)
         };
+
         // A `--profile` browser is navigera's: its downloads go where ours
         // do. The user's own browser (`--attach`) keeps its own setting;
         // navigera only listens.
@@ -1100,6 +1145,8 @@ impl BrowserSession {
             init_ids: Default::default(),
             held: Default::default(),
             steered: Default::default(),
+            user_tabs: handed.into_iter().collect(),
+            keep_tabs: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1215,6 +1262,8 @@ impl BrowserSession {
             init_ids: Default::default(),
             held: Default::default(),
             steered: Default::default(),
+            user_tabs: Default::default(),
+            keep_tabs: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1361,8 +1410,14 @@ impl BrowserSession {
             bail!("the lightpanda engine supports one tab only; use the chrome engine for tabs");
         }
         // In this session's own browser context (a fork's, or the one
-        // `reset` made), not the default one.
-        let page = self.browser.new_page_with(Some("about:blank"), false, self.context.as_deref())?;
+        // `reset` made), not the default one. In the user's own browser, a
+        // window of its own, behind theirs: a tab would open in the window
+        // they last used, in front of what they were looking at.
+        let page = if self.in_users_browser() && self.context.is_none() {
+            self.browser.new_window(Some("about:blank"), true)?
+        } else {
+            self.browser.new_page_with(Some("about:blank"), false, self.context.as_deref())?
+        };
         self.apply_overrides(&page);
         self.apply_init_scripts(&page);
         self.pages.push(page);
@@ -1404,13 +1459,23 @@ impl BrowserSession {
             self.init_scripts.clear();
             self.init_ids.clear();
         }
-        let page = self.browser.new_page_with(Some("about:blank"), false, Some(&context))?;
+        // In the user's own browser, behind their windows, as at start.
+        let page = if self.in_users_browser() {
+            self.browser.new_window_in(Some("about:blank"), true, Some(&context))?
+        } else {
+            self.browser.new_page_with(Some("about:blank"), false, Some(&context))?
+        };
         self.apply_overrides(&page);
         self.apply_init_scripts(&page);
         let timeout = self.timeout(None);
         for old in self.pages.drain(..) {
-            let _ = old.close_target(timeout);
+            if self.user_tabs.contains(old.target_id()) {
+                old.detach(timeout);
+            } else {
+                let _ = old.close_target(timeout);
+            }
         }
+        self.user_tabs.clear();
         self.pages.push(page);
         self.active = 0;
         self.closed = None;
@@ -1460,6 +1525,8 @@ impl BrowserSession {
             init_ids: Default::default(),
             held: std::sync::Mutex::new(Vec::new()),
             steered: Default::default(),
+            user_tabs: Default::default(),
+            keep_tabs: Default::default(),
             context: Some(context),
             owner: false,
             shared: self.shared,
@@ -1476,9 +1543,190 @@ impl BrowserSession {
         self.bring_to_front()
     }
 
-    /// Make the active tab the foreground one.
+    /// Make the active tab the foreground one. Not in the user's own
+    /// browser: there it would switch the tab they are looking at and take
+    /// the keyboard from wherever they type, and a tab behind another reads
+    /// and takes clicks and typing as it is. `show` brings it forward.
     fn bring_to_front(&self) -> Result<()> {
+        if self.in_users_browser() {
+            return Ok(());
+        }
         self.browser.activate_target(self.active_tab().target_id())
+    }
+
+    /// `show` in the user's own browser: the session's tab comes to the
+    /// front for them, and is theirs from then on (`quit` leaves it open).
+    pub fn show_to_user(&mut self) -> Result<()> {
+        let target = self.active_tab().target_id().to_string();
+        self.browser.activate_target(&target)?;
+        self.user_tabs.insert(target);
+        Ok(())
+    }
+
+    /// Attached to a browser that is the user's (`--attach`), not
+    /// navigera's own `--profile` browser or an Electron app.
+    pub fn in_users_browser(&self) -> bool {
+        self.attached && self.profile_dir.is_none() && !self.is_electron()
+    }
+
+    /// The tab is the user's, handed to the session (`quit` leaves it open).
+    pub fn is_user_tab(&self, target_id: &str) -> bool {
+        self.user_tabs.contains(target_id)
+    }
+
+    /// The tabs of the user's browser the session doesn't work in, in the
+    /// browser's order: (target id, url, title). None but in the user's
+    /// own browser (`--attach`).
+    pub fn other_tabs(&self) -> Vec<(String, String, String)> {
+        self.other_tabs_counted().0
+    }
+
+    /// [`BrowserSession::other_tabs`], and the target ids of those the
+    /// session's `--allow-domains` list leaves out: a tab of the user's on
+    /// another site is neither shown to the agent nor handed to it.
+    pub fn other_tabs_counted(&self) -> (Vec<(String, String, String)>, Vec<String>) {
+        if !self.in_users_browser() {
+            return (Vec::new(), Vec::new());
+        }
+        let mine = self.page_targets();
+        let policy = self.browser.shared().allow_policy(&self.scope());
+        let (shown, hidden): (Vec<_>, Vec<_>) = self
+            .browser
+            .page_rows()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(id, _, _)| !mine.contains(id))
+            .partition(|(_, url, _)| policy.as_ref().is_none_or(|p| p.allows_url(url)));
+        (shown, hidden.into_iter().map(|(id, _, _)| id).collect())
+    }
+
+    /// The tab the user is on, of the session's and `others` (target ids),
+    /// by [`cdp::TabView::current`]. In their own browser one of their tabs
+    /// when one is on screen: navigera's window behind theirs is on screen
+    /// too, and says it has focus once the agent typed in it.
+    pub fn users_current(&self, others: &[String]) -> Option<String> {
+        let mut ids = self.page_targets();
+        ids.extend(others.iter().cloned());
+        if let Some(closed) = &self.closed {
+            ids.retain(|id| id != closed);
+        }
+        let views = self.browser.tab_views(&ids, TAB_VIEW_WAIT);
+        let theirs = |id: &String| !self.in_users_browser() || others.contains(id) || self.user_tabs.contains(id);
+        if let Some(id) = cdp::TabView::current(views.iter().filter(|(id, v)| v.visible && theirs(id))) {
+            return Some(id.clone());
+        }
+        cdp::TabView::current(views.iter()).cloned()
+    }
+
+    /// `tab-select current`: work in the tab the user is on. In their own
+    /// browser that can be one of their tabs, handed to the session for
+    /// as long as it runs; elsewhere it is the session's tab on screen.
+    pub fn select_current(&mut self) -> Result<usize> {
+        let (shown, hidden) = self.other_tabs_counted();
+        let mut others: Vec<String> = shown.into_iter().map(|(id, _, _)| id).collect();
+        others.extend(hidden.iter().cloned());
+        let current = self.users_current(&others);
+        let Some(target) = current else {
+            bail!("no tab says it is on screen (`tab-list` shows the tabs; `tab-select <target>` picks one)");
+        };
+        if hidden.contains(&target) {
+            bail!("the tab you are on is on a site outside this session's --allow-domains list");
+        }
+        match self.pages.iter().position(|p| p.target_id() == target) {
+            Some(index) => {
+                self.select_page(index)?;
+                Ok(index)
+            }
+            None => self.adopt_user_tab(&target),
+        }
+    }
+
+    /// `tab-select <target>` for one of the user's tabs (an id, or the
+    /// first characters of one, from `tab-list`'s `user_tabs`): `None` when
+    /// no tab of theirs has that id.
+    pub fn select_user_tab(&mut self, prefix: &str) -> Result<Option<usize>> {
+        let prefix = prefix.to_ascii_lowercase();
+        let hits: Vec<String> = self
+            .other_tabs()
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .filter(|id| id.to_ascii_lowercase().starts_with(&prefix))
+            .collect();
+        match hits.as_slice() {
+            [] => Ok(None),
+            [id] => self.adopt_user_tab(&id.clone()).map(Some),
+            _ => bail!("{prefix} matches {} of your tabs; give more of the id", hits.len()),
+        }
+    }
+
+    /// Work in one of the user's tabs: it becomes the session's active tab,
+    /// stays theirs (`quit` leaves it open) and stays where it is on their
+    /// screen. A window of navigera's own that was never used (still
+    /// blank) closes: nothing is left behind for the user.
+    fn adopt_user_tab(&mut self, target: &str) -> Result<usize> {
+        let page = self.browser.attach_page(target, &self.scope()).with_context(|| format!("work in tab {target}"))?;
+        self.apply_overrides(&page);
+        self.apply_init_scripts(&page);
+        self.pages.push(page);
+        self.user_tabs.insert(target.to_string());
+        self.active = self.pages.len() - 1;
+        self.forget_closed();
+        let infos = self.browser.target_infos().unwrap_or_default();
+        let timeout = self.timeout(None);
+        let mut index = 0;
+        while index < self.pages.len() {
+            let id = self.pages[index].target_id().to_string();
+            let blank = infos.get(&id).is_some_and(|(url, _)| url == "about:blank");
+            if index != self.active
+                && blank
+                && !self.user_tabs.contains(&id)
+                && self.pages[index].close_target(timeout).is_ok()
+            {
+                self.pages.remove(index);
+                if index < self.active {
+                    self.active -= 1;
+                }
+                continue;
+            }
+            index += 1;
+        }
+        Ok(self.active)
+    }
+
+    /// Close the tabs navigera opened in a browser it attached to, and leave
+    /// the user's open; never the browser's last tab (that would close a
+    /// window the user may still want, or the browser). Returns how many
+    /// closed. `quit --keep-tabs` leaves them all.
+    pub fn close_own_tabs(&self) -> usize {
+        if !self.attached || self.is_electron() || self.keep_tabs.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return 0;
+        }
+        let timeout = self.timeout(None).min(Duration::from_secs(5));
+        let mut open = self.browser.page_rows().map(|rows| rows.len()).unwrap_or(0);
+        let mut closed = 0;
+        for page in &self.pages {
+            if self.user_tabs.contains(page.target_id())
+                || self.closed.as_deref() == Some(page.target_id())
+                || open <= 1
+            {
+                continue;
+            }
+            if page.close_target(timeout).is_ok() {
+                open -= 1;
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// `quit --keep-tabs`: leave navigera's own tabs open as well.
+    pub fn keep_tabs(&self) {
+        self.keep_tabs.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How many of the session's tabs are the user's.
+    pub fn user_tab_count(&self) -> usize {
+        self.pages.iter().filter(|p| self.user_tabs.contains(p.target_id())).count()
     }
 
     /// Close one tab by index; the last remaining tab cannot be closed.
@@ -1491,6 +1739,7 @@ impl BrowserSession {
         }
         let timeout = self.timeout(None);
         self.pages[index].close_target(timeout)?;
+        self.user_tabs.remove(self.pages[index].target_id());
         self.pages.remove(index);
         let closed_active = index == self.active;
         if self.active >= self.pages.len() {
@@ -1536,6 +1785,9 @@ impl BrowserSession {
             // ours; the user's popups stay theirs.
             if self.attached && !self.is_electron() && !self.pages.iter().any(|p| p.target_id() == opener) {
                 continue;
+            }
+            if self.user_tabs.contains(&opener) {
+                self.user_tabs.insert(target_id.clone());
             }
             match self.browser.attach_page(&target_id, &self.scope()) {
                 Ok(page) => {
@@ -3211,6 +3463,7 @@ impl BrowserSession {
             // A browser navigera doesn't own keeps running: take the
             // context `reset` opened in it away first. A fork only closes
             // its own context.
+            self.close_own_tabs();
             if let (true, Some(context)) = (self.attached || !self.owner, self.context.as_deref()) {
                 let _ = self.browser.dispose_context(context);
                 // Its routes, answers and downloads go with it.
