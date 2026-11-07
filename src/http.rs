@@ -447,7 +447,17 @@ pub fn request(
                 &at,
                 match e {
                     ureq::Error::Timeout(_) => format!("timed out after {} ms", limit.as_millis()),
-                    e => e.to_string(),
+                    e => {
+                        let why = e.to_string();
+                        if why.contains("invalid peer certificate") && !how.insecure {
+                            format!(
+                                "{why} (nothing this machine trusts vouches for the certificate; for a test \
+                                 server's own, --insecure accepts it)"
+                            )
+                        } else {
+                            why
+                        }
+                    }
                 },
             )
         })?;
