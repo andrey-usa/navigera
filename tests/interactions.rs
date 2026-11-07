@@ -176,7 +176,13 @@ fn a_locator_on_a_long_page_is_linear() {
     };
     let (small, large) = (timed(3000), timed(12000));
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.001);
-    assert!(ratio < 8.0, "3000 buttons {small:?}, 12000 {large:?}: {ratio:.1}x");
+    // The ratio alone swings with the small page's time (55-200 ms on one
+    // runner); quadratic took about 9 s here, so a large page under 2 s
+    // passes whatever the ratio.
+    assert!(
+        ratio < 8.0 || large < std::time::Duration::from_secs(2),
+        "3000 buttons {small:?}, 12000 {large:?}: {ratio:.1}x"
+    );
     assert!(large < std::time::Duration::from_secs(30), "{large:?}");
 }
 
