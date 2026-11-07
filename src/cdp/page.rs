@@ -317,6 +317,20 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     const deadline = Date.now() + (force ? 0 : settleMs);
     // navigera's own listeners, told from the page's by PATH_LISTENERS.
     const ours = (f) => { f.__nv = true; return f; };
+    // A frame (true), else 100 ms (false). A hidden page draws no frames,
+    // and the user's own browser (no flags of navigera's) runs its timers
+    // about once a second: one task of the page's event loop stands in
+    // there, which a deferred zero-delay commit has also run by.
+    const frameOr100 = () => new Promise((res) => {
+        if (el.ownerDocument.visibilityState === 'hidden') {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = () => res(false);
+            ch.port2.postMessage(0);
+            return;
+        }
+        requestAnimationFrame(() => res(true));
+        setTimeout(() => res(false), 100);
+    });
     // The element's ancestors through shadow hosts: what can move it.
     const chain = new Set();
     for (let n = el; n; n = n.parentElement || (n.getRootNode && n.getRootNode().host) || null) chain.add(n);
@@ -360,7 +374,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         ]);
         // A frame, but not forever: a renderer that paints nothing (a
         // starved or hidden page) must not hold the click up to its timeout.
-        await new Promise((res) => { requestAnimationFrame(() => res()); setTimeout(res, 100); });
+        await frameOr100();
     };
     // Mouse events are dispatched in top-level viewport coordinates: add the
     // offsets of every iframe on the way up (null if one is cross-origin).
@@ -653,7 +667,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // isn't moving anything by frames either: the timer counts there.
         if (steadyBy === null) steadyBy = Date.now() + Math.min(1000, settleMs);
         for (let idle = 0; ; ) {
-            const framed = await new Promise((res) => { requestAnimationFrame(() => res(true)); setTimeout(() => res(false), 100); });
+            const framed = await frameOr100();
             idle = framed ? 0 : idle + 1;
             const r2 = box.getBoundingClientRect();
             // The centre is where the press lands, so the centre is what
@@ -3701,15 +3715,26 @@ impl Page {
     /// action fetched; waiting out the rest of `quiet` only delays the
     /// report. Falls back to the quiet window when the proof does not come
     /// (a response the page does not render, or work that starts a request
-    /// past the frame). Returns like [`Page::network_quiet_waited`].
+    /// past the frame), and at once in a hidden tab: no frame runs there,
+    /// and a user's browser (launched without navigera's flags) throttles
+    /// its timers, so the proof's own timeout would cost more than the
+    /// window. Returns like [`Page::network_quiet_waited`].
     pub fn action_settle_wait(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
         let out = self.action_settle_wait_inner(quiet, max);
+        self.settle_unhook();
+        out
+    }
+
+    /// Put back the page's own timer functions that [`Page::mark_action`]
+    /// wrapped for the settle proof, once no proof will need them: site
+    /// scripts (bot checks among them) can tell a wrapped `setTimeout`
+    /// from a native one.
+    pub fn settle_unhook(&self) {
         let _ = self.send(
             "Runtime.evaluate",
             json!({ "expression": SETTLE_UNHOOK, "returnByValue": true }),
             Duration::from_millis(500),
         );
-        out
     }
 
     fn action_settle_wait_inner(&self, quiet: Duration, max: Duration) -> (bool, Duration) {
@@ -3740,7 +3765,7 @@ impl Page {
             let floor = settle_floor(quiet).saturating_sub(since_last).as_millis();
             let js = format!(
                 "new Promise((r) => {{ const c = window.__nvMut; \
-             if (!c) return r(false); \
+             if (!c || document.visibilityState !== 'visible') return r(false); \
              const st = (c.T && c.T.st) || setTimeout; const ct = (c.T && c.T.ct) || clearTimeout; \
              let proved = false; let floor = false; \
              const t = st.call(window, () => {{ c.e = null; r(false); }}, {ms}); \

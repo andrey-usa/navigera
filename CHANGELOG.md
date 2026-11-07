@@ -23,7 +23,7 @@ All notable changes to this project are documented here. The format follows
   window of navigera's own. MCP: `browser_tabs` `select` takes `target`
   (an id, or `current`).
 - `quit --keep-tabs` leaves navigera's own tabs open in a browser it
-  attached to.
+  attached to, the ones `reset` opened as well.
 
 ### Behaviour changes
 
@@ -52,7 +52,8 @@ All notable changes to this project are documented here. The format follows
   or short timer (up to 100 ms) of its own still pending; it used to wait
   out 100 ms of network quiet every time. A fetch the page chains from
   the response, at once or by such a timer, is still waited for, and one
-  deferred past 100 ms still isn't, as before.
+  deferred past 100 ms still isn't, as before. In a tab that is not on
+  screen (no frames there) it waits out the 100 ms as before.
 - After a look, `select`, `check` and `uncheck` print only the changed
   lines when those lines already show the choice or the flipped box. They
   used to print `{"selected":["Tokyo"]}` or `{"changed":true,"checked":true}`
