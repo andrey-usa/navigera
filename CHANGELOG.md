@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-07
+
 ### Added
 
 - `--auto-connect` (also `--autoconnect`, and a bare `--attach`) works in
@@ -63,6 +65,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- In a tab that is not on screen in your own browser, an action no longer
+  waits about a second before it runs. Your browser runs timers there
+  about once a second, and navigera's wait for a frame before a click
+  fell back to such a timer; it now waits one task of the page there.
+  A click in such a tab takes about 230 ms where it took 1 s.
 - `tab-list` in the default compact output printed only `{"active": n}`
   once the tab list had been printed before; it now always lists the tabs.
   MCP: `browser_tabs` `list` returned the page line without the tabs; it
@@ -1415,6 +1422,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.10.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.10.0
 [0.9.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.9.0
 [0.8.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.8.0
 [0.7.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.1
