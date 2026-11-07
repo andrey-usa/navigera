@@ -3654,6 +3654,9 @@ impl Driver {
         if command.is_action() && !self.session.action_traffic_seen() {
             self.session.settle_unhook();
         }
+        // Tabs opened or closed: say which are ours to other sessions in
+        // the user's browser.
+        self.session.publish_own_tabs();
     }
 
     fn report_state_inner(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {

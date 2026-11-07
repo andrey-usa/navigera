@@ -778,6 +778,9 @@ pub struct BrowserSession {
     /// `quit --keep-tabs` asked for it (`keep_tabs` also marks that
     /// navigera's tabs were already closed).
     keep_asked: std::sync::atomic::AtomicBool,
+    /// The own tabs last written for other navigera sessions in the same
+    /// browser (see [`BrowserSession::publish_own_tabs`]).
+    published: std::sync::Mutex<Vec<String>>,
     /// The browser context `reset` made (its tabs are the session's).
     context: Option<String>,
     /// False for a session `fork` made: closing it closes its context, not
@@ -890,6 +893,7 @@ impl BrowserSession {
             user_tabs: Default::default(),
             keep_tabs: Default::default(),
             keep_asked: Default::default(),
+            published: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -970,6 +974,7 @@ impl BrowserSession {
             user_tabs: Default::default(),
             keep_tabs: Default::default(),
             keep_asked: Default::default(),
+            published: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1153,6 +1158,7 @@ impl BrowserSession {
             user_tabs: handed.into_iter().collect(),
             keep_tabs: Default::default(),
             keep_asked: Default::default(),
+            published: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1271,6 +1277,7 @@ impl BrowserSession {
             user_tabs: Default::default(),
             keep_tabs: Default::default(),
             keep_asked: Default::default(),
+            published: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1535,6 +1542,7 @@ impl BrowserSession {
             user_tabs: Default::default(),
             keep_tabs: Default::default(),
             keep_asked: Default::default(),
+            published: Default::default(),
             context: Some(context),
             owner: false,
             shared: self.shared,
@@ -1577,6 +1585,56 @@ impl BrowserSession {
         self.attached && self.profile_dir.is_none() && !self.is_electron()
     }
 
+    /// Where this process lists its own tabs in the user's browser, for the
+    /// other navigera sessions there: one file per server process.
+    fn own_tabs_path(pid: u32) -> Option<std::path::PathBuf> {
+        Some(crate::session::session_dir().ok()?.join("own-tabs").join(format!("{pid}.json")))
+    }
+
+    /// Write the tabs navigera opened for this session in the user's
+    /// browser, when they changed, so another session there doesn't list
+    /// them as the user's (its `tab-list`, `tab-select current`). Each
+    /// session sees the browser's targets but not who opened them.
+    pub fn publish_own_tabs(&self) {
+        if !self.in_users_browser() {
+            return;
+        }
+        let mut own: Vec<String> = self.page_targets().into_iter().filter(|id| !self.user_tabs.contains(id)).collect();
+        own.sort();
+        let mut last = self.published.lock().unwrap();
+        if *last == own {
+            return;
+        }
+        let Some(path) = Self::own_tabs_path(std::process::id()) else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let body = serde_json::json!({ "endpoint": self.endpoint(), "tabs": own }).to_string();
+        if std::fs::write(&path, body).is_ok() {
+            *last = own;
+        }
+    }
+
+    /// The tabs other navigera sessions say they opened in this browser.
+    fn others_own_tabs(&self) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        let Some(dir) = Self::own_tabs_path(0).and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return out };
+        let me = format!("{}.json", std::process::id());
+        let endpoint = self.endpoint();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if entry.file_name().to_string_lossy() == me {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            if v["endpoint"].as_str() != Some(endpoint.as_str()) {
+                continue;
+            }
+            out.extend(v["tabs"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(String::from)));
+        }
+        out
+    }
+
     /// The tab is the user's, handed to the session (`quit` leaves it open).
     pub fn is_user_tab(&self, target_id: &str) -> bool {
         self.user_tabs.contains(target_id)
@@ -1596,7 +1654,9 @@ impl BrowserSession {
         if !self.in_users_browser() {
             return (Vec::new(), Vec::new());
         }
-        let mine = self.page_targets();
+        let mut mine = self.page_targets();
+        // Another navigera session's own window is not one of the user's.
+        mine.extend(self.others_own_tabs());
         let policy = self.browser.shared().allow_policy(&self.scope());
         let (shown, hidden): (Vec<_>, Vec<_>) = self
             .browser
@@ -3485,6 +3545,9 @@ impl BrowserSession {
             // leaves that context's tabs open too.
             let keep = self.attached && self.keep_asked.load(std::sync::atomic::Ordering::Relaxed);
             self.close_own_tabs();
+            if let Some(path) = Self::own_tabs_path(std::process::id()) {
+                let _ = std::fs::remove_file(path);
+            }
             if let (true, false, Some(context)) = (self.attached || !self.owner, keep, self.context.as_deref()) {
                 let _ = self.browser.dispose_context(context);
                 // Its routes, answers and downloads go with it.

@@ -410,3 +410,35 @@ fn a_tab_closed_while_an_op_waits_on_it_ends_the_op() {
     assert_eq!(ok(&s, &["status"])["closed"], true);
     ok(&s, &["quit"]);
 }
+
+#[test]
+fn two_sessions_in_the_users_browser_never_list_each_others_windows_as_theirs() {
+    let Some(exe) = chrome() else { return };
+    let (_user, profile, port, _mine) = users_browser(&exe);
+    let dir = profile.path().display().to_string();
+    let (a, b) = (session_name("pair-a"), session_name("pair-b"));
+    ok(&a, &["start", "--attach", &dir]);
+    ok(&b, &["start", "--attach", &dir]);
+    ok(&a, &["goto", "data:text/html,<title>AgentA</title>a"]);
+    ok(&b, &["goto", "data:text/html,<title>AgentB</title>b"]);
+    let titles = |s: &str| -> Vec<String> {
+        ok(s, &["tab-list"])["user_tabs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t["title"].as_str().map(String::from))
+            .collect()
+    };
+    let (seen_a, seen_b) = (titles(&a), titles(&b));
+    assert!(seen_a.iter().any(|t| t == "Mine") && seen_b.iter().any(|t| t == "Mine"), "{seen_a:?} {seen_b:?}");
+    assert!(!seen_a.iter().any(|t| t.starts_with("Agent")), "A lists B's window as the user's: {seen_a:?}");
+    assert!(!seen_b.iter().any(|t| t.starts_with("Agent")), "B lists A's window as the user's: {seen_b:?}");
+    ok(&b, &["quit"]);
+
+    // `quit --keep-tabs` after `reset` leaves the reset context's tab too.
+    ok(&a, &["reset"]);
+    ok(&a, &["goto", "data:text/html,<title>AfterReset</title>r"]);
+    ok(&a, &["quit", "--keep-tabs"]);
+    let urls = page_urls(port).expect("browser still serves DevTools");
+    assert!(urls.iter().any(|u| u.contains("AfterReset")), "--keep-tabs after reset: {urls:?}");
+}

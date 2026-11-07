@@ -17,6 +17,8 @@ All notable changes to this project are documented here. The format follows
 - In your own browser `tab-list` lists your other tabs too, under
   `user_tabs`, and marks the tab you are on `current: true`: the one whose
   window has your keyboard, else the one that came on screen last.
+  Windows another navigera session on the same machine opened there are
+  not listed as yours.
 - `tab-select current` works in the tab you are on, and `tab-select` takes
   a target id from `user_tabs`. The tab stays yours: `quit` and `reset`
   leave it open. `start --attach --tab current` starts there and opens no
