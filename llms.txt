@@ -8,7 +8,7 @@ Output is compact by default (an action prints what changed: a new title/url, or
 
 Electron apps: `navigera -s app start --electron ./my-app` launches the app (its directory or main script, a packaged executable or a .app bundle) and drives its windows as tabs; `quit` ends it.
 
-Your own browser: `navigera -s me start --attach` connects to the user's running Chrome 144+ (after they enable chrome://inspect/#remote-debugging and click Allow); `--profile <name>` keeps a separate persistent visible browser. `quit` only disconnects; the browser stays open.
+Your own browser: `navigera -s me start --auto-connect` (or `--attach`) connects to the user's running browser, whichever of Chrome 144+, Edge, Brave or Chromium serves remote debugging (after they enable chrome://inspect/#remote-debugging and click Allow), or one started with `--remote-debugging-port` 9222 or 9229; `tab-list` shows their tabs too, `tab-select current` works in the tab they are on, and `--tab current` starts there. `--profile <name>` keeps a separate persistent visible browser. `quit` closes the agent's own tabs and leaves the user's; the browser stays open.
 
 ## Docs
 

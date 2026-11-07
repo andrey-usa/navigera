@@ -20,11 +20,17 @@ What v2 changes, and why:
   secrets in their environment: the first word must be the arm's
   tool, one command per call (a heredoc only for navigera `batch`).
   MCP arms accept only `mcp <tool> <json-args>` lines, as before.
-- Every arm starts with its browser open on the home page.
+- Every arm starts with its browser open on the home page, except
+  nav-user, which starts in the user's own browser on the order form.
 
 Arms:
   nav-default          navigera CLI (compact output, its default)
   nav-batch            navigera CLI; a whole flow may go in one `batch`
+  nav-user             navigera CLI in the user's own browser: the driver
+                       starts a Chrome with remote debugging on and three
+                       tabs (home, price table, the order form current);
+                       the agent connects to it and fills the form in
+                       that tab (task `form` only; not in the default list)
   nav-help             navigera CLI, no command list in the prompt: the
                        agent learns the commands from `navigera --help`
   agent-browser        agent-browser CLI
@@ -77,10 +83,13 @@ PORT = 8901
 BASE = f"http://127.0.0.1:{PORT}"
 
 ALL_ARMS = ["nav-default", "nav-batch", "nav-help", "agent-browser",
-            "playwright-cli", "playwright-mcp", "chrome-devtools-mcp"]
+            "playwright-cli", "playwright-mcp", "chrome-devtools-mcp",
+            "nav-user"]
 ALL_TASKS = ["search", "form", "table", "catalog"]
+ARM_TASKS = {"nav-user": ["form"]}  # an arm that runs only these tasks
+USER_PORT = 9222  # the user browser's remote debugging port (nav-user)
 CLI_TOOL = {"nav-default": "navigera", "nav-batch": "navigera",
-            "nav-help": "navigera",
+            "nav-help": "navigera", "nav-user": "navigera",
             "agent-browser": "agent-browser",
             "playwright-cli": "playwright-cli"}
 
@@ -103,6 +112,13 @@ class Site:
             self.names = [f"{rng.choice(ADJ)} {rng.choice(NOUN)} {i + 1}"
                           for i in range(self.items)]
             self.events = []
+            self.loads = 0
+
+    def load(self):
+        """A new form page load's number (the order it places carries it)."""
+        with self.lock:
+            self.loads += 1
+            return self.loads
 
     def record(self, kind, **data):
         with self.lock:
@@ -141,9 +157,10 @@ FORM = """<!doctype html><html><head><title>Bench Form</title></head><body>
 <label><input type="checkbox" id="agree" name="agree"> I agree to the terms</label><br>
 <button type="submit">Submit order</button></form><p id="done" role="status"></p>
 <script>
+const LOAD = __LOAD__;
 document.getElementById('order').onsubmit = async e => {
   e.preventDefault();
-  const body = JSON.stringify({name: document.getElementById('name').value,
+  const body = JSON.stringify({load: LOAD, name: document.getElementById('name').value,
     city: document.getElementById('city').value,
     agree: document.getElementById('agree').checked});
   const r = await fetch('/api/order', {method: 'POST', body});
@@ -209,7 +226,7 @@ def make_handler(site):
             if u.path in ("/", "/index.html"):
                 return self.send(200, HOME)
             if u.path == "/form.html":
-                return self.send(200, FORM)
+                return self.send(200, FORM.replace("__LOAD__", str(site.load())))
             if u.path == "/table.html":
                 return self.send(200, table_page(site))
             if u.path == "/catalog.html":
@@ -247,7 +264,7 @@ def make_handler(site):
                     return self.send(200, json.dumps(
                         {"ok": False, "error": "accept the terms"}),
                         "application/json")
-                site.record("order", name=name, city=city)
+                site.record("order", name=name, city=city, load=d.get("load"))
                 return self.send(200, json.dumps(
                     {"ok": True, "name": name, "city": city}),
                     "application/json")
@@ -284,6 +301,21 @@ def task_def(task, site):
                 "'N items, last=NAME'.",
                 lambda a: f"{n} items" in a and last.lower() in a.lower())
     raise ValueError(task)
+
+
+def user_task(task, site, user):
+    """nav-user's goal, said the way a user says it; the order must come
+    from the user's own form tab (its load number), not a tab of the
+    agent's."""
+    if task == "form":
+        return ("The user says: \"Fill in the order form in my current "
+                "tab: name Alex, city Tokyo, terms accepted. Submit it and "
+                "tell me the confirmation line.\"",
+                lambda a: site.saw("order", lambda e: e["name"] == "Alex"
+                                   and e["city"] == "Tokyo"
+                                   and e.get("load") == user.form_load)
+                and "order placed for alex in tokyo" in a.lower())
+    raise ValueError(f"nav-user runs only {ARM_TASKS['nav-user']}")
 
 
 def check_site():
@@ -540,6 +572,78 @@ def tool_env():
     return env
 
 
+def user_chrome_bin():
+    for env in ("CHROME_PATH", "CHROME_BIN"):
+        if os.environ.get(env):
+            return os.environ[env]
+    for name in ("google-chrome", "google-chrome-stable", "chromium",
+                 "chromium-browser", "chrome"):
+        hit = shutil.which(name)
+        if hit:
+            return hit
+    return chrome_path()
+
+
+class UserBrowser:
+    """The nav-user arm's "user": a Chrome with remote debugging on and
+    three tabs, the order form last and current. The form tab's load
+    number tells the judge whether the order came from that tab."""
+
+    def __init__(self, site, cwd):
+        self.site = site
+        self.url = f"http://127.0.0.1:{USER_PORT}"
+        self.p = subprocess.Popen(
+            [user_chrome_bin(), "--headless=new",
+             f"--remote-debugging-port={USER_PORT}",
+             f"--user-data-dir={os.path.join(cwd, 'user-profile')}",
+             "--no-first-run", "--no-default-browser-check", "--no-sandbox",
+             BASE + "/"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                self.json("version")
+                break
+            except OSError:
+                if time.monotonic() > deadline or self.p.poll() is not None:
+                    self.stop()
+                    raise RuntimeError("the user browser did not start")
+                time.sleep(0.2)
+        self.json("new?" + BASE + "/table.html", "PUT")
+        before = site.loads
+        form = self.json("new?" + BASE + "/form.html", "PUT")
+        while site.loads == before and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.form_load = site.loads
+        self.json("activate/" + form["id"])
+        self.tabs = {t["id"] for t in self.pages()}
+
+    def json(self, path, method="GET"):
+        req = urllib.request.Request(f"{self.url}/json/{path}", method=method)
+        with urllib.request.urlopen(req, timeout=5) as r:
+            body = r.read().decode()
+        try:
+            return json.loads(body)
+        except ValueError:
+            return body
+
+    def pages(self):
+        return [t for t in self.json("list") if t.get("type") == "page"]
+
+    def after(self):
+        """What the session left: the user's tabs still open, others left."""
+        try:
+            ids = {t["id"] for t in self.pages()}
+        except (OSError, ValueError):
+            return {"user_tabs_kept": None, "tabs_left": None}
+        return {"user_tabs_kept": f"{len(ids & self.tabs)}/{len(self.tabs)}",
+                "tabs_left": len(ids - self.tabs)}
+
+    def stop(self):
+        self.p.kill()
+        self.p.wait()
+
+
 class ToolHang(RuntimeError):
     """The tool stopped answering: the session ends, classed as such."""
 
@@ -630,6 +734,16 @@ def vocab(arm, sess):
         return (f"Browser tool: the navigera CLI, already running on the "
                 f"home page. Run its commands as `{p} <command>`; "
                 f"`navigera --help` lists them.")
+    if arm == "nav-user":
+        p = f"navigera -s {sess}"
+        return (f"Browser tool: the navigera CLI. The user's own Chrome is "
+                f"open with their tabs; navigera is not connected to it yet: "
+                f"`{p} start --auto-connect` connects, `{p} tab-list` lists "
+                f"the tabs. Commands: `{p} ax` (the page as a tree with "
+                f"[ref=N]), `{p} click <ref>`, `{p} fill <ref> <text>`, "
+                f"`{p} select <ref> <value>`, `{p} check <ref>`, `{p} press "
+                f"<key>`, `{p} text --selector <css>`, `{p} eval <js>`; "
+                f"`navigera --help` lists more.")
     if arm.startswith("nav-"):
         p = f"navigera -s {sess}"
         extra = ""
@@ -730,6 +844,8 @@ def run_cli(argv, stdin, cwd):
 def setup_arm(arm, sess, b, cwd):
     """Start the tool with its browser open on the home page."""
     home = BASE + "/"
+    if arm == "nav-user":
+        return None  # the agent connects to the user's browser itself
     if arm.startswith("nav-"):
         run_cli([b["navigera"], "-s", sess, "start", "--headless"], None, cwd)
         run_cli([b["navigera"], "-s", sess, "goto", home], None, cwd)
@@ -840,6 +956,8 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
     goal, judge = task_def(task, site)
     cwd = tempfile.mkdtemp(prefix="llmb-")
     mcp = None
+    user = None
+    tabs = {}
     t0 = time.monotonic()
     turns = 0
     journal = {"calls": [], "path": os.path.join(out_dir, f"{sess}.usage.jsonl"),
@@ -853,13 +971,19 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
     pauses = []
     prev_end = None
     try:
+        if arm == "nav-user":
+            user = UserBrowser(site, cwd)
+            goal, judge = user_task(task, site, user)
         mcp = setup_arm(arm, sess, b, cwd)
         block = vocab(arm, sess)
         if mcp is not None:
             block += " Tools: " + ", ".join(mcp.tool_names) + "."
+        where = ("The browser is already open on the home page."
+                 if user is None else
+                 "The user has these pages open in their own Chrome.")
         prompt = (f"Task: {goal} Site: {BASE}/ (home), {BASE}/form.html, "
-                  f"{BASE}/table.html, {BASE}/catalog.html. The browser is "
-                  f"already open on the home page. {block} Use only "
+                  f"{BASE}/table.html, {BASE}/catalog.html. {where} "
+                  f"{block} Use only "
                   f"run_shell_command, one browser command per call. When "
                   f"you have the answer, reply `DONE: <answer>` and stop.")
         messages = [{"role": "user", "content": prompt}]
@@ -924,7 +1048,11 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
     finally:
         try:
             cleanup(arm, sess, b, cwd, mcp)
+            if user is not None:
+                tabs = user.after()
         finally:
+            if user is not None:
+                user.stop()
             shutil.rmtree(cwd, ignore_errors=True)
     wall_ms = round((time.monotonic() - t0) * 1000)
     usage = session_usage(journal["calls"])
@@ -934,7 +1062,7 @@ def run_session(key, model, arm, task, rep, b, site, budget, out_dir):
            "cached_tokens": usage["tokens"]["input_cached"],
            "usage": usage, "rate_card": RATE_CARD if model == MODEL_DEFAULT else None,
            "usage_jsonl": os.path.basename(journal["path"]),
-           "wall_ms": wall_ms, "stop": stop, "pauses": pauses}
+           "wall_ms": wall_ms, "stop": stop, "pauses": pauses, **tabs}
     with open(os.path.join(out_dir, f"{sess}.json"), "w") as f:
         json.dump(rec, f, indent=2)
     line = result_line(rec)
@@ -1069,16 +1197,17 @@ def main():
     tasks = [t for t in args.tasks.split(",") if t]
     budget = Budget(args.budget)
     records = []
+    plan = [(arm, task) for arm in arms for task in tasks
+            if task in ARM_TASKS.get(arm, tasks)]
     for rep in range(1, args.reps + 1):
-        for arm in arms:
-            for task in tasks:
-                print(f"--- {arm} / {task} / rep {rep} ---", flush=True)
-                records.append(run_session(key, args.model, arm, task, rep,
-                                           b, site, budget, args.out))
+        for arm, task in plan:
+            print(f"--- {arm} / {task} / rep {rep} ---", flush=True)
+            records.append(run_session(key, args.model, arm, task, rep,
+                                       b, site, budget, args.out))
     server.shutdown()
     with open(os.path.join(args.out, "summary.json"), "w") as f:
         json.dump({"model": args.model, "records": records,
-                   "usage": run_usage(records, args.reps * len(arms) * len(tasks)),
+                   "usage": run_usage(records, args.reps * len(plan)),
                    "admission_control_consumed_usd": budget.spent,
                    "admission_bound_verified": False}, f, indent=2)
     t = table(records, arms, tasks)

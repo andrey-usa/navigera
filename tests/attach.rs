@@ -189,20 +189,76 @@ fn attach_never_closes_the_users_browser() {
     let state = ok(&s, &["goto", "data:text/html,<title>Agent</title><h1>agent page</h1>"]);
     assert_eq!(state["title"], "Agent");
     assert!(ok(&s, &["ax"]).as_str().unwrap_or("").contains("agent page"));
+    ok(&s, &["tab-new", "data:text/html,<title>Agent2</title>"]);
     let bye = ok(&s, &["quit"]);
     assert_eq!(bye["browser"], "left open", "{bye}");
+    assert_eq!(bye["closed_tabs"], 2, "navigera closes the tabs it opened: {bye}");
 
     std::thread::sleep(Duration::from_millis(500));
     assert!(user.0.try_wait().unwrap().is_none(), "the user's browser must still run");
     let urls = page_urls(port).expect("browser still serves DevTools");
     assert!(urls.iter().any(|u| u.contains("Mine")), "the user's tab is untouched: {urls:?}");
-    assert!(urls.iter().any(|u| u.contains("Agent")), "navigera's window stays too: {urls:?}");
+    assert!(!urls.iter().any(|u| u.contains("Agent")), "nothing of navigera's is left behind: {urls:?}");
 
-    // A second session reuses the same browser.
+    // A second session reuses the same browser and sees the user's tab
+    // beside its own; `quit --keep-tabs` leaves its window for the user.
     ok(&s, &["start", "--attach", &dir]);
-    assert_eq!(ok(&s, &["tab-list"])["tabs"].as_array().map(Vec::len), Some(1), "only navigera's own tab");
-    ok(&s, &["quit"]);
+    let tabs = ok(&s, &["tab-list"]);
+    assert_eq!(tabs["tabs"].as_array().map(Vec::len), Some(1), "navigera's own tab: {tabs}");
+    let theirs = tabs["user_tabs"].as_array().cloned().unwrap_or_default();
+    assert!(theirs.iter().any(|t| t["title"] == "Mine"), "the user's tab is listed as theirs: {tabs}");
+    assert_eq!(ok(&s, &["status"])["user_tabs"], theirs.len(), "status counts them");
+    ok(&s, &["goto", "data:text/html,<title>Kept</title>"]);
+    let bye = ok(&s, &["quit", "--keep-tabs"]);
+    assert!(bye.get("closed_tabs").is_none(), "{bye}");
+    let urls = page_urls(port).expect("browser still serves DevTools");
+    assert!(urls.iter().any(|u| u.contains("Kept")), "--keep-tabs leaves navigera's tab: {urls:?}");
     assert!(user.0.try_wait().unwrap().is_none(), "still running after the second session");
+}
+
+#[test]
+fn an_attached_session_works_in_the_users_tab_and_leaves_it_open() {
+    let Some(exe) = chrome() else { return };
+    let (user, profile, port, mine) = users_browser(&exe);
+    let dir = profile.path().display().to_string();
+    let s = session_name("users-tab");
+
+    // In the tab the user is on (theirs is the only one): no window of
+    // navigera's own opens.
+    ok(&s, &["start", "--attach", &dir, "--tab", "current"]);
+    assert_eq!(ok(&s, &["eval", "document.title"]), "Mine");
+    let tabs = ok(&s, &["tab-list"]);
+    assert_eq!(tabs["tabs"][0]["user"], true, "{tabs}");
+    assert_eq!(page_targets(port).map(|t| t.len()), Some(1), "no window of navigera's own");
+    let bye = ok(&s, &["quit"]);
+    assert_eq!(bye["user_tabs_left"], 1, "{bye}");
+    assert!(bye.get("closed_tabs").is_none(), "{bye}");
+    assert!(page_targets(port).is_some_and(|t| t.iter().any(|(id, _)| *id == mine)), "the user's tab stays open");
+
+    // From a window of its own to the user's tab by its id: the unused
+    // blank window closes; `reset` lets the user's tab go, and `quit`
+    // closes only what navigera opened.
+    ok(&s, &["start", "--attach", &dir]);
+    let state = ok(&s, &["tab-select", &mine[..8]]);
+    assert_eq!(state["title"], "Mine", "{state}");
+    assert_eq!(page_targets(port).map(|t| t.len()), Some(1), "navigera's blank window closed");
+    ok(&s, &["reset"]);
+    assert_eq!(page_targets(port).map(|t| t.len()), Some(2), "reset opens a window of its own");
+    ok(&s, &["quit"]);
+    let left = page_targets(port).unwrap_or_default();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0].0, mine, "only the user's tab is left");
+
+    // `show` hands navigera's tab to the user: `quit` leaves it open.
+    ok(&s, &["start", "--attach", &dir]);
+    ok(&s, &["goto", "data:text/html,<title>Shown</title>"]);
+    let shown = ok(&s, &["show"]);
+    assert_eq!(shown["visible"], true, "{shown}");
+    let bye = ok(&s, &["quit"]);
+    assert_eq!(bye["user_tabs_left"], 1, "{bye}");
+    let urls = page_urls(port).unwrap_or_default();
+    assert!(urls.iter().any(|u| u.contains("Shown")), "{urls:?}");
+    drop(user);
 }
 
 #[test]
@@ -353,4 +409,36 @@ fn a_tab_closed_while_an_op_waits_on_it_ends_the_op() {
     assert!(started.elapsed() < Duration::from_secs(10), "waited {:?}", started.elapsed());
     assert_eq!(ok(&s, &["status"])["closed"], true);
     ok(&s, &["quit"]);
+}
+
+#[test]
+fn two_sessions_in_the_users_browser_never_list_each_others_windows_as_theirs() {
+    let Some(exe) = chrome() else { return };
+    let (_user, profile, port, _mine) = users_browser(&exe);
+    let dir = profile.path().display().to_string();
+    let (a, b) = (session_name("pair-a"), session_name("pair-b"));
+    ok(&a, &["start", "--attach", &dir]);
+    ok(&b, &["start", "--attach", &dir]);
+    ok(&a, &["goto", "data:text/html,<title>AgentA</title>a"]);
+    ok(&b, &["goto", "data:text/html,<title>AgentB</title>b"]);
+    let titles = |s: &str| -> Vec<String> {
+        ok(s, &["tab-list"])["user_tabs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t["title"].as_str().map(String::from))
+            .collect()
+    };
+    let (seen_a, seen_b) = (titles(&a), titles(&b));
+    assert!(seen_a.iter().any(|t| t == "Mine") && seen_b.iter().any(|t| t == "Mine"), "{seen_a:?} {seen_b:?}");
+    assert!(!seen_a.iter().any(|t| t.starts_with("Agent")), "A lists B's window as the user's: {seen_a:?}");
+    assert!(!seen_b.iter().any(|t| t.starts_with("Agent")), "B lists A's window as the user's: {seen_b:?}");
+    ok(&b, &["quit"]);
+
+    // `quit --keep-tabs` after `reset` leaves the reset context's tab too.
+    ok(&a, &["reset"]);
+    ok(&a, &["goto", "data:text/html,<title>AfterReset</title>r"]);
+    ok(&a, &["quit", "--keep-tabs"]);
+    let urls = page_urls(port).expect("browser still serves DevTools");
+    assert!(urls.iter().any(|u| u.contains("AfterReset")), "--keep-tabs after reset: {urls:?}");
 }

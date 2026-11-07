@@ -533,6 +533,9 @@ fn compact_output_says_only_what_changed() {
         // Again: nothing it could see changed, so `ok`.
         assert_eq!(compact(&["click", "--testid", "save-btn"]).1, "ok", "[{engine}]");
         assert_eq!(compact(&["text", "--selector", "#out"]).1, "saved", "[{engine}]");
+        // A check the change shows is not said again as JSON first.
+        let (ok, out, _) = compact(&["uncheck", "--label", "I accept the terms"]);
+        assert!(ok && !out.starts_with('{') && out.contains("I accept the terms"), "[{engine}] {out}");
         // A batch's actions say what they changed, as each does alone; a
         // step that changed nothing says nothing.
         let batch = |steps: &str| {

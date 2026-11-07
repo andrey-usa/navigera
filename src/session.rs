@@ -857,6 +857,9 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     if let Some(spec) = &config.attach {
         cmd.arg(format!("--attach={spec}"));
     }
+    if config.in_current_tab {
+        cmd.arg("--tab").arg("current");
+    }
     if let Some(name) = &config.profile {
         cmd.arg("--profile").arg(name);
     }
@@ -925,12 +928,20 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
             // can reach its main process.
             if config.electron.is_some() || config.attach.is_some() {
                 if let Probe::Ready(status) = probe(&path) {
+                    // The user's own browser: what the agent has in front of
+                    // it, and how it works there without getting in their way.
+                    if let Some(theirs) = status.get("user_tabs").and_then(Value::as_u64) {
+                        // A page endpoint attaches to that one tab of theirs.
+                        let in_their_tab = config.in_current_tab
+                            || config.attach.as_deref().is_some_and(|a| crate::cdp::attach::page_endpoint(a).is_some());
+                        add_note(&mut response, attached_note(&status, theirs, in_their_tab));
+                    }
                     if let Some(electron) = status.get("electron").filter(|e| e.is_object()) {
                         response["result"]["electron"] = electron.clone();
                         if electron["main_process"] == false {
                             let note =
                                 if config.attach.is_some() { ELECTRON_ATTACHED_NOTE } else { ELECTRON_NO_MAIN_NOTE };
-                            response["notes"] = json!([note]);
+                            add_note(&mut response, note.to_string());
                         }
                     }
                 }
@@ -939,7 +950,7 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
                 response["result"]["decider"] = json!(decider.model());
                 // The contract, where the agent decides how to proceed: a
                 // skill section further down is read once, if at all.
-                response["notes"] = json!([DECIDER_NOTE]);
+                add_note(&mut response, DECIDER_NOTE.to_string());
             }
             print_json(output, &response, config);
             return ExitCode::SUCCESS;
@@ -1034,10 +1045,37 @@ mod tests {
 /// session (an idle one stays idle).
 const PROBE: &str = "probe";
 
-/// `start --electron` on an app whose main process can't be reached.
+/// Add a note to start's answer, after any already there.
+fn add_note(response: &mut Value, note: String) {
+    match response["notes"].as_array_mut() {
+        Some(notes) => notes.push(json!(note)),
+        None => response["notes"] = json!([note]),
+    }
+}
+
+/// What `start --attach` tells the agent about the user's browser.
+fn attached_note(status: &Value, theirs: u64, in_current_tab: bool) -> String {
+    let browser = status.get("executable").and_then(Value::as_str).unwrap_or("").trim_start_matches("attach ");
+    let tabs = match theirs {
+        0 => "no other tab of theirs is open".to_string(),
+        1 => "1 other tab of theirs is open".to_string(),
+        n => format!("{n} other tabs of theirs are open"),
+    };
+    let here = if in_current_tab {
+        format!("working in the user's tab {:?}", status.get("title").and_then(Value::as_str).unwrap_or(""))
+    } else {
+        "working in a window of its own, behind theirs".to_string()
+    };
+    format!(
+        "the user's browser ({browser}): {here}; {tabs}. `tab-list` lists them (`current`: the one they are on), \
+         `tab-select current` works in that one; `quit` closes only the agent's own tabs"
+    )
+}
+
 const ELECTRON_ATTACHED_NOTE: &str = "an Electron app navigera attached to: its windows are the tabs, quit \
      leaves it running (quit --close-browser ends it), and eval --main needs the launch with --electron <app>";
 
+/// `start --electron` on an app whose main process can't be reached.
 const ELECTRON_NO_MAIN_NOTE: &str = "this app turns Node's inspector off (Electron's EnableNodeCliInspectArguments \
      fuse), so eval --main can't reach its main process; its windows work as usual";
 

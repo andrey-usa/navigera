@@ -176,7 +176,13 @@ fn a_locator_on_a_long_page_is_linear() {
     };
     let (small, large) = (timed(3000), timed(12000));
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.001);
-    assert!(ratio < 8.0, "3000 buttons {small:?}, 12000 {large:?}: {ratio:.1}x");
+    // The ratio alone swings with the small page's time (55-200 ms on one
+    // runner); quadratic took about 9 s here, so a large page under 2 s
+    // passes whatever the ratio.
+    assert!(
+        ratio < 8.0 || large < std::time::Duration::from_secs(2),
+        "3000 buttons {small:?}, 12000 {large:?}: {ratio:.1}x"
+    );
     assert!(large < std::time::Duration::from_secs(30), "{large:?}");
 }
 
@@ -1603,6 +1609,53 @@ fn a_click_waits_for_a_navigation_only_when_the_page_plans_one() {
         handled < plain + 100.0,
         "a handled submit waited for a navigation: {handled:.0} ms against {plain:.0} ms for a plain click"
     );
+}
+
+fn assert_chain_reports_its_end(page: &str) {
+    let _alone = timed_alone();
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start(page.trim_start_matches('/'), &[]);
+    let compact = |args: &[&str]| {
+        let out = Command::new(tool_exe())
+            .env_remove("NAVIGERA_OUTPUT")
+            .arg("--session")
+            .arg(&s.name)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run navigera");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    for _ in 0..3 {
+        s.ok(&["goto", &format!("{}{page}", site.url)]);
+        let tree = compact(&["ax"]);
+        let reference = tree
+            .lines()
+            .find(|l| l.contains("button \"Load\""))
+            .and_then(|l| l.split("[ref=").nth(1))
+            .map(|r| r.trim_end_matches(']').to_string())
+            .unwrap_or_else(|| panic!("no Load ref in {tree}"));
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let out = compact(&["click", &reference]);
+        assert!(out.contains("chain complete"), "{out}");
+        assert!(!out.contains("phase one"), "{out}");
+    }
+}
+
+/// A click whose response starts a second fetch at once reports what the
+/// second fetch rendered: the after-action settle never returns between
+/// states of a chain.
+#[test]
+fn an_action_reports_the_end_of_a_chained_fetch() {
+    assert_chain_reports_its_end("/action-chain");
+}
+
+/// The same with the second fetch deferred by a timer inside the quiet
+/// window (80 ms): the settle proof waits for short timers the page
+/// scheduled, as the plain window did.
+#[test]
+fn an_action_reports_the_end_of_a_fetch_chained_by_a_timer() {
+    assert_chain_reports_its_end("/action-chain-timer");
 }
 
 /// What an action changed is read after the requests it started, also one

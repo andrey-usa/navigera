@@ -858,6 +858,10 @@ pub enum Command {
     Quit {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         close_browser: bool,
+        /// Attached: leave navigera's own tabs open too (by default only
+        /// the user's stay).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_tabs: bool,
     },
 }
 
@@ -918,6 +922,9 @@ pub struct SessionConfig {
     /// (default `chrome`: the user's own, via chrome://inspect remote
     /// debugging) instead of launching one. Never closes it.
     pub attach: Option<String>,
+    /// `--tab current` with `--attach`: the session starts in the tab the
+    /// user is on, not in a window of its own.
+    pub in_current_tab: bool,
     /// `--profile <name|dir>`: a persistent, visible navigera browser on
     /// its own profile, started when needed and kept open between sessions.
     pub profile: Option<String>,
@@ -995,6 +1002,7 @@ impl Default for SessionConfig {
             session: None,
             idle_timeout_s: DEFAULT_IDLE_TIMEOUT_S,
             attach: None,
+            in_current_tab: false,
             profile: None,
             electron: None,
             electron_args: Vec::new(),
@@ -1049,8 +1057,27 @@ fn check_profile_flags(config: &SessionConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// `--attach` takes an optional value; the default is the user's Chrome.
-const DEFAULT_ATTACH: &str = "chrome";
+/// `--attach` takes an optional value; the default is the user's running
+/// browser, whichever serves remote debugging (`--auto-connect` too).
+const DEFAULT_ATTACH: &str = crate::cdp::attach::AUTO;
+
+/// `--tab <current|new>`: where an attached session starts.
+fn parse_start_tab(raw: &str) -> Result<bool, String> {
+    match raw {
+        "current" => Ok(true),
+        "new" => Ok(false),
+        other => {
+            Err(format!("--tab takes current (the tab you are on) or new (a window of the agent's own), got {other:?}"))
+        }
+    }
+}
+
+/// `$NAVIGERA_AUTO_CONNECT` set to anything but empty, 0, false or no.
+fn auto_connect_env() -> bool {
+    std::env::var("NAVIGERA_AUTO_CONNECT")
+        .ok()
+        .is_some_and(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+}
 
 /// True when `word` is a command name (so it can't be `--attach`'s value).
 fn is_command_word(word: &str) -> bool {
@@ -1058,7 +1085,8 @@ fn is_command_word(word: &str) -> bool {
         || OPS.iter().any(|(name, _, _)| *name == word)
 }
 
-/// Pull `--attach [value]` out of argv; a bare `--attach` means `chrome`.
+/// Pull `--attach [value]` (or `--auto-connect`) out of argv; a bare
+/// `--attach` means whichever browser of the user's serves remote debugging.
 fn extract_attach(args: &mut std::collections::VecDeque<String>) -> Result<Option<String>, String> {
     let mut found = None;
     let mut rest = std::collections::VecDeque::new();
@@ -1070,6 +1098,8 @@ fn extract_attach(args: &mut std::collections::VecDeque<String>) -> Result<Optio
             }
         } else if let Some(v) = arg.strip_prefix("--attach=") {
             Some(v.to_string())
+        } else if arg == "--auto-connect" || arg == "--autoconnect" {
+            Some(DEFAULT_ATTACH.to_string())
         } else {
             rest.push_back(arg);
             continue;
@@ -1135,7 +1165,7 @@ pub struct ParsedArgs {
 
 /// One op's CLI documentation: (name, synopsis, what it does).
 const OPS: &[(&str, &str, &str)] = &[
-    ("start", "[--attach [<where>] | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open; --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
+    ("start", "[--attach [<where>] [--tab current] | --auto-connect | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open (--auto-connect, a bare --attach: your running browser, whichever serves remote debugging; $NAVIGERA_AUTO_CONNECT=1 for every start; --tab current: in the tab you are on, not a window of its own); --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
     ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
@@ -1186,15 +1216,15 @@ const OPS: &[(&str, &str, &str)] = &[
     ("screenshot", "[--path <f.png>] [--full-page] [--quality <1-100>] [--timeout-ms <n>] [--no-wait]", "PNG (a JPEG with --quality) of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
     ("reset", "[--all]", "a clean slate in the same browser: a new browser context (no cookies, storage or cache from before) with one blank tab; the old tabs close (`set`, routes, credentials, init scripts, the dialog answer and `downloads --dir` stay; --all drops them too)"),
     ("tab-new", "[<url>]", "open a tab and make it active"),
-    ("tab-list", "", "list tabs"),
-    ("show", "", "put the browser on screen with the same tabs and sign-ins, to hand the session to a person (a login, 2FA, a CAPTCHA); `hide` takes it back off"),
+    ("tab-list", "", "list tabs; in your own browser (--attach) also your other tabs (user_tabs), current: true on the one you are on"),
+    ("show", "", "put the browser on screen with the same tabs and sign-ins, to hand the session to a person (a login, 2FA, a CAPTCHA); `hide` takes it back off. In your own browser (--attach): bring the session's tab to the front for you, yours from then on"),
     ("hide", "", "take the browser off screen again (headless), with the same tabs and sign-ins"),
-    ("tab-select", "<index> | <target id>", "switch the active tab (a target id from tab-list stays right when tabs open and close)"),
+    ("tab-select", "<index> | <target id> | current", "switch the active tab (a target id from tab-list stays right when tabs open and close); current: the tab you are on, in your own browser one of yours (quit leaves it open)"),
     ("tab-close", "[<index>]", "close a tab (default: active)"),
     ("dialog", "--accept [--prompt-text <t>] | --dismiss", "how alert/confirm/prompt are answered (default: accept; every dialog is reported)"),
-    ("quit", "[--close-browser]", "close the browser and the session server; attached (--attach/--profile): only disconnect, unless --close-browser"),
+    ("quit", "[--close-browser] [--keep-tabs]", "close the browser and the session server; attached (--attach/--profile): close only navigera's own tabs and disconnect (--keep-tabs: leave them open too; --close-browser: close the browser)"),
     ("serve", "", "for programs: read one JSON command per line on stdin (`{\"id\":1,\"op\":\"goto\",\"url\":\"…\"}`) and answer each on stdout; the protocol is in docs/navigera.md"),
-    ("mcp", "[--headed] [--profile <name> | --attach [<where>] | --electron <app>] [--allow-domains <list>] [--allow-domains-docs-only]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call; --allow-domains works as for `start`"),
+    ("mcp", "[--headed] [--profile <name> | --attach [<where>] [--tab current] | --auto-connect | --electron <app>] [--allow-domains <list>] [--allow-domains-docs-only]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call; --allow-domains works as for `start`"),
     ("batch", "[<file> | -] [--keep-going]", "run several steps in one call (one process, one connection): one command per line (`goto /form`, `fill --label Email a@b.c`; # comments) or JSON ops as `serve` takes them; stops at the first failure (--keep-going runs the rest); prints what the steps read and the page state once; reads stdin without a file"),
     ("sessions", "[--clean [--all] [--idle <s>]]", "list the named sessions (pid, idle time, browser, memory) and the shared browsers; --clean quits the ones idle 5 min or more and drops dead ones, --all quits every one"),
     ("profiles", "", "list what a session can be handed: your browsers' profiles (name, email, whether --attach can reach them now) and navigera's own --profile browsers"),
@@ -1266,7 +1296,7 @@ pub fn usage(program: &str) -> String {
     out.push_str("\nOTHER COMMANDS:\n");
     out.push_str(&wrapped("  ", &others.join(" "), 2));
     out.push_str("\nFLAGS: -s <name> session; --output compact|raw|json; --timeout-ms <ms>;\n");
-    out.push_str("  --headed; --attach, --profile, --electron with `start` (`help --all`).\n\n");
+    out.push_str("  --headed; --auto-connect (your browser), --profile, --electron with `start`.\n\n");
     for paragraph in [
         format!("`{program} help <command>`: its usage, flags and examples."),
         format!("`{program} help --all`: every command and flag. `{program} skill`: the agent guide."),
@@ -1314,7 +1344,7 @@ pub fn usage_full(program: &str) -> String {
         ("--parent <pid>", "with `start`: the session ends when that process exits ($NAVIGERA_PARENT_PID)".into()),
         (
             "--attach [chrome|edge|<dir>|<port>]",
-            "with `start`: use your running browser and never close it. Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there".into(),
+            "with `start`: use your running browser and never close it (bare, or --auto-connect: whichever of Chrome, Edge, Brave, Chromium or ports 9222/9229 serves remote debugging). Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there; --tab current works in the tab you are on".into(),
         ),
         ("--profile <name>", "with `start`: a persistent visible navigera browser, kept open between sessions (--headless to hide it)".into()),
         (
@@ -1598,7 +1628,13 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
             raw.parse::<u64>().map_err(|_| format!("--idle-timeout-s must be whole seconds, got {raw:?}"))?;
     }
     if let Some(spec) = extract_attach(args)? {
+        if config.attach.is_some() {
+            return Err("duplicate --attach".into());
+        }
         config.attach = Some(spec);
+    }
+    if let Some(raw) = extract_value(args, "--tab")? {
+        config.in_current_tab = parse_start_tab(&raw)?;
     }
     if let Some(name) = extract_value(args, "--profile")? {
         config.profile = Some(name);
@@ -1787,6 +1823,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             "--output" => set_output(&mut config, &value("--output")?).map_err(ArgsError::Invalid)?,
             "--transport" => config.transport = Some(value("--transport")?),
             "--session" | "-s" => config.session = Some(value("--session")?),
+            "--auto-connect" | "--autoconnect" => config.attach = Some(DEFAULT_ATTACH.to_string()),
+            "--tab" => config.in_current_tab = parse_start_tab(&value("--tab")?).map_err(ArgsError::Invalid)?,
             "--attach" => {
                 config.attach = Some(match &inline {
                     Some(v) => v.clone(),
@@ -1852,6 +1890,19 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         }
     }
     consume_globals(&mut args, &mut config).map_err(ArgsError::Invalid)?;
+    // `$NAVIGERA_AUTO_CONNECT`: sessions and the MCP server work in the
+    // user's running browser unless told where else.
+    if matches!(op.as_str(), "start" | "serve" | "mcp")
+        && config.attach.is_none()
+        && config.profile.is_none()
+        && config.electron.is_none()
+        && auto_connect_env()
+    {
+        config.attach = Some(DEFAULT_ATTACH.to_string());
+    }
+    if config.in_current_tab && config.attach.is_none() {
+        return invalid("--tab current works in your own browser's tab: add --attach (or --auto-connect)");
+    }
     let parsed = |config, command, start, local| Ok(ParsedArgs { config, command, start, local, mcp: false });
 
     match op.as_str() {
@@ -2466,7 +2517,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         "history" => Command::History { clear: extract_present(&mut args, "--clear") },
         // Mostly for sessions (`--session s quit` stops the server); as a
         // one-shot it just launches and closes.
-        "quit" | "close" => Command::Quit { close_browser: extract_present(&mut args, "--close-browser") },
+        "quit" | "close" => Command::Quit {
+            close_browser: extract_present(&mut args, "--close-browser"),
+            keep_tabs: extract_present(&mut args, "--keep-tabs"),
+        },
         "tab-list" => Command::TabList {},
         "show" => Command::Show {},
         "hide" => Command::Hide {},
@@ -2482,6 +2536,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 Ok(index) => Command::TabSelect { index, target: None },
                 Err(e) => return invalid(e),
             },
+            // The tab the user is on (in their own browser, one of theirs).
+            (None, Some(raw)) if raw == "current" => Command::TabSelect { index: 0, target: Some(raw) },
             // A target id (or 4+ characters of one) even when it happens to
             // be all digits; a tab index is short.
             (None, Some(raw)) if raw.len() >= 4 && raw.chars().all(|c| c.is_ascii_hexdigit()) => {
@@ -3150,7 +3206,7 @@ impl Driver {
             });
         }
         if let Some(target) = config.attach_target() {
-            let mut session = BrowserSession::attach(&target, config.timeout_ms)
+            let mut session = BrowserSession::attach_in(&target, config.timeout_ms, config.in_current_tab)
                 .map_err(|e| e.context("could not connect to the browser"))?;
             Self::apply_allow_policy(&mut session, config)?;
             return Ok(Self {
@@ -3442,8 +3498,17 @@ impl Driver {
         if self.session.is_electron() {
             anyhow::bail!("{what}: an Electron app shows its own windows");
         }
-        if self.session.is_attached() && self.session.profile_dir().is_none() {
-            anyhow::bail!("{what}: this is your own browser (--attach); it is already where you see it");
+        // The user's own browser is on their screen already: `show` brings
+        // the session's tab to the front for them, and hands it to them.
+        if self.session.in_users_browser() {
+            if !visible {
+                anyhow::bail!("hide: this is your own browser (--attach); it stays where you see it");
+            }
+            self.session.show_to_user().map_err(|e| e.context("show"))?;
+            let mut state = self.state_json();
+            state["visible"] = json!(true);
+            state["note"] = json!("this tab is in front of the user now, and theirs: quit leaves it open");
+            return Ok(state);
         }
         let urls = self.session.tab_urls();
         let active = self.session.active_page();
@@ -3516,6 +3581,19 @@ impl Driver {
         let active = self.session.active_page();
         let closed = self.session.closed_tab();
         let infos = self.session.tab_infos();
+        // In the user's own browser: their other tabs, and the one they are
+        // on (theirs, or one of the session's they are looking at).
+        let users = self.session.in_users_browser();
+        let (others, hidden) = self.session.other_tabs_counted();
+        // Asked of every tab, those outside `--allow-domains` too: the tab
+        // the user is on is that one even when it isn't shown.
+        let current = if users {
+            let mut ids: Vec<String> = others.iter().map(|(id, _, _)| id.clone()).collect();
+            ids.extend(hidden.iter().cloned());
+            self.session.users_current(&ids)
+        } else {
+            None
+        };
         let tabs: Vec<Value> = self
             .session
             .page_targets()
@@ -3533,10 +3611,33 @@ impl Driver {
                 if self.session.is_embedded(&target) {
                     tab["webview"] = json!(true);
                 }
+                if self.session.is_user_tab(&target) {
+                    tab["user"] = json!(true);
+                }
+                if current.as_deref() == Some(target.as_str()) {
+                    tab["current"] = json!(true);
+                }
                 tab
             })
             .collect();
-        json!({ "tabs": tabs, "active": active, "url": self.session.url() })
+        let mut out = json!({ "tabs": tabs, "active": active, "url": self.session.url() });
+        if users {
+            let theirs: Vec<Value> = others
+                .into_iter()
+                .map(|(target, url, title)| {
+                    let mut tab = json!({ "target": target, "url": url, "title": title });
+                    if current.as_deref() == Some(tab["target"].as_str().unwrap_or("")) {
+                        tab["current"] = json!(true);
+                    }
+                    tab
+                })
+                .collect();
+            out["user_tabs"] = json!(theirs);
+            if !hidden.is_empty() {
+                out["user_tabs_outside_allow_domains"] = json!(hidden.len());
+            }
+        }
+        out
     }
 
     /// Keep the page state `result` reports; with `compact`, make it say
@@ -3544,6 +3645,21 @@ impl Driver {
     /// report (`"ok"` when that is nothing).
     pub(crate) fn report_state(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
         self.compact = compact;
+        self.report_state_inner(command, result, compact);
+        // After an action, put the page's timer functions back (see
+        // [`crate::cdp::Page::settle_unhook`]) unless a settle proof still
+        // needs them: once the action's requests have started, the read
+        // that waits on the proof (the compact report's, or the agent's next
+        // `ax`) puts them back itself.
+        if command.is_action() && !self.session.action_traffic_seen() {
+            self.session.settle_unhook();
+        }
+        // Tabs opened or closed: say which are ours to other sessions in
+        // the user's browser.
+        self.session.publish_own_tabs();
+    }
+
+    fn report_state_inner(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
         if let (Command::Ax { .. }, Some(Value::String(tree))) = (command, result.as_ref()) {
             self.look =
                 Some(Look::new(command.clone(), tree.clone(), self.session.page_identity(), self.session.journal_id()));
@@ -3632,11 +3748,7 @@ impl Driver {
             if let Some(tree) = self.session.journal_restate(id).and_then(|moved| restate(&look.tree, &moved)) {
                 let change = tree_change(&look.tree, &tree, &entered);
                 self.look = Some(Look { tree, ..look });
-                let change = change?;
-                return Some(Value::String(match short {
-                    Value::String(ok) if ok == "ok" => change,
-                    other => format!("{other}\n{change}"),
-                }));
+                return Some(Value::String(with_change(command, short, change?)));
             }
         }
         let read = |me: &mut Self| match me.run_op_inner(&look.command) {
@@ -3674,11 +3786,7 @@ impl Driver {
         }
         let journal = self.session.journal_id();
         self.look = Some(Look { tree, journal, typed: Vec::new(), ..look });
-        let change = change?;
-        Some(Value::String(match short {
-            Value::String(ok) if ok == "ok" => change,
-            other => format!("{other}\n{change}"),
-        }))
+        Some(Value::String(with_change(command, short, change?)))
     }
 
     /// Run one op, after relaunching the shared browser if it died since the
@@ -4067,10 +4175,17 @@ impl Driver {
                 // the whole window is for traffic not started yet (a page's
                 // data after it loads). A window the session chose holds.
                 let mut window = self.session.network_quiet_window();
-                if !self.session.network_quiet_chosen() && self.session.action_traffic_seen() {
+                let after_action = !self.session.network_quiet_chosen() && self.session.action_traffic_seen();
+                if after_action {
                     window = window.min(AFTER_ACTION_QUIET);
                 }
-                let (_, waited) = self.session.network_quiet_waited(window, budget.min(NETWORK_QUIET_MAX));
+                // After an action's own requests, end the wait on proof of
+                // a settled render rather than waiting out the window.
+                let (_, waited) = if after_action {
+                    self.session.action_settle_wait(window, budget.min(NETWORK_QUIET_MAX))
+                } else {
+                    self.session.network_quiet_waited(window, budget.min(NETWORK_QUIET_MAX))
+                };
                 quiet_waited_ms = waited.as_millis() as u64;
             }
         }
@@ -5156,6 +5271,11 @@ impl Driver {
                     None => "own".to_string(),
                 });
                 state["version"] = json!(env!("CARGO_PKG_VERSION"));
+                // The user's other tabs, in their own browser (`tab-list`
+                // names them).
+                if self.session.in_users_browser() {
+                    state["user_tabs"] = json!(self.session.other_tabs().len());
+                }
                 if let Some(electron) = self.session.electron_info() {
                     state["electron"] = electron;
                 }
@@ -5181,6 +5301,10 @@ impl Driver {
                 }
                 Ok(self.tabs_json())
             }
+            Command::TabSelect { target: Some(current), .. } if current == "current" => {
+                self.session.select_current().map_err(|e| e.context("tab-select current"))?;
+                Ok(self.state_json())
+            }
             Command::TabSelect { index, target } => {
                 let index = match target {
                     Some(id) => {
@@ -5193,6 +5317,10 @@ impl Driver {
                             .collect();
                         match hits.as_slice() {
                             [i] => *i,
+                            // One of the user's own tabs, handed to the session.
+                            [] if self.session.select_user_tab(id).map_err(|e| e.context("tab-select"))?.is_some() => {
+                                return Ok(self.state_json());
+                            }
                             [] => anyhow::bail!("tab-select: no tab with target {id} (`tab-list` shows them)"),
                             _ => anyhow::bail!("tab-select: {id} matches {} tabs; give more of the id", hits.len()),
                         }
@@ -5228,16 +5356,31 @@ impl Driver {
                 let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
                 Ok(json!({ "path": path, "bytes": bytes.len() }))
             }
-            // Attached: only the connection ends; the browser and every
-            // window (navigera's included) stay open.
-            Command::Quit { close_browser: true } if s.is_attached() => {
+            // Attached: the browser stays open, and so do the user's tabs;
+            // navigera's own close (all of them stay with `--keep-tabs`).
+            Command::Quit { close_browser: true, .. } if s.is_attached() => {
                 s.close_browser()?;
                 Ok(json!({ "bye": true, "browser": "closed" }))
             }
-            Command::Quit { .. } if s.is_attached() => Ok(json!({ "bye": true, "browser": "left open" })),
+            Command::Quit { keep_tabs, .. } if s.is_attached() => {
+                let mut bye = json!({ "bye": true, "browser": "left open" });
+                if *keep_tabs {
+                    s.keep_tabs();
+                } else {
+                    let closed = s.close_own_tabs();
+                    if closed > 0 {
+                        bye["closed_tabs"] = json!(closed);
+                    }
+                }
+                let yours = s.user_tab_count();
+                if yours > 0 {
+                    bye["user_tabs_left"] = json!(yours);
+                }
+                Ok(bye)
+            }
             // Its context closes; the browser closes with it unless other
             // sessions use it.
-            Command::Quit { close_browser: true } if s.is_shared() => {
+            Command::Quit { close_browser: true, .. } if s.is_shared() => {
                 let others = s.close_shared_if_unused().map_err(|e| e.context("quit --close-browser"))?;
                 let browser = match others {
                     0 => "closed: no other session used it".to_string(),
@@ -5784,10 +5927,15 @@ pub fn oneshot(config: &SessionConfig, command: &Command, output: &mut dyn Write
         // Each one-shot command would open (and abandon) a window in the
         // user's browser, and Chrome would ask to Allow every one of them.
         let flag = if config.attach.is_some() { "--attach" } else { "--profile" };
+        let start = match (config.attach.as_deref(), config.profile.as_deref()) {
+            (Some(crate::cdp::attach::AUTO), _) => "--auto-connect".to_string(),
+            (Some(spec), _) => format!("--attach {spec}"),
+            (None, Some(name)) => format!("--profile {name}"),
+            (None, None) => flag.to_string(),
+        };
         let error = format!(
             "{flag} keeps one connection to a browser that stays open: use a session, \
-             e.g. `navigera -s me start {flag} {}` then `navigera -s me <command>`",
-            config.attach.as_deref().or(config.profile.as_deref()).unwrap_or("")
+             e.g. `navigera -s me start {start}` then `navigera -s me <command>`"
         );
         print_cli_response(output, &json!({ "id": null, "ok": false, "error": error }), config);
         return ExitCode::from(2);
@@ -5962,11 +6110,55 @@ pub fn split_state(result: &Value) -> (Option<Value>, Option<Value>) {
     match result {
         Value::Object(map) if map.contains_key("url") => {
             let (state, rest): (serde_json::Map<String, Value>, serde_json::Map<String, Value>) =
-                map.clone().into_iter().partition(|(k, _)| STATE_KEYS.contains(&k.as_str()));
+                // `tabs` is the state's tab count; `tab-list`'s list of tabs
+                // is what the op says, always printed.
+                map.clone().into_iter().partition(|(k, v)| STATE_KEYS.contains(&k.as_str()) && !v.is_array());
             ((!rest.is_empty()).then_some(Value::Object(rest)), Some(Value::Object(state)))
         }
         Value::Null => (None, None),
         other => (Some(other.clone()), None),
+    }
+}
+
+/// The compact report of an action that changed what the last look showed:
+/// what the op said, then the change. A choice or a check whose change
+/// already shows it (the chosen options, a box that flipped) does not say it
+/// again as a line of JSON first.
+fn with_change(command: &Command, short: &Value, change: String) -> String {
+    let mut short = short.clone();
+    if let Value::Object(map) = &mut short {
+        let shown = match command {
+            Command::Select { .. } => map.get("selected").and_then(Value::as_array).is_some_and(|chosen| {
+                chosen.iter().all(|c| {
+                    c.as_str().is_some_and(|c| {
+                        change.contains(&format!("\"{c}\"")) || change.contains(&format!("\"{c} (selected)\""))
+                    })
+                })
+            }),
+            // Only a line of the flipped control itself says so: a scoped
+            // look may show just what the box rewrote (a summary line).
+            Command::SetChecked { .. } => {
+                map.get("changed") == Some(&json!(true))
+                    && change.lines().any(|l| {
+                        l.strip_prefix("~ ").and_then(|l| l.split_whitespace().next()).is_some_and(|role| {
+                            matches!(role, "checkbox" | "radio" | "switch" | "menuitemcheckbox" | "menuitemradio")
+                        })
+                    })
+            }
+            _ => false,
+        };
+        if shown {
+            for k in ["selected", "checked", "changed"] {
+                map.remove(k);
+            }
+        }
+        if map.is_empty() {
+            return change;
+        }
+    }
+    match short {
+        Value::String(ok) if ok == "ok" => change,
+        other => format!("{other}\n{change}"),
     }
 }
 
@@ -6747,6 +6939,36 @@ mod tests {
     }
 
     #[test]
+    fn a_choice_or_check_its_change_shows_is_not_said_twice() {
+        let sel = Command::Select { target: Default::default(), value: vec![], timeout_ms: None, add: false };
+        let shown = "~ combobox [ref=5] value=\"Tokyo\" options: \"Oslo\", \"Tokyo (selected)\"";
+        assert_eq!(with_change(&sel, &json!({ "selected": ["Tokyo"] }), shown.into()), shown);
+        assert_eq!(
+            with_change(&sel, &json!({ "selected": ["Tok"] }), shown.into()),
+            format!("{{\"selected\":[\"Tok\"]}}\n{shown}")
+        );
+        assert_eq!(
+            with_change(&sel, &json!({ "selected": ["Tokyo"], "tabs": 2 }), shown.into()),
+            format!("{{\"tabs\":2}}\n{shown}")
+        );
+        let chk = Command::SetChecked { checked: true, target: Default::default(), timeout_ms: None };
+        let flipped = "~ checkbox \"Gift\" [ref=3] checked";
+        assert_eq!(with_change(&chk, &json!({ "checked": true, "changed": true }), flipped.into()), flipped);
+        assert_eq!(
+            with_change(&chk, &json!({ "checked": true, "changed": false }), "+ text: x".into()),
+            "{\"changed\":false,\"checked\":true}\n+ text: x"
+        );
+        // A scoped look that shows only what the box rewrote keeps the line.
+        let rewrote = "+ paragraph: Gift wrap: no\n- paragraph: Gift wrap: yes";
+        assert_eq!(
+            with_change(&chk, &json!({ "checked": false, "changed": true }), rewrote.into()),
+            format!("{{\"changed\":true,\"checked\":false}}\n{rewrote}")
+        );
+        let click = Command::KeyDown { key: "a".into() };
+        assert_eq!(with_change(&click, &json!("ok"), "+ text: x".into()), "+ text: x");
+    }
+
+    #[test]
     fn compact_says_ok_or_only_what_changed() {
         let st = json!({ "tab": 0, "tabs": 1, "url": "http://h/a", "title": "A" });
         assert_eq!(compact_result(None, &st, None), json!({ "url": "http://h/a", "title": "A" }));
@@ -6943,8 +7165,14 @@ mod tests {
             Command::TabSelect { index: 0, target: Some("8895149696".into()) }
         );
         assert_eq!(cmd(&["snapshot"]), cmd(&["ax"]));
-        assert_eq!(cmd(&["close"]), Command::Quit { close_browser: false });
-        assert_eq!(cmd(&["quit", "--close-browser"]), Command::Quit { close_browser: true });
+        assert_eq!(cmd(&["close"]), Command::Quit { close_browser: false, keep_tabs: false });
+        assert_eq!(cmd(&["quit", "--close-browser"]), Command::Quit { close_browser: true, keep_tabs: false });
+        assert_eq!(cmd(&["quit", "--keep-tabs"]), Command::Quit { close_browser: false, keep_tabs: true });
+        assert_eq!(cmd(&["tab-select", "current"]), Command::TabSelect { index: 0, target: Some("current".into()) });
+        assert_eq!(
+            serde_json::from_value::<Command>(json!({"op": "tab-select", "target": "current"})).unwrap(),
+            Command::TabSelect { index: 0, target: Some("current".into()) }
+        );
     }
 
     #[test]
@@ -7240,8 +7468,8 @@ mod tests {
                 timeout_ms: None,
                 download: None,
             },
-            Command::Quit { close_browser: false },
-            Command::Quit { close_browser: true },
+            Command::Quit { close_browser: false, keep_tabs: false },
+            Command::Quit { close_browser: true, keep_tabs: false },
         ] {
             let wire = serde_json::to_string(&command).expect("serializes");
             let back: Command = serde_json::from_str(&wire).expect("deserializes");
@@ -7278,10 +7506,45 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_list_is_what_tab_list_says_not_state() {
+        let list =
+            json!({ "tabs": [{ "index": 0, "target": "AB12", "active": true }], "active": 0, "url": "about:blank" });
+        let (own, state) = split_state(&list);
+        assert_eq!(own.unwrap()["tabs"][0]["target"], "AB12");
+        assert_eq!(state.unwrap(), json!({ "url": "about:blank" }));
+        // Unchanged since the last report, it is still printed.
+        let before = json!({ "url": "about:blank", "tabs": 1 });
+        let (own, state) = split_state(&list);
+        let short = compact_result(own, &state.unwrap(), Some(&before));
+        assert_eq!(short["tabs"][0]["target"], "AB12", "{short}");
+        // A state's tab count stays state.
+        let (_, state) = split_state(&json!({ "tab": 0, "tabs": 2, "url": "u" }));
+        assert_eq!(state.unwrap()["tabs"], 2);
+    }
+
+    #[test]
     fn attach_and_profile_flags() {
         let attach = |args: &[&str]| parse_args(argv(args)).map(|p| (p.config.attach, p.start));
-        // Bare --attach means the user's Chrome, wherever it sits.
-        assert_eq!(attach(&["navigera", "-s", "me", "start", "--attach"]).unwrap(), (Some("chrome".into()), true));
+        // Bare --attach means the user's running browser, whichever serves
+        // remote debugging; --auto-connect (either spelling) says the same.
+        assert_eq!(attach(&["navigera", "-s", "me", "start", "--attach"]).unwrap(), (Some("auto".into()), true));
+        assert_eq!(attach(&["navigera", "-s", "me", "start", "--auto-connect"]).unwrap(), (Some("auto".into()), true));
+        assert_eq!(attach(&["navigera", "--autoconnect", "-s", "me", "start"]).unwrap(), (Some("auto".into()), true));
+        assert!(parse_args(argv(&["navigera", "-s", "me", "start", "--attach", "9222", "--auto-connect"])).is_err());
+        // --tab current: start in the user's tab; only in their browser.
+        let p = parse_args(argv(&["navigera", "-s", "me", "start", "--auto-connect", "--tab", "current"])).unwrap();
+        assert!(p.config.in_current_tab);
+        assert!(
+            !parse_args(argv(&["navigera", "-s", "me", "start", "--attach", "--tab", "new"]))
+                .unwrap()
+                .config
+                .in_current_tab
+        );
+        let err = parse_args(argv(&["navigera", "-s", "me", "start", "--tab", "current"])).unwrap_err();
+        assert!(matches!(&err, ArgsError::Invalid(m) if m.contains("add --attach")), "{err:?}");
+        assert!(parse_args(argv(&["navigera", "-s", "me", "start", "--attach", "--tab", "mine"])).is_err());
+        let parsed = parse_args(argv(&["navigera", "mcp", "--auto-connect", "--tab", "current"])).unwrap();
+        assert!(parsed.mcp && parsed.config.attach.as_deref() == Some("auto") && parsed.config.in_current_tab);
         // --electron with repeated arguments, before or after `start`; an
         // argument may start with a dash.
         let parsed = parse_args(argv(&[
@@ -7307,10 +7570,10 @@ mod tests {
         assert!(matches!(&err, ArgsError::Invalid(m) if m.contains("add --electron")), "{err:?}");
         let parsed = parse_args(argv(&["navigera", "mcp", "--electron", "my-app-bin"])).unwrap();
         assert!(parsed.mcp && parsed.config.electron.as_deref() == Some("my-app-bin"));
-        assert_eq!(attach(&["navigera", "-s", "me", "--attach", "start"]).unwrap(), (Some("chrome".into()), true));
+        assert_eq!(attach(&["navigera", "-s", "me", "--attach", "start"]).unwrap(), (Some("auto".into()), true));
         assert_eq!(
             attach(&["navigera", "-s", "me", "start", "--attach", "--headless"]).unwrap().0.as_deref(),
-            Some("chrome")
+            Some("auto")
         );
         assert_eq!(attach(&["navigera", "-s", "me", "start", "--attach", "edge"]).unwrap().0.as_deref(), Some("edge"));
         assert_eq!(attach(&["navigera", "-s", "me", "--attach=9222", "start"]).unwrap().0.as_deref(), Some("9222"));

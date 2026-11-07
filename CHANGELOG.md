@@ -6,6 +6,75 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-07
+
+### Added
+
+- `--auto-connect` (also `--autoconnect`, and a bare `--attach`) works in
+  whichever of your browsers serves remote debugging: Chrome, Chrome Beta,
+  Dev and Canary, Chromium, Edge and Brave by their default profiles, then
+  a browser started with `--remote-debugging-port` 9222 or 9229.
+  `NAVIGERA_AUTO_CONNECT=1` does the same for every `start` and `mcp`.
+  `start` says which browser it found and how many of your tabs are open.
+- In your own browser `tab-list` lists your other tabs too, under
+  `user_tabs`, and marks the tab you are on `current: true`: the one whose
+  window has your keyboard, else the one that came on screen last.
+  Windows another navigera session on the same machine opened there are
+  not listed as yours.
+- `tab-select current` works in the tab you are on, and `tab-select` takes
+  a target id from `user_tabs`. The tab stays yours: `quit` and `reset`
+  leave it open. `start --attach --tab current` starts there and opens no
+  window of navigera's own. MCP: `browser_tabs` `select` takes `target`
+  (an id, or `current`).
+- `quit --keep-tabs` leaves navigera's own tabs open in a browser it
+  attached to, the ones `reset` opened as well.
+
+### Behaviour changes
+
+- In a browser navigera attached to, `quit` closes the tabs navigera
+  opened and leaves yours open, where it left them all. An idle or
+  `--parent` shutdown does the same. The browser's last tab is never
+  closed.
+- navigera's window in your own browser opens behind yours, so the window
+  you type in keeps the keyboard. `tab-new` there opens another such
+  window, where it opened a tab in the window you used last. `tab-select`
+  and `reset` there no longer bring a tab to the front: the tab you look at
+  stays in front, and a tab behind it still reads, takes clicks and typing,
+  and gives screenshots.
+- `show` in your own browser brings the session's tab to the front for
+  you and hands it to you (`quit` leaves it open), where it was refused.
+- When the agent moves to one of your tabs, navigera's own window closes
+  if it was never used.
+- A bare `--attach` looks for any of your browsers (as `--auto-connect`),
+  where it meant Chrome only; `--attach chrome` still means Chrome.
+
+### Changed
+
+- An action whose requests fetch data reports about 50 ms sooner. Once
+  those requests are done, the wait for the page to settle ends as soon
+  as the page has changed, drawn a frame and run a task with no request
+  or short timer (up to 100 ms) of its own still pending; it used to wait
+  out 100 ms of network quiet every time. A fetch the page chains from
+  the response, at once or by such a timer, is still waited for, and one
+  deferred past 100 ms still isn't, as before. In a tab that is not on
+  screen (no frames there) it waits out the 100 ms as before.
+- After a look, `select`, `check` and `uncheck` print only the changed
+  lines when those lines already show the choice or the flipped box. They
+  used to print `{"selected":["Tokyo"]}` or `{"changed":true,"checked":true}`
+  above lines that said the same.
+
+### Fixed
+
+- In a tab that is not on screen in your own browser, an action no longer
+  waits about a second before it runs. Your browser runs timers there
+  about once a second, and navigera's wait for a frame before a click
+  fell back to such a timer; it now waits one task of the page there.
+  A click in such a tab takes about 230 ms where it took 1 s.
+- `tab-list` in the default compact output printed only `{"active": n}`
+  once the tab list had been printed before; it now always lists the tabs.
+  MCP: `browser_tabs` `list` returned the page line without the tabs; it
+  now lists them, a line each.
+
 ## [0.9.0] - 2026-11-06
 
 ### Behaviour changes
@@ -1353,6 +1422,7 @@ First public release.
   x86_64) and Windows (x64); install scripts for sh and PowerShell; packages
   for crates.io, npm, PyPI, Homebrew and Scoop.
 
+[0.10.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.10.0
 [0.9.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.9.0
 [0.8.0]: https://github.com/andrey-usa/navigera/releases/tag/v0.8.0
 [0.7.1]: https://github.com/andrey-usa/navigera/releases/tag/v0.7.1

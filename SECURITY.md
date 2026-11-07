@@ -26,6 +26,13 @@ navigera runs a real browser for an agent that opens pages nobody vetted.
   drive that browser. For a `--profile` browser (your sign-ins), that lasts as
   long as the browser stays open. On a shared machine, close it with
   `quit --close-browser` when you're done.
+- **Your own browser is the agent's to read.** `--attach` and
+  `--auto-connect` give the session your running browser: `tab-list` shows
+  the address and title of each of your tabs, and `tab-select` lets the
+  agent read and act in any of them with your sign-ins. navigera lists them
+  only in that mode and never closes them, and with `--allow-domains` a tab
+  of yours on another site is neither listed (only counted) nor handed to
+  the agent.
 - **`eval` runs any JavaScript** in the page, and `upload` (CLI) sends any
   file you name: by design, for the agent you run.
 - **WebMCP tools are the page's.** `webmcp-call` (MCP: `browser_webmcp_call`)

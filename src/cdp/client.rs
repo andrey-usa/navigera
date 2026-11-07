@@ -391,6 +391,39 @@ impl CdpClient {
         session_id: Option<&str>,
         timeout: Duration,
     ) -> Result<Value> {
+        self.send_counted(method, params, session_id, timeout, true).await
+    }
+
+    /// [`CdpClient::send`] for a request a crash retry may leave out of
+    /// account (see `effects_uncertain`): page instrumentation that is safe
+    /// to run again and reaches nothing beyond the page, sent before an
+    /// action's own requests. If the browser died meanwhile, its timing out
+    /// or meeting a closing connection must not stop the action, which never
+    /// reached the browser, from running once in the relaunched one.
+    pub async fn send_harmless(
+        &self,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value> {
+        self.send_counted(method, params, session_id, timeout, false).await
+    }
+
+    fn unproven(&self, counted: bool) {
+        if counted {
+            self.inner.effects_uncertain.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn send_counted(
+        &self,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+        timeout: Duration,
+        counted: bool,
+    ) -> Result<Value> {
         trace(method, &params);
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
@@ -433,27 +466,27 @@ impl CdpClient {
         // answer never came.
         let response = match tokio::time::timeout(timeout, rx).await {
             Err(_) => {
-                self.inner.effects_uncertain.fetch_add(1, Ordering::SeqCst);
+                self.unproven(counted);
                 anyhow::bail!("{NO_ANSWER} within {} ms ({method})", timeout.as_millis());
             }
             Ok(Err(_)) => {
-                self.inner.effects_uncertain.fetch_add(1, Ordering::SeqCst);
+                self.unproven(counted);
                 anyhow::bail!("{CLOSED} ({method})");
             }
             Ok(Ok(response)) => response,
         };
         match response {
             Ok(value) => {
-                self.inner.effects_uncertain.fetch_add(1, Ordering::SeqCst);
+                self.unproven(counted);
                 Ok(value)
             }
             Err(Refusal::NeverReached) => Err(NeverReached(method.to_string()).into()),
             Err(Refusal::Closed) => {
-                self.inner.effects_uncertain.fetch_add(1, Ordering::SeqCst);
+                self.unproven(counted);
                 anyhow::bail!("{CLOSED} ({method})")
             }
             Err(Refusal::Other(e)) => {
-                self.inner.effects_uncertain.fetch_add(1, Ordering::SeqCst);
+                self.unproven(counted);
                 anyhow::bail!("the browser refused {method}: {e}")
             }
         }
@@ -730,6 +763,23 @@ mod tests {
         assert_eq!(eval.unwrap()["result"]["value"], 2);
         assert!(format!("{:#}", failed.unwrap_err()).contains("refused"));
         assert_eq!(events.recv().await.unwrap()["method"], "Page.loadEventFired");
+    }
+
+    /// A request with no answer leaves its effect unproven, so a crash
+    /// retry won't rerun the op; one sent as harmless doesn't count.
+    #[tokio::test]
+    async fn a_harmless_request_leaves_no_unproven_effect() {
+        let (client, mut peer) = framed_pair();
+        tokio::spawn(async move {
+            let mut chunk = [0u8; 8192];
+            while peer.read(&mut chunk).await.is_ok_and(|n| n > 0) {}
+        });
+        let short = Duration::from_millis(50);
+        let arm = json!({ "expression": "0" });
+        assert!(client.send_harmless("Runtime.evaluate", arm.clone(), None, short).await.is_err());
+        assert_eq!(client.effects_uncertain(), 0);
+        assert!(client.send("Runtime.evaluate", arm, None, short).await.is_err());
+        assert_eq!(client.effects_uncertain(), 1);
     }
 
     /// The peer is already gone: the write fails before a byte lands.

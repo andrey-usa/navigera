@@ -2,7 +2,11 @@
 //!
 //! `--attach <where>` connects to a Chrome that is already running:
 //!
-//! * `chrome` (also `beta`, `dev`, `canary`, `chromium`, `edge`): the
+//! * `auto` (a bare `--attach`, or `--auto-connect`): the first browser
+//!   below that serves remote debugging: Chrome, its Beta, Dev and Canary,
+//!   Chromium, Edge and Brave by their default profiles, then a browser
+//!   started with `--remote-debugging-port` 9222 or 9229;
+//! * `chrome` (also `beta`, `dev`, `canary`, `chromium`, `edge`, `brave`): the
 //!   user's everyday browser. Chrome 144+ serves remote debugging for its
 //!   default profile once the user turns it on at
 //!   `chrome://inspect/#remote-debugging`; it then writes the endpoint to
@@ -42,6 +46,7 @@ pub fn default_user_data_dir(channel: &str) -> Option<PathBuf> {
             "canary" => "Google\\Chrome SxS\\User Data",
             "chromium" => "Chromium\\User Data",
             "edge" => "Microsoft\\Edge\\User Data",
+            "brave" => "BraveSoftware\\Brave-Browser\\User Data",
             _ => return None,
         };
         Some(base.join(rel))
@@ -54,6 +59,7 @@ pub fn default_user_data_dir(channel: &str) -> Option<PathBuf> {
             "canary" => "Google/Chrome Canary",
             "chromium" => "Chromium",
             "edge" => "Microsoft Edge",
+            "brave" => "BraveSoftware/Brave-Browser",
             _ => return None,
         };
         Some(base.join(rel))
@@ -67,6 +73,7 @@ pub fn default_user_data_dir(channel: &str) -> Option<PathBuf> {
             "dev" | "canary" => "google-chrome-unstable",
             "chromium" => "chromium",
             "edge" => "microsoft-edge",
+            "brave" => "BraveSoftware/Brave-Browser",
             _ => return None,
         };
         Some(base.join(rel))
@@ -133,8 +140,64 @@ pub fn page_endpoint(spec: &str) -> Option<(String, String)> {
         .then(|| (format!("http://{hostport}"), id.to_string()))
 }
 
+/// `--attach` with no value, `--attach auto` and `--auto-connect`.
+pub const AUTO: &str = "auto";
+
+/// The browsers `auto` looks for, in order, by their default profiles.
+const AUTO_CHANNELS: &[(&str, &str)] = &[
+    ("chrome", "Chrome"),
+    ("beta", "Chrome Beta"),
+    ("dev", "Chrome Dev"),
+    ("canary", "Chrome Canary"),
+    ("chromium", "Chromium"),
+    ("edge", "Edge"),
+    ("brave", "Brave"),
+];
+
+/// The ports a browser started by hand with `--remote-debugging-port`
+/// usually serves on (9229: Electron apps and their inspector's habit).
+const AUTO_PORTS: &[u16] = &[9222, 9229];
+
+/// `auto`: the browser endpoint of the first running browser that serves
+/// remote debugging, and which browser that is. A default profile first
+/// (Chrome 144+ with chrome://inspect remote debugging on: its
+/// `DevToolsActivePort`), then the usual ports. A Node.js inspector on
+/// 9229 is not a browser and is passed over.
+pub fn discover() -> Result<(String, String)> {
+    for (channel, name) in AUTO_CHANNELS {
+        if let Some(url) = default_user_data_dir(channel).and_then(|dir| live_endpoint(&dir)) {
+            return Ok((url, format!("{name} (its default profile)")));
+        }
+    }
+    for port in AUTO_PORTS {
+        if !port_open(*port) {
+            continue;
+        }
+        let Ok(body) = super::transport::http_get_body("127.0.0.1", *port, "/json/version") else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { continue };
+        let browser = v.get("Browser").and_then(|b| b.as_str()).unwrap_or("");
+        if let Some(url) =
+            v.get("webSocketDebuggerUrl").and_then(|u| u.as_str()).filter(|_| !browser.starts_with("node"))
+        {
+            return Ok((
+                url.to_string(),
+                format!("{} on port {port}", if browser.is_empty() { "a browser" } else { browser }),
+            ));
+        }
+    }
+    let names: Vec<&str> = AUTO_CHANNELS.iter().map(|(_, name)| *name).collect();
+    bail!(
+        "no running browser serves remote debugging (looked for {} by their default profiles, and ports {}): {ENABLE_HINT}",
+        names.join(", "),
+        AUTO_PORTS.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" and ")
+    )
+}
+
 pub fn resolve(spec: &str) -> Result<String> {
     let spec = spec.trim();
+    if spec == AUTO {
+        return discover().map(|(url, _)| url).map_err(|e| anyhow::anyhow!("--attach: {e:#}"));
+    }
     if spec.starts_with("ws://") || spec.starts_with("wss://") {
         return Ok(spec.to_string());
     }
