@@ -146,9 +146,14 @@ def write_kilo(home: Path, work: Path, server: dict | None, model: tuple, env: d
                                        "models": {model_id: {"name": model_id, "tool_call": True}}}}
         name = f"mock/{model_id}"
     elif kind == "openrouter":
-        config["provider"] = {"openrouter": {"npm": "@ai-sdk/openai-compatible", "name": "OpenRouter",
-                                       "options": {"baseURL": base, "apiKey": env["OPENROUTER_API_KEY"]},
-                                       "models": {model_id: {"name": model_id, "tool_call": True}}}}
+        # OpenRouter's own AI SDK provider, not the generic OpenAI-compatible
+        # one: Gemini 3 hands back reasoning with each tool call that the
+        # next request must carry, and through the generic provider an
+        # episode ended after 3-7 calls on a reply with no tokens and finish
+        # reason "other" (purchase 0/18, no answer).
+        config["provider"] = {"openrouter": {"npm": "@openrouter/ai-sdk-provider", "name": "OpenRouter",
+                                       "options": {"apiKey": env["OPENROUTER_API_KEY"]},
+                                       "models": {model_id: {"name": model_id, "tool_call": True, "reasoning": True}}}}
         name = f"openrouter/{model_id}"
     else:
         env["GOOGLE_GENERATIVE_AI_API_KEY"] = env["GEMINI_API_KEY"]
