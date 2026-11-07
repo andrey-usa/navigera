@@ -600,6 +600,40 @@ fn webmcp_tools_are_listed_and_called() {
     assert!(a.err(&["webmcp-call", "nope"]).contains("it has: "));
 }
 
+/// `screencast`: what the tab showed, frame by frame with times, into a
+/// directory with a player; it follows the session to a new tab.
+#[test]
+fn a_screencast_records_frames_with_times_and_follows_the_session_to_a_new_tab() {
+    let Some((engine, bin)) = engines().into_iter().find(|(e, _)| *e == "chrome") else { return };
+    let a = Agent::new("screencast", engine, bin);
+    let dir = tempfile::tempdir().unwrap();
+    let rec = dir.path().join("rec");
+    let page = "data:text/html,<body><button onclick=\"let n = 0; const t = setInterval(() => { \
+        document.body.style.background = 'hsl(' + n * 40 + ',70%,60%)'; if (++n > 5) clearInterval(t); }, 60)\">go</button>";
+    assert!(a.err(&["screencast", "stop"]).contains("nothing is recording"));
+    a.ok(&["goto", page]);
+    let r = a.ok(&["screencast", "start", rec.to_str().unwrap(), "--size", "320x240", "--quality", "50"]);
+    assert_eq!(r["screencast"], rec.display().to_string(), "{r}");
+    assert!(a.err(&["screencast", "start", rec.to_str().unwrap()]).contains("already recording"));
+    a.ok(&["click", "--text", "go"]);
+    a.ok(&["wait", "--ms", "600"]);
+    a.ok(&["tab-new", page]);
+    a.ok(&["click", "--text", "go"]);
+    a.ok(&["wait", "--ms", "600"]);
+    let r = a.ok(&["screencast", "stop"]);
+    let frames = r["frames"].as_u64().unwrap();
+    assert!(frames >= 8, "the colour changes of both tabs: {r}");
+    let html = std::fs::read_to_string(rec.join("index.html")).unwrap();
+    let list = html.split("\"frames\":").nth(1).unwrap();
+    let times: Vec<u64> = list.split("\",").skip(1).map_while(|t| t.split(']').next()?.parse().ok()).collect();
+    assert_eq!(times.len() as u64, frames, "{list}");
+    assert!(times.windows(2).all(|w| w[0] <= w[1]), "times in order: {times:?}");
+    assert!(*times.last().unwrap() <= r["ms"].as_u64().unwrap());
+    let first = std::fs::read(rec.join("frame-00001.jpg")).unwrap();
+    assert_eq!(&first[..2], &[0xFF, 0xD8], "a JPEG");
+    assert!(std::fs::metadata(rec.join(format!("frame-{frames:05}.jpg"))).is_ok());
+}
+
 /// `clock`: a page's dates and timers at the test's command, in later
 /// documents too, while navigera's own waits keep real time.
 #[test]

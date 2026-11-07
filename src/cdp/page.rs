@@ -3460,6 +3460,16 @@ impl Page {
         &self.session_id
     }
 
+    /// The connection and runtime this tab is driven through (for a task
+    /// that follows its events, such as a screencast).
+    pub fn client(&self) -> &CdpClient {
+        &self.client
+    }
+
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.handle
+    }
+
     fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
         self.handle.block_on(fut)
     }

@@ -773,6 +773,8 @@ pub struct BrowserSession {
     /// The `clock` (see [`crate::clock`]), if installed: the script that
     /// starts it in a new document, and per tab the identifier to remove it by.
     clock: Clock,
+    /// `screencast start`'s recording, following the active tab.
+    screencast: std::sync::Mutex<Option<crate::screencast::Recording>>,
     /// Modifiers held with `keydown` (Shift, Control, Alt, Meta): later
     /// `press`es carry them until `keyup`.
     held: std::sync::Mutex<Vec<String>>,
@@ -900,6 +902,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             clock: Default::default(),
+            screencast: Default::default(),
             held: Default::default(),
             steered: Default::default(),
             user_tabs: Default::default(),
@@ -982,6 +985,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             clock: Default::default(),
+            screencast: Default::default(),
             held: Default::default(),
             steered: Default::default(),
             user_tabs: Default::default(),
@@ -1167,6 +1171,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             clock: Default::default(),
+            screencast: Default::default(),
             held: Default::default(),
             steered: Default::default(),
             user_tabs: handed.into_iter().collect(),
@@ -1287,6 +1292,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             clock: Default::default(),
+            screencast: Default::default(),
             held: Default::default(),
             steered: Default::default(),
             user_tabs: Default::default(),
@@ -1555,6 +1561,7 @@ impl BrowserSession {
             init_scripts: Vec::new(),
             init_ids: Default::default(),
             clock: Default::default(),
+            screencast: Default::default(),
             held: std::sync::Mutex::new(Vec::new()),
             steered: Default::default(),
             user_tabs: Default::default(),
@@ -2520,6 +2527,46 @@ impl BrowserSession {
                 self.add_clock_script(page, &cfg, now);
             }
             self.pages = pages;
+        }
+    }
+
+    /// `screencast start <dir>` (see [`crate::screencast`]): record the
+    /// active tab, and the tab the session acts on after it.
+    pub fn screencast_start(
+        &self,
+        dir: &std::path::Path,
+        opts: crate::screencast::Options,
+    ) -> Result<serde_json::Value> {
+        if self.lightpanda {
+            bail!("screencast: Lightpanda draws no pixels; record on Chrome");
+        }
+        let mut slot = self.screencast.lock().unwrap();
+        if let Some(r) = slot.as_ref() {
+            bail!("screencast: already recording into {}; `screencast stop` first", r.dir().display());
+        }
+        let page = self.active_tab();
+        let r = crate::screencast::Recording::start(page.runtime(), page.client(), page.session_id(), dir, opts)?;
+        *slot = Some(r);
+        Ok(serde_json::json!({ "screencast": dir.display().to_string(), "recording": self.url() }))
+    }
+
+    /// `screencast stop`: the recording's frames and its player.
+    pub fn screencast_stop(&self) -> Result<serde_json::Value> {
+        match self.screencast.lock().unwrap().take() {
+            Some(r) => r.stop(),
+            None => bail!("screencast: nothing is recording; `screencast start <dir>` first"),
+        }
+    }
+
+    /// A recording goes on in the tab the session acts on now.
+    pub fn screencast_follow(&self) {
+        let mut slot = self.screencast.lock().unwrap();
+        let Some(r) = slot.as_mut() else { return };
+        if self.pages.is_empty() {
+            return;
+        }
+        if let Err(e) = r.follow(self.active_tab().session_id()) {
+            eprintln!("[browser] screencast in the new tab: {e:#}");
         }
     }
 
@@ -3659,6 +3706,10 @@ impl BrowserSession {
         // Never panic from close: a panicking shutdown turns a successful
         // session into a failed process exit.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // A recording still running keeps what it has, player included.
+            if let Some(r) = self.screencast.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = r.stop();
+            }
             // A browser navigera doesn't own keeps running: take the
             // context `reset` opened in it away first. A fork only closes
             // its own context. `quit --keep-tabs` in the user's browser

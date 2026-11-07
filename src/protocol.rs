@@ -679,6 +679,18 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         paused: bool,
     },
+    /// What the active tab shows, frame by frame (see
+    /// [`crate::screencast`]): `start <dir> [--quality] [--size]`, `stop`.
+    #[serde(rename = "screencast")]
+    Screencast {
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
+    },
     #[serde(rename = "init-script")]
     InitScript {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1208,6 +1220,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value'] | --modify [--set-header 'Name: value'] [--replace <from> <to>]]] [--har <f> [--not-found abort|continue]]", "fail, answer, or change the responses of requests whose URL matches (* and ? globs); --har answers from a recorded HAR; no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("clock", "[install [--time <t>] [--paused] | set <t> | run-for <length> | fast-forward <length> | pause-at <t> | resume | uninstall]", "the page's time under your control in every tab: Date, performance.now and timers start at --time (a date, or epoch ms), flow or pause, jump (set), or run forward firing the timers due (run-for 30m; fast-forward fires each once); no action shows it"),
+    ("screencast", "start <dir> [--quality <0-100>] [--size <w>x<h>] | stop", "record what the tab shows, frame by frame, into <dir> (JPEGs with their times; it follows the session to other tabs); stop writes <dir>/index.html, a player"),
     ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
     ("get", "text|value|html|outer|box|checked|attr <name>|style <prop> <target> | count <css> | title | url", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --near <text>, --nth; --frame <css> to look only inside that frame)"),
     ("is", "<state> <target>", "true/false: whether the element is visible, hidden, enabled, disabled, checked, editable or focused; a missing element is not visible"),
@@ -2510,6 +2523,26 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             crate::clock::Op::parse(action.as_deref(), value.as_deref(), time.as_deref(), paused)
                 .map_err(|e| ArgsError::Invalid(format!("{e}")))?;
             Command::Clock { action, value, time, paused }
+        }
+        "screencast" => {
+            let quality = str_flag(&mut args, "--quality")?;
+            let size = str_flag(&mut args, "--size")?;
+            let action = positional(&mut args).unwrap_or_default();
+            let dir = positional(&mut args);
+            match (action.as_str(), &dir) {
+                ("start", Some(_)) | ("stop", None) => {}
+                ("start", None) => {
+                    return Err(ArgsError::Invalid("screencast start needs a directory for the frames".into()))
+                }
+                _ => {
+                    return Err(ArgsError::Invalid(
+                        "screencast start <dir> [--quality <0-100>] [--size <w>x<h>] | stop".into(),
+                    ))
+                }
+            }
+            crate::screencast::Options::parse(quality.as_deref(), size.as_deref())
+                .map_err(|e| ArgsError::Invalid(format!("{e}")))?;
+            Command::Screencast { action, dir: dir.map(caller_path), quality, size }
         }
         "init-script" | "addinitscript" => {
             let clear = extract_present(&mut args, "--clear");
@@ -4296,6 +4329,8 @@ impl Driver {
                 e
             }
         });
+        // A recording goes on in the tab this command left the session on.
+        self.session.screencast_follow();
         // A ref the page re-rendered (a list redrawn, a button replaced
         // after a state change): the same element is acted on, found again
         // by the role, name and place the snapshot showed, when that is
@@ -5101,6 +5136,14 @@ impl Driver {
                 let op = crate::clock::Op::parse(action.as_deref(), value.as_deref(), time.as_deref(), *paused)?;
                 self.session.clock(&op)
             }
+            Command::Screencast { action, dir, quality, size } => match (action.as_str(), dir) {
+                ("start", Some(dir)) => {
+                    let opts = crate::screencast::Options::parse(quality.as_deref(), size.as_deref())?;
+                    self.session.screencast_start(std::path::Path::new(dir), opts)
+                }
+                ("stop", _) => self.session.screencast_stop(),
+                _ => anyhow::bail!("screencast start <dir> | stop"),
+            },
             Command::InitScript { source: Some(source), .. } => {
                 let n = self.session.add_init_script(source).map_err(|e| e.context("init-script"))?;
                 Ok(json!({ "init_scripts": n }))

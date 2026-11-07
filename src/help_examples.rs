@@ -404,6 +404,19 @@ pub const EXAMPLES: &[Help] = &[
         ],
     ),
     (
+        "screencast",
+        &[
+            ("navigera -s s screencast start ./rec", ""),
+            ("navigera -s s screencast stop", ""),
+        ],
+        &[
+            ("start <dir>", "record from now on: a JPEG each time the page's pixels change, with its time"),
+            ("--quality <0-100>", "JPEG quality (default 60)"),
+            ("--size <w>x<h>", "the largest frame; the page is scaled down into it (default 1280x720)"),
+            ("stop", "end it and write <dir>/index.html, which plays the frames at their pace"),
+        ],
+    ),
+    (
         "init-script",
         &[("navigera -s s init-script \"window.demo = 42\"", ""), ("navigera -s s init-script --clear", "")],
         &[

@@ -18,6 +18,7 @@ pub mod install;
 pub mod mcp;
 pub mod proc;
 pub mod protocol;
+pub mod screencast;
 pub mod session;
 pub mod shared;
 pub mod timing;

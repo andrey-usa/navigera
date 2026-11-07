@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `screencast start <dir> [--quality] [--size <w>x<h>]` and `screencast
+  stop`: what the tab showed, as a JPEG each time its pixels change, with
+  its time; the recording follows the session from tab to tab, and `stop`
+  writes `<dir>/index.html`, a player for the frames.
 - `clock`: the page's time at your command. `clock install [--time <t>]
   [--paused]` fakes `Date`, `performance.now`, `setTimeout`/`setInterval`
   and `Intl.DateTimeFormat` in every document of every tab; `set` jumps
