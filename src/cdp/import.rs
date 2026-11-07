@@ -205,19 +205,7 @@ pub fn list_profiles() -> Value {
 
 /// A channel's user data directory, Brave included.
 fn user_data_dir(channel: &str) -> Option<PathBuf> {
-    if channel != "brave" {
-        return super::attach::default_user_data_dir(channel);
-    }
-    if cfg!(windows) {
-        Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("BraveSoftware\\Brave-Browser\\User Data"))
-    } else if cfg!(target_os = "macos") {
-        Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/BraveSoftware/Brave-Browser"))
-    } else {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("BraveSoftware/Brave-Browser"))
-    }
+    super::attach::default_user_data_dir(channel)
 }
 
 /// The profile directory to copy: `which` as a directory name, a display
