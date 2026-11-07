@@ -296,6 +296,13 @@ fn emulation() {
         if engine == "chrome" {
             a.ok(&["set", "device", "Pixel", "8"]);
             assert_eq!(a.ok(&["eval", "devicePixelRatio"]), 2.625);
+            a.ok(&["set", "network", "slow-3g"]);
+            let rtt = a.ok(&["eval", "navigator.connection.rtt"]).as_f64().unwrap();
+            assert!(rtt >= 1000.0, "[{engine}] the page sees a slow network: {rtt}");
+            let started = std::time::Instant::now();
+            a.ok(&["goto", &format!("{}/form", site.base)]);
+            assert!(started.elapsed() >= std::time::Duration::from_millis(1900), "{:?}", started.elapsed());
+            a.ok(&["set", "network", "off"]);
             a.ok(&["set", "media", "dark"]);
             assert_eq!(a.ok(&["eval", "matchMedia('(prefers-color-scheme: dark)').matches"]), true);
             a.ok(&["set", "timezone", "Asia/Tokyo"]);
@@ -591,4 +598,57 @@ fn webmcp_tools_are_listed_and_called() {
     assert_eq!(r["output"]["content"][0]["text"], "5", "{r}");
     assert_eq!(a.ok(&["text", "--selector", "#count"]), "5");
     assert!(a.err(&["webmcp-call", "nope"]).contains("it has: "));
+}
+
+/// `clock`: a page's dates and timers at the test's command, in later
+/// documents too, while navigera's own waits keep real time.
+#[test]
+fn the_clock_starts_paused_runs_forward_and_carries_into_new_documents() {
+    let Some((engine, bin)) = engines().into_iter().find(|(e, _)| *e == "chrome") else { return };
+    let a = Agent::new("clock", engine, bin);
+    let page = "data:text/html,<p id=now></p><p id=ticks>0</p><p id=later>waiting</p>\
+        <button id=b onclick=\"setTimeout(() => later.textContent = 'clicked', 1000)\">go</button>\
+        <script>const show = () => now.textContent = new Date().toISOString(); show(); let n = 0;\
+        setInterval(() => { ticks.textContent = ++n; show(); }, 1000);\
+        setTimeout(() => later.textContent = 'five minutes', 300000);</script>";
+    assert!(a.err(&["clock", "run-for", "1s"]).contains("clock install"), "no clock yet");
+    let r = a.ok(&["clock", "install", "--time", "2024-02-02T08:00:00Z", "--paused"]);
+    assert_eq!(r["time"], "2024-02-02T08:00:00.000Z", "{r}");
+    a.ok(&["goto", page]);
+    assert_eq!(
+        a.text(&["text", "--selector", "#now"]),
+        "2024-02-02T08:00:00.000Z",
+        "the page starts at the clock's time"
+    );
+    // Paused: a second of real time changes nothing; navigera's own wait still ends.
+    a.ok(&["wait", "--ms", "1100"]);
+    assert_eq!(a.text(&["text", "--selector", "#ticks"]), "0");
+    let r = a.ok(&["clock", "run-for", "3s"]);
+    assert_eq!((r["fired"].as_u64(), r["time"].as_str()), (Some(3), Some("2024-02-02T08:00:03.000Z")), "{r}");
+    assert_eq!(a.text(&["text", "--selector", "#ticks"]), "3");
+    assert_eq!(a.text(&["text", "--selector", "#now"]), "2024-02-02T08:00:03.000Z");
+    a.ok(&["clock", "run-for", "05:00"]);
+    assert_eq!(a.text(&["text", "--selector", "#later"]), "five minutes");
+    assert_eq!(a.text(&["text", "--selector", "#ticks"]), "303", "an interval fires as often as it comes");
+    // A click whose effect waits for a timer: the click returns, the timer waits for the clock.
+    a.ok(&["click", "--selector", "#b"]);
+    assert_eq!(a.text(&["text", "--selector", "#later"]), "five minutes");
+    let r = a.ok(&["clock", "fast-forward", "10s"]);
+    assert_eq!(r["fired"], 2, "each timer that came due fires once: {r}");
+    assert_eq!(a.text(&["text", "--selector", "#later"]), "clicked");
+    // eval is the page's code: it reads the page's clock.
+    a.ok(&["clock", "set", "2030-01-01T00:00:00Z"]);
+    assert_eq!(a.ok(&["eval", "new Date().getUTCFullYear()"]), 2030);
+    assert_eq!(a.ok(&["eval", "Date.now()"]), 1_893_456_000_000u64);
+    // A new document goes on from there, and a resumed clock flows.
+    a.ok(&["clock", "resume"]);
+    a.ok(&["goto", page]);
+    let now = a.text(&["text", "--selector", "#now"]);
+    assert!(now.starts_with("2030-01-01T00:00:0"), "{now}");
+    let r = a.ok(&["clock", "pause-at", "2030-01-01T01:00:00Z"]);
+    assert_eq!((r["paused"].as_bool(), r["time"].as_str()), (Some(true), Some("2030-01-01T01:00:00.000Z")), "{r}");
+    a.ok(&["clock", "uninstall"]);
+    a.ok(&["goto", page]);
+    let year = a.ok(&["eval", "new Date().getUTCFullYear()"]).as_u64().unwrap();
+    assert!(year >= 2026, "real time again: {year}");
 }

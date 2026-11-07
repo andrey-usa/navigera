@@ -665,6 +665,20 @@ pub enum Command {
     /// A script that runs before the page's own scripts in every document
     /// of every tab (auth shims, feature flags, mocks of `Date`/`fetch`).
     /// Without a source: list them; `clear`: remove them.
+    /// The page's time under the caller's control (see [`crate::clock`]):
+    /// `install`, `set`, `run-for`, `fast-forward`, `pause-at`, `resume`,
+    /// `uninstall`; no action shows it.
+    #[serde(rename = "clock")]
+    Clock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        time: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        paused: bool,
+    },
     #[serde(rename = "init-script")]
     InitScript {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1190,9 +1204,10 @@ const OPS: &[(&str, &str, &str)] = &[
     ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
     ("state", "save|load <file.json>", "every cookie and the open tabs' localStorage to a file, or back (`{cookies, origins}`, the common storage-state format): sign in once, reuse it in later sessions"),
-    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password> | permissions grant|deny|reset <name>…  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
+    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | network slow-3g|fast-3g|4g|<latency ms> <down kbit/s> [<up>] | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password> | permissions grant|deny|reset <name>…  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value'] | --modify [--set-header 'Name: value'] [--replace <from> <to>]]] [--har <f> [--not-found abort|continue]]", "fail, answer, or change the responses of requests whose URL matches (* and ? globs); --har answers from a recorded HAR; no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
+    ("clock", "[install [--time <t>] [--paused] | set <t> | run-for <length> | fast-forward <length> | pause-at <t> | resume | uninstall]", "the page's time under your control in every tab: Date, performance.now and timers start at --time (a date, or epoch ms), flow or pause, jump (set), or run forward firing the timers due (run-for 30m; fast-forward fires each once); no action shows it"),
     ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
     ("get", "text|value|html|outer|box|checked|attr <name>|style <prop> <target> | count <css> | title | url", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --near <text>, --nth; --frame <css> to look only inside that frame)"),
     ("is", "<state> <target>", "true/false: whether the element is visible, hidden, enabled, disabled, checked, editable or focused; a missing element is not visible"),
@@ -2442,7 +2457,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             if !SETTINGS.contains(&what.as_str()) {
                 return invalid(format!(
                     "{op}: unknown setting {what:?}; settings: viewport, device, media, geo, offline, headers, ua, \
-                     locale, timezone, credentials, permissions, network-quiet"
+                     locale, timezone, credentials, permissions, network, network-quiet"
                 ));
             }
             let scale = num_flag(&mut args, "--scale")?;
@@ -2482,6 +2497,20 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             pattern: positional(&mut args),
         },
         "unroute" => Command::Unroute { pattern: positional(&mut args) },
+        "clock" => {
+            let paused = extract_present(&mut args, "--paused");
+            let time = str_flag(&mut args, "--time")?;
+            let action = positional(&mut args);
+            // A time may come in words: `clock set 2024-02-02 08:00`.
+            let mut rest = Vec::new();
+            while let Some(w) = positional(&mut args) {
+                rest.push(w);
+            }
+            let value = (!rest.is_empty()).then(|| rest.join(" "));
+            crate::clock::Op::parse(action.as_deref(), value.as_deref(), time.as_deref(), paused)
+                .map_err(|e| ArgsError::Invalid(format!("{e}")))?;
+            Command::Clock { action, value, time, paused }
+        }
         "init-script" | "addinitscript" => {
             let clear = extract_present(&mut args, "--clear");
             let source = match str_flag(&mut args, "--file")? {
@@ -5068,6 +5097,10 @@ impl Driver {
                     .map_err(|e| e.context("route"))?;
                 Ok(json!({ "route": pattern, "action": what }))
             }
+            Command::Clock { action, value, time, paused } => {
+                let op = crate::clock::Op::parse(action.as_deref(), value.as_deref(), time.as_deref(), *paused)?;
+                self.session.clock(&op)
+            }
             Command::InitScript { source: Some(source), .. } => {
                 let n = self.session.add_init_script(source).map_err(|e| e.context("init-script"))?;
                 Ok(json!({ "init_scripts": n }))
@@ -5556,6 +5589,8 @@ const SETTINGS: &[&str] = &[
     "geolocation",
     "location",
     "offline",
+    "network",
+    "throttle",
     "permissions",
     "permission",
     "headers",

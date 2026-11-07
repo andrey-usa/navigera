@@ -166,6 +166,7 @@ fn lightpanda_refuses(what: &str, values: &[String]) -> Option<String> {
     match what {
         "media" => Some("the lightpanda engine does not emulate media features (prefers-color-scheme, print)".into()),
         "offline" => Some("the lightpanda engine does not emulate going offline".into()),
+        "network" | "throttle" => Some("the lightpanda engine does not emulate network speeds".into()),
         "locale" | "timezone" | "tz" => Some(format!(
             "the lightpanda engine takes its {what} at launch only (`lightpanda serve --{}`)",
             if what == "locale" { "locale" } else { "timezone" }
@@ -356,6 +357,59 @@ pub fn plan(
                 result: json!({ "offline": on }),
             }
         }
+        "network" | "throttle" => {
+            // Chrome DevTools' presets (latency ms, down and up kbit/s).
+            let (name, latency, down, up) = match first.to_ascii_lowercase().as_str() {
+                f if off(f) => ("off", 0.0, -1.0, -1.0),
+                "slow-3g" | "3g" => ("slow-3g", 2000.0, 400.0, 400.0),
+                "fast-3g" | "slow-4g" => ("fast-3g", 562.5, 1440.0, 675.0),
+                "4g" | "fast-4g" => ("4g", 165.0, 8100.0, 1350.0),
+                _ => {
+                    let latency = num(first, "network: the latency (ms)")?;
+                    let down = num(values.get(1).map(String::as_str).unwrap_or(""), "network: the download speed (kbit/s)")?;
+                    let up = match values.get(2) {
+                        Some(u) => num(u, "network: the upload speed (kbit/s)")?,
+                        None => down,
+                    };
+                    if latency < 0.0 || down <= 0.0 || up <= 0.0 {
+                        bail!("set network: a latency of 0 ms or more and speeds above 0 kbit/s");
+                    }
+                    ("custom", latency, down, up)
+                }
+            };
+            let bytes = |kbit: f64| if kbit < 0.0 { -1.0 } else { kbit * 1000.0 / 8.0 };
+            let state = |latency: f64, down: f64, up: f64| {
+                json!({ "offline": false, "latency": latency, "downloadThroughput": bytes(down), "uploadThroughput": bytes(up) })
+            };
+            Plan {
+                // One setting with `set offline`: the network's conditions.
+                kind: "offline",
+                calls: if name == "off" {
+                    vec![]
+                } else {
+                    vec![
+                        (
+                            "Network.emulateNetworkConditionsByRule",
+                            json!({ "matchedNetworkConditions": [{
+                                "urlPattern": "", "offline": false, "latency": latency,
+                                "downloadThroughput": bytes(down), "uploadThroughput": bytes(up)
+                            }] }),
+                        ),
+                        ("Network.overrideNetworkState", state(latency, down, up)),
+                    ]
+                },
+                reset: vec![
+                    ("Network.emulateNetworkConditionsByRule", json!({ "matchedNetworkConditions": [] })),
+                    ("Network.overrideNetworkState", state(0.0, -1.0, -1.0)),
+                ],
+                grant: None,
+                result: if name == "off" {
+                    json!({ "network": "default" })
+                } else {
+                    json!({ "network": name, "latency_ms": latency, "down_kbps": down, "up_kbps": up })
+                },
+            }
+        }
         "headers" | "header" => {
             if off(first) {
                 return Ok(Plan {
@@ -439,7 +493,7 @@ pub fn plan(
                 result: json!({ "timezone": if off(first) { "default" } else { first } }),
             }
         }
-        other => bail!("set: unknown setting {other:?}; settings: viewport, device, media, geo, offline, headers, ua, locale, timezone"),
+        other => bail!("set: unknown setting {other:?}; settings: viewport, device, media, geo, offline, network, headers, ua, locale, timezone"),
     })
 }
 
@@ -492,6 +546,15 @@ mod tests {
         let p = plan("device", &v(&["iPhone", "15"]), None, false, None, false).unwrap();
         assert_eq!(p.kind, "viewport");
         assert_eq!(p.calls.len(), 3);
+        let p = plan("network", &v(&["slow-3g"]), None, false, None, false).unwrap();
+        assert_eq!(p.kind, "offline", "one network setting with offline");
+        assert_eq!(p.calls[0].1["matchedNetworkConditions"][0]["latency"], 2000.0);
+        assert_eq!(p.calls[0].1["matchedNetworkConditions"][0]["downloadThroughput"], 50_000.0);
+        let p = plan("network", &v(&["100", "800"]), None, false, None, false).unwrap();
+        assert_eq!(p.result, json!({"network": "custom", "latency_ms": 100.0, "down_kbps": 800.0, "up_kbps": 800.0}));
+        assert!(plan("network", &v(&["off"]), None, false, None, false).unwrap().calls.is_empty());
+        assert!(plan("network", &v(&["warp"]), None, false, None, false).is_err());
+        assert!(plan("network", &v(&["slow-3g"]), None, false, None, true).is_err());
         let p = plan("media", &v(&["dark", "print"]), None, false, None, false).unwrap();
         assert_eq!(p.calls[0].1["media"], "print");
         assert_eq!(p.calls[0].1["features"][0]["value"], "dark");

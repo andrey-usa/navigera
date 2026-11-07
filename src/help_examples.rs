@@ -384,6 +384,26 @@ pub const EXAMPLES: &[Help] = &[
         &[("<url glob>", "the rule to remove; none removes all rules")],
     ),
     (
+        "clock",
+        &[
+            ("navigera -s s clock install --time \"2024-02-02T08:00:00\" --paused", ""),
+            ("navigera -s s clock run-for 30m", ""),
+            ("navigera -s s clock pause-at \"2024-02-02T10:00:00\"", ""),
+            ("navigera -s s clock resume", ""),
+        ],
+        &[
+            ("install", "fake Date, performance.now and timers from now on, in every document of every tab"),
+            ("--time <t>", "install: where the clock starts (2024-02-02T08:00:00, or epoch ms; default now)"),
+            ("--paused", "install: the clock stands still until run-for, fast-forward or resume"),
+            ("set <t>", "the date jumps to t; timers keep their delays and none fire"),
+            ("run-for <length>", "advance (30s, 5m, 1h, mm:ss), firing each timer due on the way at its time, intervals as often as they come"),
+            ("fast-forward <length>", "jump ahead, firing each timer that came due once"),
+            ("pause-at <t>", "run to t, firing the timers on the way, and stand still there"),
+            ("resume", "the clock flows with real time again"),
+            ("uninstall", "documents opened from now on keep real time"),
+        ],
+    ),
+    (
         "init-script",
         &[("navigera -s s init-script \"window.demo = 42\"", ""), ("navigera -s s init-script --clear", "")],
         &[

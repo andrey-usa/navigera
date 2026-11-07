@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `clock`: the page's time at your command. `clock install [--time <t>]
+  [--paused]` fakes `Date`, `performance.now`, `setTimeout`/`setInterval`
+  and `Intl.DateTimeFormat` in every document of every tab; `set` jumps
+  the date, `run-for 30m` advances firing the timers due on the way in
+  order, `fast-forward` jumps firing each once, `pause-at` and `resume`
+  stop and restart it. A reload or a new tab goes on from where the clock
+  is. navigera's own waits in the page keep real time, so a paused clock
+  never stalls an action.
+- `set network slow-3g|fast-3g|4g` (Chrome DevTools' presets) or `set
+  network <latency ms> <down kbit/s> [<up kbit/s>]` throttles every tab;
+  `navigator.connection` reports it. It and `set offline` are one
+  setting: the later wins.
+
 - An `http` feature for crates that use navigera as a library
   (`navigera::http`): one request outside the page with the cookie jar a
   browser keeps (saved and loaded in `state save`'s format), redirects

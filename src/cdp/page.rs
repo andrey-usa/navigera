@@ -884,7 +884,7 @@ const SETTLE_ARM: &str = r#"(() => {
     const p = new Set();
     c.p = p; c.e = null; c.lim = 100;
     const done = (id) => { if (p.delete(id) && !p.size && c.p === p && c.e) { const e = c.e; c.e = null; e(); } };
-    const short = (f, d) => typeof f === 'function' && (Number(d) || 0) <= c.lim;
+    const short = (f, d) => typeof f === 'function' && (Number(d) || 0) <= c.lim && !(window.__nvClock && window.__nvClock.paused());
     const st = { setTimeout(f, d, ...a) {
         if (!short(f, d)) return T.st.call(window, f, d, ...a);
         const id = T.st.call(window, function () { try { return f.apply(this, a); } finally { done(id); } }, d);

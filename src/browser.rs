@@ -717,6 +717,14 @@ const TAB_VIEW_WAIT: Duration = Duration::from_millis(1000);
 /// event's CDP reply by a task or two). Ends early once it arrives.
 const NAV_GRACE: Duration = Duration::from_millis(150);
 
+/// A session's `clock`: the settings a new document starts it from, and
+/// per tab (target id) the identifier of the script that does.
+#[derive(Debug, Default, Clone)]
+struct Clock {
+    cfg: Option<serde_json::Value>,
+    ids: std::collections::HashMap<String, String>,
+}
+
 /// One browser + tab list, driven by the from-scratch CDP engine.
 pub struct BrowserSession {
     browser: std::sync::Arc<Browser>,
@@ -762,6 +770,9 @@ pub struct BrowserSession {
     /// remove them by.
     init_scripts: Vec<String>,
     init_ids: std::collections::HashMap<String, Vec<String>>,
+    /// The `clock` (see [`crate::clock`]), if installed: the script that
+    /// starts it in a new document, and per tab the identifier to remove it by.
+    clock: Clock,
     /// Modifiers held with `keydown` (Shift, Control, Alt, Meta): later
     /// `press`es carry them until `keyup`.
     held: std::sync::Mutex<Vec<String>>,
@@ -888,6 +899,7 @@ impl BrowserSession {
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
+            clock: Default::default(),
             held: Default::default(),
             steered: Default::default(),
             user_tabs: Default::default(),
@@ -969,6 +981,7 @@ impl BrowserSession {
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
+            clock: Default::default(),
             held: Default::default(),
             steered: Default::default(),
             user_tabs: Default::default(),
@@ -1153,6 +1166,7 @@ impl BrowserSession {
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
+            clock: Default::default(),
             held: Default::default(),
             steered: Default::default(),
             user_tabs: handed.into_iter().collect(),
@@ -1272,6 +1286,7 @@ impl BrowserSession {
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
+            clock: Default::default(),
             held: Default::default(),
             steered: Default::default(),
             user_tabs: Default::default(),
@@ -1473,6 +1488,8 @@ impl BrowserSession {
             self.init_scripts.clear();
             self.init_ids.clear();
         }
+        // A clock belongs to the browser context, as the page's time.
+        self.clock = Clock::default();
         // In the user's own browser, behind their windows, as at start.
         let page = if self.in_users_browser() {
             self.browser.new_window_in(Some("about:blank"), true, Some(&context))?
@@ -1537,6 +1554,7 @@ impl BrowserSession {
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
+            clock: Default::default(),
             held: std::sync::Mutex::new(Vec::new()),
             steered: Default::default(),
             user_tabs: Default::default(),
@@ -2459,6 +2477,105 @@ impl BrowserSession {
                 Err(e) => eprintln!("[browser] init-script on a new tab: {e:#}"),
             }
         }
+        if let Some(cfg) = self.clock.cfg.clone() {
+            self.add_clock_script(page, &cfg, true);
+        }
+    }
+
+    /// The clock's script in `page`'s later documents (and, `now`, its
+    /// documents open now).
+    fn add_clock_script(&mut self, page: &Page, cfg: &serde_json::Value, now: bool) {
+        let source = crate::clock::install_script(cfg);
+        match page.send_cdp(
+            "Page.addScriptToEvaluateOnNewDocument",
+            serde_json::json!({ "source": source, "runImmediately": now }),
+            self.timeout(None),
+        ) {
+            Ok(r) => {
+                if let Some(id) = r.get("identifier").and_then(|i| i.as_str()) {
+                    self.clock.ids.insert(page.target_id().to_string(), id.to_string());
+                }
+            }
+            Err(e) => eprintln!("[browser] clock on a tab: {e:#}"),
+        }
+    }
+
+    /// Replace the clock's script in every tab: `cfg` starts it in each
+    /// later document; none removes it.
+    fn put_clock(&mut self, cfg: Option<serde_json::Value>, now: bool) {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            if let Some(id) = self.clock.ids.remove(page.target_id()) {
+                let _ = page.send_cdp(
+                    "Page.removeScriptToEvaluateOnNewDocument",
+                    serde_json::json!({ "identifier": id }),
+                    timeout,
+                );
+            }
+        }
+        self.clock = Clock { cfg: cfg.clone(), ids: Default::default() };
+        if let Some(cfg) = cfg {
+            let pages = std::mem::take(&mut self.pages);
+            for page in &pages {
+                self.add_clock_script(page, &cfg, now);
+            }
+            self.pages = pages;
+        }
+    }
+
+    /// `clock …` (see [`crate::clock`]): done in the document of every tab
+    /// now, and carried into every document opened later. Answers the
+    /// active tab's clock.
+    pub fn clock(&mut self, op: &crate::clock::Op) -> Result<serde_json::Value> {
+        use crate::clock::Op;
+        let real_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as f64)
+                .unwrap_or(0.0)
+        };
+        let timeout = self.timeout(None);
+        let expr = match op {
+            Op::Install { time, paused } => {
+                let now = real_ms();
+                crate::clock::install_script(
+                    &serde_json::json!({ "time": time, "now": now, "at": now, "paused": paused }),
+                )
+            }
+            Op::Uninstall => {
+                let had = self.clock.cfg.is_some();
+                self.put_clock(None, false);
+                return Ok(serde_json::json!({
+                    "clock": if had { "uninstalled: documents opened from now on keep real time (an open one keeps its clock until it reloads)" } else { "none installed" }
+                }));
+            }
+            other => {
+                if self.clock.cfg.is_none() {
+                    bail!("clock: no clock in this session yet: `clock install [--time <t>] [--paused]` first");
+                }
+                let call = other.call().unwrap_or_default();
+                format!("(() => window.__nvClock ? window.__nvClock.{call} : null)()")
+            }
+        };
+        let active = self.active;
+        let mut answer = serde_json::Value::Null;
+        for (i, page) in self.pages.iter().enumerate() {
+            match page.evaluate(&expr, timeout) {
+                Ok(v) if i == active => answer = v,
+                Ok(_) => {}
+                Err(e) if i == active => return Err(e.context("clock")),
+                Err(e) => eprintln!("[browser] clock in another tab: {e:#}"),
+            }
+        }
+        if answer.is_null() {
+            bail!("clock: the current page has no clock: it was open before `clock install` reached it; reload it");
+        }
+        if !matches!(op, Op::Show) {
+            // Later documents go on from where this one is.
+            let cfg = serde_json::json!({ "now": answer["now"], "at": real_ms(), "paused": answer["paused"] });
+            self.put_clock(Some(cfg), matches!(op, Op::Install { .. }));
+        }
+        Ok(answer)
     }
 
     /// The key of this session's routes, credentials and dialog answer:
@@ -3035,6 +3152,9 @@ impl BrowserSession {
     pub fn evaluate_user(&self, source: &str, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
         let tab = self.active_tab();
         let timeout = self.timeout(timeout_ms);
+        // Marked, so a `clock` counts it as the page's own code.
+        let marked = format!("{source}\n//# sourceURL={}\n", crate::clock::USER_EVAL_URL);
+        let source = marked.as_str();
         let first = match tab.evaluate(source, timeout) {
             Err(e) if is_syntax_error(&format!("{e:#}")) => e,
             other => return other,
@@ -3622,6 +3742,7 @@ impl BrowserSession {
         }
         self.overrides = old.overrides.clone();
         self.init_scripts = old.init_scripts.clone();
+        self.clock.cfg = old.clock.cfg.clone();
         if let Some(dir) = old.downloads_dir.clone() {
             let _ = self.set_downloads_dir(&dir);
         }
