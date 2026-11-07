@@ -53,6 +53,10 @@ All notable changes to this project are documented here. The format follows
   out 100 ms of network quiet every time. A fetch the page chains from
   the response, at once or by such a timer, is still waited for, and one
   deferred past 100 ms still isn't, as before.
+- After a look, `select`, `check` and `uncheck` print only the changed
+  lines when those lines already show the choice or the flipped box. They
+  used to print `{"selected":["Tokyo"]}` or `{"changed":true,"checked":true}`
+  above lines that said the same.
 
 ### Fixed
 

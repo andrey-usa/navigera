@@ -3733,11 +3733,7 @@ impl Driver {
             if let Some(tree) = self.session.journal_restate(id).and_then(|moved| restate(&look.tree, &moved)) {
                 let change = tree_change(&look.tree, &tree, &entered);
                 self.look = Some(Look { tree, ..look });
-                let change = change?;
-                return Some(Value::String(match short {
-                    Value::String(ok) if ok == "ok" => change,
-                    other => format!("{other}\n{change}"),
-                }));
+                return Some(Value::String(with_change(command, short, change?)));
             }
         }
         let read = |me: &mut Self| match me.run_op_inner(&look.command) {
@@ -3775,11 +3771,7 @@ impl Driver {
         }
         let journal = self.session.journal_id();
         self.look = Some(Look { tree, journal, typed: Vec::new(), ..look });
-        let change = change?;
-        Some(Value::String(match short {
-            Value::String(ok) if ok == "ok" => change,
-            other => format!("{other}\n{change}"),
-        }))
+        Some(Value::String(with_change(command, short, change?)))
     }
 
     /// Run one op, after relaunching the shared browser if it died since the
@@ -6113,6 +6105,39 @@ pub fn split_state(result: &Value) -> (Option<Value>, Option<Value>) {
     }
 }
 
+/// The compact report of an action that changed what the last look showed:
+/// what the op said, then the change. A choice or a check whose change
+/// already shows it (the chosen options, a box that flipped) does not say it
+/// again as a line of JSON first.
+fn with_change(command: &Command, short: &Value, change: String) -> String {
+    let mut short = short.clone();
+    if let Value::Object(map) = &mut short {
+        let shown = match command {
+            Command::Select { .. } => map.get("selected").and_then(Value::as_array).is_some_and(|chosen| {
+                chosen.iter().all(|c| {
+                    c.as_str().is_some_and(|c| {
+                        change.contains(&format!("\"{c}\"")) || change.contains(&format!("\"{c} (selected)\""))
+                    })
+                })
+            }),
+            Command::SetChecked { .. } => map.get("changed") == Some(&json!(true)),
+            _ => false,
+        };
+        if shown {
+            for k in ["selected", "checked", "changed"] {
+                map.remove(k);
+            }
+        }
+        if map.is_empty() {
+            return change;
+        }
+    }
+    match short {
+        Value::String(ok) if ok == "ok" => change,
+        other => format!("{other}\n{change}"),
+    }
+}
+
 /// Actions whose compact output says what they changed on the page.
 pub(crate) fn reports_page_change(command: &Command) -> bool {
     matches!(
@@ -6887,6 +6912,30 @@ mod tests {
         let cut = "- combobox [ref=5] value=\"S\" options: \"S (selected)\", \"M\", …(+30)";
         assert!(super::restate(cut, &[(5, chosen("M", "S"))]).unwrap().ends_with("\"S\", \"M (selected)\", …(+30)"));
         assert_eq!(super::restate(cut, &[(5, chosen("Option 40", "S"))]), None);
+    }
+
+    #[test]
+    fn a_choice_or_check_its_change_shows_is_not_said_twice() {
+        let sel = Command::Select { target: Default::default(), value: vec![], timeout_ms: None, add: false };
+        let shown = "~ combobox [ref=5] value=\"Tokyo\" options: \"Oslo\", \"Tokyo (selected)\"";
+        assert_eq!(with_change(&sel, &json!({ "selected": ["Tokyo"] }), shown.into()), shown);
+        assert_eq!(
+            with_change(&sel, &json!({ "selected": ["Tok"] }), shown.into()),
+            format!("{{\"selected\":[\"Tok\"]}}\n{shown}")
+        );
+        assert_eq!(
+            with_change(&sel, &json!({ "selected": ["Tokyo"], "tabs": 2 }), shown.into()),
+            format!("{{\"tabs\":2}}\n{shown}")
+        );
+        let chk = Command::SetChecked { checked: true, target: Default::default(), timeout_ms: None };
+        let flipped = "~ checkbox \"Gift\" [ref=3] checked";
+        assert_eq!(with_change(&chk, &json!({ "checked": true, "changed": true }), flipped.into()), flipped);
+        assert_eq!(
+            with_change(&chk, &json!({ "checked": true, "changed": false }), "+ text: x".into()),
+            "{\"changed\":false,\"checked\":true}\n+ text: x"
+        );
+        let click = Command::KeyDown { key: "a".into() };
+        assert_eq!(with_change(&click, &json!("ok"), "+ text: x".into()), "+ text: x");
     }
 
     #[test]
