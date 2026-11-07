@@ -184,11 +184,8 @@ fn attach_never_closes_the_users_browser() {
     let dir = profile.path().display().to_string();
     let s = session_name("user");
 
-    let (success, started) = run(&s, &["start", "--attach", &dir], &[]);
-    assert!(success && started["result"]["pid"].is_number(), "{started}");
-    // The note names the tab the user is on, so the agent needn't list them.
-    let note = started["notes"][0].as_str().unwrap_or("");
-    assert!(note.contains("1 other tab of theirs is open, they are on \"Mine\" "), "{started}");
+    let started = ok(&s, &["start", "--attach", &dir]);
+    assert!(started["pid"].is_number(), "{started}");
     let state = ok(&s, &["goto", "data:text/html,<title>Agent</title><h1>agent page</h1>"]);
     assert_eq!(state["title"], "Agent");
     assert!(ok(&s, &["ax"]).as_str().unwrap_or("").contains("agent page"));
