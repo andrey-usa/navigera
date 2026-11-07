@@ -44,6 +44,16 @@ All notable changes to this project are documented here. The format follows
 - A bare `--attach` looks for any of your browsers (as `--auto-connect`),
   where it meant Chrome only; `--attach chrome` still means Chrome.
 
+### Changed
+
+- An action whose requests fetch data reports about 50 ms sooner. Once
+  those requests are done, the wait for the page to settle ends as soon
+  as the page has changed, drawn a frame and run a task with no request
+  or short timer (up to 100 ms) of its own still pending; it used to wait
+  out 100 ms of network quiet every time. A fetch the page chains from
+  the response, at once or by such a timer, is still waited for, and one
+  deferred past 100 ms still isn't, as before.
+
 ### Fixed
 
 - `tab-list` in the default compact output printed only `{"active": n}`

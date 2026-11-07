@@ -4168,10 +4168,17 @@ impl Driver {
                 // the whole window is for traffic not started yet (a page's
                 // data after it loads). A window the session chose holds.
                 let mut window = self.session.network_quiet_window();
-                if !self.session.network_quiet_chosen() && self.session.action_traffic_seen() {
+                let after_action = !self.session.network_quiet_chosen() && self.session.action_traffic_seen();
+                if after_action {
                     window = window.min(AFTER_ACTION_QUIET);
                 }
-                let (_, waited) = self.session.network_quiet_waited(window, budget.min(NETWORK_QUIET_MAX));
+                // After an action's own requests, end the wait on proof of
+                // a settled render rather than waiting out the window.
+                let (_, waited) = if after_action {
+                    self.session.action_settle_wait(window, budget.min(NETWORK_QUIET_MAX))
+                } else {
+                    self.session.network_quiet_waited(window, budget.min(NETWORK_QUIET_MAX))
+                };
                 quiet_waited_ms = waited.as_millis() as u64;
             }
         }
