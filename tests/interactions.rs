@@ -1697,24 +1697,26 @@ fn an_action_reports_what_a_request_it_started_a_turn_later_changed() {
     }
     // An action that starts nothing isn't held for a request that never
     // comes: saying what it changed costs a read of the page, not a fixed
-    // wait (it was 50 ms).
-    let best = |report: bool| {
-        (0..3)
-            .map(|i| {
-                s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
-                compact(&["ax"]);
-                let value = format!("v{i}");
-                let t = std::time::Instant::now();
-                if report {
-                    compact(&["fill", "--selector", "[name=x]", &value]);
-                } else {
-                    s.ok(&["fill", "--selector", "[name=x]", &value]);
-                }
-                t.elapsed().as_secs_f64() * 1000.0
-            })
-            .fold(f64::MAX, f64::min)
+    // wait (it was 50 ms). The two kinds of fill take turns, so a burst of
+    // load from the tests beside this one slows both, not just the ones
+    // timed last (CI: 56 ms against 11 ms, with each kind timed in a block).
+    let fill = |report: bool, i: usize| {
+        s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+        compact(&["ax"]);
+        let value = format!("v{i}");
+        let t = std::time::Instant::now();
+        if report {
+            compact(&["fill", "--selector", "[name=x]", &value]);
+        } else {
+            s.ok(&["fill", "--selector", "[name=x]", &value]);
+        }
+        t.elapsed().as_secs_f64() * 1000.0
     };
-    let (plain, reported) = (best(false), best(true));
+    let (mut plain, mut reported) = (f64::MAX, f64::MAX);
+    for i in 0..5 {
+        plain = plain.min(fill(false, i));
+        reported = reported.min(fill(true, i));
+    }
     assert!(reported < plain + 40.0, "saying what a fill changed took {reported:.0} ms against {plain:.0} ms");
 }
 
