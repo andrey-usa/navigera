@@ -931,7 +931,12 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
                     // The user's own browser: what the agent has in front of
                     // it, and how it works there without getting in their way.
                     if let Some(theirs) = status.get("user_tabs").and_then(Value::as_u64) {
-                        response["notes"] = json!([attached_note(&status, theirs, config.in_current_tab)]);
+                        // The tab they are on, named, so the agent needn't
+                        // list the tabs to find it.
+                        let current =
+                            if theirs > 0 && !config.in_current_tab { users_current_tab(&path) } else { None };
+                        response["notes"] =
+                            json!([attached_note(&status, theirs, config.in_current_tab, current.as_ref())]);
                     }
                     if let Some(electron) = status.get("electron").filter(|e| e.is_object()) {
                         response["result"]["electron"] = electron.clone();
@@ -1024,6 +1029,28 @@ mod tests {
     }
 
     #[test]
+    fn the_attached_note_names_the_tab_the_user_is_on() {
+        let status = json!({"executable": "attach Chrome/153 on port 9222"});
+        let current = ("Bench Form".to_string(), "http://127.0.0.1:8901/form.html".to_string());
+        let note = attached_note(&status, 3, false, Some(&current));
+        assert!(
+            note.contains(
+                "3 other tabs of theirs are open, they are on \"Bench Form\" http://127.0.0.1:8901/form.html."
+            ),
+            "{note}"
+        );
+        assert!(note.contains("`tab-select current` works in that one"), "{note}");
+        // Unknown (they are on none of theirs that is shown): as before.
+        let plain = attached_note(&status, 3, false, None);
+        assert!(plain.contains("`tab-list` lists them (`current`: the one they are on)"), "{plain}");
+        assert!(!plain.contains("they are on \""), "{plain}");
+        let long = ("t".repeat(80), format!("https://example.com/{}", "a".repeat(200)));
+        let note = attached_note(&status, 1, false, Some(&long));
+        assert!(note.contains(&format!("\"{}…\"", "t".repeat(59))), "{note}");
+        assert!(note.contains(&format!("https://example.com/{}…. ", "a".repeat(79))), "{note}");
+    }
+
+    #[test]
     fn a_log_path_that_is_a_symlink_is_not_followed() {
         let base = tempfile::tempdir().unwrap();
         let victim = base.path().join("victim");
@@ -1044,7 +1071,7 @@ const PROBE: &str = "probe";
 
 /// `start --electron` on an app whose main process can't be reached.
 /// What `start --attach` tells the agent about the user's browser.
-fn attached_note(status: &Value, theirs: u64, in_current_tab: bool) -> String {
+fn attached_note(status: &Value, theirs: u64, in_current_tab: bool, current: Option<&(String, String)>) -> String {
     let browser = status.get("executable").and_then(Value::as_str).unwrap_or("").trim_start_matches("attach ");
     let tabs = match theirs {
         0 => "no other tab of theirs is open".to_string(),
@@ -1056,10 +1083,34 @@ fn attached_note(status: &Value, theirs: u64, in_current_tab: bool) -> String {
     } else {
         "working in a window of its own, behind theirs".to_string()
     };
+    if let Some((title, url)) = current {
+        return format!(
+            "the user's browser ({browser}): {here}; {tabs}, they are on {:?} {}. `tab-select current` works in \
+             that one, `tab-list` lists them; `quit` closes only the agent's own tabs",
+            clip(title, 60),
+            clip(url, 100)
+        );
+    }
     format!(
         "the user's browser ({browser}): {here}; {tabs}. `tab-list` lists them (`current`: the one they are on), \
          `tab-select current` works in that one; `quit` closes only the agent's own tabs"
     )
+}
+
+/// `text`, cut to `max` characters with an ellipsis.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max - 1).chain(std::iter::once('…')).collect()
+}
+
+/// The title and URL of the user's tab they are on, as `tab-list` marks it
+/// (`current`); `None` when they are on none of theirs that is shown.
+fn users_current_tab(path: &std::path::Path) -> Option<(String, String)> {
+    let Probe::Ready(tabs) = ask(path, "{\"id\":1,\"op\":\"tab-list\"}", 5) else { return None };
+    let tab = tabs.get("user_tabs")?.as_array()?.iter().find(|t| t["current"] == true)?;
+    Some((tab["title"].as_str()?.to_string(), tab["url"].as_str()?.to_string()))
 }
 
 const ELECTRON_ATTACHED_NOTE: &str = "an Electron app navigera attached to: its windows are the tabs, quit \
@@ -1187,10 +1238,15 @@ enum Probe {
 }
 
 fn probe(path: &std::path::Path) -> Probe {
+    ask(path, &format!("{{\"id\":1,\"op\":\"status\",\"{PROBE}\":true}}"), 2)
+}
+
+/// One request to a session server, its result within `secs` seconds.
+fn ask(path: &std::path::Path, request: &str, secs: u64) -> Probe {
     let Ok(stream) = connect(path) else { return Probe::Stale };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(secs)));
     let mut writer = &stream;
-    let request = format!("{{\"id\":1,\"op\":\"status\",\"{PROBE}\":true}}\n");
+    let request = format!("{request}\n");
     if writer.write_all(request.as_bytes()).and_then(|_| writer.flush()).is_err() {
         return Probe::Busy;
     }

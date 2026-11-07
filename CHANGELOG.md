@@ -13,7 +13,9 @@ All notable changes to this project are documented here. The format follows
   Dev and Canary, Chromium, Edge and Brave by their default profiles, then
   a browser started with `--remote-debugging-port` 9222 or 9229.
   `NAVIGERA_AUTO_CONNECT=1` does the same for every `start` and `mcp`.
-  `start` says which browser it found and how many of your tabs are open.
+  `start` says which browser it found, how many of your tabs are open and
+  which one you are on (its title and address), so an agent asked to work
+  in your current tab needn't list them first.
 - In your own browser `tab-list` lists your other tabs too, under
   `user_tabs`, and marks the tab you are on `current: true`: the one whose
   window has your keyboard, else the one that came on screen last.
