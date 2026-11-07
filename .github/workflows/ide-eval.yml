@@ -10,6 +10,8 @@ name: ide-eval
 #           browser both ways and hand the results back.
 #   gemini  the same agents on a real model, when GEMINI_API_KEY is set in
 #           the `main` environment (manual runs: pick tasks and model).
+#           provider=openrouter routes the same leg through OpenRouter
+#           (OPENROUTER_API_KEY, OpenAI-compatible) instead.
 #
 # Results: annotations `ide eval mock N/M` and `ide eval gemini N/M`.
 
@@ -22,8 +24,11 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Gemini model id for the real-model leg (empty: mock only)"
+        description: "Model id for the real-model leg (empty: mock only); with provider=openrouter, the OpenRouter id (e.g. google/gemini-3.5-flash-lite)"
         default: "gemini-3.5-flash-lite"
+      provider:
+        description: "real-model provider: gemini (direct) or openrouter"
+        default: "gemini"
       tasks:
         description: "comma-separated task ids for the real-model leg"
         default: "lookup,purchase"
@@ -57,7 +62,7 @@ jobs:
     timeout-minutes: 60
     environment: main
     env:
-      HAS_KEY: ${{ secrets.GEMINI_API_KEY != '' }}
+      HAS_KEY: ${{ secrets.GEMINI_API_KEY != '' || secrets.OPENROUTER_API_KEY != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -93,20 +98,21 @@ jobs:
         if: env.HAS_KEY == 'true' && github.event_name == 'workflow_dispatch' && inputs.model != ''
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           MODEL: ${{ inputs.model || 'gemini-3.5-flash-lite' }}
           TASKS: ${{ inputs.tasks }}
           AGENTS_LIST: ${{ inputs.agents || 'cline,kilo,continue' }}
           BROWSERS: ${{ inputs.browsers || 'navigera,navigera-mcp,playwright-mcp' }}
         run: |
-          python3 bench/ide-eval/run.py --model "gemini:$MODEL" --tasks "$TASKS" \
+          python3 bench/ide-eval/run.py --model "${{ inputs.provider || 'gemini' }}:$MODEL" --tasks "$TASKS" \
             --agents "$AGENTS_LIST" --browsers "$BROWSERS" --timeout 900 --out out/gemini \
             --cline "$AGENTS/cline/bin/cline" --kilo "$AGENTS/.bin/kilo" --cn "$AGENTS/.bin/cn" \
             --playwright-mcp "$AGENTS/@playwright/mcp/cli.js" || true
-          python3 bench/ladder/annotate.py out/gemini/table.md "ide eval gemini"
-          python3 bench/ladder/annotate.py out/gemini/runs.json "ide eval json gemini"
+          python3 bench/ladder/annotate.py out/gemini/table.md "ide eval ${{ inputs.provider || 'gemini' }}"
+          python3 bench/ladder/annotate.py out/gemini/runs.json "ide eval json ${{ inputs.provider || 'gemini' }}"
       - name: No key
         if: env.HAS_KEY != 'true'
-        run: echo "::notice title=ide eval::no GEMINI_API_KEY in the main environment; ran the mock model only"
+        run: echo "::notice title=ide eval::no model key in the main environment; ran the mock model only"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
