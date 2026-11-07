@@ -213,7 +213,17 @@ def is_browser_call(name: str, call_input) -> bool:
     return "navigera" in json.dumps(call_input or "")
 
 
-def run_one(agent: str, browser: str, task: dict, model_spec: str, args) -> dict:
+def redact(text: str) -> str:
+    """Text with the values of the environment's keys and tokens masked:
+    the artifact of a public repository's run can be downloaded, and an
+    agent's error line can carry a request URL with its key."""
+    for name, value in os.environ.items():
+        if len(value) >= 8 and any(w in name.upper() for w in ("KEY", "TOKEN", "SECRET")):
+            text = text.replace(value, "***")
+    return text
+
+
+def run_one(agent: str, browser: str, task: dict, model_spec: str, args, rep: int = 0) -> dict:
     root = Path(tempfile.mkdtemp(prefix=f"ide-{agent}-{browser}-{task['id']}-"))
     home, work = root / "home", root / "work"
     home.mkdir()
@@ -250,6 +260,15 @@ def run_one(agent: str, browser: str, task: dict, model_spec: str, args) -> dict
             ae.kill_tree(proc)
             out, err = proc.communicate()
         wall = time.time() - started
+        # The agent's own output, event by event, beside runs.json: what the
+        # model said and which tool results it saw, for a failure no
+        # check names (an episode that ends without an answer).
+        logs = Path(args.out) / "transcripts"
+        logs.mkdir(parents=True, exist_ok=True)
+        stem = f"{agent}-{browser}-{task['id']}-rep{rep}"
+        (logs / f"{stem}.jsonl").write_text(redact(out), encoding="utf-8")
+        if err.strip():
+            (logs / f"{stem}.stderr.txt").write_text(redact(err), encoding="utf-8")
         parsed = parse(agent, out)
         answer = ae.final_answer(parsed["text"])
         ok, why = ae.check(task, answer, site)
@@ -346,7 +365,7 @@ def main() -> int:
         for task in tasks:
             for agent in args.agents.split(","):
                 for browser in args.browsers.split(","):
-                    rec = run_one(agent, browser, task, args.model, args)
+                    rec = run_one(agent, browser, task, args.model, args, rep)
                     rec["rep"] = rep
                     runs.append(rec)
                     print(f"{agent:9} {browser:15} {task['id']:9} rep{rep}: {'PASS' if rec.get('ok') else 'FAIL'} "
