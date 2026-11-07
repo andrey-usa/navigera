@@ -24,6 +24,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 anyhow = "1"
 miniz_oxide = "0.9"
+# The `http` feature: requests outside the page (primavera's API tests).
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "platform-verifier"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+
+[features]
+# HTTP outside the page, for a crate that uses navigera as a library;
+# navigera's own binary doesn't build it.
+http = ["dep:ureq", "dep:rustls"]
 
 # musl's allocator is slow on the many small allocations a large snapshot makes.
 [target.'cfg(target_env = "musl")'.dependencies]

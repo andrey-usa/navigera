@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- An `http` feature for crates that use navigera as a library
+  (`navigera::http`): one request outside the page with the cookie jar a
+  browser keeps (saved and loaded in `state save`'s format), redirects
+  followed with their cookies, forms, multipart uploads and query
+  encoding. The client is native (ureq over rustls with ring, the
+  operating system's certificates, the proxy from the environment) and
+  keeps connections alive, so a local request costs about a millisecond.
+  navigera's own binary doesn't build it.
+
 ## [0.10.0] - 2026-11-07
 
 ### Added

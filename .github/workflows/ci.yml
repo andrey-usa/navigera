@@ -42,7 +42,7 @@ jobs:
           NAVIGERA_REQUIRE_BROWSER: "1"
         run: |
           set -o pipefail
-          if ! cargo test --locked --no-fail-fast 2>&1 | tee /tmp/test.log; then
+          if ! cargo test --locked --features http --no-fail-fast 2>&1 | tee /tmp/test.log; then
             # Surface the failure through the checks API, not just the log.
             sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
             python3 bench/ladder/annotate.py /tmp/test-tail.log "cargo test failure"
@@ -62,7 +62,7 @@ jobs:
           exit $rc
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --features http --all-targets -- -D warnings
 
       - name: Harness syntax check
         run: |
@@ -213,7 +213,7 @@ jobs:
         run: |
           set -o pipefail
           log="$RUNNER_TEMP/test.log"
-          if ! cargo test --locked --no-fail-fast 2>&1 | tee "$log"; then
+          if ! cargo test --locked --features http --no-fail-fast 2>&1 | tee "$log"; then
             sed -n '/^---- /,/^test result/p' "$log" | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > "$RUNNER_TEMP/test-tail.log" || true
             python bench/ladder/annotate.py "$RUNNER_TEMP/test-tail.log" "cargo test failure (windows)"
             exit 1
@@ -223,7 +223,7 @@ jobs:
           python bench/ladder/annotate.py "$RUNNER_TEMP/test-summary.log" "cargo test summary (windows)"
       - name: Clippy
         if: success() || failure()
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --features http --all-targets -- -D warnings
 
   # The install path agents actually take: `curl install.sh | sh` (a
   # release binary, or the cargo fallback while there is no release), and
@@ -367,7 +367,7 @@ jobs:
         run: |
           set -o pipefail
           "$CHROME_BIN" --version || true
-          if ! cargo test --locked --no-fail-fast 2>&1 | tee /tmp/test.log; then
+          if ! cargo test --locked --features http --no-fail-fast 2>&1 | tee /tmp/test.log; then
             sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
             python3 bench/ladder/annotate.py /tmp/test-tail.log "cargo test failure (${{ matrix.browser.label }})"
             { grep -E -m 20 'FATAL|Check failed|Received signal|DCHECK|NOTREACHED|crash' "$NAVIGERA_CHROME_LOG"; echo '---'; \
