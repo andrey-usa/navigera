@@ -58,19 +58,30 @@ struct Serve {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<std::process::ChildStdout>,
+    /// What `serve` wrote to stderr, for a failure to show why it ended.
+    stderr: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl Serve {
     fn spawn(args: &[&str], allow_env: Option<&str>) -> Serve {
         let mut cmd = Command::new(tool_exe());
-        cmd.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(list) = allow_env {
             cmd.env("NAVIGERA_ALLOW_DOMAINS", list);
         }
         let mut child = cmd.spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        Serve { child, stdin, stdout }
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let (err, sink) = (child.stderr.take().unwrap(), stderr.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                let mut all = sink.lock().unwrap();
+                all.push_str(&line);
+                all.push('\n');
+            }
+        });
+        Serve { child, stdin, stdout, stderr }
     }
 
     fn call(&mut self, id: u64, op: &str, extra: Value) -> Value {
@@ -81,7 +92,11 @@ impl Serve {
         writeln!(self.stdin, "{}", req).unwrap();
         self.stdin.flush().unwrap();
         let mut line = String::new();
-        self.stdout.read_line(&mut line).unwrap();
+        if self.stdout.read_line(&mut line).unwrap() == 0 {
+            let status = self.child.wait().map(|s| s.to_string()).unwrap_or_default();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            panic!("serve ended before answering {op} ({status}); its stderr:\n{}", self.stderr.lock().unwrap());
+        }
         serde_json::from_str(line.trim()).unwrap()
     }
 
