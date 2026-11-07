@@ -3645,6 +3645,18 @@ impl Driver {
     /// report (`"ok"` when that is nothing).
     pub(crate) fn report_state(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
         self.compact = compact;
+        self.report_state_inner(command, result, compact);
+        // After an action, put the page's timer functions back (see
+        // [`crate::cdp::Page::settle_unhook`]) unless a settle proof still
+        // needs them: once the action's requests have started, the read
+        // that waits on the proof (the compact report's, or the agent's next
+        // `ax`) puts them back itself.
+        if command.is_action() && !self.session.action_traffic_seen() {
+            self.session.settle_unhook();
+        }
+    }
+
+    fn report_state_inner(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
         if let (Command::Ax { .. }, Some(Value::String(tree))) = (command, result.as_ref()) {
             self.look =
                 Some(Look::new(command.clone(), tree.clone(), self.session.page_identity(), self.session.journal_id()));
@@ -6120,7 +6132,16 @@ fn with_change(command: &Command, short: &Value, change: String) -> String {
                     })
                 })
             }),
-            Command::SetChecked { .. } => map.get("changed") == Some(&json!(true)),
+            // Only a line of the flipped control itself says so: a scoped
+            // look may show just what the box rewrote (a summary line).
+            Command::SetChecked { .. } => {
+                map.get("changed") == Some(&json!(true))
+                    && change.lines().any(|l| {
+                        l.strip_prefix("~ ").and_then(|l| l.split_whitespace().next()).is_some_and(|role| {
+                            matches!(role, "checkbox" | "radio" | "switch" | "menuitemcheckbox" | "menuitemradio")
+                        })
+                    })
+            }
             _ => false,
         };
         if shown {
@@ -6933,6 +6954,12 @@ mod tests {
         assert_eq!(
             with_change(&chk, &json!({ "checked": true, "changed": false }), "+ text: x".into()),
             "{\"changed\":false,\"checked\":true}\n+ text: x"
+        );
+        // A scoped look that shows only what the box rewrote keeps the line.
+        let rewrote = "+ paragraph: Gift wrap: no\n- paragraph: Gift wrap: yes";
+        assert_eq!(
+            with_change(&chk, &json!({ "checked": false, "changed": true }), rewrote.into()),
+            format!("{{\"changed\":true,\"checked\":false}}\n{rewrote}")
         );
         let click = Command::KeyDown { key: "a".into() };
         assert_eq!(with_change(&click, &json!("ok"), "+ text: x".into()), "+ text: x");

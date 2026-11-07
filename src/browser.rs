@@ -775,6 +775,9 @@ pub struct BrowserSession {
     user_tabs: std::collections::HashSet<String>,
     /// `quit --keep-tabs`: navigera's own tabs stay open too.
     keep_tabs: std::sync::atomic::AtomicBool,
+    /// `quit --keep-tabs` asked for it (`keep_tabs` also marks that
+    /// navigera's tabs were already closed).
+    keep_asked: std::sync::atomic::AtomicBool,
     /// The browser context `reset` made (its tabs are the session's).
     context: Option<String>,
     /// False for a session `fork` made: closing it closes its context, not
@@ -886,6 +889,7 @@ impl BrowserSession {
             steered: Default::default(),
             user_tabs: Default::default(),
             keep_tabs: Default::default(),
+            keep_asked: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -965,6 +969,7 @@ impl BrowserSession {
             steered: Default::default(),
             user_tabs: Default::default(),
             keep_tabs: Default::default(),
+            keep_asked: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1147,6 +1152,7 @@ impl BrowserSession {
             steered: Default::default(),
             user_tabs: handed.into_iter().collect(),
             keep_tabs: Default::default(),
+            keep_asked: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1264,6 +1270,7 @@ impl BrowserSession {
             steered: Default::default(),
             user_tabs: Default::default(),
             keep_tabs: Default::default(),
+            keep_asked: Default::default(),
             _runtime: std::sync::Arc::new(runtime),
         })
     }
@@ -1527,6 +1534,7 @@ impl BrowserSession {
             steered: Default::default(),
             user_tabs: Default::default(),
             keep_tabs: Default::default(),
+            keep_asked: Default::default(),
             context: Some(context),
             owner: false,
             shared: self.shared,
@@ -1722,6 +1730,7 @@ impl BrowserSession {
     /// `quit --keep-tabs`: leave navigera's own tabs open as well.
     pub fn keep_tabs(&self) {
         self.keep_tabs.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.keep_asked.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// How many of the session's tabs are the user's.
@@ -2685,6 +2694,11 @@ impl BrowserSession {
         self.active_tab().mark_action();
     }
 
+    /// [`cdp::Page::settle_unhook`] on the active tab.
+    pub fn settle_unhook(&self) {
+        self.active_tab().settle_unhook();
+    }
+
     /// The agent acted, navigated or chose a tab: from now on a window an
     /// Electron app opens becomes the session's tab, as the agent's doing
     /// (see [`BrowserSession::sync_tabs`]).
@@ -3467,9 +3481,11 @@ impl BrowserSession {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // A browser navigera doesn't own keeps running: take the
             // context `reset` opened in it away first. A fork only closes
-            // its own context.
+            // its own context. `quit --keep-tabs` in the user's browser
+            // leaves that context's tabs open too.
+            let keep = self.attached && self.keep_asked.load(std::sync::atomic::Ordering::Relaxed);
             self.close_own_tabs();
-            if let (true, Some(context)) = (self.attached || !self.owner, self.context.as_deref()) {
+            if let (true, false, Some(context)) = (self.attached || !self.owner, keep, self.context.as_deref()) {
                 let _ = self.browser.dispose_context(context);
                 // Its routes, answers and downloads go with it.
                 self.browser.shared().drop_scope(context);
