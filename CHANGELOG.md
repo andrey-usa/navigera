@@ -34,6 +34,16 @@ All notable changes to this project are documented here. The format follows
   keeps connections alive, so a local request costs about a millisecond.
   navigera's own binary doesn't build it.
 
+### Changed
+
+- `reset` in a browser navigera started closes the session's tabs and
+  their browser context before it opens the new ones, instead of after.
+  Both tabs' renderers were alive for a moment at every reset, and that
+  moment was a test run's peak: 24 TodoMVC scenarios through bitti, the
+  browser's peak 1,088 -> 883 MiB (median of 5), in the same time. A
+  browser navigera attached to (your own, an Electron app) keeps the old
+  order, so its window is never left with no tab.
+
 ## [0.10.0] - 2026-11-07
 
 ### Added

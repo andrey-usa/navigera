@@ -1475,54 +1475,98 @@ impl BrowserSession {
         // Events already sent (a dialog answered a moment ago) are handled
         // first, so they are moved along, or dropped by `--all`, with the rest.
         self.browser.caught_up();
-        let context = self.browser.create_context()?;
-        if all {
-            self.downloads_dir = None;
+        let timeout = self.timeout(None);
+        // In a browser navigera started, the old tabs and their context go
+        // before the new ones start, as a test runner ends one test's
+        // context before the next test's. The other way round, both tabs'
+        // renderers were alive for a moment at every reset, and that moment
+        // was the peak of a whole run: 4 renderers of 130-150 MiB instead
+        // of 2 (24 TodoMVC scenarios through bitti: the browser's peak
+        // 1,088 -> 883 MiB, the same time). A browser navigera attached to
+        // keeps the new tab first: the user's window, or an Electron app,
+        // must never be left with none open (the app may quit then).
+        let close_first = !self.attached && !self.is_electron();
+        if close_first {
+            self.close_old_tabs(timeout);
+            // Its routes and the rest still move to the new context below,
+            // by the old context's name.
+            if let Some(old) = &self.context {
+                let _ = self.browser.dispose_context(old);
+            }
         }
-        // The user's own browser (`--attach`) keeps its download setting,
-        // unless the session chose a directory.
-        let dir = match &self.downloads_dir {
-            Some(own) => Some(own.clone()),
-            None if self.attached && self.profile_dir.is_none() => None,
-            None => download_dir().ok(),
-        };
-        let _ = self.browser.enable_downloads_in(dir.as_deref(), Some(&context));
-        // Before the new tab exists, so its first requests see its routes.
-        self.browser.shared().move_scope(&self.scope(), &context, !all);
-        if all {
-            self.overrides.clear();
-            self.init_scripts.clear();
-            self.init_ids.clear();
-        }
-        // A clock belongs to the browser context, as the page's time.
-        self.clock = Clock::default();
-        // In the user's own browser, behind their windows, as at start.
-        let page = if self.in_users_browser() {
-            self.browser.new_window_in(Some("about:blank"), true, Some(&context))?
-        } else {
-            self.browser.new_page_with(Some("about:blank"), false, Some(&context))?
+        let made = self.browser.create_context().and_then(|context| {
+            if all {
+                self.downloads_dir = None;
+            }
+            // The user's own browser (`--attach`) keeps its download setting,
+            // unless the session chose a directory.
+            let dir = match &self.downloads_dir {
+                Some(own) => Some(own.clone()),
+                None if self.attached && self.profile_dir.is_none() => None,
+                None => download_dir().ok(),
+            };
+            let _ = self.browser.enable_downloads_in(dir.as_deref(), Some(&context));
+            // Before the new tab exists, so its first requests see its routes.
+            self.browser.shared().move_scope(&self.scope(), &context, !all);
+            if all {
+                self.overrides.clear();
+                self.init_scripts.clear();
+                self.init_ids.clear();
+            }
+            // A clock belongs to the browser context, as the page's time.
+            self.clock = Clock::default();
+            // In the user's own browser, behind their windows, as at start.
+            let page = if self.in_users_browser() {
+                self.browser.new_window_in(Some("about:blank"), true, Some(&context))
+            } else {
+                self.browser.new_page_with(Some("about:blank"), false, Some(&context))
+            };
+            Ok((context, page?))
+        });
+        let (context, page) = match made {
+            Ok(made) => made,
+            Err(e) => {
+                if close_first {
+                    // Its tabs are gone: the session goes on as one whose
+                    // only tab closed, until `tab-new` or `reset`.
+                    self.pages.truncate(1);
+                    self.active = 0;
+                    self.closed = self.pages.first().map(|p| p.target_id().to_string());
+                }
+                return Err(e);
+            }
         };
         self.apply_overrides(&page);
         self.apply_init_scripts(&page);
-        let timeout = self.timeout(None);
-        for old in self.pages.drain(..) {
+        if !close_first {
+            self.close_old_tabs(timeout);
+        }
+        self.pages.clear();
+        self.user_tabs.clear();
+        self.pages.push(page);
+        self.active = 0;
+        self.closed = None;
+        if let Some(old) = self.context.replace(context) {
+            if !close_first {
+                let _ = self.browser.dispose_context(&old);
+            }
+        }
+        if let Ok(mut a) = self.abandoned.lock() {
+            *a = None;
+        }
+        self.bring_to_front()
+    }
+
+    /// `reset`'s end of the session's tabs: the user's own are let go
+    /// (detached), navigera's closed.
+    fn close_old_tabs(&self, timeout: Duration) {
+        for old in &self.pages {
             if self.user_tabs.contains(old.target_id()) {
                 old.detach(timeout);
             } else {
                 let _ = old.close_target(timeout);
             }
         }
-        self.user_tabs.clear();
-        self.pages.push(page);
-        self.active = 0;
-        self.closed = None;
-        if let Some(old) = self.context.replace(context) {
-            let _ = self.browser.dispose_context(&old);
-        }
-        if let Ok(mut a) = self.abandoned.lock() {
-            *a = None;
-        }
-        self.bring_to_front()
     }
 
     /// Another session on the same browser, in a browser context of its
