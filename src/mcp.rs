@@ -638,7 +638,7 @@ fn notes(outcome_dialogs: &[Value], new_tabs: &[usize], engine_notes: &[String])
 }
 
 /// The browser tools' state: the browser, started by the first call. A
-/// program with tools of its own (primavera's) serves these beside them.
+/// program with tools of its own (bitti's) serves these beside them.
 pub struct Server<'a> {
     config: &'a SessionConfig,
     driver: Option<Driver>,
@@ -869,7 +869,7 @@ fn check_file_access(step: &Value) -> Result<(), String> {
 
 /// Whether `name` (relative to the working directory, or absolute; existing
 /// or about to be written) is inside the working directory: the limit an
-/// MCP server built on this one (primavera's) holds its own files to.
+/// MCP server built on this one (bitti's) holds its own files to.
 pub fn in_working_dir(name: &str) -> bool {
     std::env::current_dir().is_ok_and(|cwd| inside(&cwd.canonicalize().unwrap_or(cwd.clone()), &cwd.join(name)))
 }
