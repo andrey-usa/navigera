@@ -1,7 +1,8 @@
 name: codeql
 
 # CodeQL on the Rust source, the workflows, and the Python and JavaScript
-# around them (bench harnesses, tools, packaging).
+# around them (bench harnesses, tools, packaging). The vendored axe-core is
+# left out: it is upstream's, unmodified.
 
 on:
   push:
@@ -34,6 +35,9 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
           queries: security-extended
+          config: |
+            paths-ignore:
+              - vendor
       - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           category: /language:${{ matrix.language }}
