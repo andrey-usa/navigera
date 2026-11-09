@@ -203,7 +203,7 @@ fn spawn_host(spec: &Spec, socket: &Path, log: &Path) -> Result<std::process::Ch
     let exe = std::env::current_exe().context("locate the navigera binary")?;
     let log = crate::session::create_log(log).with_context(|| format!("create {}", log.display()))?;
     let mut cmd = std::process::Command::new(exe);
-    // `--session` first: a program that embeds navigera (primavera) hands
+    // `--session` first: a program that embeds navigera (bitti) hands
     // such a command line to navigera's CLI.
     cmd.arg("--session").arg(socket).arg("--chromium").arg(&spec.exe);
     if !spec.headless {

@@ -1237,7 +1237,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("webmcp-call", "<name> [--params '{json}'] [--confirm] [--timeout-ms <n>]", "call a page's WebMCP tool and print its output; a tool the page doesn't mark read-only needs --confirm (it may place an order or send a message: confirm only what the user asked for)"),
     ("status", "", "the session as JSON: version, engine, executable (the browser binary), endpoint (\"pipe\": a private pipe; else the DevTools address), attached (true: a browser that stays open when the session quits, from --attach or --profile), tab (the active one), tabs, url, title"),
     ("locate", "<target>", "the locators that find an element again, most stable first, each checked on the page (to turn refs into tests)"),
-    ("history", "[--clear]", "the actions this session ran, a ref's with the locators of its element (primavera, the test runner built on navigera, turns it into a test with `from-session`)"),
+    ("history", "[--clear]", "the actions this session ran, a ref's with the locators of its element (bitti, the test runner built on navigera, turns it into a test with `from-session`)"),
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
@@ -6802,7 +6802,7 @@ mod tests {
     }
 
     /// A link planted where a file is to be written (a cloned project's
-    /// `.primavera`, a shared directory) is replaced, not followed.
+    /// `.bitti`, a shared directory) is replaced, not followed.
     #[cfg(unix)]
     #[test]
     fn a_file_written_where_a_link_was_replaces_the_link() {

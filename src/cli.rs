@@ -1,5 +1,5 @@
 //! The `navigera` command line, as a function: the `navigera` binary is
-//! this, and a program that embeds navigera (primavera) can offer the same
+//! this, and a program that embeds navigera (bitti) can offer the same
 //! commands, its own executable then serving the sessions it starts.
 
 use std::io::{self, BufRead, Write};
@@ -8,8 +8,8 @@ use std::process::ExitCode;
 use crate::protocol::{self, ArgsError};
 
 /// Run the CLI on `args` (the program name first, as `std::env::args()`).
-/// How this binary was called (`navigera`, or `primavera navigera` from
-/// inside primavera), for the commands a message tells to run.
+/// How this binary was called (`navigera`, or `bitti navigera` from
+/// inside bitti), for the commands a message tells to run.
 static PROGRAM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub(crate) fn program() -> &'static str {
