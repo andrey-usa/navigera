@@ -336,7 +336,9 @@ impl CdpClient {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         buf.extend_from_slice(&chunk[..n]);
-                        while let Some(pos) = buf[scanned..].iter().position(|b| *b == 0) {
+                        // A capture's answer is megabytes: searched for its
+                        // end a vector at a time, not a byte.
+                        while let Some(pos) = memchr::memchr(0, &buf[scanned..]) {
                             let end = scanned + pos;
                             if let Ok(text) = std::str::from_utf8(&buf[..end]) {
                                 dispatch(text, &pending_pump, &event_tx_pump, &sent_pump, &raw_pump);
