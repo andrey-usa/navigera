@@ -1182,6 +1182,11 @@ pub enum Local {
     Version,
     /// List the browsers and profiles a session can be handed.
     Profiles,
+    /// The current one-time code of the authenticator whose secret is in
+    /// this environment variable (see [`crate::totp`]).
+    Totp {
+        env: String,
+    },
     /// The shared browser's host (spawned by sessions; see `crate::shared`).
     BrowserHost,
     /// List the named sessions (and shared browsers), or quit the idle
@@ -1283,6 +1288,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("mcp", "[--headed] [--profile <name> | --attach [<where>] [--tab current] | --auto-connect | --electron <app>] [--allow-domains <list>] [--allow-domains-docs-only]", "serve the Model Context Protocol on stdio (for Cline, Roo, Kilo, Continue, VS Code, Claude Desktop, Cursor); the browser starts on the first tool call; --allow-domains works as for `start`"),
     ("batch", "[<file> | -] [--keep-going]", "run several steps in one call (one process, one connection): one command per line (`goto /form`, `fill --label Email a@b.c`; # comments) or JSON ops as `serve` takes them; stops at the first failure (--keep-going runs the rest); prints what the steps read and the page state once; reads stdin without a file"),
     ("sessions", "[--clean [--all] [--idle <s>]]", "list the named sessions (pid, idle time, browser, memory) and the shared browsers; --clean quits the ones idle 5 min or more and drops dead ones, --all quits every one"),
+    ("totp", "<ENV_NAME>", "the current code of a sign-in's authenticator app (two-factor), from the secret in that environment variable (its base32 key or otpauth:// URI; never on the command line): fill it in with `fill --label Code \"$(navigera totp SHOP_TOTP)\"`; a code with under 3 s left waits for the next"),
     ("profiles", "", "list what a session can be handed: your browsers' profiles (name, email, whether --attach can reach them now) and navigera's own --profile browsers"),
     ("skill", "", "print the agent skill (usage guide) for this version"),
     ("install-browser", "[chrome-headless-shell | chrome] [--channel stable|beta|dev|canary] [--where]", "download Chrome from Google's Chrome for Testing into navigera's cache (default chrome-headless-shell: the same Chrome without its UI layer, ~3x faster to start), used from then on; --where prints the directory"),
@@ -2013,6 +2019,20 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 return invalid("--all goes with --clean: `sessions --clean --all` quits every session".to_string());
             }
             return parsed(config, None, false, Some(Local::Sessions { clean, all, idle_s }));
+        }
+        "totp" => {
+            let Some(env) = positional(&mut args) else {
+                return invalid(
+                    "totp needs the name of the environment variable that holds the secret (its base32 key or \
+                     otpauth:// URI), as in `navigera totp SHOP_TOTP`",
+                );
+            };
+            if let Some(extra) = args.front() {
+                return invalid(format!(
+                    "unexpected argument {extra:?} after totp: it takes the variable's name only, never the secret itself"
+                ));
+            }
+            return parsed(config, None, false, Some(Local::Totp { env }));
         }
         "profiles" => {
             if let Some(extra) = args.front() {
@@ -6904,6 +6924,17 @@ pub fn run_local(local: &Local, config: &SessionConfig, output: &mut dyn Write) 
         Local::BrowserHost => crate::shared::serve_host(config),
         Local::Sessions { clean, all, idle_s } => crate::session::sessions(config, *clean, *all, *idle_s, output),
         Local::Batch { source, keep_going } => run_batch(source.as_deref(), *keep_going, config, output),
+        Local::Totp { env } => {
+            let response = match crate::totp::from_env(env) {
+                Ok(t) => json!({ "id": null, "ok": true, "result": t.now().0 }),
+                Err(e) => json!({ "id": null, "ok": false, "error": plain_error(&format!("{e:#}")) }),
+            };
+            if print_cli_response(output, &response, config) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
         Local::Profiles => {
             let response = json!({ "id": null, "ok": true, "result": crate::cdp::import::list_profiles() });
             if print_cli_response(output, &response, config) {

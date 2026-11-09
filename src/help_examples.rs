@@ -666,6 +666,14 @@ pub const EXAMPLES: &[Help] = &[
     ),
     ("profiles", &[("navigera profiles", "")], &[]),
     (
+        "totp",
+        &[
+            ("navigera totp SHOP_TOTP", "the code to type now; SHOP_TOTP holds the key or otpauth:// URI"),
+            ("navigera -s s fill --label \"Authentication code\" \"$(navigera totp SHOP_TOTP)\"", "a sign-in's second step"),
+        ],
+        &[("<ENV_NAME>", "the environment variable with the secret: never the secret itself, which would land in the shell history")],
+    ),
+    (
         "batch",
         &[
             ("navigera -s s batch steps.txt", "goto, fill, click … in one call"),

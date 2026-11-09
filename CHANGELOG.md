@@ -43,6 +43,13 @@ All notable changes to this project are documented here. The format follows
   `privateKey`, `publicKey`, with `rpId` and `signCount`), and `state
   load` puts them back: register a passkey once, sign in with it in
   every later session.
+- `totp <ENV_NAME>`: the current code of a sign-in's authenticator app
+  (RFC 6238), from the secret in that environment variable, its base32
+  key or the `otpauth://` URI of the site's QR code; never from the
+  command line. A code with under 3 s left waits for the next. For a
+  second step: `fill --label "Authentication code" "$(navigera totp
+  SHOP_TOTP)"`. SHA-1 and HMAC are written out (checked against RFC
+  3174, 2202 and 6238 vectors): no new dependency.
 - `set cpu <slowdown>` (`set cpu 4`; `mid-tier` is 4, `low-end` 6, as in
   Chrome DevTools) runs the page's main thread that many times slower in
   every tab, to measure or test as a phone would. `set cpu off` undoes it.

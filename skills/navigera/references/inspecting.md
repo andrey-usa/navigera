@@ -15,6 +15,7 @@
 | `downloads [--dir <path>]`, `wait --download "*.csv"` | downloaded files with their paths; `--dir` sets where they go |
 | `cookies`, `cookies set <name> <value>`, `storage [get\|set k v]` | cookies and localStorage |
 | `state save auth.json` … `state load auth.json` | sign in once, reuse it later (cookies and localStorage in one file) |
+| `fill --label Code "$(navigera totp SHOP_TOTP)"` | a two-factor code from the authenticator secret in `$SHOP_TOTP` (base32 or otpauth:// URI) |
 | `passkey on` (before the page asks), `passkey list`, `passkey verify off` | passkey sign-up and sign-in with no person or phone; `state save` keeps the passkeys too |
 | `set device "iPhone 15"`, `set viewport 1280 720`, also `media dark`, `geo <lat> <lon>`, `offline on`, `credentials <user> <pass>` | emulate (`off` resets) |
 | `route "*/api/*" --body '{…}'`, `route "*.png"` (fail), `unroute` | mock or block requests |
