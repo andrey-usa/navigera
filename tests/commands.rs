@@ -370,6 +370,38 @@ fn passkeys() {
 }
 
 #[test]
+fn a11y_audits_with_refs_and_leaves_the_page_alone() {
+    let page = "data:text/html,<html><title>a</title><main><h1>Shop</h1><img src=x.png width=10 height=10><button></button><form id=f><input></form></main></html>";
+    for (engine, bin) in engines() {
+        let a = Agent::new("a11y", engine, bin);
+        a.ok(&["goto", page]);
+        if engine == "lightpanda" {
+            assert!(a.err(&["a11y"]).contains("no layout"), "[{engine}]");
+            continue;
+        }
+        let r = a.ok(&["a11y"]);
+        let rules: Vec<&str> = r["rules"].as_array().unwrap().iter().filter_map(|x| x["rule"].as_str()).collect();
+        for want in ["button-name", "image-alt", "label", "html-has-lang"] {
+            assert!(rules.contains(&want), "[{engine}] {want} in {rules:?}");
+        }
+        assert_eq!(r["rules"][0]["impact"], "critical", "worst first: {r}");
+        // The flagged button is the ref `ax` shows for it.
+        let tree = a.text(&["ax"]);
+        let button = r["rules"].as_array().unwrap().iter().find(|x| x["rule"] == "button-name").unwrap();
+        let ref_ = button["nodes"][0]["ref"].as_u64().unwrap();
+        assert!(tree.contains(&format!("button [ref={ref_}]")), "[{engine}] ref {ref_} in\n{tree}");
+        // Scoped, with a rule left out; and the page never sees axe.
+        let r = a.ok(&["a11y", "--selector", "#f"]);
+        assert_eq!(r["rules"].as_array().unwrap().len(), 1, "{r}");
+        assert_eq!(r["rules"][0]["rule"], "label");
+        let r = a.ok(&["a11y", "--ignore", "image-alt,button-name"]);
+        assert!(!r.to_string().contains("image-alt") && r["violations"].as_u64() >= Some(2), "{r}");
+        assert_eq!(a.ok(&["eval", "typeof window.axe"]), "undefined", "[{engine}]");
+        assert!(a.err(&["a11y", "--selector", "#nope"]).contains("no element matches"));
+    }
+}
+
+#[test]
 fn vitals() {
     // A heading painted at once, a paragraph that pushes it down later, a
     // quick button and one whose handler keeps the page busy for 250 ms.

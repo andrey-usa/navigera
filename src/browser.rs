@@ -3947,6 +3947,20 @@ impl BrowserSession {
         Ok((shot?, shown.len()))
     }
 
+    /// `a11y`: an accessibility audit of the active tab (see [`crate::a11y`]).
+    pub fn a11y(
+        &self,
+        selector: Option<&str>,
+        tags: &[String],
+        ignore: &[String],
+        timeout_ms: Option<f64>,
+    ) -> Result<serde_json::Value> {
+        let timeout = self.timeout(timeout_ms);
+        let js = crate::a11y::run_js(selector, tags, ignore);
+        let (rules, refs) = self.active_tab().a11y(&js, timeout)?;
+        crate::a11y::finish(rules, &refs, tags)
+    }
+
     /// True when this session drives Lightpanda rather than Chromium.
     pub fn is_lightpanda(&self) -> bool {
         self.lightpanda

@@ -255,6 +255,18 @@ pub const EXAMPLES: &[Help] = &[
         ],
     ),
     (
+        "a11y",
+        &[
+            ("navigera -s s a11y", "the whole page"),
+            ("navigera -s s a11y --selector form --ignore color-contrast", "one part, a rule left out"),
+        ],
+        &[
+            ("--selector <css>", "only this part of the page"),
+            ("--tags <list>", "axe tags: wcag2a, wcag2aa, wcag21aa, wcag22aa, best-practice (default: WCAG 2.0-2.2 A and AA)"),
+            ("--ignore <list>", "rules to leave out, by id (color-contrast, region, …)"),
+        ],
+    ),
+    (
         "vitals",
         &[
             ("navigera -s s vitals", "after the page loaded, and again after the clicks whose INP you want"),

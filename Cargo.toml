@@ -12,7 +12,7 @@ readme = "README.md"
 keywords = ["chrome", "cdp", "browser-automation", "headless", "electron"]
 categories = ["command-line-utilities", "web-programming", "development-tools::testing"]
 rust-version = "1.91"
-include = ["/src/**", "/skills/**", "/tests/**", "/bench/site/server.py", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/CHANGELOG.md"]
+include = ["/src/**", "/skills/**", "/tests/**", "/bench/site/server.py", "/build.rs", "/vendor/axe-core/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/CHANGELOG.md"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "net", "macros"] }
@@ -27,6 +27,10 @@ miniz_oxide = "0.9"
 # The `http` feature: requests outside the page (primavera's API tests).
 ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "platform-verifier"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+
+[build-dependencies]
+# Deflates the vendored axe-core into the binary (see build.rs).
+miniz_oxide = "0.9"
 
 [features]
 # HTTP outside the page, for a crate that uses navigera as a library;

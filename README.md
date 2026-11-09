@@ -473,4 +473,5 @@ CI results, A/B benchmarks and releasing.
 - `bench/decide/`: decision benchmark (`compare.py`), TypeSafe relay (`relay.py`) and a stand-in for runs without a key (`mock_jev.py`)
 - `tools/`: `cdp_check.py` (protocol correctness), `protocol_dump.sh`, `cft_matrix.py` (Chrome version matrix)
 - `skills/navigera/SKILL.md`: the agent guide (compiled into the binary: `navigera skill`)
+- `vendor/axe-core/`: axe-core 4.14.0 (Deque Systems, MPL-2.0, unmodified, with its licenses), compiled in deflated for `a11y`
 - `.github/workflows/`: `ci.yml` (tests, Chrome matrix, protocol check), `bench.yml`, `agent-eval.yml`, `release.yml`, `chrome-bisect.yml`, `vendor.yml`

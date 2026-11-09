@@ -457,6 +457,23 @@ pub enum Command {
     /// Page title.
     #[serde(rename = "title")]
     Title {},
+    /// An accessibility audit with axe-core (see [`crate::a11y`]): the
+    /// violations of the page, or of the part `selector` names, by rule,
+    /// worst first, each element with its ref.
+    #[serde(rename = "a11y", alias = "accessibility", alias = "audit")]
+    A11y {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selector: Option<String>,
+        /// axe tags to run (`wcag2a`, `wcag21aa`, `best-practice`, ...);
+        /// none: [`crate::a11y::DEFAULT_TAGS`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+        /// Rules to leave out (`color-contrast`, ...).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ignore: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
     /// The current document's web vitals: LCP, FCP, TTFB, load, CLS and
     /// INP as the browser measured them, rated by Google's thresholds.
     #[serde(rename = "vitals", alias = "web-vitals")]
@@ -1240,6 +1257,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("text", "[--selector <css>]", "textContent of the first match; with no selector, the whole page's text as it reads (innerText)"),
     ("find", "<description>", "the element a description means, chosen by a decision model (set NAVIGERA_DECIDER_KEY; README: Decisions by a fast model); element ops also take --find <description>"),
     ("title", "", "page title"),
+    ("a11y", "[--selector <css>] [--tags wcag2a,wcag2aa,…] [--ignore <rule>,…]", "an accessibility audit with axe-core (built in, run where the page can't see it): the violations by rule, worst first, each with its first elements as refs to act on; WCAG 2.0-2.2 A and AA by default (--tags best-practice adds axe's own advice)"),
     ("vitals", "", "the page's web vitals as the browser measured them: LCP, FCP, TTFB, load (ms), CLS, INP (the slowest interaction; under 104 ms the browser keeps none), each rated good, needs-improvement or poor, with the elements behind LCP, CLS and INP as selectors"),
     ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
     ("errors", "[--limit <n>] [--clear] [--json]", "only the errors: exceptions, console.error, failed loads"),
@@ -2401,6 +2419,15 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         }
         "title" => Command::Title {},
         "vitals" | "web-vitals" => Command::Vitals {},
+        "a11y" | "accessibility" | "audit" => Command::A11y {
+            selector: match str_flag(&mut args, "--selector")? {
+                Some(s) => Some(s),
+                None => positional(&mut args),
+            },
+            tags: crate::a11y::list(&extract_values(&mut args, "--tags").map_err(ArgsError::Invalid)?),
+            ignore: crate::a11y::list(&extract_values(&mut args, "--ignore").map_err(ArgsError::Invalid)?),
+            timeout_ms,
+        },
         "ax" | "snapshot" => Command::Ax {
             max_depth: num_flag(&mut args, "--max-depth")?.map(|v| v as u32),
             all: extract_present(&mut args, "--all").then_some(true),
@@ -4929,6 +4956,17 @@ impl Driver {
             Command::Title {} => {
                 let title = s.title().map_err(|e| e.context("title"))?;
                 Ok(json!(title))
+            }
+            Command::A11y { selector, tags, ignore, timeout_ms } => {
+                if s.is_lightpanda() {
+                    anyhow::bail!("a11y: the lightpanda engine has no layout, which most accessibility checks need");
+                }
+                let tags: Vec<String> = if tags.is_empty() {
+                    crate::a11y::DEFAULT_TAGS.iter().map(|t| t.to_string()).collect()
+                } else {
+                    tags.clone()
+                };
+                s.a11y(selector.as_deref(), &tags, ignore, *timeout_ms).map_err(|e| e.context("a11y"))
             }
             Command::Vitals {} => {
                 if s.is_lightpanda() {

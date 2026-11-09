@@ -26,4 +26,5 @@
 | `screencast start ./rec`, `screencast stop` | what the tab showed, frame by frame; `./rec/index.html` plays it |
 | `screenshot 12 card.png`, `screenshot --selector "#chart"` | one element only: a smaller image than the viewport |
 | `screenshot --annotate` | each ref outlined and numbered in the image: act on what you see by its number |
+| `a11y`, `a11y --selector form` | accessibility problems by rule, worst first, each element a ref to fix or act on |
 | `vitals`; `set cpu 4`, `set network fast-3g` first | LCP, CLS, INP, FCP, TTFB as the browser measured them, rated, with the element behind each (a selector); a slower phone and its network |

@@ -5201,6 +5201,82 @@ impl Page {
         }
     }
 
+    /// `a11y`: axe-core run in an isolated world of the top document (the
+    /// page sees no `window.axe`; it is loaded once per document), its
+    /// violations, and per flagged element its ref (`backendNodeId`).
+    pub fn a11y(&self, run_js: &str, timeout: Duration) -> Result<(Value, Vec<Option<u64>>)> {
+        let tree = self.send("Page.getFrameTree", json!({}), timeout)?;
+        let frame =
+            |k: &str| tree.pointer(&format!("/frameTree/frame/{k}")).and_then(Value::as_str).map(str::to_string);
+        let (Some(id), Some(loader)) = (frame("id"), frame("loaderId")) else {
+            bail!("a11y: the page has no document yet");
+        };
+        let cached = self.worlds.lock().unwrap().get(&id).filter(|(l, _)| *l == loader).map(|(_, c)| *c);
+        let context = match cached {
+            Some(c) => c,
+            None => {
+                let r =
+                    self.send("Page.createIsolatedWorld", json!({ "frameId": id, "worldName": "navigera" }), timeout)?;
+                let c = r
+                    .get("executionContextId")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| anyhow::anyhow!("a11y: no world"))?;
+                self.worlds.lock().unwrap().insert(id.clone(), (loader, c));
+                c
+            }
+        };
+        if self.evaluate_in(context, &crate::a11y::load_js(), timeout)? != Value::Bool(true) {
+            bail!("a11y: axe-core did not load in the page");
+        }
+        let rules = self.evaluate_in(context, run_js, timeout)?;
+        // The flagged elements, kept by the run, as node ids.
+        let session = Some(self.session_id.as_str());
+        let refs = self.block_on(async {
+            let kept = self
+                .client
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": "globalThis.__nv_axe_nodes", "contextId": context, "objectGroup": "nv-axe" }),
+                    session,
+                    timeout,
+                )
+                .await
+                .ok()?;
+            let array = kept.pointer("/result/objectId")?.as_str()?.to_string();
+            let props = self
+                .client
+                .send("Runtime.getProperties", json!({ "objectId": array, "ownProperties": true }), session, timeout)
+                .await
+                .ok()?;
+            let mut slots: Vec<(usize, String)> = props["result"]
+                .as_array()?
+                .iter()
+                .filter_map(|p| {
+                    Some((p["name"].as_str()?.parse().ok()?, p.pointer("/value/objectId")?.as_str()?.to_string()))
+                })
+                .collect();
+            slots.sort();
+            let size = slots.last().map_or(0, |(i, _)| i + 1);
+            let described = futures_util::future::join_all(
+                slots
+                    .iter()
+                    .map(|(_, o)| self.client.send("DOM.describeNode", json!({ "objectId": o }), session, timeout)),
+            )
+            .await;
+            let mut refs = vec![None; size];
+            for ((i, _), d) in slots.iter().zip(described) {
+                refs[*i] = d.ok().and_then(|d| d.pointer("/node/backendNodeId").and_then(Value::as_u64));
+            }
+            let _ = self
+                .client
+                .send("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-axe" }), session, timeout)
+                .await;
+            Some(refs)
+        });
+        let _ = self.evaluate_in(context, "delete globalThis.__nv_axe_nodes", timeout);
+        Ok((rules, refs.unwrap_or_default()))
+    }
+
     /// Each node's first content quad as `(id, x, y, width, height)` in
     /// top-level viewport CSS pixels, asked for all at once; a node with
     /// no box (hidden, gone) is left out.

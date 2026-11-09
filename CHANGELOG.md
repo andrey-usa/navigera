@@ -43,6 +43,12 @@ All notable changes to this project are documented here. The format follows
   `privateKey`, `publicKey`, with `rpId` and `signCount`), and `state
   load` puts them back: register a passkey once, sign in with it in
   every later session.
+- `a11y [--selector <css>] [--tags …] [--ignore …]`: an accessibility
+  audit with axe-core 4.14 (built in, Deque's MPL-2.0 engine, unmodified
+  in `vendor/axe-core`), run in an isolated world so the page never sees
+  a `window.axe`. The violations by rule, worst first, each with its
+  first elements as refs. WCAG 2.0 to 2.2 A and AA by default. The
+  script is stored deflated: 652 KB as 182 KB of the binary.
 - `totp <ENV_NAME>`: the current code of a sign-in's authenticator app
   (RFC 6238), from the secret in that environment variable, its base32
   key or the `otpauth://` URI of the site's QR code; never from the
