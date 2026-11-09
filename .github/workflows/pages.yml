@@ -1,9 +1,11 @@
 name: Deploy docs to GitHub Pages
 
+# Every page is generated from its source (README.md, docs/, the skill and
+# `navigera --help`) by docs-site/build.py, so any push to master can change
+# the site.
 on:
   push:
     branches: ["master"]
-    paths: ["docs-site/**"]
   workflow_dispatch:
 
 permissions:
@@ -20,6 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
+        with:
+          toolchain: stable
+      - name: Build navigera (for `--help`)
+        run: cargo build --release --locked
+      - name: Write the pages from their sources
+        run: python3 docs-site/build.py target/release/navigera
       - name: Install mdBook
         run: |
           mkdir -p /tmp/mdbook
