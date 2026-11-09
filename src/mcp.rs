@@ -294,7 +294,8 @@ fn deferred_tools() -> Vec<Value> {
             object(
                 props(&[json!({
                     "full_page": {"type": "boolean", "description": "The whole page, not only what is in view"},
-                    "ref": {"type": "integer", "description": "Only this element (a ref from browser_snapshot): a smaller image"}
+                    "ref": {"type": "integer", "description": "Only this element (a ref from browser_snapshot): a smaller image"},
+                    "annotate": {"type": "boolean", "description": "Outline each element with its ref number, to act on what you see"}
                 })]),
                 &[],
             ),
@@ -721,10 +722,11 @@ impl<'a> Server<'a> {
         }
         let command = match command {
             // MCP returns the image itself; the file is only a hand-off.
-            Command::Screenshot { full_page, target, .. } => Command::Screenshot {
+            Command::Screenshot { full_page, target, annotate, .. } => Command::Screenshot {
                 path: Some(screenshot_path()),
                 full_page,
                 target,
+                annotate,
                 quality: None,
                 timeout_ms: None,
             },

@@ -849,6 +849,9 @@ pub enum Command {
         /// reading.
         #[serde(flatten)]
         target: TargetArgs,
+        /// `--annotate`: each ref outlined and labelled with its number.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        annotate: bool,
         /// `--quality <1-100>`: a JPEG at that quality instead of a PNG.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<u8>,
@@ -1266,7 +1269,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
-    ("screenshot", "[--path <f.png>] [--full-page | <ref> | --selector <css> | <locator>] [--quality <1-100>] [--timeout-ms <n>] [--no-wait]", "PNG (a JPEG with --quality) of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
+    ("screenshot", "[--path <f.png>] [--full-page | <ref> | --selector <css> | <locator>] [--annotate] [--quality <1-100>] [--timeout-ms <n>] [--no-wait]", "PNG (a JPEG with --quality) of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
     ("reset", "[--all]", "a clean slate in the same browser: a new browser context (no cookies, storage or cache from before) with one blank tab; the old tabs close (`set`, routes, credentials, init scripts, the dialog answer and `downloads --dir` stay; --all drops them too)"),
     ("tab-new", "[<url>]", "open a tab and make it active"),
     ("tab-list", "", "list tabs; in your own browser (--attach) also your other tabs (user_tabs), current: true on the one you are on"),
@@ -2677,6 +2680,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         }
         "screenshot" => Command::Screenshot {
             full_page: extract_present(&mut args, "--full-page").then_some(true),
+            annotate: extract_present(&mut args, "--annotate"),
             target: {
                 let mut t = target_args(&mut args, false)?;
                 // A bare number is a ref from `ax`, as for the other element
@@ -5560,11 +5564,18 @@ impl Driver {
                 self.session.close_page(index).map_err(|e| e.context(format!("tab-close {index}")))?;
                 Ok(self.state_json())
             }
-            Command::Screenshot { path, full_page, quality, timeout_ms, target } => {
+            Command::Screenshot { path, full_page, quality, timeout_ms, target, annotate } => {
                 let element = target.optional("screenshot")?;
                 if element.is_some() && full_page.unwrap_or(false) {
                     anyhow::bail!("screenshot: --full-page or an element, not both");
                 }
+                if element.is_some() && *annotate {
+                    anyhow::bail!("screenshot: --annotate labels the viewport or the whole page, not one element");
+                }
+                if *annotate && s.is_lightpanda() {
+                    anyhow::bail!("screenshot: the lightpanda engine paints nothing to annotate");
+                }
+                let mut labelled = None;
                 let path = path.clone().unwrap_or_else(|| {
                     format!(
                         "shot-{}.{}",
@@ -5579,6 +5590,13 @@ impl Driver {
                     Some(t) => {
                         s.screenshot_element(t, *quality, *timeout_ms).map_err(|e| on_target("screenshot", t, e))?
                     }
+                    None if *annotate => {
+                        let (bytes, n) = s
+                            .screenshot_annotated(full_page.unwrap_or(false), *quality, *timeout_ms)
+                            .map_err(|e| e.context("screenshot --annotate"))?;
+                        labelled = Some(n);
+                        bytes
+                    }
                     None => s
                         .screenshot_in(full_page.unwrap_or(false), *quality, *timeout_ms)
                         .map_err(|e| e.context("screenshot"))?,
@@ -5588,7 +5606,11 @@ impl Driver {
                 // Report where it really went (a relative path is relative
                 // to this process, which may not be the caller's directory).
                 let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
-                Ok(json!({ "path": path, "bytes": bytes.len() }))
+                let mut out = json!({ "path": path, "bytes": bytes.len() });
+                if let Some(n) = labelled {
+                    out["refs"] = json!(n);
+                }
+                Ok(out)
             }
             // Attached: the browser stays open, and so do the user's tabs;
             // navigera's own close (all of them stay with `--keep-tabs`).

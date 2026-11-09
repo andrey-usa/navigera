@@ -4,6 +4,7 @@
 //! driver crates): direct CDP JSON-RPC over WebSocket, two-worker Tokio
 //! runtime, JSON-lines protocol with `serve` mode and one-shot subcommands.
 
+pub mod annotate;
 pub mod browser;
 pub mod cdp;
 pub mod cli;

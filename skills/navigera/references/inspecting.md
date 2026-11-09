@@ -24,4 +24,5 @@
 | `pdf [file.pdf]`, `init-script "<js>"`, `wait --idle` | print, run code before the page's, wait for the network |
 | `screencast start ./rec`, `screencast stop` | what the tab showed, frame by frame; `./rec/index.html` plays it |
 | `screenshot 12 card.png`, `screenshot --selector "#chart"` | one element only: a smaller image than the viewport |
+| `screenshot --annotate` | each ref outlined and numbered in the image: act on what you see by its number |
 | `vitals`; `set cpu 4`, `set network fast-3g` first | LCP, CLS, INP, FCP, TTFB as the browser measured them, rated, with the element behind each (a selector); a slower phone and its network |

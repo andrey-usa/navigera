@@ -5201,6 +5201,33 @@ impl Page {
         }
     }
 
+    /// Each node's first content quad as `(id, x, y, width, height)` in
+    /// top-level viewport CSS pixels, asked for all at once; a node with
+    /// no box (hidden, gone) is left out.
+    pub fn content_boxes(&self, ids: &[u64], timeout: Duration) -> Vec<(u64, f64, f64, f64, f64)> {
+        let session = Some(self.session_id.as_str());
+        let answers = self.block_on(futures_util::future::join_all(
+            ids.iter()
+                .map(|&id| self.client.send("DOM.getContentQuads", json!({ "backendNodeId": id }), session, timeout)),
+        ));
+        ids.iter()
+            .zip(answers)
+            .filter_map(|(&id, r)| {
+                let q: Vec<f64> =
+                    r.ok()?.get("quads")?.as_array()?.first()?.as_array()?.iter().filter_map(Value::as_f64).collect();
+                if q.len() != 8 {
+                    return None;
+                }
+                let (xs, ys) = ([q[0], q[2], q[4], q[6]], [q[1], q[3], q[5], q[7]]);
+                let min = |v: [f64; 4]| v.into_iter().fold(f64::INFINITY, f64::min);
+                let max = |v: [f64; 4]| v.into_iter().fold(f64::NEG_INFINITY, f64::max);
+                let (x, y) = (min(xs), min(ys));
+                let (w, h) = (max(xs) - x, max(ys) - y);
+                (w >= 1.0 && h >= 1.0).then_some((id, x, y, w, h))
+            })
+            .collect()
+    }
+
     /// Centre of a node's first content quad, in top-level viewport
     /// coordinates (works inside cross-origin iframes).
     fn content_quad_center(&self, backend_node_id: u64, timeout: Duration) -> Option<(f64, f64)> {

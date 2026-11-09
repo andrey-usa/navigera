@@ -32,6 +32,12 @@ All notable changes to this project are documented here. The format follows
   its scroll containers too, and the image is cropped to its box: a
   200x120 card was 862 bytes against the viewport's 5.9 KB. MCP:
   `browser_screenshot` takes `ref`.
+- `screenshot --annotate`: each ref of a fresh `ax` read outlined and
+  labelled with its number in the image, so a model that reads
+  screenshots acts on what it sees by number (`click 12`). The marks are
+  drawn into the page for the capture only, in a closed shadow root
+  (`aria-hidden`, no pointer events), and removed after it; the next
+  `ax` reads as before. MCP: `browser_screenshot` takes `annotate`.
 - `state save` keeps the passkeys too, under `credentials`, in the shape
   Playwright's `credentials.get()` gives (base64url `id`, `userHandle`,
   `privateKey`, `publicKey`, with `rpId` and `signCount`), and `state

@@ -302,6 +302,17 @@ fn screenshot_of_one_element() {
         let (w, h) = size(file);
         assert!(w < 200 && h < 120 && w > 10, "[{engine}] a bare number is a ref: {w}x{h}");
         assert!(a.err(&["screenshot", file, "--full-page", "--selector", "#card"]).contains("not both"));
+        // --annotate: each ref outlined and numbered for the capture only.
+        a.ok(&["goto", "data:text/html,<button>One</button> <a href=%23x>Two</a> <input aria-label=Three>"]);
+        let before = a.text(&["ax"]);
+        a.ok(&["screenshot", file]);
+        let plain = std::fs::read(file).unwrap();
+        let r = a.ok(&["screenshot", file, "--annotate"]);
+        assert_eq!(r["refs"], 3, "[{engine}] {r}");
+        assert_ne!(std::fs::read(file).unwrap(), plain, "[{engine}] the labels are in the image");
+        assert_eq!(a.ok(&["eval", "!!document.getElementById('__nv_marks')"]), false, "[{engine}] and gone after");
+        assert_eq!(a.text(&["ax"]), before, "[{engine}] the page reads as before");
+        assert!(a.err(&["screenshot", file, "--annotate", "--selector", "button"]).contains("not one element"));
     }
     let _ = std::fs::remove_file(file);
 }

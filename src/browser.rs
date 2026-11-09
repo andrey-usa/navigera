@@ -3917,6 +3917,36 @@ impl BrowserSession {
         self.active_tab().screenshot_clip(self.timeout(timeout_ms), false, quality, Some(clip))
     }
 
+    /// The viewport (or the whole page) with each ref of a fresh `ax` read
+    /// outlined and labelled with its number, for a model that reads
+    /// images: what it sees is what `click 12` acts on. The labels are
+    /// drawn into the page for the capture only (`aria-hidden`, no pointer
+    /// events) and removed after it. Returns the image and how many refs
+    /// it labels.
+    pub fn screenshot_annotated(
+        &self,
+        full_page: bool,
+        quality: Option<u8>,
+        timeout_ms: Option<f64>,
+    ) -> Result<(Vec<u8>, usize)> {
+        let timeout = self.timeout(timeout_ms);
+        let tree =
+            self.ax(&cdp::AxOptions { limit: crate::protocol::DEFAULT_AX_LIMIT, ..Default::default() }, timeout_ms)?;
+        let refs = crate::annotate::refs_in(tree.as_str().unwrap_or_default());
+        let tab = self.active_tab();
+        let boxes = tab.content_boxes(&refs, timeout);
+        let (vw, vh): (f64, f64) = self.evaluate("[innerWidth, innerHeight]").map(|v: Vec<f64>| (v[0], v[1]))?;
+        // The viewport's labels only, unless the whole page is taken.
+        let shown: Vec<_> = boxes
+            .into_iter()
+            .filter(|&(_, x, y, w, h)| full_page || (x + w > 0.0 && y + h > 0.0 && x < vw && y < vh))
+            .collect();
+        tab.evaluate(&crate::annotate::draw(&shown), timeout)?;
+        let shot = tab.screenshot_as(timeout, full_page, quality);
+        let _ = tab.evaluate(crate::annotate::REMOVE, timeout);
+        Ok((shot?, shown.len()))
+    }
+
     /// True when this session drives Lightpanda rather than Chromium.
     pub fn is_lightpanda(&self) -> bool {
         self.lightpanda
