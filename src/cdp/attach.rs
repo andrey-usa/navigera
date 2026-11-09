@@ -15,7 +15,7 @@
 //!   `--remote-debugging-port` switch is ignored for the default profile.)
 //! * a user data directory: any Chrome started with
 //!   `--remote-debugging-port` and that `--user-data-dir`;
-//! * `ws://…` (the browser endpoint), `http://host:port` or a bare port:
+//! * `ws://…` (the browser endpoint), `http://host:port`, `host:port` or a bare port:
 //!   a DevTools HTTP server's `/json/version` names the endpoint.
 //!
 //! `--profile <name|dir>` is the self-contained version: a persistent,
@@ -204,12 +204,14 @@ pub fn resolve(spec: &str) -> Result<String> {
     let http = spec
         .strip_prefix("http://")
         .map(|rest| rest.trim_end_matches('/').to_string())
-        .or_else(|| spec.parse::<u16>().ok().map(|port| format!("127.0.0.1:{port}")));
+        .or_else(|| spec.parse::<u16>().ok().map(|port| format!("127.0.0.1:{port}")))
+        .or_else(|| host_port(spec));
     if let Some(hostport) = http {
-        let (host, port) = hostport
-            .rsplit_once(':')
-            .and_then(|(h, p)| Some((h.to_string(), p.parse::<u16>().ok()?)))
-            .with_context(|| format!("--attach {spec}: expected http://host:port or a port"))?;
+        let (host, port) =
+            hostport
+                .rsplit_once(':')
+                .and_then(|(h, p)| Some((h.to_string(), p.parse::<u16>().ok()?)))
+                .with_context(|| format!("--attach {spec}: expected http://host:port, host:port or a port"))?;
         let body = super::transport::http_get_body(&host, port, "/json/version")
             .with_context(|| format!("--attach {spec}: no DevTools HTTP server there"))?;
         let v: serde_json::Value = serde_json::from_str(&body).context("/json/version is not JSON")?;
@@ -235,6 +237,15 @@ pub fn resolve(spec: &str) -> Result<String> {
         );
     }
     Ok(format!("ws://127.0.0.1:{port}{path}"))
+}
+
+/// `localhost:9222` written without `http://`: a DevTools address, not a
+/// directory (no path separator, a port after the last `:`, and no
+/// directory of that name). `C:\x` and `./a:1` stay paths.
+fn host_port(spec: &str) -> Option<String> {
+    let (host, port) = spec.rsplit_once(':')?;
+    let host_ok = !host.is_empty() && !host.contains(['/', '\\']) && host.len() > 1;
+    (host_ok && port.parse::<u16>().is_ok() && !Path::new(spec).exists()).then(|| spec.to_string())
 }
 
 /// `--profile`: the endpoint of the persistent browser on `dir`, starting
@@ -337,6 +348,15 @@ fn start_profile_browser(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_and_port_without_http_is_an_address_and_a_path_stays_a_path() {
+        assert_eq!(host_port("localhost:9222").as_deref(), Some("localhost:9222"));
+        assert_eq!(host_port("127.0.0.1:9333").as_deref(), Some("127.0.0.1:9333"));
+        for path in ["C:\\Users\\me\\Chrome", "C:9222", "./a:1", "/tmp/x:9222", "chrome", "host:port"] {
+            assert_eq!(host_port(path), None, "{path}");
+        }
+    }
 
     #[test]
     fn reads_devtools_active_port() {

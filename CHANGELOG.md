@@ -48,6 +48,14 @@ All notable changes to this project are documented here. The format follows
   shows no address bar, yet each window, and so each browser context
   and each `reset`, loaded them into a renderer of their own. A
   visible browser keeps them.
+- `--attach localhost:9222` (a host and port without `http://`) attaches
+  to that DevTools address. It was read as a user data directory and
+  failed with "no DevToolsActivePort".
+- `start --attach` on a headless browser someone started with a DevTools
+  port says "a headless browser", not "the user's browser ... behind
+  theirs", and `status` says `"headless": true`. The wait for the Allow
+  prompt names no browser ("if it asks to allow the connection"): it may
+  be Edge or another Chromium browser.
 
 ## [0.10.0] - 2026-11-07
 

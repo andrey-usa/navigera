@@ -914,7 +914,7 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     // Attaching to the user's Chrome waits for them to click Allow.
     let wait = if config.attach.is_some() { 180 } else { 60 };
     if config.attach.is_some() {
-        eprintln!("navigera: connecting to your browser; if Chrome asks, click Allow");
+        eprintln!("navigera: connecting to your browser; if it asks to allow the connection, click Allow");
     }
     let deadline = Instant::now() + Duration::from_secs(wait);
     loop {
@@ -980,6 +980,18 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
 mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn a_headless_browser_is_not_called_the_users_and_has_nothing_behind() {
+        let user = json!({ "executable": "attach Chrome" });
+        assert!(attached_note(&user, 2, false).starts_with(
+            "the user's browser (Chrome): working in a window of its own, behind theirs; 2 other tabs of theirs"
+        ));
+        let headless = json!({ "executable": "attach ws://127.0.0.1:9222/devtools/browser/x", "headless": true });
+        let note = attached_note(&headless, 1, false);
+        assert!(note.starts_with("a headless browser (ws://127.0.0.1:9222/devtools/browser/x): working in a tab of its own; 1 other tab is open"), "{note}");
+        assert!(!note.contains("user") && !note.contains("behind"), "{note}");
+    }
 
     #[test]
     fn session_dir_is_created_private_and_refused_when_not() {
@@ -1056,6 +1068,20 @@ fn add_note(response: &mut Value, note: String) {
 /// What `start --attach` tells the agent about the user's browser.
 fn attached_note(status: &Value, theirs: u64, in_current_tab: bool) -> String {
     let browser = status.get("executable").and_then(Value::as_str).unwrap_or("").trim_start_matches("attach ");
+    // A headless browser someone started with a DevTools port: nobody looks
+    // at it, so it is not "the user's", and nothing is behind anything.
+    if status.get("headless").and_then(Value::as_bool) == Some(true) {
+        let tabs = match theirs {
+            0 => "no other tab is open".to_string(),
+            1 => "1 other tab is open".to_string(),
+            n => format!("{n} other tabs are open"),
+        };
+        let here = if in_current_tab { "working in its current tab" } else { "working in a tab of its own" };
+        return format!(
+            "a headless browser ({browser}): {here}; {tabs}. `tab-list` lists them; `quit` closes only the agent's \
+             own tabs and leaves the browser running"
+        );
+    }
     let tabs = match theirs {
         0 => "no other tab of theirs is open".to_string(),
         1 => "1 other tab of theirs is open".to_string(),

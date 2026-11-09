@@ -5351,6 +5351,9 @@ impl Driver {
                 // names them).
                 if self.session.in_users_browser() {
                     state["user_tabs"] = json!(self.session.other_tabs().len());
+                    if self.session.attached_headless() {
+                        state["headless"] = json!(true);
+                    }
                 }
                 if let Some(electron) = self.session.electron_info() {
                     state["electron"] = electron;

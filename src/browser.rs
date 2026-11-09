@@ -1668,6 +1668,13 @@ impl BrowserSession {
         Ok(())
     }
 
+    /// An attached browser that runs headless (its user agent says
+    /// `HeadlessChrome`): a test or agent browser, with no window and no
+    /// person in front of it.
+    pub fn attached_headless(&self) -> bool {
+        self.attached && self.browser.user_agent().is_ok_and(|agent| agent.contains("HeadlessChrome"))
+    }
+
     /// Attached to a browser that is the user's (`--attach`), not
     /// navigera's own `--profile` browser or an Electron app.
     pub fn in_users_browser(&self) -> bool {
