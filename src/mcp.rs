@@ -290,9 +290,12 @@ fn deferred_tools() -> Vec<Value> {
             false,
         ),        tool(
             "browser_screenshot",
-            "A PNG of the viewport (or the whole page). Prefer browser_snapshot: text is far cheaper than an image.",
+            "A PNG of the viewport, the whole page, or one element (ref). Prefer browser_snapshot: text is far cheaper than an image.",
             object(
-                props(&[json!({"full_page": {"type": "boolean", "description": "The whole page, not only what is in view"}})]),
+                props(&[json!({
+                    "full_page": {"type": "boolean", "description": "The whole page, not only what is in view"},
+                    "ref": {"type": "integer", "description": "Only this element (a ref from browser_snapshot): a smaller image"}
+                })]),
                 &[],
             ),
             true,
@@ -718,10 +721,10 @@ impl<'a> Server<'a> {
         }
         let command = match command {
             // MCP returns the image itself; the file is only a hand-off.
-            Command::Screenshot { full_page, no_wait, .. } => Command::Screenshot {
+            Command::Screenshot { full_page, target, .. } => Command::Screenshot {
                 path: Some(screenshot_path()),
                 full_page,
-                no_wait,
+                target,
                 quality: None,
                 timeout_ms: None,
             },

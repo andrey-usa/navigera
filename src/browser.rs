@@ -3902,6 +3902,21 @@ impl BrowserSession {
         self.active_tab().screenshot_as(self.timeout(timeout_ms), full_page, quality)
     }
 
+    /// One element, as it shows on the page: scrolled into view first (in
+    /// its scroll containers and frames), then cropped to its box.
+    pub fn screenshot_element(&self, target: &Target, quality: Option<u8>, timeout_ms: Option<f64>) -> Result<Vec<u8>> {
+        self.scroll(Some(target), None, None, timeout_ms)?;
+        let b = self.get_prop(target, "box", None, timeout_ms)?;
+        let f = |k: &str| b[k].as_f64().unwrap_or(0.0);
+        let (w, h) = (f("width"), f("height"));
+        if w < 1.0 || h < 1.0 {
+            bail!("the element has no area on the page ({w}x{h}): hidden, or empty");
+        }
+        let at: Vec<f64> = self.evaluate("[scrollX, scrollY]")?;
+        let clip = serde_json::json!({ "x": f("x") + at[0], "y": f("y") + at[1], "width": w, "height": h });
+        self.active_tab().screenshot_clip(self.timeout(timeout_ms), false, quality, Some(clip))
+    }
+
     /// True when this session drives Lightpanda rather than Chromium.
     pub fn is_lightpanda(&self) -> bool {
         self.lightpanda

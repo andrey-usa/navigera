@@ -844,9 +844,11 @@ pub enum Command {
         path: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         full_page: Option<bool>,
-        /// Skip the network-quiet wait before reading (`--no-wait`).
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        no_wait: bool,
+        /// One element only (a ref, `--selector`, a locator); its
+        /// `no_wait` (`--no-wait`) skips the network-quiet wait before
+        /// reading.
+        #[serde(flatten)]
+        target: TargetArgs,
         /// `--quality <1-100>`: a JPEG at that quality instead of a PNG.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<u8>,
@@ -1264,7 +1266,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("back", "", "history back"),
     ("forward", "", "history forward"),
     ("reload", "", "reload the page"),
-    ("screenshot", "[--path <f.png>] [--full-page] [--quality <1-100>] [--timeout-ms <n>] [--no-wait]", "PNG (a JPEG with --quality) of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
+    ("screenshot", "[--path <f.png>] [--full-page | <ref> | --selector <css> | <locator>] [--quality <1-100>] [--timeout-ms <n>] [--no-wait]", "PNG (a JPEG with --quality) of the viewport (or whole page), taken once fetches/XHRs the page started have gone quiet (steady polls ignored; --no-wait skips that)"),
     ("reset", "[--all]", "a clean slate in the same browser: a new browser context (no cookies, storage or cache from before) with one blank tab; the old tabs close (`set`, routes, credentials, init scripts, the dialog answer and `downloads --dir` stay; --all drops them too)"),
     ("tab-new", "[<url>]", "open a tab and make it active"),
     ("tab-list", "", "list tabs; in your own browser (--attach) also your other tabs (user_tabs), current: true on the one you are on"),
@@ -2674,12 +2676,23 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
         }
         "screenshot" => Command::Screenshot {
+            full_page: extract_present(&mut args, "--full-page").then_some(true),
+            target: {
+                let mut t = target_args(&mut args, false)?;
+                // A bare number is a ref from `ax`, as for the other element
+                // ops; a path has a name.
+                if t.optional("screenshot").ok().flatten().is_none() {
+                    if let Some(r) = args.front().and_then(|a| parse_ref(a)) {
+                        args.pop_front();
+                        t.node_ref = Some(r);
+                    }
+                }
+                t
+            },
             path: match str_flag(&mut args, "--path")? {
                 Some(p) => Some(p),
                 None => positional(&mut args),
             },
-            full_page: extract_present(&mut args, "--full-page").then_some(true),
-            no_wait: extract_present(&mut args, "--no-wait"),
             quality: match str_flag(&mut args, "--quality")? {
                 Some(q) => match q.parse::<u8>() {
                     Ok(n) if (1..=100).contains(&n) => Some(n),
@@ -5547,7 +5560,11 @@ impl Driver {
                 self.session.close_page(index).map_err(|e| e.context(format!("tab-close {index}")))?;
                 Ok(self.state_json())
             }
-            Command::Screenshot { path, full_page, quality, timeout_ms, .. } => {
+            Command::Screenshot { path, full_page, quality, timeout_ms, target } => {
+                let element = target.optional("screenshot")?;
+                if element.is_some() && full_page.unwrap_or(false) {
+                    anyhow::bail!("screenshot: --full-page or an element, not both");
+                }
                 let path = path.clone().unwrap_or_else(|| {
                     format!(
                         "shot-{}.{}",
@@ -5558,9 +5575,14 @@ impl Driver {
                         if quality.is_some() { "jpg" } else { "png" }
                     )
                 });
-                let bytes = s
-                    .screenshot_in(full_page.unwrap_or(false), *quality, *timeout_ms)
-                    .map_err(|e| e.context("screenshot"))?;
+                let bytes = match &element {
+                    Some(t) => {
+                        s.screenshot_element(t, *quality, *timeout_ms).map_err(|e| on_target("screenshot", t, e))?
+                    }
+                    None => s
+                        .screenshot_in(full_page.unwrap_or(false), *quality, *timeout_ms)
+                        .map_err(|e| e.context("screenshot"))?,
+                };
                 write_own(&path, &bytes)
                     .map_err(|e| anyhow::Error::from(e).context(format!("screenshot: writing {path}")))?;
                 // Report where it really went (a relative path is relative
@@ -5646,7 +5668,8 @@ impl Command {
             | Command::Dblclick { target, .. }
             | Command::Focus { target, .. }
             | Command::SetChecked { target, .. }
-            | Command::InsertText { target, .. } => Some(target),
+            | Command::InsertText { target, .. }
+            | Command::Screenshot { target, .. } => Some(target),
             Command::Ax { scope, .. } => Some(scope),
             _ => None,
         }
@@ -5736,9 +5759,7 @@ impl Command {
 
     fn no_wait(&self) -> bool {
         match self {
-            Command::Screenshot { no_wait, .. } | Command::Find { no_wait, .. } | Command::Check { no_wait, .. } => {
-                *no_wait
-            }
+            Command::Find { no_wait, .. } | Command::Check { no_wait, .. } => *no_wait,
             _ => self.clone().target_mut().is_some_and(|t| t.no_wait),
         }
     }

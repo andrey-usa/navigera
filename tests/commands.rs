@@ -279,6 +279,34 @@ fn drag_drops_a_card_and_moves_a_slider() {
 }
 
 #[test]
+fn screenshot_of_one_element() {
+    // A card far below the fold, the page's only button beside it.
+    let page = "data:text/html,<style>body{margin:0}%23card{margin:1500px 0 0 40px;width:200px;height:120px;background:red}</style><div id=card><button>Buy</button></div>";
+    let file = std::env::temp_dir().join(format!("nv-el-{}.png", std::process::id()));
+    let file = file.to_str().unwrap();
+    let size = |path: &str| {
+        let b = std::fs::read(path).unwrap();
+        (u32::from_be_bytes(b[16..20].try_into().unwrap()), u32::from_be_bytes(b[20..24].try_into().unwrap()))
+    };
+    for (engine, bin) in engines() {
+        if engine == "lightpanda" {
+            continue;
+        }
+        let a = Agent::new("elshot", engine, bin);
+        a.ok(&["goto", page]);
+        a.ok(&["screenshot", file, "--selector", "#card"]);
+        assert_eq!(size(file), (200, 120), "[{engine}] cropped to the card, scrolled into view");
+        let r = a.text(&["ax"]);
+        let button = r.split("[ref=").nth(1).and_then(|t| t.split(']').next()).unwrap().to_string();
+        a.ok(&["screenshot", &button, "--path", file]);
+        let (w, h) = size(file);
+        assert!(w < 200 && h < 120 && w > 10, "[{engine}] a bare number is a ref: {w}x{h}");
+        assert!(a.err(&["screenshot", file, "--full-page", "--selector", "#card"]).contains("not both"));
+    }
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
 fn passkeys() {
     let Some(site) = edge_site() else { return };
     // A passkey's relying party is a domain: localhost, not 127.0.0.1.

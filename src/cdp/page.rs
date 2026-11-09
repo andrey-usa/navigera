@@ -6109,12 +6109,28 @@ impl Page {
 
     /// Screenshot bytes: a JPEG at `quality` (1-100) when given, else a PNG.
     pub fn screenshot_as(&self, timeout: Duration, full_page: bool, quality: Option<u8>) -> Result<Vec<u8>> {
+        self.screenshot_clip(timeout, full_page, quality, None)
+    }
+
+    /// [`Self::screenshot_as`] of one region: `clip` is `{x, y, width,
+    /// height}` in CSS pixels of the document (not the viewport).
+    pub fn screenshot_clip(
+        &self,
+        timeout: Duration,
+        full_page: bool,
+        quality: Option<u8>,
+        clip: Option<Value>,
+    ) -> Result<Vec<u8>> {
         let mut params = match quality {
             Some(q) => json!({ "format": "jpeg", "quality": q }),
             None => json!({ "format": "png" }),
         };
-        if full_page {
+        if full_page || clip.is_some() {
             params["captureBeyondViewport"] = Value::Bool(true);
+        }
+        if let Some(mut clip) = clip {
+            clip["scale"] = json!(1);
+            params["clip"] = clip;
         }
         // A capture asked for while the page is replacing its document (a click
         // that confirm()s, posts and reloads) can be lost: Chrome never answers it,

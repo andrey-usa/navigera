@@ -27,6 +27,11 @@ All notable changes to this project are documented here. The format follows
   `off` do what they say. A tab opened later starts with the passkeys
   the others hold; `reset` keeps the authenticator and drops its
   passkeys.
+- `screenshot` of one element: `screenshot 12 card.png` (a ref),
+  `--selector`, or a locator. The element is scrolled into view, inside
+  its scroll containers too, and the image is cropped to its box: a
+  200x120 card was 862 bytes against the viewport's 5.9 KB. MCP:
+  `browser_screenshot` takes `ref`.
 - `state save` keeps the passkeys too, under `credentials`, in the shape
   Playwright's `credentials.get()` gives (base64url `id`, `userHandle`,
   `privateKey`, `publicKey`, with `rpId` and `signCount`), and `state

@@ -23,4 +23,5 @@
 | `clock install --time 2024-02-02T08:00:00 --paused`, `clock run-for 30m`, `clock pause-at <t>`, `clock resume` | the page's time: dates and timers at your command (a session timeout, a countdown, tomorrow's date) |
 | `pdf [file.pdf]`, `init-script "<js>"`, `wait --idle` | print, run code before the page's, wait for the network |
 | `screencast start ./rec`, `screencast stop` | what the tab showed, frame by frame; `./rec/index.html` plays it |
+| `screenshot 12 card.png`, `screenshot --selector "#chart"` | one element only: a smaller image than the viewport |
 | `vitals`; `set cpu 4`, `set network fast-3g` first | LCP, CLS, INP, FCP, TTFB as the browser measured them, rated, with the element behind each (a selector); a slower phone and its network |
