@@ -371,6 +371,56 @@ agent's shell never sees, and each run records the decider's calls and
 tokens. `decisions: true` adds the Jev-against-Gemini decision comparison
 above (`bench/decide/compare.py`).
 
+### One model, six tools
+
+DeepSeek-V4.1-Flash drives each tool through one shell function on a local
+shop the harness serves: a search, an order form, a price table and a
+catalog that loads in pages. Success is judged from what the site recorded
+(the search run, the order placed) and from the final answer, never from
+the agent's claim; the table and the catalog are drawn per session, so no
+file holds an answer. CLI tools run without a shell (the command must start
+with the tool, one per call), MCP servers get one `tools/call` per call,
+and every tool starts on the home page. Four tasks, 12 reps each, the tools
+at their latest npm releases; medians over each tool's 48 sessions
+([`llm-bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/llm-bench.yml),
+run [42228800128](https://github.com/andrey-usa/navigera/actions/runs/42228800128)).
+Cost is the harness's estimate at SiliconFlow's list prices (per million
+tokens: $0.15 uncached input, $0.003 cached input, $0.60 output), not a bill:
+
+| tool | success | median turns | median tokens per session [IQR] | mean tokens | estimated $ for the 48 sessions |
+|---|---|---|---|---|---|
+| `navigera`, `batch` allowed | 48/48 | **5** | **5,094** [3,910–7,996] | **8,626** | **$0.0351** |
+| `navigera` | 48/48 | 6.5 | 7,906 [5,590–9,261] | 9,543 | $0.0373 |
+| `agent-browser` 0.41.2 | 48/48 | 8 | 8,035 [6,780–11,787] | 11,543 | $0.0393 |
+| `playwright-cli` 0.1.23 | 48/48 | 7 | 9,682 [5,681–11,286] | 13,207 | $0.0460 |
+| Playwright MCP 0.0.84 | 48/48 | 9 | 13,706 [7,759–20,145] | 15,515 | $0.0535 |
+| Chrome DevTools MCP 1.12.0 | 48/48 | 10 | 13,790 [9,665–19,193] | 14,747 | $0.0506 |
+
+Per task, the lowest median tokens: `navigera` with `batch` in all four (search
+3.9K, form 5.1K, table 4.5K, catalog 12.7K). The best other tool is
+agent-browser on search (6.2K) and form (8.1K, under `navigera` without
+`batch` at 8.4K), playwright-cli on the table (5.4K; `navigera` without
+`batch` 5.9K) and Playwright MCP on the catalog (22.0K; `navigera` without
+`batch` 13.5K).
+
+What navigera lost: without `batch` its median is only 1.6% under
+agent-browser's (7,906 against 8,035, inside each other's IQR), it is behind
+agent-browser on the order form, and playwright-cli and Playwright MCP
+finished the table in fewer turns (median 4 against 5). A tool's catalog
+cost varies two to six times between its reps (playwright-cli 12.2K–73.3K,
+`navigera` 6.6K–31.9K), so close rows can swap places between runs; the
+6-rep run of the same build (run
+[42177759665](https://github.com/andrey-usa/navigera/actions/runs/42177759665))
+had playwright-cli ahead of agent-browser by mean, and the 12 reps put it
+behind. Earlier runs of the same harness: 8,705 tokens a
+session without `batch` and 11,689 with it on 2026-11-03 (run
+[41579693623](https://github.com/andrey-usa/navigera/actions/runs/41579693623));
+16,661 and 12,755 against navigera 0.7.1 (run
+[41568863979](https://github.com/andrey-usa/navigera/actions/runs/41568863979)).
+Since 0.7.1 an action says what it changed on the page, so the agent sees
+the result of a click without another look, and a list item is one line of
+the tree instead of three.
+
 **0.5.0 (2026-10-22)**, skilled, the six tasks twice per tool:
 
 - DeepSeek-V4.1-Flash (run 39699303497): navigera passed 12/12 at a median
