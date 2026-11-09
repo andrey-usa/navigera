@@ -397,7 +397,8 @@ fn vitals() {
         assert!(v["inp"].as_f64().is_some_and(|n| n < 250.0) || v["inp_under_ms"] == 104.0, "{v}");
         a.ok(&["click", "--selector", "#slow"]);
         let v = a.ok(&["vitals"]);
-        assert!(v["inp"].as_f64().is_some_and(|n| n >= 250.0), "{v}");
+        // Event timings are rounded to 8 ms: a 250 ms handler reads 248 or 256.
+        assert!(v["inp"].as_f64().is_some_and(|n| n >= 240.0), "{v}");
         assert_eq!((v["inp_element"].as_str(), v["inp_event"].as_str()), (Some("#slow"), Some("click")), "{v}");
         assert_ne!(v["rating"]["inp"], "good", "{v}");
     }
