@@ -16,6 +16,7 @@ mod help_examples;
 pub mod http;
 pub mod install;
 pub mod mcp;
+pub mod passkey;
 pub mod proc;
 pub mod protocol;
 pub mod screencast;

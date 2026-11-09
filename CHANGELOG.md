@@ -16,6 +16,22 @@ All notable changes to this project are documented here. The format follows
   element behind LCP, CLS and INP as a CSS selector: what to fix. Chrome
   keeps only interactions of 104 ms or more, so when every interaction
   was quicker `inp` is `null` and `inp_under_ms` is 104.
+- `passkey on`: a virtual WebAuthn authenticator in every tab, so a
+  page's passkey sign-up and sign-in (`navigator.credentials.create()`
+  and `.get()`) are answered with no person, phone or security key. By
+  default the device's own authenticator, making discoverable passkeys
+  with user verification; `--authenticator usb|nfc|ble|hybrid` makes it a
+  security key or a phone. `passkey list` shows the passkeys it holds
+  (never their private keys), `passkey verify off` fails the next
+  ceremonies as a wrong fingerprint would, `load`, `remove`, `clear` and
+  `off` do what they say. A tab opened later starts with the passkeys
+  the others hold; `reset` keeps the authenticator and drops its
+  passkeys.
+- `state save` keeps the passkeys too, under `credentials`, in the shape
+  Playwright's `credentials.get()` gives (base64url `id`, `userHandle`,
+  `privateKey`, `publicKey`, with `rpId` and `signCount`), and `state
+  load` puts them back: register a passkey once, sign in with it in
+  every later session.
 - `set cpu <slowdown>` (`set cpu 4`; `mid-tier` is 4, `low-end` 6, as in
   Chrome DevTools) runs the page's main thread that many times slower in
   every tab, to measure or test as a phone would. `set cpu off` undoes it.

@@ -85,6 +85,20 @@ if (document.modelContext) {
 <p id=out></p><p id=keys></p>
 <script>document.addEventListener('keydown', e => keys.textContent += 'd:' + e.key + (e.shiftKey ? '(shift)' : '') + ' ');
 document.addEventListener('keyup', e => keys.textContent += 'u:' + e.key + ' ');</script>""",
+    "/passkey": """<!doctype html><title>passkey</title>
+<button id=reg onclick="reg()">Create a passkey</button><button id=login onclick="login()">Sign in with a passkey</button><p id=out>idle</p>
+<script>
+const pk = (o) => Object.assign({ challenge: new Uint8Array(16), timeout: 3000 }, o);
+async function reg() { try {
+  const c = await navigator.credentials.create({ publicKey: pk({ rp: { name: 'Shop', id: location.hostname },
+    user: { id: new TextEncoder().encode('ada'), name: 'ada@example.com', displayName: 'Ada' },
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+    authenticatorSelection: { residentKey: 'required', userVerification: 'required' } }) });
+  out.textContent = 'created ' + c.id; } catch (e) { out.textContent = 'error ' + e.name; } }
+async function login() { try {
+  const c = await navigator.credentials.get({ publicKey: pk({ rpId: location.hostname, userVerification: 'required' }) });
+  out.textContent = 'signed in as ' + new TextDecoder().decode(c.response.userHandle); } catch (e) { out.textContent = 'error ' + e.name; } }
+</script>""",
     "/keys": """<!doctype html><title>keys</title><input id=i autofocus><p id=p>no form here</p>""",
     # A single-page app: the list arrives by fetch, then renders a beat later.
     "/spa": """<!doctype html><title>spa</title><p id=s role=status>Loading items…</p><script>

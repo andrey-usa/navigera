@@ -279,6 +279,58 @@ fn drag_drops_a_card_and_moves_a_slider() {
 }
 
 #[test]
+fn passkeys() {
+    let Some(site) = edge_site() else { return };
+    // A passkey's relying party is a domain: localhost, not 127.0.0.1.
+    let page = format!("{}/passkey", site.base.replace("127.0.0.1", "localhost"));
+    let file = std::env::temp_dir().join(format!("nv-passkey-{}.json", std::process::id()));
+    let file = file.to_str().unwrap();
+    for (engine, bin) in engines() {
+        let a = Agent::new("passkey", engine, bin);
+        if engine == "lightpanda" {
+            assert!(a.err(&["passkey", "on"]).contains("no WebAuthn"), "[{engine}]");
+            continue;
+        }
+        assert_eq!(a.ok(&["passkey"])["passkeys"], "off");
+        assert_eq!(a.ok(&["passkey", "on"])["transport"], "internal");
+        a.ok(&["goto", &page]);
+        let sign_in = |a: &Agent, expect: &str| {
+            a.ok(&["click", "--selector", "#login"]);
+            a.ok(&["wait", "--text", expect]);
+        };
+        a.ok(&["click", "--selector", "#reg"]);
+        a.ok(&["wait", "--text", "created"]);
+        let list = a.ok(&["passkey", "list"]);
+        assert_eq!(list["passkeys"][0]["rp_id"], "localhost", "{list}");
+        assert_eq!(list["passkeys"][0]["user"], "ada@example.com", "{list}");
+        assert!(list["passkeys"][0].get("private_key").is_none() && list.to_string().len() < 300, "{list}");
+        sign_in(&a, "signed in as ada");
+        // A tab opened later holds the passkey too.
+        a.ok(&["tab-new", &page]);
+        sign_in(&a, "signed in as ada");
+        // A fingerprint that doesn't match.
+        assert_eq!(a.ok(&["passkey", "verify", "off"])["user_verification"], "fails");
+        sign_in(&a, "error NotAllowedError");
+        a.ok(&["passkey", "verify", "on"]);
+        // `state save` keeps it, `reset` drops it, `state load` brings it back.
+        assert_eq!(a.ok(&["state", "save", file])["passkeys"], 1);
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        let c = &saved["credentials"][0];
+        assert!(c["privateKey"].is_string() && c["publicKey"].is_string() && c["rpId"] == "localhost", "{c}");
+        a.ok(&["reset"]);
+        a.ok(&["goto", &page]);
+        assert_eq!(a.ok(&["passkey", "list"])["passkeys"], serde_json::json!([]), "the authenticator stays, empty");
+        sign_in(&a, "error NotAllowedError");
+        assert_eq!(a.ok(&["state", "load", file])["passkeys"], 1);
+        sign_in(&a, "signed in as ada");
+        a.ok(&["passkey", "clear"]);
+        sign_in(&a, "error NotAllowedError");
+        assert_eq!(a.ok(&["passkey", "off"])["passkeys"], "off");
+    }
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
 fn vitals() {
     // A heading painted at once, a paragraph that pushes it down later, a
     // quick button and one whose handler keeps the page busy for 250 ms.

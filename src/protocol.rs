@@ -683,6 +683,23 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         paused: bool,
     },
+    /// A virtual WebAuthn authenticator in every tab (see
+    /// [`crate::passkey`]): `on [--authenticator <t>] [--no-user-verification]
+    /// [--no-resident-key]`, `off`, `list` (the default), `load <file.json>`,
+    /// `remove <id>`, `clear`, `verify on|off`.
+    #[serde(rename = "passkey", alias = "passkeys", alias = "webauthn")]
+    Passkey {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_user_verification: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_resident_key: bool,
+    },
     /// What the active tab shows, frame by frame (see
     /// [`crate::screencast`]): `start <dir> [--quality] [--size]`, `stop`.
     #[serde(rename = "screencast")]
@@ -1225,6 +1242,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value'] | --modify [--set-header 'Name: value'] [--replace <from> <to>]]] [--har <f> [--not-found abort|continue]]", "fail, answer, or change the responses of requests whose URL matches (* and ? globs); --har answers from a recorded HAR; no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("clock", "[install [--time <t>] [--paused] | set <t> | run-for <length> | fast-forward <length> | pause-at <t> | resume | uninstall]", "the page's time under your control in every tab: Date, performance.now and timers start at --time (a date, or epoch ms), flow or pause, jump (set), or run forward firing the timers due (run-for 30m; fast-forward fires each once); no action shows it"),
+    ("passkey", "on [--authenticator internal|usb|nfc|ble|hybrid] [--no-user-verification] [--no-resident-key] | off | list | load <file.json> | remove <id> | clear | verify on|off", "a virtual authenticator in every tab: the page's passkey sign-up and sign-in (navigator.credentials) are answered with no person, phone or security key; list shows the passkeys it holds, state save keeps them (private keys included), verify off fails the fingerprint check"),
     ("screencast", "start <dir> [--quality <0-100>] [--size <w>x<h>] | stop", "record what the tab shows, frame by frame, into <dir> (JPEGs with their times; it follows the session to other tabs); stop writes <dir>/index.html, a player"),
     ("init-script", "[<js> | --file <path.js> | --clear]", "run a script before the page's own in every document of every tab; no argument lists them"),
     ("get", "text|value|html|outer|box|checked|attr <name>|style <prop> <target> | count <css> | title | url", "read one property of an element (target: ref, --selector, --text, --role/--name, --label, --placeholder, --testid, --near <text>, --nth; --frame <css> to look only inside that frame)"),
@@ -2437,6 +2455,32 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
             cmd
         }
+        "passkey" | "passkeys" | "webauthn" => {
+            let transport = str_flag(&mut args, "--authenticator")?;
+            let no_user_verification = extract_present(&mut args, "--no-user-verification");
+            let no_resident_key = extract_present(&mut args, "--no-resident-key");
+            let action = positional(&mut args);
+            let value = positional(&mut args);
+            let usage = "passkey on [--authenticator internal|usb|nfc|ble|hybrid] [--no-user-verification] \
+                         [--no-resident-key] | off | list | load <file.json> | remove <id> | clear | verify on|off";
+            match (action.as_deref(), &value) {
+                (None | Some("list" | "on" | "off" | "clear"), None) => {}
+                (Some("load" | "remove"), Some(_)) => {}
+                (Some("verify"), Some(v)) if matches!(v.as_str(), "on" | "off") => {}
+                (Some("load"), None) => {
+                    return Err(need("passkey load", "a JSON file: one passkey, a list, or a `state save` file"))
+                }
+                (Some("remove"), None) => return Err(need("passkey remove", "the passkey's id, from `passkey list`")),
+                (Some("verify"), _) => return Err(need("passkey verify", "on or off")),
+                _ => return invalid(format!("passkey: {usage}")),
+            }
+            if (transport.is_some() || no_user_verification || no_resident_key) && action.as_deref() != Some("on") {
+                return invalid(
+                    "passkey: --authenticator, --no-user-verification and --no-resident-key go with `passkey on`",
+                );
+            }
+            Command::Passkey { action, value, transport, no_user_verification, no_resident_key }
+        }
         "state" => {
             let action = positional(&mut args).ok_or_else(|| need("state", "save or load"))?;
             if action != "save" && action != "load" {
@@ -2992,6 +3036,7 @@ fn retry_eligible(command: &Command) -> bool {
             | Command::Open { .. }
             | Command::Network { .. }
             | Command::State { .. }
+            | Command::Passkey { .. }
             | Command::Set { .. }
             | Command::Reset { .. }
     )
@@ -4071,7 +4116,7 @@ impl Driver {
         let (mut cookies, mut origins) = (0, 0);
         let mut stale_ms = None;
         if let Some(state) = &self.crash.storage {
-            if let Ok((c, o)) = new.load_storage_state(state) {
+            if let Ok((c, o, _)) = new.load_storage_state(state) {
                 (cookies, origins) = (c, o);
             }
             stale_ms = self.crash.storage_at.map(|t| t.elapsed().as_millis() as u64);
@@ -4195,6 +4240,7 @@ impl Driver {
                 | Command::Downloads { .. }
                 | Command::Cookies { .. }
                 | Command::State { .. }
+                | Command::Passkey { .. }
                 | Command::Route { .. }
                 | Command::InitScript { .. }
                 | Command::Unroute { .. }
@@ -4984,21 +5030,95 @@ impl Driver {
                 }
                 other => anyhow::bail!("cookies: unknown action {other:?} (list|set|delete|clear)"),
             },
+            Command::Passkey { action, value, transport, no_user_verification, no_resident_key } => {
+                if s.is_lightpanda() {
+                    anyhow::bail!("passkey: the lightpanda engine has no WebAuthn");
+                }
+                let listed = |session: &crate::browser::BrowserSession| {
+                    let creds = session.passkey_credentials();
+                    json!(creds.iter().map(crate::passkey::summary).collect::<Vec<_>>())
+                };
+                match action.as_deref().unwrap_or("list") {
+                    "on" => {
+                        let options =
+                            crate::passkey::options(transport.as_deref(), !no_user_verification, !no_resident_key)?;
+                        let kept = self.session.passkeys_on(options.clone()).map_err(|e| e.context("passkey on"))?;
+                        Ok(json!({ "passkeys": "on", "transport": options["transport"],
+                                   "user_verification": !no_user_verification, "kept": kept }))
+                    }
+                    "off" => {
+                        self.session.passkeys_off()?;
+                        Ok(json!({ "passkeys": "off" }))
+                    }
+                    "list" if !self.session.passkeys_enabled() => {
+                        Ok(json!({ "passkeys": "off", "note": "`passkey on` first, before the page asks for one" }))
+                    }
+                    "list" => Ok(json!({ "passkeys": listed(&self.session) })),
+                    "load" => {
+                        let path = value.as_deref().unwrap_or_default();
+                        let text = std::fs::read_to_string(path)
+                            .map_err(|e| anyhow::Error::from(e).context(format!("passkey load {path}")))?;
+                        let v: Value = serde_json::from_str(&text)
+                            .map_err(|e| anyhow::anyhow!("passkey load {path}: not JSON ({e})"))?;
+                        let creds =
+                            crate::passkey::read_file(&v).map_err(|e| e.context(format!("passkey load {path}")))?;
+                        let n = self.session.passkeys_add(&creds)?;
+                        Ok(json!({ "loaded": path, "added": n, "passkeys": listed(&self.session) }))
+                    }
+                    "remove" | "clear" if !self.session.passkeys_enabled() => {
+                        anyhow::bail!("passkey {}: passkeys are off (`passkey on`)", action.as_deref().unwrap_or(""))
+                    }
+                    "remove" => {
+                        let want = value.as_deref().unwrap_or_default();
+                        let creds = self.session.passkey_credentials();
+                        let hit = creds.iter().find(|c| {
+                            crate::passkey::summary(c)["id"]
+                                .as_str()
+                                .is_some_and(|id| id == want || id.starts_with(want))
+                        });
+                        let Some(hit) = hit.and_then(|c| c["credentialId"].as_str()) else {
+                            anyhow::bail!("passkey remove: no passkey {want:?}; `passkey list` shows their ids");
+                        };
+                        self.session.passkeys_remove(Some(hit))?;
+                        Ok(json!({ "removed": want, "passkeys": listed(&self.session) }))
+                    }
+                    "clear" => {
+                        self.session.passkeys_remove(None)?;
+                        Ok(json!({ "passkeys": [] }))
+                    }
+                    _ => {
+                        let yes = value.as_deref() == Some("on");
+                        if !self.session.passkeys_enabled() {
+                            anyhow::bail!("passkey verify: passkeys are off (`passkey on`)");
+                        }
+                        self.session.passkeys_verified(yes)?;
+                        Ok(json!({ "user_verification": if yes { "passes" } else { "fails" } }))
+                    }
+                }
+            }
             Command::State { action, path } if action == "save" => {
                 let state = self.session.storage_state()?;
                 let (cookies, origins) =
                     (state["cookies"].as_array().map_or(0, Vec::len), state["origins"].as_array().map_or(0, Vec::len));
                 write_own(path, (serde_json::to_string_pretty(&state)? + "\n").as_bytes())
                     .map_err(|e| anyhow::Error::from(e).context(format!("state save {path}")))?;
-                Ok(json!({ "saved": path, "cookies": cookies, "origins": origins }))
+                let mut out = json!({ "saved": path, "cookies": cookies, "origins": origins });
+                if let Some(p) = state["credentials"].as_array() {
+                    out["passkeys"] = json!(p.len());
+                }
+                Ok(out)
             }
             Command::State { path, .. } => {
                 let text = std::fs::read_to_string(path)
                     .map_err(|e| anyhow::Error::from(e).context(format!("state load {path}")))?;
                 let state: Value =
                     serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("state load {path}: not JSON ({e})"))?;
-                let (cookies, origins) = self.session.load_storage_state(&state)?;
-                Ok(json!({ "loaded": path, "cookies": cookies, "origins": origins }))
+                let (cookies, origins, passkeys) = self.session.load_storage_state(&state)?;
+                let mut out = json!({ "loaded": path, "cookies": cookies, "origins": origins });
+                if passkeys > 0 {
+                    out["passkeys"] = json!(passkeys);
+                }
+                Ok(out)
             }
             Command::Pdf { path, landscape, background } => {
                 let path = path.clone().unwrap_or_else(|| {
@@ -6897,6 +7017,32 @@ mod tests {
         };
         assert!(bad(&["navigera", "webmcp-call", "add", "--params", "[1]"]).contains("JSON object"));
         assert!(bad(&["navigera", "webmcp-call"]).contains("tool's name"));
+    }
+
+    #[test]
+    fn passkey_args() {
+        let cmd = |a: &[&str]| parse_args(argv(a)).map(|p| p.command);
+        assert_eq!(
+            cmd(&["navigera", "passkey", "on", "--authenticator", "usb", "--no-user-verification"]).unwrap(),
+            Some(Command::Passkey {
+                action: Some("on".into()),
+                value: None,
+                transport: Some("usb".into()),
+                no_user_verification: true,
+                no_resident_key: false
+            })
+        );
+        assert!(matches!(cmd(&["navigera", "webauthn"]).unwrap(), Some(Command::Passkey { action: None, .. })));
+        assert!(matches!(
+            cmd(&["navigera", "passkey", "load", "a.json"]).unwrap(),
+            Some(Command::Passkey { value: Some(_), .. })
+        ));
+        assert!(cmd(&["navigera", "passkey", "verify", "maybe"]).is_err());
+        assert!(cmd(&["navigera", "passkey", "remove"]).is_err());
+        assert!(cmd(&["navigera", "passkey", "list", "--authenticator", "usb"]).is_err());
+        assert!(cmd(&["navigera", "passkey", "fly"]).is_err());
+        assert_eq!(cmd(&["navigera", "vitals"]).unwrap(), Some(Command::Vitals {}));
+        assert!(matches!(cmd(&["navigera", "set", "cpu", "4"]).unwrap(), Some(Command::Set { .. })));
     }
 
     #[test]

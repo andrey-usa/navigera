@@ -782,6 +782,8 @@ pub struct BrowserSession {
     /// `set …` overrides (keyed by what they set): applied to every open
     /// tab and replayed on tabs opened later.
     overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
+    /// `passkey on`: the virtual authenticator every tab gets.
+    passkeys: crate::passkey::Passkeys,
     /// The browser answered -32601 to `Network.emulateNetworkConditionsByRule`
     /// (Chromium before it had the call): the older call is used from then on.
     no_rule_call: std::sync::atomic::AtomicBool,
@@ -918,6 +920,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
@@ -1001,6 +1004,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
@@ -1187,6 +1191,7 @@ impl BrowserSession {
             profile_exe,
             downloads_dir: None,
             overrides: Default::default(),
+            passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
@@ -1308,6 +1313,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
@@ -1475,6 +1481,8 @@ impl BrowserSession {
         };
         self.apply_overrides(&page);
         self.apply_init_scripts(&page);
+        let held = self.passkey_credentials();
+        self.apply_passkeys(&page, &held);
         self.pages.push(page);
         self.active = self.pages.len() - 1;
         self.forget_closed();
@@ -1558,6 +1566,13 @@ impl BrowserSession {
         };
         self.apply_overrides(&page);
         self.apply_init_scripts(&page);
+        // The authenticator is a setting and stays; its passkeys belonged
+        // to the old context, like its cookies.
+        if all {
+            self.passkeys = Default::default();
+        }
+        self.passkeys.ids.clear();
+        self.apply_passkeys(&page, &[]);
         if !close_first {
             self.close_old_tabs(timeout);
         }
@@ -1621,6 +1636,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
             init_ids: Default::default(),
@@ -1831,6 +1847,8 @@ impl BrowserSession {
         let page = self.browser.attach_page(target, &self.scope()).with_context(|| format!("work in tab {target}"))?;
         self.apply_overrides(&page);
         self.apply_init_scripts(&page);
+        let held = self.passkey_credentials();
+        self.apply_passkeys(&page, &held);
         self.pages.push(page);
         self.user_tabs.insert(target.to_string());
         self.active = self.pages.len() - 1;
@@ -1958,6 +1976,8 @@ impl BrowserSession {
                 Ok(page) => {
                     self.apply_overrides(&page);
                     self.apply_init_scripts(&page);
+                    let held = self.passkey_credentials();
+                    self.apply_passkeys(&page, &held);
                     // An app's hidden window (a dropdown, a helper) is a tab,
                     // but not the one the session goes on in, when its main
                     // process says so (a page's own visibility can't be
@@ -2250,6 +2270,159 @@ impl BrowserSession {
         Ok(())
     }
 
+    /// `passkey on`: a virtual authenticator with these options in every
+    /// tab and in tabs opened later. Turned on again (other options), the
+    /// passkeys it held move to the new one.
+    pub fn passkeys_on(&mut self, options: serde_json::Value) -> Result<usize> {
+        let held = if self.passkeys.options.is_some() { self.passkey_credentials() } else { Vec::new() };
+        self.passkeys_off()?;
+        self.passkeys.options = Some(options);
+        let pages: Vec<Page> = self.pages.clone();
+        for page in &pages {
+            self.add_authenticator(page, &held)?;
+        }
+        Ok(held.len())
+    }
+
+    /// `passkey off`: the authenticators go, and the passkeys with them.
+    pub fn passkeys_off(&mut self) -> Result<()> {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            if let Some(id) = self.passkeys.ids.get(page.target_id()) {
+                let _ = page.send_cdp(
+                    "WebAuthn.removeVirtualAuthenticator",
+                    serde_json::json!({ "authenticatorId": id }),
+                    timeout,
+                );
+                let _ = page.send_cdp("WebAuthn.disable", serde_json::json!({}), timeout);
+            }
+        }
+        self.passkeys = Default::default();
+        Ok(())
+    }
+
+    pub fn passkeys_enabled(&self) -> bool {
+        self.passkeys.options.is_some()
+    }
+
+    /// The authenticator on `page`, holding `credentials`.
+    fn add_authenticator(&mut self, page: &Page, credentials: &[serde_json::Value]) -> Result<()> {
+        let Some(options) = self.passkeys.options.clone() else { return Ok(()) };
+        let timeout = self.timeout(None);
+        page.send_cdp("WebAuthn.enable", serde_json::json!({ "enableUI": false }), timeout)
+            .map_err(|e| e.context("WebAuthn.enable"))?;
+        let r = page
+            .send_cdp("WebAuthn.addVirtualAuthenticator", serde_json::json!({ "options": options }), timeout)
+            .map_err(|e| e.context("WebAuthn.addVirtualAuthenticator"))?;
+        let id = r["authenticatorId"].as_str().unwrap_or_default().to_string();
+        if self.passkeys.unverified {
+            page.send_cdp(
+                "WebAuthn.setUserVerified",
+                serde_json::json!({ "authenticatorId": id, "isUserVerified": false }),
+                timeout,
+            )?;
+        }
+        for c in credentials {
+            page.send_cdp(
+                "WebAuthn.addCredential",
+                serde_json::json!({ "authenticatorId": id, "credential": c }),
+                timeout,
+            )
+            .map_err(|e| e.context("WebAuthn.addCredential"))?;
+        }
+        self.passkeys.ids.insert(page.target_id().to_string(), id);
+        Ok(())
+    }
+
+    /// A tab the session just got: the authenticator, with the passkeys
+    /// the other tabs hold.
+    fn apply_passkeys(&mut self, page: &Page, credentials: &[serde_json::Value]) {
+        if let Err(e) = self.add_authenticator(page, credentials) {
+            eprintln!("[browser] passkeys on a new tab: {e:#}");
+        }
+    }
+
+    /// Every passkey the session's tabs hold (Chrome's `WebAuthn.Credential`s).
+    pub fn passkey_credentials(&self) -> Vec<serde_json::Value> {
+        let timeout = self.timeout(None);
+        let mut all = Vec::new();
+        for page in &self.pages {
+            let Some(id) = self.passkeys.ids.get(page.target_id()) else { continue };
+            if let Ok(r) =
+                page.send_cdp("WebAuthn.getCredentials", serde_json::json!({ "authenticatorId": id }), timeout)
+            {
+                all.extend(r["credentials"].as_array().cloned().unwrap_or_default());
+            }
+        }
+        crate::passkey::merge(all)
+    }
+
+    /// Put these passkeys in every tab's authenticator (one with the same
+    /// id is replaced), turning passkeys on first if they are off.
+    pub fn passkeys_add(&mut self, credentials: &[serde_json::Value]) -> Result<usize> {
+        if self.passkeys.options.is_none() {
+            self.passkeys_on(crate::passkey::options(None, true, true)?)?;
+        }
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            let Some(id) = self.passkeys.ids.get(page.target_id()) else { continue };
+            for c in credentials {
+                let _ = page.send_cdp(
+                    "WebAuthn.removeCredential",
+                    serde_json::json!({ "authenticatorId": id, "credentialId": c["credentialId"] }),
+                    timeout,
+                );
+                page.send_cdp(
+                    "WebAuthn.addCredential",
+                    serde_json::json!({ "authenticatorId": id, "credential": c }),
+                    timeout,
+                )
+                .map_err(|e| e.context("passkey: the browser refused the passkey"))?;
+            }
+        }
+        Ok(credentials.len())
+    }
+
+    /// Remove one passkey (`id`: Chrome's credential id, base64), or all.
+    pub fn passkeys_remove(&mut self, id: Option<&str>) -> Result<()> {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            let Some(auth) = self.passkeys.ids.get(page.target_id()) else { continue };
+            let r = match id {
+                Some(c) => page.send_cdp(
+                    "WebAuthn.removeCredential",
+                    serde_json::json!({ "authenticatorId": auth, "credentialId": c }),
+                    timeout,
+                ),
+                None => {
+                    page.send_cdp("WebAuthn.clearCredentials", serde_json::json!({ "authenticatorId": auth }), timeout)
+                }
+            };
+            // A tab that never had this passkey has nothing to remove.
+            if let (Err(e), None) = (r, id) {
+                return Err(e.context("passkey clear"));
+            }
+        }
+        Ok(())
+    }
+
+    /// `passkey verify on|off`: whether the "person" passes the
+    /// authenticator's fingerprint or PIN check.
+    pub fn passkeys_verified(&mut self, yes: bool) -> Result<()> {
+        let timeout = self.timeout(None);
+        for page in &self.pages {
+            if let Some(id) = self.passkeys.ids.get(page.target_id()) {
+                page.send_cdp(
+                    "WebAuthn.setUserVerified",
+                    serde_json::json!({ "authenticatorId": id, "isUserVerified": yes }),
+                    timeout,
+                )?;
+            }
+        }
+        self.passkeys.unverified = !yes;
+        Ok(())
+    }
+
     /// One CDP call of a `set` override. A browser that has no
     /// `Network.emulateNetworkConditionsByRule` (-32601) gets
     /// `Network.emulateNetworkConditions` instead, and is not asked the new
@@ -2479,14 +2652,25 @@ impl BrowserSession {
             }
             origins.push(here);
         }
-        Ok(serde_json::json!({ "cookies": cookies, "origins": origins }))
+        let mut state = serde_json::json!({ "cookies": cookies, "origins": origins });
+        // Passkeys the tabs hold, private keys included, as Playwright's
+        // `storageState({ credentials: true })` keeps them.
+        let passkeys = self.passkey_credentials();
+        if !passkeys.is_empty() {
+            state["credentials"] = serde_json::json!(passkeys
+                .iter()
+                .filter_map(|c| crate::passkey::to_portable(c).ok())
+                .collect::<Vec<_>>());
+        }
+        Ok(state)
     }
 
     /// Put a [`BrowserSession::storage_state`] file back: its cookies now, and
     /// each origin's localStorage into the tab already on that origin and,
     /// through an init script, into any document of that origin that does
-    /// not have the key yet. Returns how many cookies and origins it read.
-    pub fn load_storage_state(&mut self, state: &serde_json::Value) -> Result<(usize, usize)> {
+    /// not have the key yet, and its passkeys (`credentials`) into the
+    /// authenticator. Returns how many cookies, origins and passkeys it read.
+    pub fn load_storage_state(&mut self, state: &serde_json::Value) -> Result<(usize, usize, usize)> {
         let cookies = state.get("cookies").and_then(|c| c.as_array()).cloned().unwrap_or_default();
         for c in &cookies {
             let mut p = serde_json::json!({
@@ -2516,7 +2700,15 @@ impl BrowserSession {
             );
             self.add_init_script(&script)?;
         }
-        Ok((cookies.len(), origins.len()))
+        // Passkeys: the authenticator is on from here, holding them.
+        let passkeys = match state.get("credentials") {
+            Some(serde_json::Value::Array(list)) if !list.is_empty() => {
+                let creds = crate::passkey::read_file(state).context("state load: credentials")?;
+                self.passkeys_add(&creds)?
+            }
+            _ => 0,
+        };
+        Ok((cookies.len(), origins.len(), passkeys))
     }
 
     /// Remove every `init-script`; returns how many there were.
@@ -3864,6 +4056,8 @@ impl BrowserSession {
         }
         self.overrides = old.overrides.clone();
         self.init_scripts = old.init_scripts.clone();
+        // Its passkeys come back with the state it saved, if any.
+        self.passkeys = crate::passkey::Passkeys { ids: Default::default(), ..old.passkeys.clone() };
         self.clock.cfg = old.clock.cfg.clone();
         if let Some(dir) = old.downloads_dir.clone() {
             let _ = self.set_downloads_dir(&dir);
@@ -3872,6 +4066,7 @@ impl BrowserSession {
         for page in &pages {
             self.apply_overrides(page);
             self.apply_init_scripts(page);
+            self.apply_passkeys(page, &[]);
         }
         self.pages = pages;
     }

@@ -237,6 +237,24 @@ pub const EXAMPLES: &[Help] = &[
     ),
     ("title", &[("navigera -s s title", "")], &[]),
     (
+        "passkey",
+        &[
+            ("navigera -s s passkey on", "before the page asks to create or use a passkey"),
+            ("navigera -s s passkey list", "the passkeys the page made, without their private keys"),
+            ("navigera -s s state save auth.json", "keeps them too: `state load auth.json` signs in again later"),
+            ("navigera -s s passkey verify off", "the next ceremony fails as a wrong fingerprint would"),
+        ],
+        &[
+            ("on", "a virtual authenticator in every tab and in tabs opened later; a phone's or laptop's own (internal) with discoverable passkeys and user verification"),
+            ("--authenticator usb|nfc|ble|hybrid", "on: a security key (usb, nfc, ble) or a phone (hybrid) instead of the device's own"),
+            ("--no-user-verification", "on: an authenticator with no fingerprint or PIN"),
+            ("--no-resident-key", "on: passkeys the site must name (no username-less sign-in)"),
+            ("load <file.json>", "add passkeys: one, a list, or a state file's credentials (Playwright's shape works)"),
+            ("remove <id> | clear", "one passkey, or all of them"),
+            ("off", "no authenticator, and its passkeys gone"),
+        ],
+    ),
+    (
         "vitals",
         &[
             ("navigera -s s vitals", "after the page loaded, and again after the clicks whose INP you want"),
