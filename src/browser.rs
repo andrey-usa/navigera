@@ -106,6 +106,26 @@ pub(crate) fn chrome_flags() -> Vec<String> {
     merge_feature_flags(flags)
 }
 
+/// What a headless launch turns off besides [`CHROME_FLAGS`]: the address
+/// bar's popups. A headless browser shows no address bar, yet each of its
+/// windows (one per browser context, so one per `reset`) loaded Chrome's
+/// WebUI omnibox popup and its AI-mode page into a renderer of their own,
+/// about 100 MiB and a page load each. Without them, 24 TodoMVC scenarios
+/// through bitti (a context each) took 7.9 -> 6.8 s, 17.8 -> 11.3 s of CPU
+/// and a browser peak of 890 -> 750 MiB (medians of 5). A visible browser
+/// keeps them: its address bar is there for the user.
+const HEADLESS_DISABLED_FEATURES: &str = "--disable-features=WebUIOmniboxPopup,WebUIOmniboxAimPopup";
+
+/// [`chrome_flags`] for a launch of navigera's own, headless or not.
+pub(crate) fn launch_flags(headless: bool) -> Vec<String> {
+    let mut flags = chrome_flags();
+    if headless {
+        flags.push(HEADLESS_DISABLED_FEATURES.into());
+        flags = merge_feature_flags(flags);
+    }
+    flags
+}
+
 /// One `--enable-features` and one `--disable-features` holding every
 /// feature the flags name: Chrome keeps only the last of each, so a feature
 /// added through `NAVIGERA_EXTRA_FLAGS` would otherwise drop navigera's own.
@@ -663,7 +683,7 @@ fn launch_chrome(
         }
         Ok(browser)
     };
-    let mut flags = chrome_flags();
+    let mut flags = launch_flags(headless);
     if natural() {
         flags.extend(natural_flags(&exe, headless)?);
     }
@@ -3892,6 +3912,17 @@ mod tests {
         );
         assert!(chrome_flags().iter().filter(|f| f.starts_with("--enable-features=")).count() == 1);
         assert!(chrome_flags().iter().any(|f| f.starts_with("--enable-features=") && f.contains("WebMCP")));
+    }
+
+    #[test]
+    fn a_headless_launch_leaves_out_the_address_bar_popups_in_the_one_feature_list() {
+        let off: Vec<String> =
+            launch_flags(true).into_iter().filter(|f| f.starts_with("--disable-features=")).collect();
+        assert_eq!(off.len(), 1, "{off:?}");
+        for name in ["WebUIOmniboxPopup", "WebUIOmniboxAimPopup", "site-per-process", "Translate"] {
+            assert!(off[0].split(['=', ',']).any(|n| n == name), "{name} in {off:?}");
+        }
+        assert!(!launch_flags(false).iter().any(|f| f.contains("WebUIOmnibox")));
     }
 
     #[test]

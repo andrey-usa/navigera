@@ -121,7 +121,7 @@ impl Spec {
     /// The launch key: a hash of everything that makes two browsers differ.
     fn key(&self) -> String {
         let mut text = format!("{}\n{}\n{}\n{}\n", env!("CARGO_PKG_VERSION"), self.exe, self.headless, self.natural);
-        for flag in crate::browser::chrome_flags() {
+        for flag in crate::browser::launch_flags(self.headless) {
             text.push_str(&flag);
             text.push('\n');
         }

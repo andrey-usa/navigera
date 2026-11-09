@@ -43,6 +43,11 @@ All notable changes to this project are documented here. The format follows
   browser's peak 1,088 -> 883 MiB (median of 5), in the same time. A
   browser navigera attached to (your own, an Electron app) keeps the old
   order, so its window is never left with no tab.
+- A headless browser navigera starts no longer loads the address bar's
+  popups (`chrome://omnibox-popup.top-chrome/` and its AI-mode page). It
+  shows no address bar, yet each window, and so each browser context
+  and each `reset`, loaded them into a renderer of their own. A
+  visible browser keeps them.
 
 ## [0.10.0] - 2026-11-07
 
