@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-09
+
 ### Added
 
 - `screencast start <dir> [--quality] [--size <w>x<h>]` and `screencast
