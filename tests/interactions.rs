@@ -937,6 +937,91 @@ fn reset_starts_clean_in_the_same_browser() {
     assert_eq!(s.ok(&["tab-list"])["tabs"].as_array().map(Vec::len), Some(1));
 }
 
+/// The browser's own list of targets (`/json/list` on its debugging port):
+/// (type, url) of each.
+fn browser_targets(port: u16) -> Vec<(String, String)> {
+    use std::io::{Read, Write};
+    let Ok(mut c) = std::net::TcpStream::connect(("127.0.0.1", port)) else { return Vec::new() };
+    let _ = c.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    // HTTP/1.1 (Chrome's debugging server leaves a 1.0 request unanswered),
+    // and read to the length it gives: it keeps the connection open.
+    let _ = c.write_all(format!("GET /json/list HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes());
+    let mut got = Vec::new();
+    let mut buf = [0u8; 8192];
+    let body = loop {
+        let Ok(n) = c.read(&mut buf) else { return Vec::new() };
+        if n == 0 {
+            return Vec::new();
+        }
+        got.extend_from_slice(&buf[..n]);
+        let text = String::from_utf8_lossy(&got);
+        let Some((head, body)) = text.split_once("\r\n\r\n") else { continue };
+        let len = head
+            .lines()
+            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>()))
+            .and_then(Result::ok)
+            .unwrap_or(0);
+        if body.len() >= len {
+            break body.to_string();
+        }
+    };
+    let list: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    list.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|t| (t["type"].as_str().unwrap_or_default().into(), t["url"].as_str().unwrap_or_default().into()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A scenario runner resets between tests; each reset used to open the new
+/// tab before closing the old one, so both pages' renderers were alive at
+/// once, and each new context loaded the address bar's popups into a
+/// renderer of their own in a browser that shows no address bar. Both were
+/// the peak of a test run's memory. Watched from the browser's side.
+#[test]
+fn a_reset_never_has_two_pages_and_a_headless_browser_loads_no_address_bar() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let name = std::env::temp_dir()
+        .join(format!("nv-interactions-twopages-{}.sock", std::process::id()))
+        .display()
+        .to_string();
+    let start = Command::new(tool_exe())
+        .args(["--session", &name, "start"])
+        .env("NAVIGERA_EXTRA_FLAGS", format!("--remote-debugging-port={port}"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+    let s = Session { name, _downloads: None };
+    s.ok(&["goto", &format!("{}/effects", site.url)]);
+    let pages = |t: &[(String, String)]| t.iter().filter(|(kind, _)| kind == "page").count();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watch = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut most = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                most = most.max(pages(&browser_targets(port)));
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            most
+        })
+    };
+    for _ in 0..5 {
+        s.ok(&["reset"]);
+        s.ok(&["goto", &format!("{}/effects", site.url)]);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(watch.join().unwrap(), 1, "a reset had the old and the new tab open at once");
+    let targets = browser_targets(port);
+    assert_eq!(pages(&targets), 1, "{targets:?}");
+    let ui: Vec<_> = targets.iter().filter(|(kind, url)| kind != "page" && url.contains("omnibox")).collect();
+    assert!(ui.is_empty(), "a headless browser loaded the address bar's popups: {ui:?}");
+}
+
 #[test]
 fn the_mouse_goes_where_it_is_told_on_a_canvas() {
     let (true, Some(site)) = (chrome(), site()) else { return };
