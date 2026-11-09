@@ -428,17 +428,20 @@ fn emulation() {
             a.ok(&["goto", &format!("{}/form", site.base)]);
             assert!(started.elapsed() >= std::time::Duration::from_millis(1900), "{:?}", started.elapsed());
             a.ok(&["set", "network", "off"]);
-            // The same work, unthrottled then six times slower: the busiest
-            // of two runs each way, so a loaded machine's pause can't decide it.
-            let busy = "(() => { const t = performance.now(); let x = 0; for (let i = 0; i < 2e7; i++) x += i % 7; return performance.now() - t; })()";
+            // The same work, unthrottled then six times slower: the quickest
+            // of two runs each way, so a loaded machine's pause can't decide
+            // it. Chrome throttles by pausing the main thread in slices, so
+            // a short loop comes out between 2x and 9x; the bounds only say
+            // that it slowed down and came back.
+            let busy = "(() => { const t = performance.now(); let x = 0; for (let i = 0; i < 5e7; i++) x += i % 7; return performance.now() - t; })()";
             let ms = |a: &Agent| (0..2).map(|_| a.ok(&["eval", busy]).as_f64().unwrap()).fold(f64::MAX, f64::min);
             let plain = ms(&a);
             assert_eq!(a.ok(&["set", "cpu", "6"]), serde_json::json!({"cpu": 6.0}));
             let slow = ms(&a);
-            assert!(slow > plain * 2.5, "[{engine}] set cpu 6: {plain:.0} ms -> {slow:.0} ms");
+            assert!(slow > plain * 1.8, "[{engine}] set cpu 6: {plain:.0} ms -> {slow:.0} ms");
             assert_eq!(a.ok(&["set", "cpu", "off"]), serde_json::json!({"cpu": "default"}));
             let back = ms(&a);
-            assert!(back < slow / 2.0, "[{engine}] set cpu off: {slow:.0} ms -> {back:.0} ms");
+            assert!(back * 1.5 < slow, "[{engine}] set cpu off: {slow:.0} ms -> {back:.0} ms");
             a.ok(&["set", "media", "dark"]);
             assert_eq!(a.ok(&["eval", "matchMedia('(prefers-color-scheme: dark)').matches"]), true);
             a.ok(&["set", "timezone", "Asia/Tokyo"]);
