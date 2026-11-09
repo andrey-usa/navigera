@@ -204,10 +204,14 @@ pub const CLOCK_JS: &str = r#"(cfg) => {
         runFor(ms) { const fired = runTo(mono() + ms, false); return Object.assign(state(), { fired }); },
         fastForward(ms) { const fired = runTo(mono() + ms, true); return Object.assign(state(), { fired }); },
         pauseAt(t) {
+            // Stopped first: a flowing clock paused after the run picked up
+            // the real milliseconds that went by meanwhile (01:00:00.001
+            // for a pause at 01:00, on a slow runner).
+            hold(); k.paused = true;
             const at = parse(t) - k.skew;
             let fired = 0;
-            if (at > mono()) fired = runTo(at, false); else { hold(); k.skew = parse(t) - k.mono; }
-            hold(); k.paused = true; schedule();
+            if (at > k.mono) fired = runTo(at, false); else k.skew = parse(t) - k.mono;
+            schedule();
             return Object.assign(state(), { fired });
         },
         resume() { hold(); k.paused = false; schedule(); return state(); },
