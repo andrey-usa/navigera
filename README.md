@@ -5,6 +5,7 @@
 [![Crates.io](https://img.shields.io/crates/v/navigera.svg)](https://crates.io/crates/navigera)
 [![PyPI](https://img.shields.io/pypi/v/navigera.svg)](https://pypi.org/project/navigera/)
 [![npm](https://img.shields.io/npm/v/navigera.svg)](https://www.npmjs.com/package/navigera)
+[![Documentation](https://img.shields.io/badge/documentation-site-blue.svg)](https://andrey-usa.github.io/navigera/)
 
 **`navigera`** is extremely fast browser automation for AI agents, driven
 from the shell, one command per step. It is a single native binary (Rust,
