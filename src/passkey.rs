@@ -50,8 +50,9 @@ pub fn options(transport: Option<&str>, user_verification: bool, resident_key: b
     }))
 }
 
-/// Bytes from base64 in either alphabet, padded or not.
-fn unbase64(s: &str) -> Result<Vec<u8>> {
+/// Bytes from base64 in either alphabet, padded or not. A failure names
+/// the field (`what`) and never the value: it may be a private key.
+fn unbase64(s: &str, what: &str) -> Result<Vec<u8>> {
     let url: String = s
         .trim()
         .trim_end_matches('=')
@@ -64,7 +65,7 @@ fn unbase64(s: &str) -> Result<Vec<u8>> {
         .collect();
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(url.as_bytes())
-        .map_err(|e| anyhow::anyhow!("not base64 ({e}): {}", s.chars().take(24).collect::<String>()))
+        .map_err(|_| anyhow::anyhow!("the passkey's {what} is not base64 (A-Z, a-z, 0-9 and +/ or -_)"))
 }
 
 fn url64(b: &[u8]) -> String {
@@ -90,7 +91,7 @@ pub fn public_key(pkcs8: &[u8]) -> Option<Vec<u8>> {
 
 /// Chrome's `WebAuthn.Credential` as Playwright's credential object.
 pub fn to_portable(c: &Value) -> Result<Value> {
-    let bytes = |k: &str| c[k].as_str().map(unbase64).transpose();
+    let bytes = |k: &str| c[k].as_str().map(|v| unbase64(v, k)).transpose();
     let private = bytes("privateKey")?.unwrap_or_default();
     let mut out = json!({
         "id": url64(&bytes("credentialId")?.unwrap_or_default()),
@@ -119,14 +120,14 @@ pub fn from_portable(c: &Value) -> Result<Value> {
         bail!("a passkey needs id, rpId and privateKey (as `state save` or Playwright's credentials.get() write them)");
     };
     let mut out = json!({
-        "credentialId": std64(&unbase64(id)?),
+        "credentialId": std64(&unbase64(id, "id")?),
         "rpId": rp,
-        "privateKey": std64(&unbase64(key)?),
+        "privateKey": std64(&unbase64(key, "privateKey")?),
         "signCount": c["signCount"].as_u64().unwrap_or(0),
         "isResidentCredential": c["discoverable"] != false && c["isResidentCredential"] != false,
     });
     if let Some(h) = get("userHandle") {
-        out["userHandle"] = json!(std64(&unbase64(h)?));
+        out["userHandle"] = json!(std64(&unbase64(h, "userHandle")?));
     }
     for k in ["userName", "userDisplayName"] {
         if let Some(v) = get(k) {
@@ -196,7 +197,7 @@ mod tests {
     fn a_credential_round_trips_through_the_portable_shape() {
         let chrome = json!({
             "credentialId": "q83v", "isResidentCredential": true, "rpId": "localhost",
-            "privateKey": std64(&unbase64(KEY).unwrap()), "userHandle": "dXNlcg==", "signCount": 3,
+            "privateKey": std64(&unbase64(KEY, "privateKey").unwrap()), "userHandle": "dXNlcg==", "signCount": 3,
             "userName": "ada@example.com"
         });
         let p = to_portable(&chrome).unwrap();
@@ -205,7 +206,7 @@ mod tests {
             (Some("q83v"), Some("dXNlcg"), Some(3))
         );
         assert_eq!(p["userName"], "ada@example.com");
-        let spki = unbase64(p["publicKey"].as_str().unwrap()).unwrap();
+        let spki = unbase64(p["publicKey"].as_str().unwrap(), "publicKey").unwrap();
         assert_eq!((spki.len(), spki[0], spki[26]), (91, 0x30, 0x04), "SPKI DER of an uncompressed P-256 point");
         let back = from_portable(&p).unwrap();
         for k in ["credentialId", "rpId", "privateKey", "userHandle", "signCount", "isResidentCredential"] {
@@ -221,6 +222,10 @@ mod tests {
         assert_eq!(read_file(&json!([one, one])).unwrap().len(), 2);
         assert_eq!(read_file(&json!({"cookies": [], "credentials": [one]})).unwrap()[0]["rpId"], "a.test");
         assert!(read_file(&json!({"id": "q83v"})).unwrap_err().to_string().contains("needs id, rpId and privateKey"));
+        // A malformed key is named, never shown: it is a secret.
+        let bad = read_file(&json!({"id": "q83v", "rpId": "a.test", "privateKey": "SECRETSECRET!!"})).unwrap_err();
+        let msg = format!("{bad:#}");
+        assert!(msg.contains("privateKey is not base64") && !msg.contains("SECRET") && !msg.contains('!'), "{msg}");
     }
 
     #[test]

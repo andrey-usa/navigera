@@ -104,7 +104,8 @@ fn base32(s: &str) -> Result<Vec<u8>> {
         let v = match c.to_ascii_uppercase() {
             c @ 'A'..='Z' => c as u32 - 'A' as u32,
             c @ '2'..='7' => c as u32 - '2' as u32 + 26,
-            _ => bail!("the key is not base32 (A-Z, 2-7): {c:?}"),
+            // The offending character is part of the secret: not shown.
+            _ => bail!("the key is not base32 (letters A-Z and digits 2-7)"),
         };
         acc = (acc << 5) | v;
         bits += 5;
@@ -220,7 +221,8 @@ mod tests {
         assert_eq!(uri.key, b"1234567890");
         assert!(Totp::parse("otpauth://hotp/x?secret=GEZD").unwrap_err().to_string().contains("only time-based"));
         assert!(Totp::parse("otpauth://totp/x?secret=GEZDGNBV&algorithm=SHA256").is_err());
-        assert!(Totp::parse("not base32!").is_err());
+        let bad = Totp::parse("JBSWY3DP!").unwrap_err().to_string();
+        assert!(bad.contains("not base32") && !bad.contains('!'), "the secret's characters never show: {bad}");
         assert!(Totp::parse("otpauth://totp/x?issuer=Shop").is_err());
     }
 }

@@ -54,6 +54,13 @@ All notable changes to this project are documented here. The format follows
   Chrome DevTools) runs the page's main thread that many times slower in
   every tab, to measure or test as a phone would. `set cpu off` undoes it.
 
+### Security
+
+- A malformed passkey (`passkey load`, `state load`) or authenticator
+  key (`totp`) is reported by the field it is in, never by any part of
+  its value: an error message no longer carries characters of a private
+  key or a TOTP secret.
+
 ## [0.10.1] - 2026-11-09
 
 ### Added
