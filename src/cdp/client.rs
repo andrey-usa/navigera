@@ -636,16 +636,68 @@ fn text_result(text: &str, pending: &Mutex<Pending>) -> Option<(u64, String)> {
     if !pending.lock().unwrap().values().any(|(_, text, _)| *text) {
         return None;
     }
-    #[derive(serde::Deserialize)]
-    struct Answer<'a> {
-        id: Option<u64>,
-        #[serde(borrow)]
-        result: Option<&'a serde_json::value::RawValue>,
+    let (id, result) = match result_span(text) {
+        Some((id, span)) => (id, &text[span]),
+        None => {
+            #[derive(serde::Deserialize)]
+            struct Answer<'a> {
+                id: Option<u64>,
+                #[serde(borrow)]
+                result: Option<&'a serde_json::value::RawValue>,
+            }
+            let answer: Answer = serde_json::from_str(text).ok()?;
+            (answer.id?, answer.result?.get())
+        }
+    };
+    matches!(pending.lock().unwrap().get(&id), Some((_, true, _))).then(|| (id, result.to_string()))
+}
+
+/// The id of an answer laid out as Chrome writes one,
+/// `{"id":<n>,"result":{…}…}`, and where its result is, found without
+/// reading the result as JSON: a capture is megabytes, and reading it here
+/// only to find its end cost half as much as the caller's own read of it.
+/// None for any other layout (an error, an event, another writer's key
+/// order), which is then read as JSON.
+fn result_span(text: &str) -> Option<(u64, std::ops::Range<usize>)> {
+    let after_id = text.strip_prefix("{\"id\":")?;
+    let digits = after_id.bytes().take_while(u8::is_ascii_digit).count();
+    let id = after_id[..digits].parse().ok()?;
+    let result = after_id[digits..].strip_prefix(",\"result\":")?;
+    let start = text.len() - result.len();
+    Some((id, start..start + object_len(result.as_bytes())?))
+}
+
+/// The length of the JSON object `text` starts with, by matching its
+/// braces outside strings. Not a validation: the caller reads the result as
+/// JSON. None when `text` doesn't start with an object that closes.
+fn object_len(text: &[u8]) -> Option<usize> {
+    if text.first() != Some(&b'{') {
+        return None;
     }
-    let answer: Answer = serde_json::from_str(text).ok()?;
-    let id = answer.id?;
-    let result = answer.result?;
-    matches!(pending.lock().unwrap().get(&id), Some((_, true, _))).then(|| (id, result.get().to_string()))
+    let mut depth = 0usize;
+    let mut at = 0;
+    loop {
+        at += memchr::memchr3(b'{', b'}', b'"', text.get(at..)?)?;
+        match text[at] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+            }
+            // A string: on to its closing quote, past escaped characters.
+            _ => loop {
+                at += 1;
+                at += memchr::memchr2(b'"', b'\\', text.get(at..)?)?;
+                if text[at] == b'"' {
+                    break;
+                }
+                at += 1;
+            },
+        }
+        at += 1;
+    }
 }
 
 fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Value>, sent: &AtomicU64, raw: &RawTap) {
@@ -792,6 +844,65 @@ mod tests {
         assert_eq!(eval.unwrap()["result"]["value"], 2);
         assert!(format!("{:#}", failed.unwrap_err()).contains("refused"));
         assert_eq!(events.recv().await.unwrap()["method"], "Page.loadEventFired");
+    }
+
+    /// The result found by matching braces is the one a JSON read finds,
+    /// whatever its strings hold (braces, quotes, escapes); a layout that
+    /// isn't Chrome's, or a result that never closes, is left to the read.
+    #[test]
+    fn a_result_found_by_its_braces_is_the_json_result() {
+        fn read(text: &str) -> Option<(u64, String)> {
+            #[derive(serde::Deserialize)]
+            struct Answer<'a> {
+                id: u64,
+                #[serde(borrow)]
+                result: &'a serde_json::value::RawValue,
+            }
+            let a: Answer = serde_json::from_str(text).ok()?;
+            Some((a.id, a.result.get().to_string()))
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        const PIECES: [&str; 10] = ["{", "}", "\"", "\\", "\\\"", "a", "é", "\n", "}\"}", ""];
+        fn value(next: &mut dyn FnMut(u64) -> u64, depth: u32) -> Value {
+            match next(if depth > 3 { 3 } else { 5 }) {
+                0 => json!(next(1000)),
+                1 => Value::String((0..next(6)).map(|_| PIECES[next(10) as usize]).collect()),
+                2 => Value::Null,
+                3 => Value::Array((0..next(4)).map(|_| value(next, depth + 1)).collect()),
+                _ => Value::Object(
+                    (0..next(4))
+                        .map(|_| ((0..next(3)).map(|_| PIECES[next(10) as usize]).collect(), value(next, depth + 1)))
+                        .collect(),
+                ),
+            }
+        }
+        for _ in 0..2000 {
+            let result = json!({ "strings": value(&mut next, 0), "documents": value(&mut next, 0) });
+            let id = next(1 << 40);
+            for text in [
+                format!("{{\"id\":{id},\"result\":{result}}}"),
+                format!("{{\"id\":{id},\"result\":{result},\"sessionId\":\"9A0F\"}}"),
+            ] {
+                let (got, span) = result_span(&text).expect("Chrome's layout");
+                assert_eq!(Some((got, text[span].to_string())), read(&text), "{text}");
+            }
+        }
+        for other in [
+            "{\"id\":7,\"error\":{\"code\":-32000,\"message\":\"}\"}}",
+            "{\"method\":\"Page.loadEventFired\",\"params\":{}}",
+            "{\"result\":{},\"id\":7}",
+            "{\"id\":7,\"result\":{\"a\":\"}",
+            "{\"id\":7,\"result\":{\"a\":\"\\",
+            "{\"id\":,\"result\":{}}",
+        ] {
+            assert_eq!(result_span(other), None, "{other}");
+        }
     }
 
     /// A request with no answer leaves its effect unproven, so a crash
