@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `vitals`: the current page's web vitals as the browser measured them,
+  read from its own performance entries with nothing injected
+  beforehand. LCP, FCP, TTFB and load in ms, CLS, and INP (the slowest
+  interaction, one in 50 left out as Google counts it), each rated
+  `good`, `needs-improvement` or `poor` by Google's thresholds, with the
+  element behind LCP, CLS and INP as a CSS selector: what to fix. Chrome
+  keeps only interactions of 104 ms or more, so when every interaction
+  was quicker `inp` is `null` and `inp_under_ms` is 104.
+- `set cpu <slowdown>` (`set cpu 4`; `mid-tier` is 4, `low-end` 6, as in
+  Chrome DevTools) runs the page's main thread that many times slower in
+  every tab, to measure or test as a phone would. `set cpu off` undoes it.
+
 ## [0.10.1] - 2026-11-09
 
 ### Added

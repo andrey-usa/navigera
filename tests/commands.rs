@@ -279,6 +279,40 @@ fn drag_drops_a_card_and_moves_a_slider() {
 }
 
 #[test]
+fn vitals() {
+    // A heading painted at once, a paragraph that pushes it down later, a
+    // quick button and one whose handler keeps the page busy for 250 ms.
+    let page = "data:text/html,<h1 id=t>Hello</h1><button id=slow onclick=\"let t=performance.now();while(performance.now()-t<250){}\">slow</button><button id=quick>quick</button><script>setTimeout(()=>{const p=document.createElement('p');p.style.height='300px';document.body.prepend(p)},200)</script>";
+    for (engine, bin) in engines() {
+        let a = Agent::new("vitals", engine, bin);
+        a.ok(&["goto", page]);
+        if engine == "lightpanda" {
+            assert!(a.err(&["vitals"]).contains("no web vitals"), "[{engine}]");
+            continue;
+        }
+        a.ok(&["wait", "--ms", "500"]);
+        let v = a.ok(&["vitals"]);
+        assert!(v["lcp"].as_f64().is_some_and(|n| n > 0.0), "{v}");
+        assert_eq!(v["lcp_element"], "#t", "{v}");
+        assert!(v["fcp"].is_number() && v["ttfb"].is_number() && v["load"].is_number(), "{v}");
+        assert!(v["cls"].as_f64().is_some_and(|n| n > 0.01), "the paragraph moved the page: {v}");
+        assert!(v["cls_elements"].as_array().is_some_and(|m| m.contains(&"#t".into())), "{v}");
+        assert_eq!((v["interactions"].as_u64(), v["inp"].is_null()), (Some(0), true), "{v}");
+        assert!(v["rating"].get("inp").is_none() && v["rating"]["lcp"] == "good", "{v}");
+        a.ok(&["click", "--selector", "#quick"]);
+        let v = a.ok(&["vitals"]);
+        assert!(v["interactions"].as_u64() >= Some(1), "{v}");
+        // Quicker than the browser keeps (104 ms), unless the machine is slow.
+        assert!(v["inp"].as_f64().is_some_and(|n| n < 250.0) || v["inp_under_ms"] == 104.0, "{v}");
+        a.ok(&["click", "--selector", "#slow"]);
+        let v = a.ok(&["vitals"]);
+        assert!(v["inp"].as_f64().is_some_and(|n| n >= 250.0), "{v}");
+        assert_eq!((v["inp_element"].as_str(), v["inp_event"].as_str()), (Some("#slow"), Some("click")), "{v}");
+        assert_ne!(v["rating"]["inp"], "good", "{v}");
+    }
+}
+
+#[test]
 fn emulation() {
     let Some(site) = edge_site() else { return };
     for (engine, bin) in engines() {
@@ -303,6 +337,17 @@ fn emulation() {
             a.ok(&["goto", &format!("{}/form", site.base)]);
             assert!(started.elapsed() >= std::time::Duration::from_millis(1900), "{:?}", started.elapsed());
             a.ok(&["set", "network", "off"]);
+            // The same work, unthrottled then six times slower: the busiest
+            // of two runs each way, so a loaded machine's pause can't decide it.
+            let busy = "(() => { const t = performance.now(); let x = 0; for (let i = 0; i < 2e7; i++) x += i % 7; return performance.now() - t; })()";
+            let ms = |a: &Agent| (0..2).map(|_| a.ok(&["eval", busy]).as_f64().unwrap()).fold(f64::MAX, f64::min);
+            let plain = ms(&a);
+            assert_eq!(a.ok(&["set", "cpu", "6"]), serde_json::json!({"cpu": 6.0}));
+            let slow = ms(&a);
+            assert!(slow > plain * 2.5, "[{engine}] set cpu 6: {plain:.0} ms -> {slow:.0} ms");
+            assert_eq!(a.ok(&["set", "cpu", "off"]), serde_json::json!({"cpu": "default"}));
+            let back = ms(&a);
+            assert!(back < slow / 2.0, "[{engine}] set cpu off: {slow:.0} ms -> {back:.0} ms");
             a.ok(&["set", "media", "dark"]);
             assert_eq!(a.ok(&["eval", "matchMedia('(prefers-color-scheme: dark)').matches"]), true);
             a.ok(&["set", "timezone", "Asia/Tokyo"]);
@@ -321,6 +366,7 @@ fn emulation() {
             assert!(a.err(&["set", "media", "dark"]).contains("does not emulate"));
             assert!(a.err(&["set", "timezone", "Asia/Tokyo"]).contains("at launch only"));
             assert!(a.err(&["set", "offline", "on"]).contains("does not emulate going offline"));
+            assert!(a.err(&["set", "cpu", "4"]).contains("does not emulate a slower CPU"));
             a.ok(&["set", "offline", "off"]);
             assert!(a.ok(&["set", "device", "Pixel 8"])["note"].as_str().unwrap().contains("viewport only"));
         }

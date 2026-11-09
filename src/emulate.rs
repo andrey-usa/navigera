@@ -167,6 +167,7 @@ fn lightpanda_refuses(what: &str, values: &[String]) -> Option<String> {
         "media" => Some("the lightpanda engine does not emulate media features (prefers-color-scheme, print)".into()),
         "offline" => Some("the lightpanda engine does not emulate going offline".into()),
         "network" | "throttle" => Some("the lightpanda engine does not emulate network speeds".into()),
+        "cpu" => Some("the lightpanda engine does not emulate a slower CPU".into()),
         "locale" | "timezone" | "tz" => Some(format!(
             "the lightpanda engine takes its {what} at launch only (`lightpanda serve --{}`)",
             if what == "locale" { "locale" } else { "timezone" }
@@ -410,6 +411,27 @@ pub fn plan(
                 },
             }
         }
+        "cpu" => {
+            // Chrome DevTools' presets: a mid-tier phone is about 4 times
+            // slower than a laptop, a low-end one about 6 times.
+            let rate = match first.to_ascii_lowercase().as_str() {
+                "" => bail!("set cpu <how many times slower, e.g. 4> | mid-tier | low-end (or `off`)"),
+                f if off(f) => 1.0,
+                "mid-tier" | "mid-tier-mobile" | "mid" => 4.0,
+                "low-end" | "low-end-mobile" | "low" => 6.0,
+                f => num(f.trim_end_matches('x'), "cpu: the slowdown (4 means four times slower)")?,
+            };
+            if !(1.0..=100.0).contains(&rate) {
+                bail!("set cpu: a slowdown from 1 (none) to 100, as in `set cpu 4`; got {first:?}");
+            }
+            Plan {
+                kind: "cpu",
+                calls: if rate == 1.0 { vec![] } else { vec![("Emulation.setCPUThrottlingRate", json!({ "rate": rate }))] },
+                reset: vec![("Emulation.setCPUThrottlingRate", json!({ "rate": 1 }))],
+                grant: None,
+                result: if rate == 1.0 { json!({ "cpu": "default" }) } else { json!({ "cpu": rate }) },
+            }
+        }
         "headers" | "header" => {
             if off(first) {
                 return Ok(Plan {
@@ -493,7 +515,7 @@ pub fn plan(
                 result: json!({ "timezone": if off(first) { "default" } else { first } }),
             }
         }
-        other => bail!("set: unknown setting {other:?}; settings: viewport, device, media, geo, offline, network, headers, ua, locale, timezone"),
+        other => bail!("set: unknown setting {other:?}; settings: viewport, device, media, geo, offline, network, cpu, headers, ua, locale, timezone"),
     })
 }
 
@@ -555,6 +577,18 @@ mod tests {
         assert!(plan("network", &v(&["off"]), None, false, None, false).unwrap().calls.is_empty());
         assert!(plan("network", &v(&["warp"]), None, false, None, false).is_err());
         assert!(plan("network", &v(&["slow-3g"]), None, false, None, true).is_err());
+        let p = plan("cpu", &v(&["4"]), None, false, None, false).unwrap();
+        assert_eq!(
+            (p.kind, p.calls[0].0, p.calls[0].1["rate"].as_f64()),
+            ("cpu", "Emulation.setCPUThrottlingRate", Some(4.0))
+        );
+        assert_eq!(plan("cpu", &v(&["low-end"]), None, false, None, false).unwrap().result, json!({"cpu": 6.0}));
+        assert_eq!(plan("cpu", &v(&["2.5x"]), None, false, None, false).unwrap().result, json!({"cpu": 2.5}));
+        let p = plan("cpu", &v(&["off"]), None, false, None, false).unwrap();
+        assert!(p.calls.is_empty() && p.reset[0].1["rate"] == 1, "off undoes it");
+        assert!(plan("cpu", &v(&["0.5"]), None, false, None, false).is_err());
+        assert!(plan("cpu", &v(&["fast"]), None, false, None, false).is_err());
+        assert!(plan("cpu", &v(&["4"]), None, false, None, true).is_err());
         let p = plan("media", &v(&["dark", "print"]), None, false, None, false).unwrap();
         assert_eq!(p.calls[0].1["media"], "print");
         assert_eq!(p.calls[0].1["features"][0]["value"], "dark");

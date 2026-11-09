@@ -457,6 +457,10 @@ pub enum Command {
     /// Page title.
     #[serde(rename = "title")]
     Title {},
+    /// The current document's web vitals: LCP, FCP, TTFB, load, CLS and
+    /// INP as the browser measured them, rated by Google's thresholds.
+    #[serde(rename = "vitals", alias = "web-vitals")]
+    Vitals {},
     /// Accessibility snapshot: an indented text tree with `[ref=N]` on
     /// actionable nodes (iframes included). `format: "json"` returns the
     /// older flat `[{ref, role, name, value?}]` list (`all: true` = raw).
@@ -1209,6 +1213,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("text", "[--selector <css>]", "textContent of the first match; with no selector, the whole page's text as it reads (innerText)"),
     ("find", "<description>", "the element a description means, chosen by a decision model (set NAVIGERA_DECIDER_KEY; README: Decisions by a fast model); element ops also take --find <description>"),
     ("title", "", "page title"),
+    ("vitals", "", "the page's web vitals as the browser measured them: LCP, FCP, TTFB, load (ms), CLS, INP (the slowest interaction; under 104 ms the browser keeps none), each rated good, needs-improvement or poor, with the elements behind LCP, CLS and INP as selectors"),
     ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
     ("errors", "[--limit <n>] [--clear] [--json]", "only the errors: exceptions, console.error, failed loads"),
     ("network", "[<n>] [--filter <text>] [--type fetch|xhr|document|…] [--failed] [--since <n>] [--limit <n>] [--clear] [--har <file>] [--body-file <file>]", "the active tab's requests, one line each (#n METHOD STATUS type url size time); `network <n>` shows one in full with its response body"),
@@ -1216,7 +1221,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
     ("state", "save|load <file.json>", "every cookie and the open tabs' localStorage to a file, or back (`{cookies, origins}`, the common storage-state format): sign in once, reuse it in later sessions"),
-    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | network slow-3g|fast-3g|4g|<latency ms> <down kbit/s> [<up>] | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password> | permissions grant|deny|reset <name>…  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
+    ("set", "viewport <w> <h> [--scale <dpr>] [--mobile] | device <name> | media dark|light|print|reduced-motion | geo <lat> <lon> | offline on|off | network slow-3g|fast-3g|4g|<latency ms> <down kbit/s> [<up>] | cpu <slowdown>|mid-tier|low-end | headers <Name: value>… | ua <string> | locale <tag> | timezone <zone> | credentials <user> <password> | permissions grant|deny|reset <name>…  (`off` resets)", "emulate a device or network condition in every tab (and in tabs opened later)"),
     ("route", "[<url glob> [--abort | --status <n> [--body <text> | --body-file <f>] [--content-type <t>] [--header 'Name: value'] | --modify [--set-header 'Name: value'] [--replace <from> <to>]]] [--har <f> [--not-found abort|continue]]", "fail, answer, or change the responses of requests whose URL matches (* and ? globs); --har answers from a recorded HAR; no flags = fail; no pattern = list the rules"),
     ("unroute", "[<url glob>]", "remove one route rule, or all"),
     ("clock", "[install [--time <t>] [--paused] | set <t> | run-for <length> | fast-forward <length> | pause-at <t> | resume | uninstall]", "the page's time under your control in every tab: Date, performance.now and timers start at --time (a date, or epoch ms), flow or pause, jump (set), or run forward firing the timers due (run-for 30m; fast-forward fires each once); no action shows it"),
@@ -2352,6 +2357,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             Command::Eval { expression: expression.trim_start_matches('\u{feff}').to_string(), timeout_ms, main }
         }
         "title" => Command::Title {},
+        "vitals" | "web-vitals" => Command::Vitals {},
         "ax" | "snapshot" => Command::Ax {
             max_depth: num_flag(&mut args, "--max-depth")?.map(|v| v as u32),
             all: extract_present(&mut args, "--all").then_some(true),
@@ -2470,7 +2476,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             if !SETTINGS.contains(&what.as_str()) {
                 return invalid(format!(
                     "{op}: unknown setting {what:?}; settings: viewport, device, media, geo, offline, headers, ua, \
-                     locale, timezone, credentials, permissions, network, network-quiet"
+                     locale, timezone, credentials, permissions, network, cpu, network-quiet"
                 ));
             }
             let scale = num_flag(&mut args, "--scale")?;
@@ -4841,6 +4847,13 @@ impl Driver {
                 let title = s.title().map_err(|e| e.context("title"))?;
                 Ok(json!(title))
             }
+            Command::Vitals {} => {
+                if s.is_lightpanda() {
+                    anyhow::bail!("vitals: the lightpanda engine paints nothing, so it has no web vitals to measure");
+                }
+                let v: Value = s.evaluate(crate::vitals::JS).map_err(|e| e.context("vitals"))?;
+                Ok(crate::vitals::finish(v))
+            }
             Command::Ax { max_depth, all, format, limit, refs, scope, timeout_ms, full_text } => {
                 let json_format = match format.as_deref() {
                     // Serve-protocol clients that predate the text tree get
@@ -5637,6 +5650,7 @@ const SETTINGS: &[&str] = &[
     "offline",
     "network",
     "throttle",
+    "cpu",
     "permissions",
     "permission",
     "headers",

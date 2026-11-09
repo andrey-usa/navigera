@@ -22,3 +22,4 @@ pub mod screencast;
 pub mod session;
 pub mod shared;
 pub mod timing;
+pub mod vitals;

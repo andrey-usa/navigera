@@ -237,6 +237,14 @@ pub const EXAMPLES: &[Help] = &[
     ),
     ("title", &[("navigera -s s title", "")], &[]),
     (
+        "vitals",
+        &[
+            ("navigera -s s vitals", "after the page loaded, and again after the clicks whose INP you want"),
+            ("navigera -s s set cpu 4", "first, to measure as a mid-tier phone would"),
+        ],
+        &[],
+    ),
+    (
         "console",
         &[("navigera -s s console", ""), ("navigera -s s console --level error", "")],
         &[
