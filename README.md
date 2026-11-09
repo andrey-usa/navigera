@@ -65,6 +65,22 @@ navigera uses a system Chrome first; with none installed it picks
 chrome-headless-shell (or Chromium) from a Playwright or Puppeteer cache.
 Set `$CHROME_BIN` to choose explicitly.
 
+## Quick start
+
+```console
+$ navigera -s work start
+$ navigera -s work goto https://example.com
+{"title":"Example Domain","url":"https://example.com/"}
+$ navigera -s work title
+Example Domain
+$ navigera -s work quit
+{"bye":true}
+```
+
+One session, one command per step: `start` keeps a warm browser
+behind a local socket, and each later command talks to it.
+`navigera --help` lists every command.
+
 ## Use (agents and people)
 
 ```sh
