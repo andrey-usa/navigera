@@ -48,7 +48,8 @@ All notable changes to this project are documented here. The format follows
   in `vendor/axe-core`), run in an isolated world so the page never sees
   a `window.axe`. The violations by rule, worst first, each with its
   first elements as refs. WCAG 2.0 to 2.2 A and AA by default. The
-  script is stored deflated: 652 KB as 182 KB of the binary.
+  script is stored deflated (652 KB as 182 KB): the release binary grows
+  236 KB, 4.2% (Linux x86_64, 5.67 -> 5.91 MB).
 - `totp <ENV_NAME>`: the current code of a sign-in's authenticator app
   (RFC 6238), from the secret in that environment variable, its base32
   key or the `otpauth://` URI of the site's QR code; never from the
