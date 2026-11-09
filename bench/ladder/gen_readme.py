@@ -1,13 +1,26 @@
 """Regenerate README's '## Benchmarks' section from a ladder publish.json.
 
-Usage: gen_readme.py README.md publish.json ["what the nv-baseline A/B changed"]
-Numbers in README come from a run's publish.json, never retyped."""
+Usage: gen_readme.py README.md publish.json ["what the nv-baseline A/B changed"] [--run ID]
+Numbers in README come from a run's publish.json, never retyped. Each
+generated table's heading is followed by a link to the run: ID from --run,
+else the run_id the ladder recorded in publish.json."""
 import json
 import sys
 
-readme_path, pub_path = sys.argv[1], sys.argv[2]
-change_note = sys.argv[3].strip() if len(sys.argv) > 3 else ""
+args = sys.argv[1:]
+run_arg = None
+if "--run" in args:
+    i = args.index("--run")
+    run_arg = args[i + 1]
+    del args[i:i + 2]
+readme_path, pub_path = args[0], args[1]
+change_note = args[2].strip() if len(args) > 2 else ""
 doc = json.load(open(pub_path))
+run_id = run_arg or doc.get("run_id")
+if not run_id:
+    sys.exit("publish.json records no run_id: pass --run <id> so each table can link its run")
+numbers = (f"Numbers: [bench run {run_id}]"
+           f"(https://github.com/andrey-usa/navigera/actions/runs/{run_id})")
 all_rows = doc["contenders"]
 baseline = next((r for r in all_rows if r["name"] == "nv-baseline"), None)
 ws = next((r for r in all_rows if r["name"] == "nv-ws"), None)
@@ -88,6 +101,8 @@ def best_of(stage):
 
 lines = [
     "## Benchmarks",
+    "",
+    numbers + ".",
     "",
     "Same scripted session (launch → goto listing → title/count/extract evals →",
     "fill+click filter → visible-count eval → screenshot → new tab → goto detail →",
@@ -175,6 +190,8 @@ if rw and br:
     lines += [
         f"### Real-world (public internet, {live_how} of {live_reps}, same run)",
         "",
+        numbers + ".",
+        "",
         f"example.com goto → title check: {rw_ok} of {len(rw)} pass; " + live(rw, "realworld") + ".",
         "",
         f"GitHub browse (awesome-list scroll + trending click-through): {br_ok} of {len(br)} pass; "
@@ -256,6 +273,8 @@ if agent:
     lines += [
         "### Agent tools (scripted, warm session, best of 3)",
         "",
+        numbers + ".",
+        "",
         "How an agent's tool calls drive a browser: CLI tools run one process per",
         "step (a shell tool), MCP servers get one `tools/call` per step over a",
         "persistent connection. Same canonical session plus one page snapshot.",
@@ -298,6 +317,8 @@ if par:
     lines += [
         "### Parallel agents (memory, same run)",
         "",
+        numbers + ".",
+        "",
         "N agents, each with a session of its own (navigera `-s <name>`, agent-browser and",
         "playwright-cli sessions, one MCP server each), all open at once on the listing",
         "after a snapshot. Memory is every process the tool started (browsers, daemons,",
@@ -328,4 +349,4 @@ start = text.index("## Benchmarks")
 end = text.index("## Agent eval") if "## Agent eval" in text else text.index("## Working on this repo")
 text = text[:start] + "\n".join(lines) + "\n" + text[end:]
 open(readme_path, "w").write(text)
-print("README updated from run", doc["run_id"])
+print("README updated from run", run_id)

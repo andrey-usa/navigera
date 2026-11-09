@@ -175,6 +175,12 @@ jobs:
           target: ${{ matrix.target }}
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
       - run: cargo build --release --locked --bin navigera --target ${{ matrix.target }}
+      - name: Binary size against the last release
+        run: |
+          bin=target/${{ matrix.target }}/release/navigera
+          now=$(stat -c %s "$bin")
+          last=$(curl -fsSL "https://github.com/andrey-usa/navigera/releases/download/v0.10.1/navigera-${{ matrix.target }}.tar.gz" | tar -xzO --wildcards '*navigera' | wc -c)
+          echo "size ${{ matrix.target }}: $now B now, $last B in v0.10.1, +$((now - last)) B"
       - name: Smoke test
         run: |
           bin=target/${{ matrix.target }}/release/navigera
