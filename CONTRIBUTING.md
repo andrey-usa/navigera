@@ -93,16 +93,33 @@ Measurement rules the ladder follows:
   `/proc/<pid>/stat`, VmHWM), never `wait4` totals, which include every child
   the driver reaped.
 - Browser numbers cover the whole process tree as PSS.
-- Every number in the README cites the run it came from; regenerate the table
-  from that run's `publish.json` with `bench/ladder/gen_readme.py`.
-  `bench/ladder/fetch_publish.py <run id>` writes that file from the run's
-  notices, with no token and no artifact download.
+- Every benchmark number in the docs cites the run it came from, and none is
+  typed by hand: `bench/ladder/fetch_publish.py <run id>` writes the run's
+  `publish.json` from its notices (no token, no artifact download), then
+  `bench/ladder/gen_readme.py README.md publish.json "<what changed>"
+  --page docs/benchmarks.md --losses docs/losses.md` writes every table to
+  the docs site's Benchmarks pages, the measures another tool won to its
+  losses page, and the headline to the README.
 
 ## Keeping docs in step
 
 When ops or flags change, update `skills/navigera/SKILL.md` (compiled into the
-binary as `navigera skill`), `docs/navigera.md`, `llms.txt` and the `OPS` table
-in `src/protocol.rs` together.
+binary as `navigera skill`), `docs/navigera.md` and the `OPS` table in
+`src/protocol.rs` together.
+
+The docs site (https://andrey-usa.github.io/navigera/) is written by
+`docs-site/build.py` from `docs-site/site.toml`, which says which page comes
+from which source: README sections, `docs/`, the skill, CHANGELOG.md and the
+binary's `--help`. Nothing under `docs-site/src` is edited by hand. The build
+stops on a link to a missing file or heading and on a source section that is
+on no page; `--write` also rewrites the README's Documentation section and
+`llms.txt`, which CI's docs job checks:
+
+```sh
+cargo build --release
+python3 docs-site/build.py --write                    # pages, README's Documentation, llms.txt
+python3 docs-site/build.py --mdbook mdbook            # and the HTML, with every link checked
+```
 
 ## Releasing
 

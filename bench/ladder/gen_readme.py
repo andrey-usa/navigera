@@ -1,18 +1,30 @@
-"""Regenerate README's '## Benchmarks' section from a ladder publish.json.
+"""Write the benchmark docs from a ladder publish.json.
 
-Usage: gen_readme.py README.md publish.json ["what the nv-baseline A/B changed"] [--run ID]
-Numbers in README come from a run's publish.json, never retyped. Each
+Usage: gen_readme.py README.md publish.json ["what the nv-baseline A/B changed"]
+                     [--run ID] [--page PATH [--losses PATH]]
+
+Numbers in the docs come from a run's publish.json, never retyped. Each
 generated table's heading is followed by a link to the run: ID from --run,
-else the run_id the ladder recorded in publish.json."""
+else the run_id the ladder recorded in publish.json.
+
+With --page (docs/benchmarks.md), every table goes to that page, and the
+measures where another tool beat navigera in the run to a section closing
+it, or to the page --losses names (docs/losses.md); README.md's `## Benchmarks` gets the headline: one table of
+the main drivers, the per-call time of the agent tools, the same list of
+losses, and a link to the page. Without it, every table goes to README.md
+(how runs before the docs site were written)."""
 import json
+import re
 import sys
 
 args = sys.argv[1:]
-run_arg = None
-if "--run" in args:
-    i = args.index("--run")
-    run_arg = args[i + 1]
-    del args[i:i + 2]
+opts = {}
+for flag in ("--run", "--page", "--losses"):
+    if flag in args:
+        i = args.index(flag)
+        opts[flag] = args[i + 1]
+        del args[i:i + 2]
+run_arg, page_path, losses_path = opts.get("--run"), opts.get("--page"), opts.get("--losses")
 readme_path, pub_path = args[0], args[1]
 change_note = args[2].strip() if len(args) > 2 else ""
 doc = json.load(open(pub_path))
@@ -348,9 +360,107 @@ for r in exp:
         "",
     ]
 
+
+
+def short(r):
+    """A driver's name for the headline: the tool, its version, and what runs it."""
+    fixed = {"nv-serve": "navigera (Chrome)", "nv-shell": "navigera (chrome-headless-shell)",
+             "gorod": f"go-rod {ver('go-rod', '')} (Go)", "chromey": f"chromey {ver('chromey', '')} (Rust)"}
+    return fixed.get(r["name"]) or NAMES.get(r["name"], r["name"]).replace("`", "")
+
+
+def tool(a):
+    """An agent tool's name and version, without who makes it."""
+    return re.sub(r" \(.*\)$", "", label.get(a["name"], a["name"])).replace("`", "")
+
+
+# What another tool did better than navigera in this run, measure by measure:
+# navigera on Chrome against every other driver on the same Chrome, and
+# navigera against every other agent tool. Lower is better for each.
+losses = []
+others = [r for r in chrome if not r["name"].startswith("nv-")]
+if serve:
+    measures = [
+        ("session wall", lambda r: r["session"]["wall_s"], lambda v: f"{v:.2f} s"),
+        ("cold start (median)", lambda r: mid(r.get("cold")), lambda v: f"{v:.2f} s"),
+        ("warm eval", lambda r: (r.get("eval") or {}).get("mean_ms"), lambda v: f"{v:.2f} ms"),
+        ("the driver's own memory", lambda r: r["session"]["driver_rss_mb"], lambda v: f"{v:.0f} MB"),
+        ("browser memory", lambda r: r["session"]["browser_pss_mb"] or None, lambda v: f"{v:.0f} MB"),
+    ]
+    # Driver CPU is left out: the kernel counts it in 10 ms ticks, so every
+    # native driver's tens of milliseconds are a tie.
+    for what, get, fmt in measures:
+        mine = get(serve)
+        rivals = [(get(r), r) for r in others if get(r) is not None]
+        if mine is None or not rivals:
+            continue
+        v, r = min(rivals, key=lambda t: t[0])
+        if v < mine:
+            losses.append(f"{what}: {short(r)} {fmt(v)}, navigera {fmt(mine)}")
+nav_agent = next((a for a in agent if a["name"] == "navigera" and a.get("wall_s")), None)
+if nav_agent:
+    def kb(key):
+        return lambda a: (a.get(key) or 0) / 1024 or None
+    for what, get, fmt in [
+        ("time per agent tool call", lambda a: a.get("op_mean_ms"), lambda v: f"{v:.0f} ms"),
+        ("snapshot size", kb("snapshot_bytes"), lambda v: f"{v:.0f} KB"),
+        ("1000-row snapshot size", kb("snapshot_b_bytes"), lambda v: f"{v:.0f} KB"),
+    ]:
+        mine = get(nav_agent)
+        rivals = [(get(a), a) for a in agent if not a["name"].startswith("navigera") and a.get("wall_s") and get(a)]
+        if mine is None or not rivals:
+            continue
+        v, a = min(rivals, key=lambda t: t[0])
+        if round(v) < round(mine):
+            losses.append(f"{what}: {tool(a)} {fmt(v)}, navigera {fmt(mine)}")
+loss_text = ("Where another tool did better in this run: " + "; ".join(losses) + "."
+             if losses else "No other tool did better than navigera on any measure in this run.")
+
+if page_path:
+    page = ["# Benchmarks", ""] + [("## " + x[4:]) if x.startswith("### ") else x for x in lines[2:]]
+    lose = [("# " if losses_path else "## ") + "Where navigera is not ahead", "", numbers + ".", "",
+            "Each measure of the benchmarks on which another tool beat navigera in this",
+            "run, from its publish.json: navigera on Chrome against every other driver on",
+            "the same Chrome, and against every other agent tool. Driver CPU is left out:",
+            "the kernel counts it in 10 ms ticks, so every native driver ties.", ""]
+    lose += [f"- {x[0].upper() + x[1:]}." for x in losses] or ["- None in this run."]
+    lose.append("")
+    if losses_path:
+        open(losses_path, "w").write("\n".join(lose))
+    else:
+        page += lose
+    open(page_path, "w").write("\n".join(page))
+    site = "https://andrey-usa.github.io/navigera/benchmarks/results.html"
+    head = ["## Benchmarks", "",
+            f"One scripted session (goto, evals, fill and click, a screenshot, a second",
+            f"tab) driven by each tool against the same headless Chrome, in one CI run",
+            f"({numbers[len('Numbers: '):]}, {date}, GitHub's `ubuntu-latest`); each",
+            "driver's extracted data is checked identical:", "",
+            "| driver | session | cold start | warm eval | its own memory |",
+            "|---|---|---|---|---|"]
+    picks = [r for r in chrome if r["name"] in ("nv-serve", "nv-shell")]
+    picks += [r for r in others if r["name"] in ("gorod", "puppeteer", "playwright", "playwright-bun")]
+    for r in sorted(picks, key=lambda r: r["session"]["wall_s"]):
+        ev = (r.get("eval") or {}).get("mean_ms")
+        head.append(f"| {short(r)} | {r['session']['wall_s']:.2f} s | {mid(r.get('cold')):.2f} s | "
+                    + (f"{ev:.2f} ms" if ev is not None else "—") + f" | {r['session']['driver_rss_mb']:.0f} MB |")
+    head.append("")
+    calls = [a for a in agent if a.get("wall_s") and a["name"] in
+             ("navigera", "agent-browser", "Playwright MCP", "Chrome DevTools MCP", "playwright-cli")]
+    if calls:
+        calls.sort(key=lambda a: a["op_mean_ms"])
+        head += ["Through an agent's tool calls, one step takes "
+                 + ", ".join(f"{a['op_mean_ms']:.0f} ms with {tool(a)}" for a in calls) + " (same run).", ""]
+    head += [loss_text, "",
+             f"Every table, the method and how to rerun it: [Benchmarks]({site}).", ""]
+    lines = head
+
 text = open(readme_path).read()
 start = text.index("## Benchmarks")
-end = text.index("## Agent eval") if "## Agent eval" in text else text.index("## Working on this repo")
+rest = text.find("\n## ", start + 1)
+if not page_path:
+    rest = text.index("## Agent eval") - 1 if "## Agent eval" in text else text.index("## Working on this repo") - 1
+end = rest + 1 if rest >= 0 else len(text)
 text = text[:start] + "\n".join(lines) + "\n" + text[end:]
 open(readme_path, "w").write(text)
-print("README updated from run", run_id)
+print("README" + "".join(f", {p}" for p in (page_path, losses_path) if p) + " updated from run", run_id)
