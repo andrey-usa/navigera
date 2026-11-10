@@ -1,8 +1,9 @@
 name: Deploy docs to GitHub Pages
 
-# Every page is generated from its source (README.md, docs/, the skill and
-# `navigera --help`) by docs-site/build.py, so any push to master can change
-# the site.
+# docs-site/build.py writes every page of the site from its source (README.md,
+# docs/, the skill, CHANGELOG.md and the binary's --help), checks every link
+# and anchor in the built HTML, and fails if README.md's Documentation section
+# or llms.txt is stale. Any push to the default branch can change the site.
 on:
   push:
     branches: ["master"]
@@ -17,28 +18,34 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
+env:
+  MDBOOK: "0.5.4"
+  MDBOOK_SHA256: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2
         with:
           toolchain: stable
-      - name: Build navigera (for `--help`)
-        run: cargo build --release --locked
-      - name: Write the pages from their sources
-        run: python3 docs-site/build.py target/release/navigera
+      - name: Build navigera (its --help and --version are on the site)
+        run: cargo build --release --locked --bin navigera
       - name: Install mdBook
         run: |
-          mkdir -p /tmp/mdbook
-          curl -sL https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-gnu.tar.gz | tar xz -C /tmp/mdbook
-          echo /tmp/mdbook >> "$GITHUB_PATH"
-      - name: Build the book
-        working-directory: docs-site
-        run: mdbook build
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/mdbook.tar.gz" \
+            "https://github.com/rust-lang/mdBook/releases/download/v$MDBOOK/mdbook-v$MDBOOK-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$MDBOOK_SHA256  $RUNNER_TEMP/mdbook.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/mdbook.tar.gz" -C "$RUNNER_TEMP"
+      - name: Write the pages, build the site, check its links
+        run: python3 docs-site/build.py --binary target/release/navigera --mdbook "$RUNNER_TEMP/mdbook" --check
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: docs-site/book
   deploy:
@@ -49,4 +56,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

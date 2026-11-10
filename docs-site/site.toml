@@ -1,0 +1,192 @@
+# The docs site: its parts, its pages, and where each page's text comes from.
+# docs-site/build.py writes every page from this (python3 docs-site/build.py --help).
+# The parts and their order are the same for every tool; the pages in them differ.
+
+name = "navigera"
+repo = "andrey-usa/navigera"
+branch = "master"
+binary = "navigera"
+summary = """
+navigera is browser automation for AI agents from the shell: one native binary
+(Rust, no Node) that drives Chrome over the DevTools Protocol, one command per
+step, with pages read as a compact accessibility tree with [ref=N] handles.
+"""
+
+[coverage.ignore]
+# README sections that point at the site rather than hold text of their own.
+"README.md" = ["Benchmarks", "Documentation", "Contributing", "License"]
+
+[[part]]
+title = "Start"
+
+[[part.page]]
+title = "Install"
+path = "start/install.md"
+about = "Every way to install navigera, the platforms it runs on, and which browser it uses."
+source = [{ file = "README.md", section = "Install" }, { file = "docs/install.md" }]
+
+[[part.page]]
+title = "Quick start"
+path = "start/quick-start.md"
+about = "One session and four commands, from install to a page read."
+source = { file = "README.md", section = "Quick start" }
+
+[[part.page]]
+title = "A first session"
+path = "start/tutorial.md"
+about = "A tour of one session: the page tree and its refs, the commands, how to name an element, and what comes back."
+source = { file = "docs/tutorial.md" }
+
+[[part]]
+title = "Guides"
+
+[[part.page]]
+title = "Hand the agent your browser"
+path = "guides/your-browser.md"
+about = "Give an agent your own signed-in browser, a copy of its profile, or a saved state, and take a step back from it."
+source = { file = "docs/guides/your-browser.md" }
+
+[[part.page]]
+title = "Drive a browser from a program"
+path = "guides/programs.md"
+about = "Keep one browser on a pipe with `navigera serve`: one JSON command per line in, one JSON reply per line out."
+source = [{ file = "docs/guides/programs.md" }, { file = "docs/navigera.md", section = "Serve protocol (programs)", keep_heading = true }]
+
+[[part.page]]
+title = "Let a fast model pick the element"
+path = "guides/decider.md"
+about = "Hand the two small decisions, which element and did it work, to a fast decision model instead of the agent's LLM."
+source = [{ file = "docs/guides/decider.md" }, { file = "docs/navigera.md", section = "Decisions: find and check", keep_heading = true }]
+
+[[part.page]]
+title = "Use a page's own tools (WebMCP)"
+path = "guides/webmcp.md"
+about = "Call the tools a page registers for agents through WebMCP, and see which ones it offers."
+source = { file = "docs/navigera.md", section = "WebMCP" }
+
+[[part.page]]
+title = "Switch from agent-browser"
+path = "guides/from-agent-browser.md"
+about = "agent-browser's commands and flags, each with its navigera equivalent."
+source = { file = "docs/navigera.md", section = "agent-browser → navigera" }
+
+[[part]]
+title = "Concepts"
+
+[[part.page]]
+title = "How navigera works"
+path = "concepts/how-it-works.md"
+about = "The three ways to run navigera, and what it does for you between the commands: waits, settling, tabs, dialogs."
+source = [{ file = "docs/navigera.md", preamble = true }, { file = "docs/navigera.md", section = "Behaviour", keep_heading = true }]
+
+[[part.page]]
+title = "Supported browsers"
+path = "concepts/browsers.md"
+about = "Which browsers and engines navigera drives, how CI tests each one, and how a browser is found or installed."
+source = [{ file = "README.md", section = "Supported browsers" }, { file = "docs/browsers.md" }, { file = "docs/navigera.md", section = "Browsers and engines", keep_heading = true }]
+
+[[part.page]]
+title = "Several models, one browser"
+path = "concepts/multi-model.md"
+about = "Why a small decision model sits beside the agent's LLM, what it was measured to do, and what comes next."
+source = { file = "docs/multi-model.md" }
+
+[[part]]
+title = "Reference"
+
+[[part.page]]
+title = "Commands"
+path = "reference/commands.md"
+about = "Every command, its arguments and flags, and what it prints."
+source = { file = "docs/navigera.md", sections = ["CLI shape", "Commands"] }
+
+[[part.page]]
+title = "navigera --help"
+path = "reference/help.md"
+about = "The command list exactly as this build prints it."
+source = { run = ["--help"] }
+
+[[part]]
+title = "Agents"
+
+[[part.page]]
+title = "For AI agents"
+path = "agents/overview.md"
+about = "What an agent gets: the skill, the MCP server, and these docs as markdown."
+source = { file = "README.md", section = "For AI agents" }
+
+[[part.page]]
+title = "Skill"
+path = "agents/skill.md"
+about = "The guide `navigera install-skill` gives an agent, as this version prints it."
+source = { file = "skills/navigera/SKILL.md" }
+
+[[part.page]]
+title = "Skill references"
+path = "agents/skill-references.md"
+about = "The detail the skill sends an agent to when a topic comes up: acting, reading, inspecting, sessions, Electron, the decider, setup and errors."
+source = [
+  { file = "skills/navigera/references/acting.md", demote = true },
+  { file = "skills/navigera/references/reading.md", demote = true },
+  { file = "skills/navigera/references/inspecting.md", demote = true },
+  { file = "skills/navigera/references/sessions.md", demote = true },
+  { file = "skills/navigera/references/electron.md", demote = true },
+  { file = "skills/navigera/references/decider.md", demote = true },
+  { file = "skills/navigera/references/setup.md", demote = true },
+  { file = "skills/navigera/references/troubleshooting.md", demote = true },
+]
+
+[[part.page]]
+title = "MCP server"
+path = "agents/mcp.md"
+about = "Run navigera as a Model Context Protocol server for IDE agents, with the setup for each client."
+source = [{ file = "docs/mcp.md" }, { file = "docs/navigera.md", section = "MCP server (IDE agents)", keep_heading = true }]
+
+[[part]]
+title = "Benchmarks"
+
+[[part.page]]
+title = "Results"
+path = "benchmarks/results.md"
+about = "Every driver and agent tool on the same scripted session, from one CI run, with how each number is taken."
+source = { file = "docs/benchmarks.md" }
+
+[[part.page]]
+title = "Where navigera is not ahead"
+path = "benchmarks/losses.md"
+about = "Each measure on which another tool beat navigera in the same run."
+source = { file = "docs/losses.md" }
+
+[[part.page]]
+title = "Agent eval"
+path = "benchmarks/agent-eval.md"
+about = "Whether a generic coding agent, given only the tool and its docs, finishes real tasks with navigera, Playwright and agent-browser."
+source = { file = "docs/agent-eval.md" }
+
+[[part]]
+title = "Project"
+
+[[part.page]]
+title = "Changelog"
+path = "project/changelog.md"
+about = "What changed in each release, and what is on the way."
+source = { file = "CHANGELOG.md" }
+long = true
+
+[[part.page]]
+title = "Contributing"
+path = "project/contributing.md"
+about = "How to build, test, benchmark and release navigera."
+source = { file = "CONTRIBUTING.md" }
+
+[[part.page]]
+title = "Source layout"
+path = "project/layout.md"
+about = "Where each part of navigera lives in the repository."
+source = { file = "docs/layout.md" }
+
+[[part.page]]
+title = "Security"
+path = "project/security.md"
+about = "What navigera protects and how, its known exposures, and how to report a problem."
+source = { file = "SECURITY.md" }

@@ -1,11 +1,16 @@
+# mdBook settings, the same in every product but for the names. Its pages are
+# written by docs-site/build.py from docs-site/site.toml.
 [book]
 title = "navigera"
 authors = ["andrey-usa"]
 language = "en"
-description = "Extremely fast browser automation for AI agents, from the shell — a single Rust binary driving Chrome over CDP."
+description = "Extremely fast browser automation for AI agents, from the shell: one Rust binary that drives Chrome over CDP."
+
 [build]
 build-dir = "book"
+create-missing = false
 
 [output.html]
 site-url = "/navigera/"
 git-repository-url = "https://github.com/andrey-usa/navigera"
+no-section-label = true

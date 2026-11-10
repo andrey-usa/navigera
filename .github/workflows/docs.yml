@@ -1,0 +1,36 @@
+name: docs
+
+# The docs site from this commit: every page written from its source, every
+# section of a source on a page, every link and anchor resolved in the built
+# HTML, README.md's Documentation section and llms.txt current. Under a
+# minute; the binary's own pages wait for the Pages build.
+on:
+  push:
+    branches: [next]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MDBOOK: "0.5.4"
+  MDBOOK_SHA256: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install mdBook
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/mdbook.tar.gz" \
+            "https://github.com/rust-lang/mdBook/releases/download/v$MDBOOK/mdbook-v$MDBOOK-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$MDBOOK_SHA256  $RUNNER_TEMP/mdbook.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/mdbook.tar.gz" -C "$RUNNER_TEMP"
+      - name: Build the site and check it
+        run: python3 docs-site/build.py --no-binary --mdbook "$RUNNER_TEMP/mdbook" --check

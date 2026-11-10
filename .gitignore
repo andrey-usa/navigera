@@ -20,7 +20,7 @@ __pycache__/
 .bitti/
 /tests/fixtures/electron-app/node_modules/
 /tests/fixtures/electron-app/package-lock.json
-# The docs site's pages: docs-site/build.py writes them from their sources.
+# The docs site: docs-site/build.py writes every file under src/ from
+# docs-site/site.toml, and mdBook builds book/ from them.
 /docs-site/book/
-/docs-site/src/*.md
-!/docs-site/src/SUMMARY.md
+/docs-site/src/

@@ -1,28 +1,50 @@
 # navigera
 
-> navigera drives headless Chrome, and Electron apps, from the shell, one command per step: a single native Rust binary speaking the Chrome DevTools Protocol, built for AI agents. Pages are read as a compact accessibility tree with [ref=N] handles. Actions are real mouse and keyboard events. A named session keeps one warm browser between shell calls. Tabs, iframes, shadow DOM and dialogs are handled for you.
+> navigera is browser automation for AI agents from the shell: one native binary (Rust, no Node) that drives Chrome over the DevTools Protocol, one command per step, with pages read as a compact accessibility tree with [ref=N] handles.
 
-Install: `curl -fsSL https://raw.githubusercontent.com/andrey-usa/navigera/master/install.sh | sh` (Windows PowerShell: `irm https://raw.githubusercontent.com/andrey-usa/navigera/master/install.ps1 | iex`; or `cargo install --locked --git https://github.com/andrey-usa/navigera navigera`), then `navigera install-skill` to put the version-matched agent guide in ./.agents/skills (`--claude` for ./.claude/skills).
+Each page below is markdown. The whole site in one file: https://andrey-usa.github.io/navigera/llms-full.txt
 
-Output is compact by default (an action prints what changed: a new title/url, or after an `ax` the changed lines of that tree with refs, `+` new `-` gone `~` different; `ok` when nothing visible changed; a read only its value; `--output json` for programs). Agents: known steps in one `batch` call, narrow reads (`ax --selector`, `text --selector`). Core loop: `navigera -s work start` → `goto <url>` → `ax` → `click <ref>` / `fill <ref> "<text>"` / `press Enter` → `ax` → `quit`. A page's WebMCP tools: `webmcp-list`, `webmcp-call <name> --params '{…}'` (`--confirm` for one not marked read-only). `batch` takes one command per line on stdin or in a file and stops at the first failure.
+## Start
 
-Electron apps: `navigera -s app start --electron ./my-app` launches the app (its directory or main script, a packaged executable or a .app bundle) and drives its windows as tabs; `quit` ends it.
+- [Install](https://andrey-usa.github.io/navigera/start/install.md): Every way to install navigera, the platforms it runs on, and which browser it uses.
+- [Quick start](https://andrey-usa.github.io/navigera/start/quick-start.md): One session and four commands, from install to a page read.
+- [A first session](https://andrey-usa.github.io/navigera/start/tutorial.md): A tour of one session: the page tree and its refs, the commands, how to name an element, and what comes back.
 
-Your own browser: `navigera -s me start --auto-connect` (or `--attach`) connects to the user's running browser, whichever of Chrome 144+, Edge, Brave or Chromium serves remote debugging (after they enable chrome://inspect/#remote-debugging and click Allow), or one started with `--remote-debugging-port` 9222 or 9229; `tab-list` shows their tabs too, `tab-select current` works in the tab they are on, and `--tab current` starts there. `--profile <name>` keeps a separate persistent visible browser. `quit` closes the agent's own tabs and leaves the user's; the browser stays open.
+## Guides
 
-## Docs
+- [Hand the agent your browser](https://andrey-usa.github.io/navigera/guides/your-browser.md): Give an agent your own signed-in browser, a copy of its profile, or a saved state, and take a step back from it.
+- [Drive a browser from a program](https://andrey-usa.github.io/navigera/guides/programs.md): Keep one browser on a pipe with `navigera serve`: one JSON command per line in, one JSON reply per line out.
+- [Let a fast model pick the element](https://andrey-usa.github.io/navigera/guides/decider.md): Hand the two small decisions, which element and did it work, to a fast decision model instead of the agent's LLM.
+- [Use a page's own tools (WebMCP)](https://andrey-usa.github.io/navigera/guides/webmcp.md): Call the tools a page registers for agents through WebMCP, and see which ones it offers.
+- [Switch from agent-browser](https://andrey-usa.github.io/navigera/guides/from-agent-browser.md): agent-browser's commands and flags, each with its navigera equivalent.
 
-- [MCP server](https://raw.githubusercontent.com/andrey-usa/navigera/master/docs/navigera.md): `navigera mcp` for Cline, Roo Code, Kilo Code, Continue, VS Code, Claude Desktop and Cursor; client configuration snippets
-- [Agent skill (usage guide)](https://raw.githubusercontent.com/andrey-usa/navigera/master/skills/navigera/SKILL.md): the loop, reading `ax`, every command, error recovery
-- [Command and protocol reference](https://raw.githubusercontent.com/andrey-usa/navigera/master/docs/navigera.md): CLI flags, JSON-lines serve protocol, sessions, engines
-- [Decisions by a fast model](https://raw.githubusercontent.com/andrey-usa/navigera/master/docs/multi-model.md): `find`, `check` and `--find` with a TypeSafe model, Jev by default (opt-in: `NAVIGERA_DECIDER_KEY` or `NAVIGERA_DECIDER_URL`; `start` reports `"decider"`), the design and the measurements
-- [README](https://raw.githubusercontent.com/andrey-usa/navigera/master/README.md): install, supported browsers, benchmarks, agent eval
+## Concepts
 
-## Working on the code
+- [How navigera works](https://andrey-usa.github.io/navigera/concepts/how-it-works.md): The three ways to run navigera, and what it does for you between the commands: waits, settling, tabs, dialogs.
+- [Supported browsers](https://andrey-usa.github.io/navigera/concepts/browsers.md): Which browsers and engines navigera drives, how CI tests each one, and how a browser is found or installed.
+- [Several models, one browser](https://andrey-usa.github.io/navigera/concepts/multi-model.md): Why a small decision model sits beside the agent's LLM, what it was measured to do, and what comes next.
 
-- [CONTRIBUTING.md](https://raw.githubusercontent.com/andrey-usa/navigera/master/CONTRIBUTING.md): build, tests, CI annotations, offline builds, A/B benchmarks, releasing
+## Reference
 
-## Optional
+- [Commands](https://andrey-usa.github.io/navigera/reference/commands.md): Every command, its arguments and flags, and what it prints.
+- [navigera --help](https://andrey-usa.github.io/navigera/reference/help.md): The command list exactly as this build prints it.
 
-- [Realistic test site](https://raw.githubusercontent.com/andrey-usa/navigera/master/bench/site/server.py): the local shop the e2e tests and the agent eval run against
-- [Agent eval harness](https://raw.githubusercontent.com/andrey-usa/navigera/master/bench/agent-eval/run.py): Gemini CLI or an OpenAI-compatible model (e.g. DeepSeek) doing the same tasks with navigera (Chrome or Lightpanda), playwright-cli and agent-browser
+## Agents
+
+- [For AI agents](https://andrey-usa.github.io/navigera/agents/overview.md): What an agent gets: the skill, the MCP server, and these docs as markdown.
+- [Skill](https://andrey-usa.github.io/navigera/agents/skill.md): The guide `navigera install-skill` gives an agent, as this version prints it.
+- [Skill references](https://andrey-usa.github.io/navigera/agents/skill-references.md): The detail the skill sends an agent to when a topic comes up: acting, reading, inspecting, sessions, Electron, the decider, setup and errors.
+- [MCP server](https://andrey-usa.github.io/navigera/agents/mcp.md): Run navigera as a Model Context Protocol server for IDE agents, with the setup for each client.
+
+## Benchmarks
+
+- [Results](https://andrey-usa.github.io/navigera/benchmarks/results.md): Every driver and agent tool on the same scripted session, from one CI run, with how each number is taken.
+- [Where navigera is not ahead](https://andrey-usa.github.io/navigera/benchmarks/losses.md): Each measure on which another tool beat navigera in the same run.
+- [Agent eval](https://andrey-usa.github.io/navigera/benchmarks/agent-eval.md): Whether a generic coding agent, given only the tool and its docs, finishes real tasks with navigera, Playwright and agent-browser.
+
+## Project
+
+- [Changelog](https://andrey-usa.github.io/navigera/project/changelog.md): What changed in each release, and what is on the way.
+- [Contributing](https://andrey-usa.github.io/navigera/project/contributing.md): How to build, test, benchmark and release navigera.
+- [Source layout](https://andrey-usa.github.io/navigera/project/layout.md): Where each part of navigera lives in the repository.
+- [Security](https://andrey-usa.github.io/navigera/project/security.md): What navigera protects and how, its known exposures, and how to report a problem.
