@@ -237,6 +237,8 @@ if ws and serve and ws.get("cold") and serve.get("cold"):
 if baseline and serve:
     def pct(new, old):
         return f"{100 * (new / old - 1):+.0f}%"
+    ev_old = (baseline.get("eval") or {}).get("mean_ms")
+    ev_new = (serve.get("eval") or {}).get("mean_ms")
     lines += [
         f"**This build vs {versions.get('nv-baseline', 'the previous one')}, same machine and run** (`nv-baseline`,",
         "built the same way by the ladder's `baseline_ref` A/B):",
@@ -244,7 +246,8 @@ if baseline and serve:
         f"({pct(serve['session']['wall_s'], baseline['session']['wall_s'])}), "
         f"cold start {mid(baseline['cold']):.2f}s → {mid(serve['cold']):.2f}s median "
         f"({pct(mid(serve['cold']), mid(baseline['cold']))}), "
-        f"browser CPU per session {baseline['session']['browser_cpu_s']:.2f}s → "
+        + (f"warm eval {ev_old:.2f} ms → {ev_new:.2f} ms ({pct(ev_new, ev_old)}), " if ev_old and ev_new else "")
+        + f"browser CPU per session {baseline['session']['browser_cpu_s']:.2f}s → "
         f"{serve['session']['browser_cpu_s']:.2f}s." + (f" {change_note}" if change_note else ""),
         "",
     ]
