@@ -45,7 +45,8 @@ env:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
     steps:
@@ -70,7 +71,7 @@ jobs:
       fail-fast: false
       matrix:
         run: ${{ fromJson(needs.plan.outputs.matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     environment: main
     env:

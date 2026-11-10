@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   fuzz:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -74,6 +74,8 @@ jobs:
           # expanded into the script could run as code.
           DURATION_INPUT: ${{ inputs.duration }}
           EVENT: ${{ github.event_name }}
+          # The log is read below and in the artifact: no colour codes in it.
+          CARGO_TERM_COLOR: never
         run: |
           # NOTE: this step runs under bash -e, so a plain failing command
           # aborts the script before the lines after it run. The cargo
@@ -85,8 +87,12 @@ jobs:
           fi
           case "$DURATION" in ''|*[!0-9]*) echo "duration must be a number of seconds: $DURATION" >&2; exit 2;; esac
           log="fuzz-$TARGET.log"
+          # The installed cargo-fuzz is a static (musl) build and would build
+          # the target for musl too, which the sanitizer cannot link: name
+          # the host.
+          host=$(rustc +nightly -vV | sed -n 's/^host: //p')
           code=0
-          cargo +nightly fuzz run --fuzz-dir . "$TARGET" "corpus/$TARGET" -- \
+          cargo +nightly fuzz run --fuzz-dir . --target "$host" "$TARGET" "corpus/$TARGET" -- \
             -max_total_time="$DURATION" -rss_limit_mb=2048 -timeout=10 -max_len=65536 \
             -artifact_prefix="$PWD/artifacts/" > "$log" 2>&1 || code=$?
           # What the run did, without the line libFuzzer prints per input.

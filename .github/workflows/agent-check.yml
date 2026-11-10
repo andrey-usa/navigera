@@ -45,9 +45,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { task: purchase, os: linux, runner: ubuntu-latest, live: false, key: GEMINI_API_KEY }
+          - { task: purchase, os: linux, runner: ubuntu-24.04, live: false, key: GEMINI_API_KEY }
           - { task: purchase, os: windows, runner: windows-latest, live: false, key: GEMINI_API_KEY_2 }
-          - { task: purchase-live, os: linux, runner: ubuntu-latest, live: true, key: GEMINI_API_KEY_3 }
+          - { task: purchase-live, os: linux, runner: ubuntu-24.04, live: true, key: GEMINI_API_KEY_3 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     continue-on-error: ${{ matrix.live }}

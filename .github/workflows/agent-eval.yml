@@ -90,7 +90,8 @@ env:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
     steps:
@@ -110,7 +111,7 @@ jobs:
           # load over the keys instead of doubling it on each.
           rotate = {"GEMINI_API_KEY": "GEMINI_API_KEY_2", "GEMINI_API_KEY_2": "GEMINI_API_KEY_3",
                     "GEMINI_API_KEY_3": "GEMINI_API_KEY"}
-          runner = {"linux": "ubuntu-latest", "windows": "windows-latest"}
+          runner = {"linux": "ubuntu-24.04", "windows": "windows-latest"}
           oses = ["linux", "windows"] if os.environ["OSES"] == "both" else \
                  [o for o in os.environ["OSES"].split(",") if o in runner]
           tools = [t.strip() for t in os.environ["TOOLS"].split(",") if t.strip() in slot]
@@ -246,7 +247,7 @@ jobs:
 
   decisions:
     if: inputs.decisions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment: main
     steps:
@@ -284,7 +285,8 @@ jobs:
   report:
     needs: eval
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
