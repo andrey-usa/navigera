@@ -66,6 +66,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- An `eval` that only reads is answered in one message. It is first run
+  with V8's side-effect check, the way a console's eager preview runs;
+  when V8 shows it changes nothing, that answer is the reply, and there
+  is no after-action arm to send or put back. A write, a statement or an
+  error runs as before, once: V8 stops a refused expression before its
+  first side effect, a source with an assignment or a statement skips
+  the try, and a source V8 refused is not tried again in that session.
+  Warm `eval` against the build just before, same machine and run:
+  0.335 ms against 0.457, 0.495 against 0.653 and 0.348 against 0.445 on
+  three runners ([bench runs
+  42874186598](https://github.com/andrey-usa/navigera/actions/runs/42874186598),
+  [42874192290](https://github.com/andrey-usa/navigera/actions/runs/42874192290),
+  [42874198065](https://github.com/andrey-usa/navigera/actions/runs/42874198065)).
+  go-rod in the same runs: 0.250, 0.501 and 0.409 ms on Chrome; 0.225,
+  0.382 and 0.232 ms on chrome-headless-shell, where navigera took
+  0.297, 0.411 and 0.311 ms.
 - An action spends less of its own time between the caller and the
   page. Its after-action arm is compiled once per document and then
   called (a page compiled the script on every action: about 100 us

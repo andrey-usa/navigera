@@ -134,7 +134,7 @@ fn the_readme_quick_start_runs_as_written() {
         let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
         let got: Vec<String> = text.lines().map(|l| mask(&l.replace(&base, SITE))).collect();
         assert!(out.status.success(), "README.md's Quick start: `{command}` failed:\n{text}");
-        assert_eq!(got, expected, "README.md's Quick start: `{command}` printed something else");
+        assert_eq!(got, expected, "README.md's Quick start: `{command}` printed {got:?}, not {expected:?}");
     }
     assert!(ran >= 2, "the Quick start ran {ran} command(s)");
 }
