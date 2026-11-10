@@ -74,8 +74,13 @@ All notable changes to this project are documented here. The format follows
   `eval` took 1.20 ms against 0.56 ms before the proof, on one machine in
   one run ([bench run
   42723530791](https://github.com/andrey-usa/navigera/actions/runs/42723530791)).
+  With the fix it takes 0.49 ms against 0.10.1's 0.90 ms, again on one
+  machine in one run ([bench run
+  42726972697](https://github.com/andrey-usa/navigera/actions/runs/42726972697)).
   Every other action saves the second wait too. The timing gate has a
-  probe for it: 200 evals timed from the caller's side.
+  probe for it, 200 evals timed from the caller's side: 86 ms against
+  0.10.1's 172 ms ([gate run
+  42726968329](https://github.com/andrey-usa/navigera/actions/runs/42726968329)).
 
 ### Security
 
