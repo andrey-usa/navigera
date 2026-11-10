@@ -14,8 +14,20 @@ fn op(driver: &mut Driver, words: &[&str]) -> Value {
     driver.run(&parsed.command.expect("a command")).unwrap_or_else(|e| panic!("{words:?}: {e:#}"))
 }
 
+/// The fixture site, stopped when the test ends, also by a failed assertion:
+/// left running it keeps the test's output open, and a step that reads
+/// that output to its end then waits until the job's time is up.
+struct Site(std::process::Child);
+
+impl Drop for Site {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// The fixture site and its URL, or None without a browser to test with.
-fn site() -> Option<(std::process::Child, String)> {
+fn site() -> Option<(Site, String)> {
     if navigera::browser::resolve_executable_for(None, true).is_none() {
         assert!(std::env::var_os("NAVIGERA_REQUIRE_BROWSER").is_none(), "no Chrome/Chromium found");
         return None;
@@ -29,7 +41,7 @@ fn site() -> Option<(std::process::Child, String)> {
     let mut line = String::new();
     BufReader::new(site.stdout.take().unwrap()).read_line(&mut line).unwrap();
     let url = line.trim().strip_prefix("LISTENING ").unwrap().to_string();
-    Some((site, url))
+    Some((Site(site), url))
 }
 
 fn download_count(driver: &mut Driver) -> usize {
@@ -47,17 +59,22 @@ fn download_count(driver: &mut Driver) -> usize {
 /// in the owner's list instead. FAILS on 113d9c2.
 #[test]
 fn subframe_download_is_listed_for_the_session_whose_tab_started_it() {
-    let Some((mut site, url)) = site() else { return };
+    let Some((_site, url)) = site() else { return };
+    let began = std::time::Instant::now();
     let mut owner = Driver::launch(&SessionConfig::default()).expect("launch");
     let mut a = owner.fork().expect("fork");
     op(&mut a, &["goto", &format!("{url}/effects")]);
+    // How long this machine takes to start a browser and load one page: the
+    // wait below is measured in these, not in seconds. A runner that took
+    // half a minute over this has no download to show after 15 s either.
+    let pace = began.elapsed();
     // Start the download from a subframe, not the tab's main frame.
     let js = format!(
         "((u) => {{ const f = document.createElement('iframe'); f.src = u; document.body.appendChild(f); return 1; }})('{url}/file.csv')"
     );
     assert_eq!(op(&mut a, &["eval", &js]), 1);
     // Poll until the download lands in somebody's list (or time out).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15).max(pace * 10);
     let (mut na, mut no) = (0, 0);
     while std::time::Instant::now() < deadline {
         na = download_count(&mut a);
@@ -72,8 +89,6 @@ fn subframe_download_is_listed_for_the_session_whose_tab_started_it() {
     assert_eq!(no, 0, "owner must not list the fork's subframe download");
     a.session().close();
     owner.session().close();
-    let _ = site.kill();
-    let _ = site.wait();
 }
 
 /// Sanity: the same download from the tab's MAIN frame is attributed
@@ -81,7 +96,7 @@ fn subframe_download_is_listed_for_the_session_whose_tab_started_it() {
 /// 113d9c2; guards the probe above against fixture/attribution drift.
 #[test]
 fn mainframe_download_stays_with_its_session() {
-    let Some((mut site, url)) = site() else { return };
+    let Some((_site, url)) = site() else { return };
     let mut owner = Driver::launch(&SessionConfig::default()).expect("launch");
     let mut a = owner.fork().expect("fork");
     op(&mut a, &["goto", &format!("{url}/effects")]);
@@ -91,8 +106,6 @@ fn mainframe_download_stays_with_its_session() {
     assert_eq!(download_count(&mut owner), 0);
     a.session().close();
     owner.session().close();
-    let _ = site.kill();
-    let _ = site.wait();
 }
 
 /// Run one op and keep the full outcome (result plus reported dialogs).
@@ -112,7 +125,7 @@ fn outcome(driver: &mut Driver, words: &[&str]) -> navigera::protocol::Outcome {
 /// dialog).
 #[test]
 fn reset_all_forgets_unreported_dialogs() {
-    let Some((mut site, url)) = site() else { return };
+    let Some((_site, url)) = site() else { return };
     let mut a = Driver::launch(&SessionConfig::default()).expect("launch");
     op(&mut a, &["goto", &format!("{url}/effects")]);
     // Fire an alert from a timer: it is answered between ops, so no op has
@@ -126,6 +139,4 @@ fn reset_all_forgets_unreported_dialogs() {
         reset.dialogs
     );
     a.session().close();
-    let _ = site.kill();
-    let _ = site.wait();
 }

@@ -12,8 +12,20 @@ fn op(driver: &mut Driver, words: &[&str]) -> Value {
     driver.run(&parsed.command.expect("a command")).unwrap_or_else(|e| panic!("{words:?}: {e:#}"))
 }
 
+/// The fixture site, stopped when the test ends, also by a failed assertion:
+/// left running it keeps the test's output open, and a step that reads
+/// that output to its end then waits until the job's time is up.
+struct Site(std::process::Child);
+
+impl Drop for Site {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// The fixture site and its URL, or None without a browser to test with.
-fn site() -> Option<(std::process::Child, String)> {
+fn site() -> Option<(Site, String)> {
     if navigera::browser::resolve_executable_for(None, true).is_none() {
         assert!(std::env::var_os("NAVIGERA_REQUIRE_BROWSER").is_none(), "no Chrome/Chromium found");
         return None;
@@ -27,12 +39,12 @@ fn site() -> Option<(std::process::Child, String)> {
     let mut line = String::new();
     BufReader::new(site.stdout.take().unwrap()).read_line(&mut line).unwrap();
     let url = line.trim().strip_prefix("LISTENING ").unwrap().to_string();
-    Some((site, url))
+    Some((Site(site), url))
 }
 
 #[test]
 fn forks_share_a_browser_and_nothing_else() {
-    let Some((mut site, url)) = site() else { return };
+    let Some((_site, url)) = site() else { return };
 
     let owner = Driver::launch(&SessionConfig::default()).expect("launch");
     let workers: Vec<Driver> = (0..3).map(|_| owner.fork().expect("fork")).collect();
@@ -74,13 +86,11 @@ fn forks_share_a_browser_and_nothing_else() {
     let mut owner = owner;
     op(&mut owner, &["goto", &format!("{url}/effects")]);
     owner.session().close();
-    let _ = site.kill();
-    let _ = site.wait();
 }
 
 #[test]
 fn routes_and_dialog_answers_are_each_sessions_own() {
-    let Some((mut site, url)) = site() else { return };
+    let Some((_site, url)) = site() else { return };
     let fetch = "fetch('/event/x').then((r) => r.text())";
     let owner = Driver::launch(&SessionConfig::default()).expect("launch");
     let (mut a, mut b) = (owner.fork().expect("fork"), owner.fork().expect("fork"));
@@ -117,13 +127,11 @@ fn routes_and_dialog_answers_are_each_sessions_own() {
     a.session().close();
     b.session().close();
     owner.session().close();
-    let _ = site.kill();
-    let _ = site.wait();
 }
 
 #[test]
 fn each_session_saves_downloads_where_it_was_told() {
-    let Some((mut site, url)) = site() else { return };
+    let Some((_site, url)) = site() else { return };
     let mut owner = Driver::launch(&SessionConfig::default()).expect("launch");
     let (mut a, mut b) = (owner.fork().expect("fork"), owner.fork().expect("fork"));
     let dirs: Vec<tempfile::TempDir> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
@@ -155,13 +163,11 @@ fn each_session_saves_downloads_where_it_was_told() {
     a.session().close();
     b.session().close();
     owner.session().close();
-    let _ = site.kill();
-    let _ = site.wait();
 }
 
 #[test]
 fn another_session_attaches_to_one_tab_by_its_endpoint() {
-    let Some((mut site, url)) = site() else { return };
+    let Some((_site, url)) = site() else { return };
     let config = SessionConfig { transport: Some("ws".into()), ..SessionConfig::default() };
     let mut first = Driver::launch(&config).expect("launch");
     op(&mut first, &["goto", &format!("{url}/effects")]);
@@ -176,6 +182,4 @@ fn another_session_attaches_to_one_tab_by_its_endpoint() {
     // Leaving changed nothing for the first.
     assert_eq!(op(&mut first, &["eval", "document.title"]), "left here");
     first.session().close();
-    let _ = site.kill();
-    let _ = site.wait();
 }
