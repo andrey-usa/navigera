@@ -9,6 +9,7 @@ Contenders (each drives the same headless Chrome on the same fixture pages):
   nv-brave        navigera serve on Brave
   nv-lightpanda   navigera serve on Lightpanda (headless Chromium for AI agents)
   playwright      playwright-core + channel:chrome (Node)
+  playwright-bun  the same script run by Bun
   puppeteer       puppeteer-core (Node)
   chromiumoxide   chromiumoxide 0.7 (native Rust CDP)
   chromedp        chromedp v0.19.1 (native Go CDP)
@@ -843,6 +844,8 @@ def collect_versions() -> dict[str, str]:
             v[pkg] = json.loads((HERE / "node_modules" / pkg / "package.json").read_text())["version"]
         except (OSError, ValueError, KeyError):
             pass
+    if shutil.which("bun"):
+        v["bun"] = first_line(["bun", "--version"])
     for crate in ("chromiumoxide", "chromey"):
         try:
             lock = (CONTENDERS / crate / "Cargo.lock").read_text()
@@ -1126,6 +1129,7 @@ def main() -> int:
         NAVIGERA_ENGINE_ARGS[nv_name] = args_extra
     contenders.update({
         "playwright": ["node", str(node_dir / "contender_playwright.mjs")],
+        "playwright-bun": ["bun", str(node_dir / "contender_playwright.mjs")],
         "puppeteer": ["node", str(node_dir / "contender_puppeteer.mjs")],
         "chromiumoxide": [str(CONTENDERS / "chromiumoxide" / "target" / "release"
                               / "ladder-chromiumoxide")],
@@ -1133,6 +1137,10 @@ def main() -> int:
         "chromedp": [str(CONTENDERS / "chromedp" / "ladder-chromedp")],
         "gorod": [str(CONTENDERS / "gorod" / "ladder-gorod")],
     })
+
+    if not shutil.which("bun"):
+        SKIPPED["playwright-bun"] = "bun not installed"
+        contenders.pop("playwright-bun")
 
     with open(FIXTURES / "expected.json", encoding="utf-8") as f:
         expected = json.load(f)

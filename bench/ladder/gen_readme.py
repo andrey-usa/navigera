@@ -45,6 +45,7 @@ NAMES = {
     "chromedp": f"`chromedp` {ver('chromedp', '0.19.1')} (Go)",
     "chromiumoxide": f"`chromiumoxide` {ver('chromiumoxide', '0.7')} (Rust)",
     "chromey": f"`chromey` {ver('chromey', '2.x')} (Rust, maintained chromiumoxide fork)",
+    "playwright-bun": f"`playwright-core` {ver('playwright-core', '')} (Bun {ver('bun', '')})".replace("  ", " ").replace("(Bun )", "(Bun)"),
     "puppeteer": f"`puppeteer-core` {ver('puppeteer-core', '')} (Node)".replace("  ", " "),
     "playwright": f"`playwright-core` {ver('playwright-core', '')} (Node)".replace("  ", " "),
 }

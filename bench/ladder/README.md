@@ -12,6 +12,7 @@ run in CI (`.github/workflows/bench.yml`) on identical hardware.
 | `nv-ws` | `nv-serve` over a DevTools WebSocket instead of the pipe | native, no Node |
 | `nv-shell` / `nv-edge` / `nv-brave` / `nv-lightpanda` | `nv-serve` on chrome-headless-shell / Edge / Brave / Lightpanda | native, no Node |
 | `playwright` | `playwright-core`, `channel: 'chrome'` | Node |
+| `playwright-bun` | the same `playwright-core` script, run by Bun | Bun |
 | `puppeteer` | `puppeteer-core`, system Chrome | Node |
 | `chromiumoxide` | `chromiumoxide` 0.7 (bench-only crate in `contenders/`) | native Rust |
 | `chromey` | `chromey` 2.x, maintained chromiumoxide fork (`contenders/`) | native Rust |
