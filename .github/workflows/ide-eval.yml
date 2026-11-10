@@ -100,16 +100,17 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           MODEL: ${{ inputs.model || 'gemini-3.5-flash-lite' }}
+          PROVIDER: ${{ inputs.provider || 'gemini' }}
           TASKS: ${{ inputs.tasks }}
           AGENTS_LIST: ${{ inputs.agents || 'cline,kilo,continue' }}
           BROWSERS: ${{ inputs.browsers || 'navigera,navigera-mcp,playwright-mcp' }}
         run: |
-          python3 bench/ide-eval/run.py --model "${{ inputs.provider || 'gemini' }}:$MODEL" --tasks "$TASKS" \
+          python3 bench/ide-eval/run.py --model "$PROVIDER:$MODEL" --tasks "$TASKS" \
             --agents "$AGENTS_LIST" --browsers "$BROWSERS" --timeout 900 --out out/gemini \
             --cline "$AGENTS/cline/bin/cline" --kilo "$AGENTS/.bin/kilo" --cn "$AGENTS/.bin/cn" \
             --playwright-mcp "$AGENTS/@playwright/mcp/cli.js" || true
-          python3 bench/ladder/annotate.py out/gemini/table.md "ide eval ${{ inputs.provider || 'gemini' }}"
-          python3 bench/ladder/annotate.py out/gemini/runs.json "ide eval json ${{ inputs.provider || 'gemini' }}"
+          python3 bench/ladder/annotate.py out/gemini/table.md "ide eval $PROVIDER"
+          python3 bench/ladder/annotate.py out/gemini/runs.json "ide eval json $PROVIDER"
       - name: No key
         if: env.HAS_KEY != 'true'
         run: echo "::notice title=ide eval::no model key in the main environment; ran the mock model only"
