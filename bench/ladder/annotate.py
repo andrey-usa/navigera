@@ -39,8 +39,16 @@ if path.suffix == ".json":
     chunks, i = [], 0
     while i < len(text):
         j = min(i + CHUNK, len(text))
-        while i + 1 < j < len(text) and (text[j - 1].isspace() or text[j].isspace()):
-            j -= 1
+        # Compact JSON has no whitespace outside strings. Escape only
+        # whitespace at a cut instead of retreating through a long run.
+        # The joined JSON keeps the original string value exactly.
+        if j < len(text):
+            for at in (j, j - 1):
+                if text[at].isspace():
+                    escaped = json.dumps(text[at], ensure_ascii=True)[1:-1]
+                    if escaped == " ":
+                        escaped = r"\u0020"
+                    text = text[:at] + escaped + text[at + 1:]
         chunks.append(text[i:j])
         i = j
 else:
