@@ -481,7 +481,7 @@ def git(*args):
     return p.stdout.strip() if p.returncode == 0 else ""
 
 
-def build_line(cfg, binary):
+def build_line(cfg, binary, pages):
     """What the site was built from: the commit, and what the binary says it is."""
     version = run_binary(binary, ["--version"]).splitlines()[0] if binary else ""
     if not version:
@@ -493,7 +493,14 @@ def build_line(cfg, binary):
     if not commit:
         return f"Built from an uncommitted tree; `{cfg['binary']} --version` says `{version}`."
     link = f"[{commit}](https://github.com/{cfg['repo']}/commit/{commit})"
-    return f"Built from commit {link}{ahead}, of {date}; `{cfg['binary']} --version` says `{version}`."
+    line = f"Built from commit {link}{ahead}, of {date}; `{cfg['binary']} --version` says `{version}`."
+    if m:
+        log = next((p for p in pages if "CHANGELOG.md" in p.files), None)
+        what = f"[changelog]({log.path}#unreleased)" if log else "changelog"
+        tag = m.group(1).lstrip("v")
+        line += (f" These docs are ahead of the {tag} release: what the {what} lists under"
+                 f" Unreleased is not in {tag} yet.")
+    return line
 
 
 def contents(cfg, pages, base, ext, about):
@@ -543,7 +550,7 @@ def write_site(cfg, pages, linker, binary):
         body = re.sub(r"\n{3,}", "\n\n", linker.text(page))
         if page.path == "index.md":
             text = (NOTE.format(src="README.md and docs-site/site.toml") + f"\n\n# {cfg['name']}\n\n{body}\n\n"
-                    + "\n".join(contents(cfg, pages[1:], "", ".md", True)) + f"\n{build_line(cfg, binary)}\n")
+                    + "\n".join(contents(cfg, pages[1:], "", ".md", True)) + f"\n{build_line(cfg, binary, pages)}\n")
         else:
             made_of = ", ".join(f if f.startswith("`") else
                                 f"[{f}](https://github.com/{cfg['repo']}/blob/{cfg['branch']}/{f})" for f in page.files)
