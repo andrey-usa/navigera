@@ -14,6 +14,7 @@ import argparse
 import json
 import math
 import re
+import socketserver
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -92,13 +93,26 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {"model": "mock-jev", "answers": answers, "usage": {"input_tokens": tokens, "output_tokens": 0}})
 
 
+class Server(ThreadingHTTPServer):
+    """A ThreadingHTTPServer that binds without looking up its host's name.
+
+    HTTPServer.server_bind ends with socket.getfqdn(host), a reverse lookup
+    whose answer nothing here reads. On GitHub's macOS runners it takes
+    about 35 s, paid at every start.
+    """
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8791)
     ap.add_argument("--log")
     args = ap.parse_args()
     Handler.log_path = args.log
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = Server(("127.0.0.1", args.port), Handler)
     # Like bench/site/server.py: the first stdout line says where it listens.
     print(f"LISTENING http://127.0.0.1:{server.server_port}/v1/systemone", flush=True)
     server.serve_forever()

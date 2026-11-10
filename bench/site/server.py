@@ -27,6 +27,7 @@ import json
 import random
 import re
 import secrets
+import socketserver
 import sys
 import threading
 import time
@@ -801,11 +802,24 @@ class Handler(BaseHTTPRequestHandler):
         return self.json({"ok": False, "error": "not found"}, 404)
 
 
+class Server(ThreadingHTTPServer):
+    """A ThreadingHTTPServer that binds without looking up its host's name.
+
+    HTTPServer.server_bind ends with socket.getfqdn(host), a reverse lookup
+    whose answer nothing here reads. On GitHub's macOS runners it takes
+    about 35 s, paid at every start.
+    """
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=0)
     args = ap.parse_args()
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    httpd = Server(("127.0.0.1", args.port), Handler)
     httpd.daemon_threads = True
     print(f"LISTENING http://127.0.0.1:{httpd.server_address[1]}", flush=True)
     try:
