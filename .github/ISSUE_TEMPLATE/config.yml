@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://andrey-usa.github.io/navigera/
+    about: Install, guides, the reference and the benchmarks.
+  - name: A security problem
+    url: https://github.com/andrey-usa/navigera/security/advisories/new
+    about: Report it privately, not as an issue (SECURITY.md).
