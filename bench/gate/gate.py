@@ -127,22 +127,24 @@ def probes(site: str, pages: str, runs: int) -> list[tuple]:
                {"op": "click", "selector": "#buy"}, True),
         repeat("select on 2,000 options", [{"op": "goto", "url": f"{pages}/select.html"}],
                {"op": "select", "selector": "#c", "value": ["Country 1500"]}, False),
-        evals(pages, runs),
+        evals(pages, runs, "() => document.title", "warm evals"),
+        evals(pages, runs, "document.title = 'x'", "warm evals that write"),
     ]
 
 
-def evals(pages: str, runs: int) -> tuple:
-    """200 warm `eval`s of the title, timed round trip by round trip from
+def evals(pages: str, runs: int, expression: str, what: str) -> tuple:
+    """200 warm `eval`s of `expression`, timed round trip by round trip from
     this side of the pipe: an eval is under a millisecond, so one more
-    CDP round trip per call doubles it."""
+    CDP round trip per call doubles it. A read is answered in one message;
+    a write runs as an action after the read is refused."""
     ops = [{"op": "goto", "url": f"{pages}/mid-table.html"}]
     timed = set()
     for r in range(runs + 1):  # one warm-up block
         for _ in range(EVAL_BLOCK):
-            ops.append({"op": "eval", "expression": "() => document.title"})
+            ops.append({"op": "eval", "expression": expression})
             if r > 0:
                 timed.add(len(ops) - 1)
-    return f"{EVAL_BLOCK} warm evals, answered one by one", ops, timed, EVAL_BLOCK
+    return f"{EVAL_BLOCK} {what}, answered one by one", ops, timed, EVAL_BLOCK
 
 
 def run_once(binary: str, ops: list[dict], timed: set[int]) -> list[float]:

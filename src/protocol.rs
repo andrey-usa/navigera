@@ -2936,6 +2936,46 @@ pub struct Driver {
     /// A read ahead of the first `ax` after a `goto` (see
     /// [`Driver::pre_read_if_idle`]).
     pre_read: PreRead,
+    /// An `eval` that V8 showed changes nothing: its answer, for
+    /// [`Driver::dispatch`] (see [`BrowserSession::evaluate_read`]).
+    read_answer: Option<Value>,
+    /// The op just run was such an `eval`: no arm was sent, so there is
+    /// nothing to put back.
+    was_read: bool,
+    /// Hashes of `eval` sources V8 refused as reads, so a repeated write
+    /// does not pay the refused try again (cleared at [`REFUSED_MAX`]).
+    refused_reads: std::collections::HashSet<u64>,
+}
+
+/// How many refused `eval` sources a session remembers.
+const REFUSED_MAX: usize = 1024;
+
+/// Whether `source` can be a read worth trying with V8's side-effect check:
+/// one expression with no assignment, increment, statement or keyword that
+/// only a write or a statement has. A no costs nothing but the try; the
+/// eval runs as an action either way.
+fn may_be_read(source: &str) -> bool {
+    let b = source.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        let prev = if i > 0 { b[i - 1] } else { 0 };
+        let next = b.get(i + 1).copied().unwrap_or(0);
+        match c {
+            b';' => return false,
+            b'+' | b'-' if next == c => return false,
+            b'=' if !matches!(prev, b'=' | b'!' | b'<' | b'>') && !matches!(next, b'=' | b'>') => return false,
+            _ => {}
+        }
+    }
+    !source.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')).any(|word| {
+        matches!(word, "return" | "await" | "delete" | "let" | "const" | "var" | "yield" | "class" | "function")
+    })
+}
+
+fn source_hash(source: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut h);
+    h.finish()
 }
 
 /// When to read a page ahead of its first `ax` (see
@@ -3379,6 +3419,9 @@ impl Driver {
                 look: None,
                 compact: false,
                 agent_reads: false,
+                read_answer: None,
+                was_read: false,
+                refused_reads: Default::default(),
                 pre_read: PreRead::default(),
             });
         }
@@ -3394,6 +3437,9 @@ impl Driver {
                 look: None,
                 compact: false,
                 agent_reads: false,
+                read_answer: None,
+                was_read: false,
+                refused_reads: Default::default(),
                 pre_read: PreRead::default(),
             });
         }
@@ -3416,6 +3462,9 @@ impl Driver {
             look: None,
             compact: false,
             agent_reads: false,
+            read_answer: None,
+            was_read: false,
+            refused_reads: Default::default(),
             pre_read: PreRead::default(),
         })
     }
@@ -3440,6 +3489,9 @@ impl Driver {
             look: None,
             compact: false,
             agent_reads: false,
+            read_answer: None,
+            was_read: false,
+            refused_reads: Default::default(),
             pre_read: PreRead::default(),
         })
     }
@@ -3479,6 +3531,9 @@ impl Driver {
             look: None,
             compact: false,
             agent_reads: false,
+            read_answer: None,
+            was_read: false,
+            refused_reads: Default::default(),
             pre_read: PreRead::default(),
         })
     }
@@ -3828,7 +3883,7 @@ impl Driver {
         // needs them: once the action's requests have started, the read
         // that waits on the proof (the compact report's, or the agent's next
         // `ax`) puts them back itself.
-        if command.is_action() && !self.session.action_traffic_seen() {
+        if command.is_action() && !self.was_read && !self.session.action_traffic_seen() {
             self.session.settle_unhook();
         }
         // Tabs opened or closed: say which are ours to other sessions in
@@ -4404,7 +4459,29 @@ impl Driver {
             }
             e["locators"] = found.and_then(|v| v.get("locators").cloned()).unwrap_or_else(|| json!([]));
         }
-        if matches!(command, Command::Eval { .. }) {
+        // An `eval` is tried as a read first: when V8 shows it changes
+        // nothing it is answered in one message, with nothing to arm, settle
+        // or put back. Anything else (a write, a refusal, an error) runs as
+        // an action, as before.
+        self.read_answer = match command {
+            Command::Eval { expression, timeout_ms, main: false }
+                if may_be_read(expression) && !self.refused_reads.contains(&source_hash(expression)) =>
+            {
+                let answer = self.session.evaluate_read(expression, *timeout_ms);
+                if answer.is_none() {
+                    if self.refused_reads.len() >= REFUSED_MAX {
+                        self.refused_reads.clear();
+                    }
+                    self.refused_reads.insert(source_hash(expression));
+                }
+                answer
+            }
+            _ => None,
+        };
+        self.was_read = self.read_answer.is_some();
+        if self.was_read {
+            // A read: no arm.
+        } else if matches!(command, Command::Eval { .. }) {
             // A `Runtime` command itself: its arm needs no round trip.
             self.session.mark_action_pipelined();
         } else if command.is_action() {
@@ -4953,6 +5030,9 @@ impl Driver {
                 s.eval_main(expression, *timeout_ms).map_err(|e| e.context("eval --main"))
             }
             Command::Eval { expression, timeout_ms, main: false } => {
+                if let Some(value) = self.read_answer.take() {
+                    return Ok(value);
+                }
                 let value = s.evaluate_user(expression, *timeout_ms).map_err(|e| e.context("eval"))?;
                 Ok(value)
             }
@@ -8026,5 +8106,41 @@ mod fork_send {
     fn a_driver_can_move_to_another_thread() {
         fn is_send<T: Send>() {}
         is_send::<super::Driver>();
+    }
+}
+
+#[cfg(test)]
+mod may_be_read_tests {
+    use super::may_be_read;
+
+    #[test]
+    fn reads_are_tried() {
+        for src in [
+            "document.title",
+            "() => document.querySelectorAll('a').length",
+            "a == b && c !== d || e <= f || g >= h",
+            "[...document.links].map(l => l.href)",
+            "location.href",
+        ] {
+            assert!(may_be_read(src), "{src}");
+        }
+    }
+
+    #[test]
+    fn writes_and_statements_are_not() {
+        for src in [
+            "document.title = 'x'",
+            "window.n += 1",
+            "i++",
+            "--i",
+            "a(); b",
+            "return 1",
+            "let a = 2",
+            "await fetch('/')",
+            "delete window.x",
+            "(function () { return 1 })()",
+        ] {
+            assert!(!may_be_read(src), "{src}");
+        }
     }
 }

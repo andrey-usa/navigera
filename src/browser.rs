@@ -3486,6 +3486,18 @@ impl BrowserSession {
         Err(first)
     }
 
+    /// `eval` as a read (see [`cdp::Page::evaluate_read`]): its answer when
+    /// V8 shows the source, taken as one expression, changes nothing; else
+    /// None, and the caller runs it with [`Self::evaluate_user`]. Not on
+    /// Lightpanda, whose side-effect checks are not V8's.
+    pub fn evaluate_read(&self, source: &str, timeout_ms: Option<f64>) -> Option<serde_json::Value> {
+        if self.is_lightpanda() {
+            return None;
+        }
+        let marked = format!("{source}\n//# sourceURL={}\n", crate::clock::USER_EVAL_URL);
+        self.active_tab().evaluate_read(&marked, self.timeout(timeout_ms))
+    }
+
     /// Click the element `target` names (trusted mouse click when hittable).
     /// If the click starts a navigation, waits for the new document.
     pub fn click_target(

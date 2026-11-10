@@ -927,6 +927,12 @@ fn settle_floor(quiet: Duration) -> Duration {
     quiet / 2
 }
 
+/// `expression`, wrapped so that a function it evaluates to is called:
+/// `() => …`, `(() => …)()` and a plain `document.title` all give a value.
+fn call_if_function(expression: &str) -> String {
+    format!("(() => {{ const __r = ({expression}\n); return (typeof __r === 'function') ? __r() : __r; }})()")
+}
+
 /// Puts back the timer functions [`SETTLE_ARM`] wrapped.
 const SETTLE_UNHOOK: &str = "(() => { const c = window.__nvMut; if (c && c.unT) c.unT(); return 0; })()";
 
@@ -3987,13 +3993,32 @@ impl Page {
     /// trip. Bare arrow functions are invoked; IIFEs and plain expressions
     /// evaluate to their value.
     pub fn evaluate(&self, expression: &str, timeout: Duration) -> Result<Value> {
-        // Wrap once: if the expression evaluates to a function, call it.
-        // Handles `() => …`, `(() => …)()`, and plain `document.title`.
-        let wrapped = format!(
-            "(() => {{ const __r = ({}\n); return (typeof __r === 'function') ? __r() : __r; }})()",
-            expression
-        );
-        self.evaluate_raw(&wrapped, timeout)
+        self.evaluate_raw(&call_if_function(expression), timeout)
+    }
+
+    /// [`Self::evaluate`] for a read: run only if V8 can show the expression
+    /// changes nothing (`throwOnSideEffect`), the way a console's eager
+    /// preview does. V8 stops a refused expression before its first side
+    /// effect, so a refusal has done nothing. None when V8 refuses it, it
+    /// throws, or no answer comes in `timeout`: the caller then runs it the
+    /// usual way, and that run says what went wrong, if anything did.
+    pub fn evaluate_read(&self, expression: &str, timeout: Duration) -> Option<Value> {
+        let res = self
+            .send(
+                "Runtime.evaluate",
+                json!({
+                    "expression": call_if_function(expression),
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                    "throwOnSideEffect": true,
+                }),
+                timeout,
+            )
+            .ok()?;
+        if res.get("exceptionDetails").is_some() {
+            return None;
+        }
+        Some(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null))
     }
 
     /// Run `source` as a script, as a console does: statements (`a(); b`),
