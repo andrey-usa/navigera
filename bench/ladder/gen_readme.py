@@ -54,6 +54,7 @@ NAMES = {
     "nv-edge": "`nv-edge` (this repo on Edge)",
     "nv-lightpanda": "`nv-lightpanda` (this repo on Lightpanda, 1 tab)",
     "gorod": f"`gorod` (go-rod {ver('go-rod', '0.116.2')}, Go)",
+    "gorod-shell": f"`gorod-shell` (go-rod {ver('go-rod', '0.116.2')}, Go, on chrome-headless-shell)",
     "chromedp": f"`chromedp` {ver('chromedp', '0.19.1')} (Go)",
     "chromiumoxide": f"`chromiumoxide` {ver('chromiumoxide', '0.7')} (Rust)",
     "chromey": f"`chromey` {ver('chromey', '2.x')} (Rust, maintained chromiumoxide fork)",
@@ -171,11 +172,14 @@ lines += [
 order = ", ".join(f"{r['name']} {r['session']['wall_s']:.2f}s" for r in chrome)
 nv_best = next(r for r in chrome if r["name"].startswith("nv-"))
 serve_row = next((r for r in chrome if r["name"] == "nv-serve"), None)
-other = next((r for r in chrome if not r["name"].startswith("nv-")), None)
+# Rows on chrome-headless-shell: compared with each other, not with Chrome.
+SHELL_ROWS = ("nv-shell", "gorod-shell")
+other = next((r for r in chrome if not r["name"].startswith("nv-") and r["name"] not in SHELL_ROWS), None)
+gorod_shell = next((r for r in chrome if r["name"] == "gorod-shell"), None)
 rank = chrome.index(nv_best) + 1
 shell_row = next((r for r in chrome if r["name"] == "nv-shell"), None)
 # Rows that run a browser other than the regular Google Chrome.
-off = [f"`{n}`" for n in ("nv-shell", "nv-edge", "nv-brave") if any(r["name"] == n for r in chrome)]
+off = [f"`{n}`" for n in ("nv-shell", "gorod-shell", "nv-edge", "nv-brave") if any(r["name"] == n for r in chrome)]
 off_text = off[0] if len(off) == 1 else ", ".join(off[:-1]) + " and " + off[-1] if off else ""
 lines += [
     f"**Reading the table.** Session wall order: {order}"
@@ -184,8 +188,10 @@ lines += [
        + f" the fastest other driver, {other['name']} ({other['session']['wall_s']:.2f}s)"
        if serve_row and other else "")
     + (f". `nv-shell` ({shell_row['session']['wall_s']:.2f}s) is navigera on chrome-headless-shell, a"
-       " lighter build of the same browser that no other row runs, so its lead is partly the"
-       " browser's" if shell_row else "")
+       " lighter build of the same browser"
+       + (f"; its pair is `gorod-shell` ({gorod_shell['session']['wall_s']:.2f}s), go-rod on the same"
+          " shell" if gorod_shell else " that no other row runs, so its lead is partly the browser's")
+       if shell_row else "")
     + ". All native drivers (navigera,",
     "go-rod, chromiumoxide, chromedp) spend tens of milliseconds of their own CPU",
     "or less; the Node drivers spend hundreds and carry 80–150 MB of their own RSS.",
@@ -367,7 +373,8 @@ for r in exp:
 def short(r):
     """A driver's name for the headline: the tool, its version, and what runs it."""
     fixed = {"nv-serve": "navigera (Chrome)", "nv-shell": "navigera (chrome-headless-shell)",
-             "gorod": f"go-rod {ver('go-rod', '')} (Go)", "chromey": f"chromey {ver('chromey', '')} (Rust)"}
+             "gorod": f"go-rod {ver('go-rod', '')} (Go)",
+             "gorod-shell": f"go-rod {ver('go-rod', '')} (Go, chrome-headless-shell)", "chromey": f"chromey {ver('chromey', '')} (Rust)"}
     return fixed.get(r["name"]) or NAMES.get(r["name"], r["name"]).replace("`", "")
 
 
@@ -382,7 +389,8 @@ TIE = 0.02
 # navigera on Chrome against every other driver on the same Chrome, and
 # navigera against every other agent tool. Lower is better for each.
 losses = []
-others = [r for r in chrome if not r["name"].startswith("nv-")]
+others = [r for r in chrome if not r["name"].startswith("nv-") and r["name"] not in SHELL_ROWS]
+measures = []
 if serve:
     measures = [
         ("session wall", lambda r: r["session"]["wall_s"], lambda v: f"{v:.2f} s"),
@@ -401,6 +409,12 @@ if serve:
         v, r = min(rivals, key=lambda t: t[0])
         if v < mine * (1 - TIE):
             losses.append(f"{what}: {short(r)} {fmt(v)}, navigera {fmt(mine)}")
+# The same measures on chrome-headless-shell: navigera against go-rod there.
+if shell and gorod_shell:
+    for what, get, fmt in measures:
+        mine, v = get(shell), get(gorod_shell)
+        if mine is not None and v is not None and v < mine * (1 - TIE):
+            losses.append(f"{what} on chrome-headless-shell: {short(gorod_shell)} {fmt(v)}, navigera {fmt(mine)}")
 nav_agent = next((a for a in agent if a["name"] == "navigera" and a.get("wall_s")), None)
 if nav_agent:
     def kb(key):
@@ -425,7 +439,8 @@ if page_path:
     lose = [("# " if losses_path else "## ") + "Where navigera is not ahead", "", numbers + ".", "",
             "Each measure of the benchmarks on which another tool beat navigera in this",
             "run by more than 2%, from its publish.json: navigera on Chrome against every",
-            "other driver on the same Chrome, and against every other agent tool. Closer",
+            "other driver on the same Chrome, navigera on chrome-headless-shell against",
+            "go-rod on it, and navigera against every other agent tool. Closer",
             "than 2% is a tie. Driver CPU is left out: the kernel counts it in 10 ms",
             "ticks, so every native driver ties.", ""]
     lose += [f"- {x[0].upper() + x[1:]}." for x in losses] or ["- None in this run."]
@@ -444,7 +459,7 @@ if page_path:
             "| driver | session | cold start | warm eval | its own memory |",
             "|---|---|---|---|---|"]
     picks = [r for r in chrome if r["name"] in ("nv-serve", "nv-shell")]
-    picks += [r for r in others if r["name"] in ("gorod", "puppeteer", "playwright", "playwright-bun")]
+    picks += [r for r in chrome if r["name"] in ("gorod", "gorod-shell", "puppeteer", "playwright", "playwright-bun")]
     for r in sorted(picks, key=lambda r: r["session"]["wall_s"]):
         ev = (r.get("eval") or {}).get("mean_ms")
         head.append(f"| {short(r)} | {r['session']['wall_s']:.2f} s | {mid(r.get('cold')):.2f} s | "

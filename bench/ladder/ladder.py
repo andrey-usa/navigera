@@ -14,6 +14,7 @@ Contenders (each drives the same headless Chrome on the same fixture pages):
   chromiumoxide   chromiumoxide 0.7 (native Rust CDP)
   chromedp        chromedp v0.19.1 (native Go CDP)
   gorod           go-rod v0.116.2 (native Go CDP)
+  gorod-shell     go-rod on chrome-headless-shell ($SHELL_BIN): nv-shell's pair
 
 Engine variants (nv-edge/nv-brave/nv-lightpanda) are skipped gracefully when
 their binary is not installed (env EDGE_BIN / BRAVE_BIN / lightpanda shim).
@@ -1149,6 +1150,15 @@ def main() -> int:
         "chromedp": [str(CONTENDERS / "chromedp" / "ladder-chromedp")],
         "gorod": [str(CONTENDERS / "gorod" / "ladder-gorod")],
     })
+    # go-rod on chrome-headless-shell: nv-shell's pair, each tool on its
+    # fastest browser. The same go-rod binary; `env` sets the browser and
+    # then execs it, so the process measured is go-rod's own.
+    shell_bin = os.environ.get("SHELL_BIN")
+    gorod_bin = CONTENDERS / "gorod" / "ladder-gorod"
+    if shell_bin and Path(shell_bin).exists() and gorod_bin.exists():
+        contenders["gorod-shell"] = ["env", f"CHROME_BIN={shell_bin}", str(gorod_bin)]
+    else:
+        SKIPPED["gorod-shell"] = f"no binary (SHELL_BIN={shell_bin}, {gorod_bin.name})"
 
     if not shutil.which("bun"):
         SKIPPED["playwright-bun"] = "bun not installed"
