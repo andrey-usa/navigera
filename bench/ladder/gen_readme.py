@@ -374,6 +374,8 @@ def tool(a):
     return re.sub(r" \(.*\)$", "", label.get(a["name"], a["name"])).replace("`", "")
 
 
+# A difference within 2% is a tie, not a loss: about what one run varies by.
+TIE = 0.02
 # What another tool did better than navigera in this run, measure by measure:
 # navigera on Chrome against every other driver on the same Chrome, and
 # navigera against every other agent tool. Lower is better for each.
@@ -395,7 +397,7 @@ if serve:
         if mine is None or not rivals:
             continue
         v, r = min(rivals, key=lambda t: t[0])
-        if v < mine:
+        if v < mine * (1 - TIE):
             losses.append(f"{what}: {short(r)} {fmt(v)}, navigera {fmt(mine)}")
 nav_agent = next((a for a in agent if a["name"] == "navigera" and a.get("wall_s")), None)
 if nav_agent:
@@ -411,18 +413,19 @@ if nav_agent:
         if mine is None or not rivals:
             continue
         v, a = min(rivals, key=lambda t: t[0])
-        if round(v) < round(mine):
+        if v < mine * (1 - TIE):
             losses.append(f"{what}: {tool(a)} {fmt(v)}, navigera {fmt(mine)}")
-loss_text = ("Where another tool did better in this run: " + "; ".join(losses) + "."
-             if losses else "No other tool did better than navigera on any measure in this run.")
+loss_text = ("Where another tool did better in this run (by more than 2%): " + "; ".join(losses) + "."
+             if losses else "No other tool did better than navigera by more than 2% on any measure in this run.")
 
 if page_path:
     page = ["# Benchmarks", ""] + [("## " + x[4:]) if x.startswith("### ") else x for x in lines[2:]]
     lose = [("# " if losses_path else "## ") + "Where navigera is not ahead", "", numbers + ".", "",
             "Each measure of the benchmarks on which another tool beat navigera in this",
-            "run, from its publish.json: navigera on Chrome against every other driver on",
-            "the same Chrome, and against every other agent tool. Driver CPU is left out:",
-            "the kernel counts it in 10 ms ticks, so every native driver ties.", ""]
+            "run by more than 2%, from its publish.json: navigera on Chrome against every",
+            "other driver on the same Chrome, and against every other agent tool. Closer",
+            "than 2% is a tie. Driver CPU is left out: the kernel counts it in 10 ms",
+            "ticks, so every native driver ties.", ""]
     lose += [f"- {x[0].upper() + x[1:]}." for x in losses] or ["- None in this run."]
     lose.append("")
     if losses_path:
