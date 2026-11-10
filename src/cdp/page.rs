@@ -3999,26 +3999,25 @@ impl Page {
     /// [`Self::evaluate`] for a read: run only if V8 can show the expression
     /// changes nothing (`throwOnSideEffect`), the way a console's eager
     /// preview does. V8 stops a refused expression before its first side
-    /// effect, so a refusal has done nothing. None when V8 refuses it, it
-    /// throws, or no answer comes in `timeout`: the caller then runs it the
-    /// usual way, and that run says what went wrong, if anything did.
-    pub fn evaluate_read(&self, expression: &str, timeout: Duration) -> Option<Value> {
-        let res = self
-            .send(
-                "Runtime.evaluate",
-                json!({
-                    "expression": call_if_function(expression),
-                    "returnByValue": true,
-                    "awaitPromise": true,
-                    "throwOnSideEffect": true,
-                }),
-                timeout,
-            )
-            .ok()?;
+    /// effect, so a refusal has done nothing. `Ok(None)` when V8 refuses it
+    /// or it throws: the caller then runs it the usual way, and that run
+    /// says what went wrong, if anything did. An error is the browser's (it
+    /// is gone, or did not answer): the caller reports it as the op's.
+    pub fn evaluate_read(&self, expression: &str, timeout: Duration) -> Result<Option<Value>> {
+        let res = self.send(
+            "Runtime.evaluate",
+            json!({
+                "expression": call_if_function(expression),
+                "returnByValue": true,
+                "awaitPromise": true,
+                "throwOnSideEffect": true,
+            }),
+            timeout,
+        )?;
         if res.get("exceptionDetails").is_some() {
-            return None;
+            return Ok(None);
         }
-        Some(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null))
+        Ok(Some(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null)))
     }
 
     /// Run `source` as a script, as a console does: statements (`a(); b`),

@@ -2942,6 +2942,9 @@ pub struct Driver {
     /// The op just run was such an `eval`: no arm was sent, so there is
     /// nothing to put back.
     was_read: bool,
+    /// The browser's error when it was asked for such a read (gone, or no
+    /// answer): the op's error, as the first message to it would have been.
+    read_error: Option<anyhow::Error>,
     /// Hashes of `eval` sources V8 refused as reads, so a repeated write
     /// does not pay the refused try again (cleared at [`REFUSED_MAX`]).
     refused_reads: std::collections::HashSet<u64>,
@@ -3421,6 +3424,7 @@ impl Driver {
                 agent_reads: false,
                 read_answer: None,
                 was_read: false,
+                read_error: None,
                 refused_reads: Default::default(),
                 pre_read: PreRead::default(),
             });
@@ -3439,6 +3443,7 @@ impl Driver {
                 agent_reads: false,
                 read_answer: None,
                 was_read: false,
+                read_error: None,
                 refused_reads: Default::default(),
                 pre_read: PreRead::default(),
             });
@@ -3464,6 +3469,7 @@ impl Driver {
             agent_reads: false,
             read_answer: None,
             was_read: false,
+            read_error: None,
             refused_reads: Default::default(),
             pre_read: PreRead::default(),
         })
@@ -3491,6 +3497,7 @@ impl Driver {
             agent_reads: false,
             read_answer: None,
             was_read: false,
+            read_error: None,
             refused_reads: Default::default(),
             pre_read: PreRead::default(),
         })
@@ -3533,6 +3540,7 @@ impl Driver {
             agent_reads: false,
             read_answer: None,
             was_read: false,
+            read_error: None,
             refused_reads: Default::default(),
             pre_read: PreRead::default(),
         })
@@ -4463,18 +4471,25 @@ impl Driver {
         // nothing it is answered in one message, with nothing to arm, settle
         // or put back. Anything else (a write, a refusal, an error) runs as
         // an action, as before.
+        self.read_error = None;
         self.read_answer = match command {
             Command::Eval { expression, timeout_ms, main: false }
                 if may_be_read(expression) && !self.refused_reads.contains(&source_hash(expression)) =>
             {
-                let answer = self.session.evaluate_read(expression, *timeout_ms);
-                if answer.is_none() {
-                    if self.refused_reads.len() >= REFUSED_MAX {
-                        self.refused_reads.clear();
+                match self.session.evaluate_read(expression, *timeout_ms) {
+                    Ok(Some(answer)) => Some(answer),
+                    Ok(None) => {
+                        if self.refused_reads.len() >= REFUSED_MAX {
+                            self.refused_reads.clear();
+                        }
+                        self.refused_reads.insert(source_hash(expression));
+                        None
                     }
-                    self.refused_reads.insert(source_hash(expression));
+                    Err(e) => {
+                        self.read_error = Some(e);
+                        None
+                    }
                 }
-                answer
             }
             _ => None,
         };
@@ -5032,6 +5047,9 @@ impl Driver {
             Command::Eval { expression, timeout_ms, main: false } => {
                 if let Some(value) = self.read_answer.take() {
                     return Ok(value);
+                }
+                if let Some(e) = self.read_error.take() {
+                    return Err(e.context("eval"));
                 }
                 let value = s.evaluate_user(expression, *timeout_ms).map_err(|e| e.context("eval"))?;
                 Ok(value)
