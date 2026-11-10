@@ -403,9 +403,11 @@ fn a11y_audits_with_refs_and_leaves_the_page_alone() {
 
 #[test]
 fn vitals() {
-    // A heading painted at once, a paragraph that pushes it down later, a
-    // quick button and one whose handler keeps the page busy for 250 ms.
-    let page = "data:text/html,<h1 id=t>Hello</h1><button id=slow onclick=\"let t=performance.now();while(performance.now()-t<250){}\">slow</button><button id=quick>quick</button><script>setTimeout(()=>{const p=document.createElement('p');p.style.height='300px';document.body.prepend(p)},200)</script>";
+    // A heading painted at once, a paragraph that pushes it down once the
+    // page has painted (a shift before the first paint is no layout shift,
+    // and a slow runner paints later than any fixed delay), a quick button
+    // and one whose handler keeps the page busy for 250 ms.
+    let page = "data:text/html,<h1 id=t>Hello</h1><button id=slow onclick=\"let t=performance.now();while(performance.now()-t<250){}\">slow</button><button id=quick>quick</button><script>new PerformanceObserver((l,o)=>{if(!l.getEntries().some(e=>e.name==='first-contentful-paint'))return;o.disconnect();setTimeout(()=>{const p=document.createElement('p');p.style.height='300px';p.textContent='pushed';document.body.prepend(p)},100)}).observe({type:'paint',buffered:true})</script>";
     for (engine, bin) in engines() {
         let a = Agent::new("vitals", engine, bin);
         a.ok(&["goto", page]);
@@ -413,7 +415,7 @@ fn vitals() {
             assert!(a.err(&["vitals"]).contains("no web vitals"), "[{engine}]");
             continue;
         }
-        a.ok(&["wait", "--ms", "500"]);
+        a.ok(&["wait", "--text", "pushed"]);
         let v = a.ok(&["vitals"]);
         assert!(v["lcp"].as_f64().is_some_and(|n| n > 0.0), "{v}");
         assert_eq!(v["lcp_element"], "#t", "{v}");
