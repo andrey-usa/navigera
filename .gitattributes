@@ -1,0 +1,3 @@
+# Files the binary embeds with include_str!: LF on every checkout, so a
+# Windows build prints the same bytes as any other.
+skills/** text eol=lf
