@@ -141,3 +141,5 @@ releasing: [CONTRIBUTING.md](https://github.com/andrey-usa/navigera/blob/master/
 ## License
 
 MIT: [LICENSE](https://github.com/andrey-usa/navigera/blob/master/LICENSE).
+`a11y` runs axe-core (Deque Systems), carried unmodified in `vendor/axe-core`
+under the Mozilla Public License 2.0, its licenses beside it.

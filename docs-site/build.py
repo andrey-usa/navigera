@@ -612,7 +612,12 @@ def main():
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--check", action="store_true")
     a = ap.parse_args()
-    cfg = tomllib.loads((SITE / "site.toml").read_text(encoding="utf-8"))
+    if not (SITE / "site.toml").exists():
+        fail(f"no {SITE / 'site.toml'}: it lists the site's parts and pages (see another tool's for the shape)")
+    try:
+        cfg = tomllib.loads((SITE / "site.toml").read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as e:
+        fail(f"docs-site/site.toml: {e}")
     for key in ("name", "repo", "branch", "binary", "summary", "part"):
         if key not in cfg:
             fail(f"site.toml has no `{key}`")
