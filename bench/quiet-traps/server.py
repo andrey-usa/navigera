@@ -24,9 +24,18 @@ Traps:
   longpoll     click starts a fetch the server holds open 30 s
   gap150       response -> DOM write -> second fetch in setTimeout 150 ms
 """
+import socketserver
 import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class Server(ThreadingHTTPServer):
+    # The local address is enough; reverse DNS can stall macOS runners.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 DELAY_MS = 150
 
@@ -118,4 +127,4 @@ if __name__ == "__main__":
     import sys
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8973
     print(json.dumps({"port": port, "traps": TRAPS}))
-    ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+    Server(("127.0.0.1", port), H).serve_forever()

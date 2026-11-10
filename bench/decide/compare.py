@@ -27,6 +27,7 @@ import os
 import re
 import statistics
 import subprocess
+import socketserver
 import sys
 import tempfile
 import threading
@@ -35,6 +36,14 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+
+class Server(ThreadingHTTPServer):
+    # The local address is enough; reverse DNS can stall macOS runners.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 # navigera prints compact output by default; this reads its JSON lines.
 os.environ.setdefault("NAVIGERA_OUTPUT", "json")
@@ -406,7 +415,7 @@ def main() -> int:
 
     site = subprocess.Popen([sys.executable, str(SITE), "--port", "0"], stdout=subprocess.PIPE, text=True)
     procs.append(site)
-    fix = ThreadingHTTPServer(("127.0.0.1", 0), Fixtures)
+    fix = Server(("127.0.0.1", 0), Fixtures)
     threading.Thread(target=fix.serve_forever, daemon=True).start()
     bases = {"site": site.stdout.readline().strip().removeprefix("LISTENING "),
              "fix": f"http://127.0.0.1:{fix.server_port}"}

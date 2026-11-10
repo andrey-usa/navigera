@@ -25,12 +25,21 @@ import json
 import re
 import select
 import socket
+import socketserver
 import sys
 import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl
+
+
+class Server(ThreadingHTTPServer):
+    # The local address is enough; reverse DNS can stall macOS runners.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 HOP_BY_HOP = {"connection", "proxy-connection", "keep-alive", "te", "trailer",
               "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate"}
@@ -243,7 +252,7 @@ def main() -> int:
     for h in args.header:
         name, _, value = h.partition(":")
         inject.append((name.strip(), value.strip()))
-    server = ThreadingHTTPServer(("127.0.0.1", args.listen), Handler)
+    server = Server(("127.0.0.1", args.listen), Handler)
     server.daemon_threads = True
     server.cfg = {"listen": args.listen, "upstream": args.upstream, "inject": inject,
                   "recorder": Recorder(args.entries)}

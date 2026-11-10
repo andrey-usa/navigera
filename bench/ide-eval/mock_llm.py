@@ -16,9 +16,18 @@ Requests without tools (session titles, summaries) get a short plain answer.
 import argparse
 import json
 import re
+import socketserver
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class Server(ThreadingHTTPServer):
+    # The local address is enough; reverse DNS can stall macOS runners.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 SHELL_TOOLS = ("bash", "run_commands", "execute_command", "run_terminal_command", "shell", "run_shell_command")
 
@@ -178,7 +187,7 @@ def main() -> int:
     ap.add_argument("--log")
     args = ap.parse_args()
     Handler.log_path = args.log
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = Server(("127.0.0.1", args.port), Handler)
     print(f"mock model on http://127.0.0.1:{args.port}/v1", file=sys.stderr, flush=True)
     server.serve_forever()
     return 0

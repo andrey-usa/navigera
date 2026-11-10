@@ -23,6 +23,7 @@ import json
 import os
 import statistics
 import subprocess
+import socketserver
 import sys
 import tempfile
 import threading
@@ -30,6 +31,14 @@ import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+
+class Server(ThreadingHTTPServer):
+    # The local address is enough; reverse DNS can stall macOS runners.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 ROOT = Path(__file__).resolve().parents[2]
 FLOOR_MS = 20.0
@@ -73,7 +82,7 @@ class Quiet(SimpleHTTPRequestHandler):
 
 
 def serve_dir(dir_: Path) -> str:
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), partial(Quiet, directory=str(dir_)))
+    srv = Server(("127.0.0.1", 0), partial(Quiet, directory=str(dir_)))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return f"http://127.0.0.1:{srv.server_address[1]}"
 

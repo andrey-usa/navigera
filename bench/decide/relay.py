@@ -14,11 +14,20 @@ usage, the status and the round-trip time.
 import argparse
 import json
 import os
+import socketserver
 import sys
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class Server(ThreadingHTTPServer):
+    # The local address is enough; reverse DNS can stall macOS runners.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 UPSTREAM = "https://api.typesafe.ai/v1/systemone"
 
@@ -79,7 +88,7 @@ def main() -> int:
         print("relay.py: TYPESAFE_API_KEY is not set", file=sys.stderr)
         return 2
     Handler.upstream, Handler.log_path = args.upstream, args.log
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = Server(("127.0.0.1", args.port), Handler)
     print(f"LISTENING http://127.0.0.1:{server.server_port}/v1/systemone", flush=True)
     server.serve_forever()
     return 0

@@ -58,6 +58,7 @@ import random
 import shlex
 import shutil
 import subprocess
+import socketserver
 import sys
 import tempfile
 import threading
@@ -66,6 +67,14 @@ import urllib.request
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+
+class Server(ThreadingHTTPServer):
+    # The local address is enough; reverse DNS can stall macOS runners.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 API = "https://api.siliconflow.com/v1/chat/completions"
 MODEL_DEFAULT = "deepseek-ai/DeepSeek-V4.1-Flash"
@@ -1180,7 +1189,7 @@ def main():
                     help="serve the site and check it, then exit")
     args = ap.parse_args()
     site = Site()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(site))
+    server = Server(("127.0.0.1", PORT), make_handler(site))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     check_site()
     print("site check: ok", flush=True)
