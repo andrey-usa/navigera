@@ -9,11 +9,12 @@ Prints `LISTENING http://127.0.0.1:<port> <other-port>` once both are up.
 """
 import http.server
 import json
-import socketserver
 import sys
 import threading
 import time
 import urllib.parse
+
+from local_server import Server
 
 OTHER = {"port": 0}
 
@@ -177,11 +178,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(404)
         self.send_header("Content-Length", "0")
         self.end_headers()
-
-
-class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
 
 
 def main():

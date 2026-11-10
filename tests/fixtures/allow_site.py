@@ -14,6 +14,8 @@ import http.server
 import sys
 import threading
 
+from local_server import Server
+
 SINK_HITS = {"localhost": 0}
 LOCK = threading.Lock()
 
@@ -68,6 +70,6 @@ class H(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+srv = Server(("127.0.0.1", 0), H)
 print(f"LISTENING {srv.server_port}", flush=True)
 srv.serve_forever()

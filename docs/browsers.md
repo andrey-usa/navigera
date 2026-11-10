@@ -7,7 +7,7 @@ CI runs the full end-to-end suite on:
   for Testing;
 - **chrome-headless-shell**;
 - **Chrome Beta**, as a non-blocking early warning;
-- the runner's own Chrome, on Linux and on **Windows**.
+- the runner's own Chrome, on Linux, **macOS** and **Windows**.
 
 The suite is weekly as well as on every push, so a new Chrome release is
 caught before agents hit it. In its first runs the matrix caught two real

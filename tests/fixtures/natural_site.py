@@ -7,7 +7,9 @@ becomes "done"). /headers echoes the request headers. /login signs in: a
 persistent cookie and a localStorage key. /whoami says who the cookie and the
 storage say you are."""
 import json, sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from local_server import Server
 
 PAGE = r"""<!doctype html><html><head><meta charset=utf-8><title>checking</title></head><body>
 <pre id=out></pre>
@@ -95,6 +97,6 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-srv = ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1]) if len(sys.argv) > 1 else 0), H)
+srv = Server(('127.0.0.1', int(sys.argv[1]) if len(sys.argv) > 1 else 0), H)
 print(f"LISTENING http://127.0.0.1:{srv.server_address[1]}", flush=True)
 srv.serve_forever()

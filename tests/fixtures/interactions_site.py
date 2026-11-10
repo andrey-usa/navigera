@@ -82,8 +82,10 @@ getting wrong, one page each, built the way those sites behave:
 
 Prints "LISTENING http://127.0.0.1:<port>" and serves until killed."""
 import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
+
+from local_server import Server
 
 HEAD = "<!doctype html><html><head><meta charset=utf-8><title>{title}</title><style>{style}</style></head><body>"
 
@@ -1144,11 +1146,11 @@ XO_PORT = [0]
 
 if __name__ == "__main__":
     # A second port: another origin on the same site (127.0.0.1).
-    xo = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    xo = Server(("127.0.0.1", 0), Handler)
     XO_PORT[0] = xo.server_address[1]
     import threading
     threading.Thread(target=xo.serve_forever, daemon=True).start()
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv = Server(("127.0.0.1", 0), Handler)
     print(f"LISTENING http://127.0.0.1:{srv.server_address[1]}", flush=True)
     try:
         srv.serve_forever()

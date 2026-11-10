@@ -251,6 +251,47 @@ jobs:
         if: success() || failure()
         run: cargo clippy --locked --features http --all-targets -- -D warnings
 
+  # The same tests on macOS (bitti's macOS job reaches navigera only through
+  # the library). The fixture sites bind without a host-name lookup, which
+  # costs about 35 s per start on these runners (tests/fixtures/local_server.py).
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+      - name: Tests (unit + browser e2e on the runner's Chrome, CDP traced)
+        # A build from nothing takes most of this; a run from the cache, 5.
+        timeout-minutes: 30
+        env:
+          NAVIGERA_CDP_TRACE: ${{ runner.temp }}/cdp-trace.jsonl
+          NAVIGERA_REQUIRE_BROWSER: "1"
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/test.log"
+          if ! cargo test --locked --features http --no-fail-fast 2>&1 | tee "$log"; then
+            sed -n '/^---- /,/^test result/p' "$log" | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > "$RUNNER_TEMP/test-tail.log" || true
+            python bench/ladder/annotate.py "$RUNNER_TEMP/test-tail.log" "cargo test failure (macos)"
+            exit 1
+          fi
+          # Which tests ran (a skipped e2e test would show up as missing).
+          grep -E '^     Running|^test .* \.\.\. |^test result' "$log" | grep -v '^test cdp::\|^test protocol::' > "$RUNNER_TEMP/test-summary.log" || true
+          python bench/ladder/annotate.py "$RUNNER_TEMP/test-summary.log" "cargo test summary (macos)"
+      - name: Clippy
+        if: success() || failure()
+        run: cargo clippy --locked --features http --all-targets -- -D warnings
+
   # The install path agents actually take: `curl install.sh | sh` (a
   # release binary, or the cargo fallback while there is no release), and
   # `irm install.ps1 | iex` on Windows.

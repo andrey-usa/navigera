@@ -6,8 +6,10 @@ large while the printed `ax` output is capped at the output limit.
 Prints "LISTENING http://127.0.0.1:<port>" and serves until killed.
 """
 import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
+
+from local_server import Server
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -39,7 +41,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv = Server(("127.0.0.1", 0), Handler)
     print(f"LISTENING http://127.0.0.1:{srv.server_address[1]}", flush=True)
     try:
         srv.serve_forever()
