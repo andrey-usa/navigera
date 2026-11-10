@@ -55,6 +55,7 @@ Platforms, and which browser navigera picks (for the fastest start,
 
 ```console
 $ navigera -s work start
+{"log":"/run/user/1000/navigera/work.log","pid":4242,"session":"work","socket":"/run/user/1000/navigera/work.sock"}
 $ navigera -s work goto https://example.com
 {"title":"Example Domain","url":"https://example.com/"}
 $ navigera -s work title
