@@ -1,18 +1,34 @@
 name: fuzz
+
+# The fuzz targets: 30 minutes each every night, on the work branch; five on
+# a pull request or a dispatch; two on a push that touches the code. A run
+# starts from the corpus the last one left, so the nights add up. A crash
+# fails the job: its last lines are in the log, the input is in the
+# artifact, and the error on the run says what to run.
+
 on:
+  push:
+    branches: [next]
+    paths: ["fuzz/**", "src/**", "Cargo.lock", ".github/workflows/fuzz.yml"]
   pull_request:
-    paths: ["fuzz/**", "src/**"]
-  schedule: [{cron: "0 3 * * *"}]  # nightly, 30 min per target
+    paths: ["fuzz/**", "src/**", "Cargo.lock", ".github/workflows/fuzz.yml"]
+  schedule: [{cron: "0 3 * * *"}]
   workflow_dispatch:
     inputs:
       duration:
-        description: "Fuzz seconds per target (empty: 300, or 1800 on schedule)"
+        description: "Fuzz seconds per target (empty: 300; 1800 on schedule, 120 on a push)"
         required: false
+
 permissions: {contents: read}
+
+concurrency:
+  group: fuzz-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -21,20 +37,33 @@ jobs:
             seeds: none
           - target: command_json
             seeds: none
+    env:
+      TARGET: ${{ matrix.target }}
+      SEEDS: ${{ matrix.seeds }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          # A schedule runs the default branch's copy of this file, and the
+          # code that changes is on next: that is what a night fuzzes.
+          ref: ${{ github.event_name == 'schedule' && 'next' || '' }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1
         with:
           toolchain: nightly
-      - name: install cargo-fuzz
-        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: The corpus the last run left
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: seed corpus
         working-directory: fuzz
         run: |
-          mkdir -p "corpus/${{ matrix.target }}" artifacts
-          ls "corpus/${{ matrix.target }}" | head -20
+          mkdir -p "corpus/$TARGET" artifacts
+          echo "corpus: $(ls "corpus/$TARGET" | wc -l) inputs"
       - name: fuzz
         working-directory: fuzz
         env:
@@ -47,28 +76,45 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           # NOTE: this step runs under bash -e, so a plain failing command
-          # aborts the script before the log-copy lines below run. The
-          # cargo invocation must therefore be in an OR list (exempt from
-          # -e) for its log to survive a crash, hang or build failure.
+          # aborts the script before the lines after it run. The cargo
+          # invocation must therefore be in an OR list (exempt from -e)
+          # for its log to survive a crash, hang or build failure.
           DURATION="$DURATION_INPUT"
           if [ -z "$DURATION" ]; then
-            if [ "$EVENT" = "schedule" ]; then DURATION=1800; else DURATION=300; fi
+            case "$EVENT" in schedule) DURATION=1800;; push) DURATION=120;; *) DURATION=300;; esac
           fi
           case "$DURATION" in ''|*[!0-9]*) echo "duration must be a number of seconds: $DURATION" >&2; exit 2;; esac
+          log="fuzz-$TARGET.log"
           code=0
-          cargo +nightly fuzz run --fuzz-dir . ${{ matrix.target }} "corpus/${{ matrix.target }}" -- \
+          cargo +nightly fuzz run --fuzz-dir . "$TARGET" "corpus/$TARGET" -- \
             -max_total_time="$DURATION" -rss_limit_mb=2048 -timeout=10 -max_len=65536 \
-            -artifact_prefix="$PWD/artifacts/" > "fuzz-${{ matrix.target }}.log" 2>&1 || code=$?
-          tail -40 "fuzz-${{ matrix.target }}.log" > artifacts/run-summary.txt || true
-          cp "fuzz-${{ matrix.target }}.log" artifacts/ || true
+            -artifact_prefix="$PWD/artifacts/" > "$log" 2>&1 || code=$?
+          # What the run did, without the line libFuzzer prints per input.
+          grep -v -E '^#[0-9]+[[:space:]]+(NEW|REDUCE|pulse|RELOAD)' "$log" | tail -60 > artifacts/run-summary.txt || true
+          cp "$log" artifacts/ || true
+          cat artifacts/run-summary.txt
+          if [ "$code" != 0 ]; then
+            what=$(grep -m1 -E '^SUMMARY: |^error(\[E[0-9]+\])?: ' "$log" || echo "exit $code")
+            input=$(ls artifacts | grep -m1 -E '^(crash|oom|timeout|leak|slow-unit)-' || true)
+            if [ -n "$input" ]; then
+              next="Input: fuzz/artifacts/$input in the artifact fuzz-$TARGET. Run it: cargo +nightly fuzz run --fuzz-dir fuzz $TARGET <the file>; then keep it as a test."
+            else
+              next="No input was written: the target did not build or run. The last lines are in this job's log."
+            fi
+            echo "::error title=fuzz $TARGET::$what. $next"
+          fi
           exit $code
-      - name: upload corpus and crashes
+      - name: Keep the corpus for the next run
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      # The log and any crashing input. The corpus is in the cache.
+      - name: upload the log and crashes
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: fuzz-${{ matrix.target }}
-          path: |
-            fuzz/corpus/${{ matrix.target }}
-            fuzz/artifacts
-            fuzz/fuzz-${{ matrix.target }}.log
+          path: fuzz/artifacts
           retention-days: 30

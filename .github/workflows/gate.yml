@@ -7,6 +7,11 @@ name: gate
 # compares two allocators, not two versions.
 
 on:
+  # Every push to the work branch is held to the last release, so a
+  # slowdown shows at the commit that brought it, not at the next release.
+  push:
+    branches: [next]
+    paths-ignore: ["**.md", "docs/**", "docs-site/**"]
   workflow_dispatch:
     inputs:
       base:
@@ -15,6 +20,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: gate-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   # The CLI's default output is the compact form for agents; the steps

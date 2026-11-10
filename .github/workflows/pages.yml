@@ -9,10 +9,10 @@ on:
     branches: ["master"]
   workflow_dispatch:
 
+# The build runs the repository's code and gets to read it, nothing more;
+# publishing is the deploy job's alone.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: "pages"
@@ -44,13 +44,16 @@ jobs:
           tar xzf "$RUNNER_TEMP/mdbook.tar.gz" -C "$RUNNER_TEMP"
       - name: Write the pages, build the site, check its links
         run: python3 docs-site/build.py --binary target/release/navigera --mdbook "$RUNNER_TEMP/mdbook" --check
-      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: docs-site/book
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -1,8 +1,9 @@
 name: ci
 
 on:
+  # next is where the work lands; master moves at a release.
   push:
-    branches: [master]
+    branches: [master, next]
   pull_request:
   workflow_dispatch:
   # Weekly: a new Chrome Stable/Beta release must not break
@@ -12,6 +13,11 @@ on:
 
 permissions:
   contents: read
+
+# A newer push to a branch replaces the run of the one before it.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   # The CLI's default output is the compact form for agents; the steps
@@ -37,6 +43,10 @@ jobs:
         run: cargo fmt --check
 
       - name: Tests (unit + browser e2e on the runner's Chrome, CDP traced)
+        # About three times what it takes. A process a failed test leaves
+        # behind can hold the log open after cargo has ended: on Windows
+        # that once kept this step waiting for the job's whole 40 minutes.
+        timeout-minutes: 15
         env:
           NAVIGERA_CDP_TRACE: ${{ runner.temp }}/cdp-trace.jsonl
           NAVIGERA_REQUIRE_BROWSER: "1"
@@ -129,6 +139,7 @@ jobs:
   # Known-vulnerable dependencies (RustSec advisory database).
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -141,6 +152,7 @@ jobs:
   # The oldest Rust that builds navigera (rust-version in Cargo.toml).
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -176,11 +188,17 @@ jobs:
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
       - run: cargo build --release --locked --bin navigera --target ${{ matrix.target }}
       - name: Binary size against the last release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
         run: |
-          bin=target/${{ matrix.target }}/release/navigera
+          bin="target/$TARGET/release/navigera"
           now=$(stat -c %s "$bin")
-          last=$(curl -fsSL "https://github.com/andrey-usa/navigera/releases/download/v0.10.1/navigera-${{ matrix.target }}.tar.gz" | tar -xzO --wildcards '*navigera' | wc -c)
-          echo "size ${{ matrix.target }}: $now B now, $last B in v0.10.1, +$((now - last)) B"
+          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "navigera-$TARGET.tar.gz" --dir "$RUNNER_TEMP/last"
+          last=$(tar -xzOf "$RUNNER_TEMP/last/navigera-$TARGET.tar.gz" --wildcards '*navigera' | wc -c)
+          echo "size $TARGET: $now B now, $last B in $tag, $((now - last)) B more"
+          echo "::notice title=size $TARGET::$now B now, $last B in $tag, $((now - last)) B more"
       - name: Smoke test
         run: |
           bin=target/${{ matrix.target }}/release/navigera
@@ -197,7 +215,7 @@ jobs:
   # kill-on-close job object).
   windows:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 35
     defaults:
       run:
         shell: bash
@@ -213,6 +231,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Tests (unit + browser e2e on the runner's Chrome, CDP traced)
+        # A build from nothing takes most of this; a run from the cache, 5.
+        timeout-minutes: 25
         env:
           NAVIGERA_CDP_TRACE: ${{ runner.temp }}/cdp-trace.jsonl
           NAVIGERA_REQUIRE_BROWSER: "1"
@@ -334,6 +354,7 @@ jobs:
   # chrome-headless-shell, and Beta (non-blocking early warning).
   browsers:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       matrix: ${{ steps.pick.outputs.matrix }}
     steps:
@@ -366,6 +387,7 @@ jobs:
           unzip -q /tmp/browser.zip -d /tmp/browser
           echo "CHROME_BIN=/tmp/browser/${{ matrix.browser.exe }}" >> "$GITHUB_ENV"
       - name: e2e tests (CDP traced)
+        timeout-minutes: 15
         env:
           NAVIGERA_CDP_TRACE: ${{ runner.temp }}/cdp-trace.jsonl
           NAVIGERA_REQUIRE_BROWSER: "1"
