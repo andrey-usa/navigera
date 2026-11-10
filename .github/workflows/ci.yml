@@ -129,7 +129,12 @@ jobs:
           log="$RUNNER_TEMP/test.log"
           run=""
           if [ "$RUNNER_OS" = "Linux" ]; then run="xvfb-run -a"; fi
-          if ! $run cargo test --locked --test electron -- --nocapture 2>&1 | tee "$log"; then
+          # To a file, not through `| tee`: a process a failed test leaves behind
+          # would hold the pipe open, and the step would wait out its time limit.
+          rc=0
+          $run cargo test --locked --test electron -- --nocapture > "$log" 2>&1 || rc=$?
+          cat "$log"
+          if [ "$rc" -ne 0 ]; then
             sed -n '/^---- /,/^test result/p' "$log" | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > "$RUNNER_TEMP/test-tail.log" || true
             py=python3; command -v python3 > /dev/null || py=python
             $py bench/ladder/annotate.py "$RUNNER_TEMP/test-tail.log" "electron test failure (${{ matrix.os }})"
@@ -239,7 +244,12 @@ jobs:
         run: |
           set -o pipefail
           log="$RUNNER_TEMP/test.log"
-          if ! cargo test --locked --features http --no-fail-fast 2>&1 | tee "$log"; then
+          # To a file, not through `| tee`: a process a failed test leaves behind
+          # would hold the pipe open, and the step would wait out its time limit.
+          rc=0
+          cargo test --locked --features http --no-fail-fast > "$log" 2>&1 || rc=$?
+          cat "$log"
+          if [ "$rc" -ne 0 ]; then
             sed -n '/^---- /,/^test result/p' "$log" | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > "$RUNNER_TEMP/test-tail.log" || true
             python bench/ladder/annotate.py "$RUNNER_TEMP/test-tail.log" "cargo test failure (windows)"
             exit 1
@@ -280,7 +290,12 @@ jobs:
         run: |
           set -o pipefail
           log="$RUNNER_TEMP/test.log"
-          if ! cargo test --locked --features http --no-fail-fast 2>&1 | tee "$log"; then
+          # To a file, not through `| tee`: a process a failed test leaves behind
+          # would hold the pipe open, and the step would wait out its time limit.
+          rc=0
+          cargo test --locked --features http --no-fail-fast > "$log" 2>&1 || rc=$?
+          cat "$log"
+          if [ "$rc" -ne 0 ]; then
             sed -n '/^---- /,/^test result/p' "$log" | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > "$RUNNER_TEMP/test-tail.log" || true
             python bench/ladder/annotate.py "$RUNNER_TEMP/test-tail.log" "cargo test failure (macos)"
             exit 1
