@@ -34,7 +34,7 @@ source = { file = "README.md", section = "Quick start" }
 [[part.page]]
 title = "A first session"
 path = "start/tutorial.md"
-about = "A tour of one session: the page tree and its refs, the commands, how to name an element, and what comes back."
+about = "A tour of one session: the page tree and its refs, the commands, naming an element, what comes back."
 source = { file = "docs/tutorial.md" }
 
 [[part]]
@@ -43,19 +43,19 @@ title = "Guides"
 [[part.page]]
 title = "Hand the agent your browser"
 path = "guides/your-browser.md"
-about = "Give an agent your own signed-in browser, a copy of its profile, or a saved state, and take a step back from it."
+about = "Give an agent your own signed-in browser, a copy of its profile, or a saved state."
 source = { file = "docs/guides/your-browser.md" }
 
 [[part.page]]
 title = "Drive a browser from a program"
 path = "guides/programs.md"
-about = "Keep one browser on a pipe with `navigera serve`: one JSON command per line in, one JSON reply per line out."
+about = "One browser on a pipe with `navigera serve`: one JSON command per line in, one reply out."
 source = [{ file = "docs/guides/programs.md" }, { file = "docs/navigera.md", section = "Serve protocol (programs)", keep_heading = true }]
 
 [[part.page]]
 title = "Let a fast model pick the element"
 path = "guides/decider.md"
-about = "Hand the two small decisions, which element and did it work, to a fast decision model instead of the agent's LLM."
+about = "Hand the small decisions, which element and did it work, to a fast decision model, not the agent's LLM."
 source = [{ file = "docs/guides/decider.md" }, { file = "docs/navigera.md", section = "Decisions: find and check", keep_heading = true }]
 
 [[part.page]]
@@ -76,20 +76,38 @@ title = "Concepts"
 [[part.page]]
 title = "How navigera works"
 path = "concepts/how-it-works.md"
-about = "The three ways to run navigera, and what it does for you between the commands: waits, settling, tabs, dialogs."
+about = "The three ways to run navigera; what it does between commands: waits, settling, tabs, dialogs."
 source = [{ file = "docs/navigera.md", preamble = true }, { file = "docs/navigera.md", section = "Behaviour", keep_heading = true }]
 
 [[part.page]]
 title = "Supported browsers"
 path = "concepts/browsers.md"
-about = "Which browsers and engines navigera drives, how CI tests each one, and how a browser is found or installed."
-source = [{ file = "README.md", section = "Supported browsers" }, { file = "docs/browsers.md" }, { file = "docs/navigera.md", section = "Browsers and engines", keep_heading = true }]
+about = "Which browsers and engines navigera drives, CI coverage, and how one is found or installed."
+source = [{ file = "README.md", section = "Supported browsers", intro = "More: [Lightpanda and your own browser](lightpanda.md), [Electron and natural mode](electron.md)." }, { file = "docs/browsers.md" }, { file = "docs/navigera.md", section = "Browsers and engines", keep_heading = true }]
+
+[[part.page]]
+title = "Lightpanda and your own browser"
+path = "concepts/lightpanda.md"
+about = "The Lightpanda engine; your own browser, `--attach` and `--profile`."
+source = { file = "docs/navigera.md", section = "Lightpanda and your own browser" }
+
+[[part.page]]
+title = "Electron and natural mode"
+path = "concepts/electron.md"
+about = "Electron apps, `--electron`; `--natural`: a headless run a page cannot tell."
+source = { file = "docs/navigera.md", section = "Electron and natural mode" }
 
 [[part.page]]
 title = "Several models, one browser"
 path = "concepts/multi-model.md"
-about = "Why a small decision model sits beside the agent's LLM, what it was measured to do, and what comes next."
-source = { file = "docs/multi-model.md" }
+about = "Why a small decision model sits beside the agent's LLM; what it was measured to do."
+source = { file = "docs/multi-model.md", preamble = true, sections = ["The models", "What is built"], intro = "[What comes next, why Jev doesn't drive, and the risks](multi-model-next.md) are on their own page." }
+
+[[part.page]]
+title = "What comes next, and the risks"
+path = "concepts/multi-model-next.md"
+about = "The work still ahead, by expected value; why not the LLM alone; the risks."
+source = { file = "docs/multi-model.md", sections = ["What comes next, by expected value", "Why not let Jev drive", "Risks"] }
 
 [[part]]
 title = "Reference"
@@ -103,25 +121,25 @@ source = { file = "docs/navigera.md", section = "CLI shape", intro = "The comman
 [[part.page]]
 title = "Commands: sessions, tabs and the browser"
 path = "reference/commands-sessions.md"
-about = "start, batch, sessions and reset, the tabs, status, history, profiles and the installers."
+about = "start, batch, sessions, reset, tabs, status, history, profiles, installers."
 source = { file = "docs/navigera.md", section = "Commands: sessions, tabs and the browser" }
 
 [[part.page]]
 title = "Commands: read the page"
 path = "reference/commands-read.md"
-about = "goto, the ax tree, text, get, is, eval, find, console, errors, network and locate."
+about = "goto, the ax tree, text, get, is, eval, find, console, errors, network, locate."
 source = { file = "docs/navigera.md", section = "Commands: read the page" }
 
 [[part.page]]
 title = "Commands: act on the page"
 path = "reference/commands-act.md"
-about = "click, fill, type and the other actions, wait, downloads, screenshot, pdf and screencast."
+about = "click, fill, type and the other actions, wait, downloads, screenshot, pdf, screencast."
 source = { file = "docs/navigera.md", section = "Commands: act on the page" }
 
 [[part.page]]
 title = "Commands: state, emulation and audit"
 path = "reference/commands-state.md"
-about = "cookies, storage and state, set, route, clock, init-script, WebMCP, passkey, a11y, vitals and totp."
+about = "cookies, storage, set, route, clock, init-script, WebMCP, passkey, a11y, vitals and totp."
 source = { file = "docs/navigera.md", section = "Commands: state, emulation and audit" }
 
 [[part.page]]
@@ -148,12 +166,26 @@ source = { file = "skills/navigera/SKILL.md" }
 [[part.page]]
 title = "Skill references"
 path = "agents/skill-references.md"
-about = "The detail the skill sends an agent to when a topic comes up: acting, reading, inspecting, sessions, Electron, the decider, setup and errors."
+about = "The detail the skill sends an agent to: acting on a page and reading one."
 source = [
-  { file = "skills/navigera/references/acting.md", demote = true },
+  { file = "skills/navigera/references/acting.md", demote = true, intro = "More: [inspecting and sessions](skill-references-inspecting.md), [Electron, the decider, setup and errors](skill-references-setup.md)." },
   { file = "skills/navigera/references/reading.md", demote = true },
+]
+
+[[part.page]]
+title = "Skill references: inspecting and sessions"
+path = "agents/skill-references-inspecting.md"
+about = "Inspecting page and browser, state and emulation, and sessions."
+source = [
   { file = "skills/navigera/references/inspecting.md", demote = true },
   { file = "skills/navigera/references/sessions.md", demote = true },
+]
+
+[[part.page]]
+title = "Skill references: setup and errors"
+path = "agents/skill-references-setup.md"
+about = "Electron, the decider, setup, when something fails."
+source = [
   { file = "skills/navigera/references/electron.md", demote = true },
   { file = "skills/navigera/references/decider.md", demote = true },
   { file = "skills/navigera/references/setup.md", demote = true },
@@ -184,7 +216,7 @@ source = { file = "docs/losses.md" }
 [[part.page]]
 title = "Agent eval"
 path = "benchmarks/agent-eval.md"
-about = "Whether a generic coding agent, given only the tool and its docs, finishes real tasks with navigera, Playwright and agent-browser."
+about = "A generic coding agent, given only the tool and its docs, finishing real tasks: navigera, Playwright, agent-browser."
 source = { file = "docs/agent-eval.md" }
 
 [[part]]

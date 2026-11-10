@@ -28,4 +28,4 @@ CI, on 1.0.1 and the nightly. It is a different engine (one tab, no layout),
 so navigera fills in what its CDP leaves out: shadow roots and password
 fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
 The differences that remain are listed in
-[docs/navigera.md](navigera.md#browsers-and-engines).
+[docs/navigera.md](navigera.md#lightpanda-and-your-own-browser).

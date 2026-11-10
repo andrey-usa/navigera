@@ -8,43 +8,48 @@ Each page below is markdown. The whole site in one file: https://andrey-usa.gith
 
 - [Install](https://andrey-usa.github.io/navigera/start/install.md): Every way to install navigera, the platforms it runs on, and which browser it uses.
 - [Quick start](https://andrey-usa.github.io/navigera/start/quick-start.md): One session and four commands, from install to a page read.
-- [A first session](https://andrey-usa.github.io/navigera/start/tutorial.md): A tour of one session: the page tree and its refs, the commands, how to name an element, and what comes back.
+- [A first session](https://andrey-usa.github.io/navigera/start/tutorial.md): A tour of one session: the page tree and its refs, the commands, naming an element, what comes back.
 
 ## Guides
 
-- [Hand the agent your browser](https://andrey-usa.github.io/navigera/guides/your-browser.md): Give an agent your own signed-in browser, a copy of its profile, or a saved state, and take a step back from it.
-- [Drive a browser from a program](https://andrey-usa.github.io/navigera/guides/programs.md): Keep one browser on a pipe with `navigera serve`: one JSON command per line in, one JSON reply per line out.
-- [Let a fast model pick the element](https://andrey-usa.github.io/navigera/guides/decider.md): Hand the two small decisions, which element and did it work, to a fast decision model instead of the agent's LLM.
+- [Hand the agent your browser](https://andrey-usa.github.io/navigera/guides/your-browser.md): Give an agent your own signed-in browser, a copy of its profile, or a saved state.
+- [Drive a browser from a program](https://andrey-usa.github.io/navigera/guides/programs.md): One browser on a pipe with `navigera serve`: one JSON command per line in, one reply out.
+- [Let a fast model pick the element](https://andrey-usa.github.io/navigera/guides/decider.md): Hand the small decisions, which element and did it work, to a fast decision model, not the agent's LLM.
 - [Use a page's own tools (WebMCP)](https://andrey-usa.github.io/navigera/guides/webmcp.md): Call the tools a page registers for agents through WebMCP, and see which ones it offers.
 - [Switch from agent-browser](https://andrey-usa.github.io/navigera/guides/from-agent-browser.md): agent-browser's commands and flags, each with its navigera equivalent.
 
 ## Concepts
 
-- [How navigera works](https://andrey-usa.github.io/navigera/concepts/how-it-works.md): The three ways to run navigera, and what it does for you between the commands: waits, settling, tabs, dialogs.
-- [Supported browsers](https://andrey-usa.github.io/navigera/concepts/browsers.md): Which browsers and engines navigera drives, how CI tests each one, and how a browser is found or installed.
-- [Several models, one browser](https://andrey-usa.github.io/navigera/concepts/multi-model.md): Why a small decision model sits beside the agent's LLM, what it was measured to do, and what comes next.
+- [How navigera works](https://andrey-usa.github.io/navigera/concepts/how-it-works.md): The three ways to run navigera; what it does between commands: waits, settling, tabs, dialogs.
+- [Supported browsers](https://andrey-usa.github.io/navigera/concepts/browsers.md): Which browsers and engines navigera drives, CI coverage, and how one is found or installed.
+- [Lightpanda and your own browser](https://andrey-usa.github.io/navigera/concepts/lightpanda.md): The Lightpanda engine; your own browser, `--attach` and `--profile`.
+- [Electron and natural mode](https://andrey-usa.github.io/navigera/concepts/electron.md): Electron apps, `--electron`; `--natural`: a headless run a page cannot tell.
+- [Several models, one browser](https://andrey-usa.github.io/navigera/concepts/multi-model.md): Why a small decision model sits beside the agent's LLM; what it was measured to do.
+- [What comes next, and the risks](https://andrey-usa.github.io/navigera/concepts/multi-model-next.md): The work still ahead, by expected value; why not the LLM alone; the risks.
 
 ## Reference
 
 - [Commands](https://andrey-usa.github.io/navigera/reference/commands.md): The navigera command line: sessions, flags and output, with the command list by topic.
-- [Commands: sessions, tabs and the browser](https://andrey-usa.github.io/navigera/reference/commands-sessions.md): start, batch, sessions and reset, the tabs, status, history, profiles and the installers.
-- [Commands: read the page](https://andrey-usa.github.io/navigera/reference/commands-read.md): goto, the ax tree, text, get, is, eval, find, console, errors, network and locate.
-- [Commands: act on the page](https://andrey-usa.github.io/navigera/reference/commands-act.md): click, fill, type and the other actions, wait, downloads, screenshot, pdf and screencast.
-- [Commands: state, emulation and audit](https://andrey-usa.github.io/navigera/reference/commands-state.md): cookies, storage and state, set, route, clock, init-script, WebMCP, passkey, a11y, vitals and totp.
+- [Commands: sessions, tabs and the browser](https://andrey-usa.github.io/navigera/reference/commands-sessions.md): start, batch, sessions, reset, tabs, status, history, profiles, installers.
+- [Commands: read the page](https://andrey-usa.github.io/navigera/reference/commands-read.md): goto, the ax tree, text, get, is, eval, find, console, errors, network, locate.
+- [Commands: act on the page](https://andrey-usa.github.io/navigera/reference/commands-act.md): click, fill, type and the other actions, wait, downloads, screenshot, pdf, screencast.
+- [Commands: state, emulation and audit](https://andrey-usa.github.io/navigera/reference/commands-state.md): cookies, storage, set, route, clock, init-script, WebMCP, passkey, a11y, vitals and totp.
 - [navigera --help](https://andrey-usa.github.io/navigera/reference/help.md): The command list exactly as this build prints it.
 
 ## Agents
 
 - [For AI agents](https://andrey-usa.github.io/navigera/agents/overview.md): What an agent gets: the skill, the MCP server, and these docs as markdown.
 - [Skill](https://andrey-usa.github.io/navigera/agents/skill.md): The guide `navigera install-skill` gives an agent, as this version prints it.
-- [Skill references](https://andrey-usa.github.io/navigera/agents/skill-references.md): The detail the skill sends an agent to when a topic comes up: acting, reading, inspecting, sessions, Electron, the decider, setup and errors.
+- [Skill references](https://andrey-usa.github.io/navigera/agents/skill-references.md): The detail the skill sends an agent to: acting on a page and reading one.
+- [Skill references: inspecting and sessions](https://andrey-usa.github.io/navigera/agents/skill-references-inspecting.md): Inspecting page and browser, state and emulation, and sessions.
+- [Skill references: setup and errors](https://andrey-usa.github.io/navigera/agents/skill-references-setup.md): Electron, the decider, setup, when something fails.
 - [MCP server](https://andrey-usa.github.io/navigera/agents/mcp.md): Run navigera as a Model Context Protocol server for IDE agents, with the setup for each client.
 
 ## Benchmarks
 
 - [Results](https://andrey-usa.github.io/navigera/benchmarks/results.md): Every driver and agent tool on the same scripted session, from one CI run, with how each number is taken.
 - [Where navigera is not ahead](https://andrey-usa.github.io/navigera/benchmarks/losses.md): Each measure on which another tool beat navigera in the same run.
-- [Agent eval](https://andrey-usa.github.io/navigera/benchmarks/agent-eval.md): Whether a generic coding agent, given only the tool and its docs, finishes real tasks with navigera, Playwright and agent-browser.
+- [Agent eval](https://andrey-usa.github.io/navigera/benchmarks/agent-eval.md): A generic coding agent, given only the tool and its docs, finishing real tasks: navigera, Playwright, agent-browser.
 
 ## Project
 

@@ -25,4 +25,4 @@ it is: no `HeadlessChrome` in the user agent (page, workers, request
 headers), and a real screen size. `navigator.webdriver` is false in every
 mode, and navigera never passes `--enable-automation`. It is not a CAPTCHA
 solver and fakes no fingerprint: it is a regular Chrome, run for you.
-Details: [docs/navigera.md](../navigera.md#browsers-and-engines).
+Details: [docs/navigera.md](../navigera.md#electron-and-natural-mode).

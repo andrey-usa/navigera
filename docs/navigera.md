@@ -663,6 +663,9 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   own instead: `start --own-browser` (or `NAVIGERA_SHARED_BROWSER=0`);
   `--attach`, `--profile`, `--electron`, Lightpanda and `--transport ws` on Linux/macOS
   always get one.
+
+## Lightpanda and your own browser
+
 - **`--engine lightpanda`** (experimental; tested on Lightpanda's newest stable
   release) starts `lightpanda serve` with iframes and stylesheets loaded and
   telemetry off (`LIGHTPANDA_DISABLE_TELEMETRY`). The binary comes from
@@ -730,6 +733,8 @@ connection for all commands): a one-shot command with `--attach` is
 refused. Chrome 136–143 can't serve its default profile at all (the
 `--remote-debugging-port` switch is ignored for it, and the inspect toggle
 arrives in 144): use `--profile` there, which works on any version.
+
+## Electron and natural mode
 
 **Electron apps: `--electron <app>`** (with `start`, or `serve`). navigera
 launches the app with a DevTools port of the app's choosing
