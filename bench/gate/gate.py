@@ -5,7 +5,10 @@ Runs the same fixed probes with both binaries on this machine (one `serve`
 process each, one browser, warm), takes the median of each probe, and fails
 when the candidate is slower than the base by more than the threshold on
 any probe (and by more than a small absolute floor, so a 3 ms probe can't
-fail on noise).
+fail on noise). Most probes time one op by its own `elapsed_ms`; the eval
+probe times 200 ops from this side of the pipe and sums them, so work done
+before an op starts its clock or after it stops (a round trip before the
+reply) counts too, and a sub-millisecond op clears the floor.
 
     python3 bench/gate/gate.py --base <old navigera> --candidate <new navigera> \
         [--runs 5] [--threshold 0.25] [--summary out.md]
@@ -23,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -85,9 +89,14 @@ def start_site() -> tuple[subprocess.Popen, str]:
     return site, line.split()[1]
 
 
-def probes(site: str, pages: str, runs: int) -> list[tuple[str, list[dict], set[int]]]:
-    """(name, ops, ids of the ops whose time counts). Each probe's ops run
-    `runs` times; for a probe that reads a fresh load, the load is repeated."""
+EVAL_BLOCK = 200
+
+
+def probes(site: str, pages: str, runs: int) -> list[tuple]:
+    """(name, ops, ids of the ops whose time counts[, block]). Each probe's
+    ops run `runs` times; for a probe that reads a fresh load, the load is
+    repeated. With a block, the timed ops are timed by the client in runs
+    of `block` and each run's sum is one sample (see `run_streamed`)."""
 
     def repeat(name, setup, measured, fresh):
         ops, timed = [], set()
@@ -118,10 +127,25 @@ def probes(site: str, pages: str, runs: int) -> list[tuple[str, list[dict], set[
                {"op": "click", "selector": "#buy"}, True),
         repeat("select on 2,000 options", [{"op": "goto", "url": f"{pages}/select.html"}],
                {"op": "select", "selector": "#c", "value": ["Country 1500"]}, False),
+        evals(pages, runs),
     ]
 
 
-def run_probe(binary: str, ops: list[dict], timed: set[int]) -> list[float]:
+def evals(pages: str, runs: int) -> tuple:
+    """200 warm `eval`s of the title, timed round trip by round trip from
+    this side of the pipe: an eval is under a millisecond, so one more
+    CDP round trip per call doubles it."""
+    ops = [{"op": "goto", "url": f"{pages}/mid-table.html"}]
+    timed = set()
+    for r in range(runs + 1):  # one warm-up block
+        for _ in range(EVAL_BLOCK):
+            ops.append({"op": "eval", "expression": "() => document.title"})
+            if r > 0:
+                timed.add(len(ops) - 1)
+    return f"{EVAL_BLOCK} warm evals, answered one by one", ops, timed, EVAL_BLOCK
+
+
+def run_once(binary: str, ops: list[dict], timed: set[int]) -> list[float]:
     lines = [json.dumps({"id": i, **op}) for i, op in enumerate(ops)]
     lines.append(json.dumps({"id": len(ops), "op": "quit"}))
     env = dict(os.environ)
@@ -141,6 +165,40 @@ def run_probe(binary: str, ops: list[dict], timed: set[int]) -> list[float]:
     return times
 
 
+def run_streamed(binary: str, ops: list[dict], timed: set[int], block: int) -> list[float]:
+    """Each op sent once the one before has answered, timed from the write
+    to its answer; the timed ops' times summed per `block` of them."""
+    p = subprocess.Popen([binary, "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, env=dict(os.environ))
+    times = []
+    try:
+        for i, op in enumerate(ops):
+            t0 = time.perf_counter()
+            p.stdin.write(json.dumps({"id": i, **op}) + "\n")
+            p.stdin.flush()
+            while True:
+                line = p.stdout.readline()
+                if not line:
+                    raise RuntimeError(f"{binary}: serve ended before answering op {i}")
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("id") == i:
+                    break
+            if not r.get("ok"):
+                raise RuntimeError(f"{binary}: op {i} failed: {str(r.get('error'))[:80]}")
+            if i in timed:
+                times.append((time.perf_counter() - t0) * 1000.0)
+        p.stdin.write(json.dumps({"id": len(ops), "op": "quit"}) + "\n")
+        p.stdin.flush()
+        p.wait(timeout=60)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    return [sum(times[i:i + block]) for i in range(0, len(times), block)]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--base", required=True)
@@ -156,7 +214,8 @@ def main() -> int:
         pages = serve_dir(Path(tmp))
         rows, failed, broken = [], [], []
         try:
-            for name, ops, timed in probes(site_url, pages, args.runs):
+            for name, ops, timed, *block in probes(site_url, pages, args.runs):
+                run_probe = partial(run_streamed, block=block[0]) if block else run_once
                 try:
                     # Interleaved: base, candidate, base, candidate (drift hits both).
                     b1 = run_probe(args.base, ops, timed)

@@ -3739,11 +3739,16 @@ impl Page {
     /// wrapped for the settle proof, once no proof will need them: site
     /// scripts (bot checks among them) can tell a wrapped `setTimeout`
     /// from a native one.
+    ///
+    /// Written without waiting for the answer (nothing reads it): the
+    /// renderer runs it before any later `Runtime` command on this tab,
+    /// and the next action's arm unhooks first anyway. An op's reply no
+    /// longer waits a round trip for it.
     pub fn settle_unhook(&self) {
-        let _ = self.send(
+        self.client.post_harmless(
             "Runtime.evaluate",
             json!({ "expression": SETTLE_UNHOOK, "returnByValue": true }),
-            Duration::from_millis(500),
+            Some(&self.session_id),
         );
     }
 
@@ -3856,6 +3861,21 @@ impl Page {
             Some(&self.session_id),
             Duration::from_millis(500),
         ));
+    }
+
+    /// [`Page::mark_action`] for an action that is itself a `Runtime`
+    /// command on this session (`eval`): the arm is written without waiting
+    /// for its answer, and the renderer runs it before the command written
+    /// after it. Half the round trips of a short eval. Not for an action
+    /// that starts with an `Input` command, which the browser process
+    /// handles and may deliver to the page before the arm has run.
+    pub fn mark_action_pipelined(&self) {
+        self.shared.mark_action(&self.session_id, self.nav_generation());
+        self.client.post_harmless(
+            "Runtime.evaluate",
+            json!({ "expression": SETTLE_ARM, "returnByValue": true }),
+            Some(&self.session_id),
+        );
     }
 
     /// The last action's own requests have started, with no navigation

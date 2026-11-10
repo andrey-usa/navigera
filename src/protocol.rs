@@ -4404,7 +4404,10 @@ impl Driver {
             }
             e["locators"] = found.and_then(|v| v.get("locators").cloned()).unwrap_or_else(|| json!([]));
         }
-        if command.is_action() {
+        if matches!(command, Command::Eval { .. }) {
+            // A `Runtime` command itself: its arm needs no round trip.
+            self.session.mark_action_pipelined();
+        } else if command.is_action() {
             self.session.mark_action();
         }
         if command.steers() {

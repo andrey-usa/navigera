@@ -410,6 +410,35 @@ impl CdpClient {
         self.send_counted(method, params, session_id, timeout, false).await
     }
 
+    /// [`CdpClient::send_harmless`] without waiting for the answer: the
+    /// command is written now and its answer dropped when it arrives. For
+    /// page instrumentation whose result nobody reads, written just before
+    /// a command the page's renderer runs after it (two `Runtime` commands
+    /// on one session run in the order they were written), so the caller
+    /// saves a round trip. A closed connection: nothing is written, and the
+    /// next command meets it.
+    pub fn post_harmless(&self, method: &str, params: Value, session_id: Option<&str>) {
+        trace(method, &params);
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
+        // The answer is read by the reader task as any other and dropped
+        // here, with its receiver; a connection that closes first answers
+        // it CLOSED to no one.
+        let (tx, _) = oneshot::channel();
+        let text = TEXT_RESULT.contains(&method);
+        self.inner.pending.lock().unwrap().insert(id, (session_id.map(str::to_string), text, tx));
+        let mut msg = serde_json::json!({ "id": id, "method": method, "params": params });
+        if let Some(session) = session_id {
+            msg["sessionId"] = Value::String(session.to_string());
+        }
+        let sent = self.inner.writer.lock().unwrap().as_ref().is_some_and(|w| w.send(msg.to_string()).is_ok());
+        if !sent {
+            self.inner.pending.lock().unwrap().remove(&id);
+        }
+    }
+
     fn unproven(&self, counted: bool) {
         if counted {
             self.inner.effects_uncertain.fetch_add(1, Ordering::SeqCst);

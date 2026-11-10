@@ -3181,6 +3181,11 @@ impl BrowserSession {
         self.active_tab().mark_action();
     }
 
+    /// [`cdp::Page::mark_action_pipelined`] on the active tab.
+    pub fn mark_action_pipelined(&self) {
+        self.active_tab().mark_action_pipelined();
+    }
+
     /// [`cdp::Page::settle_unhook`] on the active tab.
     pub fn settle_unhook(&self) {
         self.active_tab().settle_unhook();

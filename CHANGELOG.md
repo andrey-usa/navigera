@@ -64,6 +64,19 @@ All notable changes to this project are documented here. The format follows
   Chrome DevTools) runs the page's main thread that many times slower in
   every tab, to measure or test as a phone would. `set cpu off` undoes it.
 
+### Fixed
+
+- `eval` answers in one round trip to the page again. Since 0.10.0 an
+  action, `eval` among them, waited for two more: one to arm the
+  after-action proof before it, one to put the page's timer functions back
+  before the reply. Neither answer is read, and the page runs them in the
+  order they were sent, so both are now sent without waiting. A warm
+  `eval` took 1.20 ms against 0.56 ms before the proof, on one machine in
+  one run ([bench run
+  42723530791](https://github.com/andrey-usa/navigera/actions/runs/42723530791)).
+  Every other action saves the second wait too. The timing gate has a
+  probe for it: 200 evals timed from the caller's side.
+
 ### Security
 
 - A malformed passkey (`passkey load`, `state load`) or authenticator
