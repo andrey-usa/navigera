@@ -3,9 +3,9 @@
 Usage: gen_readme.py README.md publish.json ["what the nv-baseline A/B changed"]
                      [--run ID] [--page PATH [--losses PATH]]
 
-Numbers in the docs come from a run's publish.json, never retyped. Each
-generated table's heading is followed by a link to the run: ID from --run,
-else the run_id the ladder recorded in publish.json.
+Numbers in the docs come from a run's publish.json, never retyped. Every
+generated page opens with a link to the run (all its tables are that run's):
+ID from --run, else the run_id the ladder recorded in publish.json.
 
 With --page (docs/benchmarks.md), every table goes to that page, and the
 measures where another tool beat navigera in the run to a section closing
@@ -123,7 +123,7 @@ lines = [
     "title/row-count evals → close) driven against the same headless browser by",
     "each driver. Fixtures are deterministic and local (500-card listing,",
     "1000-row detail). navigera is the static Linux binary the releases ship.",
-    "Reps are interleaved across contenders. Run in CI via `.github/workflows/bench.yml`.",
+    "Reps are interleaved across contenders.",
     "",
     f"| contender | session wall, best (median) of {doc['reps']} | warm eval mean (200×) | cold start, median (best) of {cold_reps} | driver CPU (own) | driver peak RSS (own) | browser memory (PSS) |",
     "|---|---|---|---|---|---|---|",
@@ -149,27 +149,20 @@ lines += [
     # No link to the run: the ladder may run in a fork or a private mirror,
     # where the link would not resolve for readers.
     f"Measured {date} on GitHub-hosted `{runner}` ({env}).",
-    "Every driver produced byte-identical extracted data and counts (correctness",
-    "gate). Session wall is best-of-N (median in brackets); cold start and the",
-    "live-site rows are ranked by their median, with the best run in brackets.",
+    "Every driver produced byte-identical extracted data and counts (the",
+    "correctness gate). Session wall is the best of N, the median in brackets;",
+    "cold start and the live-site rows rank by the median, the best run in brackets.",
     "The ladder reruns weekly ([`bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/bench.yml)) against",
-    "the latest contender releases. GitHub runners vary between runs, so compare",
-    "rows within one run.",
+    "the latest contender releases; runners vary, so compare rows within one run.",
     "",
     "**How driver CPU/RSS are measured.** Each driver's *own* `utime+stime`,",
     "read from its zombie's `/proc/<pid>/stat` before reaping (`waitid` with",
-    "`WNOWAIT`), and its own VmHWM. The kernel counts CPU in 10 ms ticks, so",
-    "values under ~50 ms are a tie. Not `wait4`: its rusage is RUSAGE_BOTH and",
-    "adds in every child the driver reaped. navigera, chromedp, puppeteer",
-    "and playwright `wait()` on their Chrome, so `wait4` charged them Chrome's",
-    "CPU and RSS; go-rod (its leakless helper reaps Chrome) and chromiumoxide",
-    "were never charged. Earlier versions of this table reported exactly that",
-    "artifact (\"0.82s vs 0.03s\"). Browser memory is the whole browser process",
-    "tree (every renderer/GPU/utility process), sampled as summed PSS every",
-    "250 ms (shared pages counted once).",
+    "`WNOWAIT`), and its own VmHWM; the kernel's 10 ms ticks make anything under",
+    "~50 ms a tie (`wait4` would add in every reaped child, the artifact earlier",
+    "versions of this table reported). Browser memory is the whole process tree,",
+    "sampled as summed PSS every 250 ms (shared pages counted once).",
     "",
 ]
-order = ", ".join(f"{r['name']} {r['session']['wall_s']:.2f}s" for r in chrome)
 nv_best = next(r for r in chrome if r["name"].startswith("nv-"))
 serve_row = next((r for r in chrome if r["name"] == "nv-serve"), None)
 # Rows on chrome-headless-shell: compared with each other, not with Chrome.
@@ -182,19 +175,16 @@ shell_row = next((r for r in chrome if r["name"] == "nv-shell"), None)
 off = [f"`{n}`" for n in ("nv-shell", "gorod-shell", "nv-edge", "nv-brave") if any(r["name"] == n for r in chrome)]
 off_text = off[0] if len(off) == 1 else ", ".join(off[:-1]) + " and " + off[-1] if off else ""
 lines += [
-    f"**Reading the table.** Session wall order: {order}"
-    + (f". Every driver{' but ' + off_text if off else ''} runs the same Google Chrome; on it, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
+    "**Reading the table**:"
+    + (f" every driver{' but ' + off_text if off else ''} runs the same Google Chrome; on it, nv-serve ({serve_row['session']['wall_s']:.2f}s) is "
        + ("ahead of" if serve_row["session"]["wall_s"] < other["session"]["wall_s"] else "behind")
        + f" the fastest other driver, {other['name']} ({other['session']['wall_s']:.2f}s)"
        if serve_row and other else "")
-    + (f". `nv-shell` ({shell_row['session']['wall_s']:.2f}s) is navigera on chrome-headless-shell, a"
-       " lighter build of the same browser"
+    + (f". `nv-shell`'s lead is partly chrome-headless-shell's, a lighter build"
        + (f"; its pair is `gorod-shell` ({gorod_shell['session']['wall_s']:.2f}s), go-rod on the same"
-          " shell" if gorod_shell else " that no other row runs, so its lead is partly the browser's")
+          " shell" if gorod_shell else " no other row runs")
        if shell_row else "")
-    + ". All native drivers (navigera,",
-    "go-rod, chromiumoxide, chromedp) spend tens of milliseconds of their own CPU",
-    "or less; the Node drivers spend hundreds and carry 80–150 MB of their own RSS.",
+    + ".",
     "",
 ]
 rw = [r for r in chrome if r.get("realworld")]
@@ -211,8 +201,6 @@ if rw and br:
     lines += [
         f"### Real-world (public internet, {live_how} of {live_reps}, same run)",
         "",
-        numbers + ".",
-        "",
         f"example.com goto → title check: {rw_ok} of {len(rw)} pass; " + live(rw, "realworld") + ".",
         "",
         f"GitHub browse (awesome-list scroll + trending click-through): {br_ok} of {len(br)} pass; "
@@ -221,21 +209,11 @@ if rw and br:
         "clicks return at once and they then poll the URL, so the browse rows do not",
         "time the same readiness. The example.com check is the title; h1 is read, not checked.",
         "Live pages change between runs, so these are informational, not part of the",
-        "correctness gate. (The scroll check used to fail at random for every driver:",
-        "GitHub sets CSS `scroll-behavior: smooth`, so `scrollY` was read mid-animation;",
-        "contenders now scroll with `behavior: 'instant'`.)",
+        "correctness gate.",
         "",
     ]
 serve = next((r for r in rows if r["name"] == "nv-serve"), None)
 shell = next((r for r in rows if r["name"] == "nv-shell"), None)
-if shell and serve and shell.get("cold") and serve.get("cold"):
-    lines += [
-        "**chrome-headless-shell** (the same Chrome build without its browser UI",
-        f"layer): cold start {mid(serve['cold']):.2f}s → {mid(shell['cold']):.2f}s (medians), session "
-        f"{serve['session']['wall_s']:.2f}s → {shell['session']['wall_s']:.2f}s, browser memory "
-        f"{mem(serve['session']['browser_pss_mb'])} → {mem(shell['session']['browser_pss_mb'])}.",
-        "",
-    ]
 if ws and serve and ws.get("cold") and serve.get("cold"):
     spread = serve["session"].get("runs_wall_s") or []
     lines += [
@@ -249,10 +227,8 @@ if ws and serve and ws.get("cold") and serve.get("cold"):
         + ": the WebSocket handshake itself is ~10 ms. The pipe is the default for two other reasons:",
         "it opens no TCP port that another local process could attach to, and Chrome exits when",
         "navigera dies (EOF on its command pipe), so a killed agent leaks no browser",
-        "(`tests/edge_cases.rs`: over a WebSocket port the browser outlives its driver).",
-        "Windows has no pipe transport here and uses the WebSocket, with a kill-on-close",
-        "job object giving the same guarantee (`killed_session_server_takes_its_browser_down`",
-        "runs there too).",
+        "(`tests/edge_cases.rs`; on Windows, which has no pipe transport here, a",
+        "kill-on-close job object gives the same guarantee).",
         "",
     ]
 if baseline and serve:
@@ -297,15 +273,13 @@ if agent:
     lines += [
         "### Agent tools (scripted, warm session, best of 3)",
         "",
-        numbers + ".",
-        "",
-        "How an agent's tool calls drive a browser: CLI tools run one process per",
-        "step (a shell tool), MCP servers get one `tools/call` per step over a",
-        "persistent connection. Same canonical session plus one page snapshot.",
+        "The same canonical session plus one page snapshot, driven as an agent's",
+        "tool calls: CLI tools run one process per step, MCP servers get one",
+        "`tools/call` per step over a persistent connection.",
         "Snapshot sizes are each tool's default output, what the agent reads.",
         "Outside the session's total, each tool also snapshots the 1000-row page,",
         "and navigera starts a second agent's session while the first one's browser",
-        "is up (sessions share one browser, a context each).",
+        "is up.",
         "",
         "| tool | kind | calls | total wall | per call | snapshot | its size | 1000-row snapshot | its size | 2nd session start | gate |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
@@ -327,10 +301,10 @@ if agent:
     lines += [
         "",
         "Per-call time includes process start (CLI) or JSON-RPC (MCP), the hop to",
-        "the daemon, and the CDP work. playwright-cli and Playwright MCP share Playwright's tool",
-        "backend, which waits a fixed 500 ms after every action (`timeouts.settle`); playwright-cli",
-        "also starts a Node process per step. `batch` saves calls, which are an agent's turns,",
-        "not time: its row runs the same steps in fewer, longer calls.",
+        "the daemon, and the CDP work. Playwright's tool backend, shared by",
+        "playwright-cli and Playwright MCP, waits a fixed 500 ms after every action;",
+        "playwright-cli also starts a Node process per step. `batch` saves calls, an",
+        "agent's turns, not time.",
         "",
     ]
 par = doc.get("parallel") or []
@@ -341,12 +315,9 @@ if par:
     lines += [
         "### Parallel agents (memory, same run)",
         "",
-        numbers + ".",
-        "",
-        "N agents, each with a session of its own (navigera `-s <name>`, agent-browser and",
-        "playwright-cli sessions, one MCP server each), all open at once on the listing",
-        "after a snapshot. Memory is every process the tool started (browsers, daemons,",
-        "servers), summed as PSS.",
+        "N agents, each with a session of its own, all open at once on the listing",
+        "after a snapshot. Memory is every process the tool started (browsers,",
+        "daemons, servers), summed as PSS."
         "",
         "| tool | " + " | ".join(f"{n} agent{'s' if n > 1 else ''}" for n in ns) + " | per extra agent |",
         "|---|" + "---|" * (len(ns) + 1),
@@ -363,8 +334,7 @@ for r in exp:
     lines += [
         f"**Lightpanda** (experimental) passes the same correctness gate in",
         f"{s['wall_s']:.2f}s" + (f" with ~{s['browser_pss_mb']:.0f} MB of browser memory" if s['browser_pss_mb'] else "") + ". It has no",
-        "rendering engine and one tab (the session opens the second page in the",
-        "same tab), so it is listed apart from the Chrome-family ranking.",
+        "rendering engine and one tab, so it is listed apart from the Chrome ranking.",
         "",
     ]
 

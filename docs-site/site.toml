@@ -97,8 +97,32 @@ title = "Reference"
 [[part.page]]
 title = "Commands"
 path = "reference/commands.md"
-about = "Every command, its arguments and flags, and what it prints."
-source = { file = "docs/navigera.md", sections = ["CLI shape", "Commands"] }
+about = "The navigera command line: sessions, flags and output, with the command list by topic."
+source = { file = "docs/navigera.md", section = "CLI shape", intro = "The commands by topic: [sessions, tabs and the browser](commands-sessions.md), [read the page](commands-read.md), [act on the page](commands-act.md), [state, emulation and audit](commands-state.md)." }
+
+[[part.page]]
+title = "Commands: sessions, tabs and the browser"
+path = "reference/commands-sessions.md"
+about = "start, batch, sessions and reset, the tabs, status, history, profiles and the installers."
+source = { file = "docs/navigera.md", section = "Commands: sessions, tabs and the browser" }
+
+[[part.page]]
+title = "Commands: read the page"
+path = "reference/commands-read.md"
+about = "goto, the ax tree, text, get, is, eval, find, console, errors, network and locate."
+source = { file = "docs/navigera.md", section = "Commands: read the page" }
+
+[[part.page]]
+title = "Commands: act on the page"
+path = "reference/commands-act.md"
+about = "click, fill, type and the other actions, wait, downloads, screenshot, pdf and screencast."
+source = { file = "docs/navigera.md", section = "Commands: act on the page" }
+
+[[part.page]]
+title = "Commands: state, emulation and audit"
+path = "reference/commands-state.md"
+about = "cookies, storage and state, set, route, clock, init-script, WebMCP, passkey, a11y, vitals and totp."
+source = { file = "docs/navigera.md", section = "Commands: state, emulation and audit" }
 
 [[part.page]]
 title = "navigera --help"

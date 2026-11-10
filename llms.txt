@@ -26,7 +26,11 @@ Each page below is markdown. The whole site in one file: https://andrey-usa.gith
 
 ## Reference
 
-- [Commands](https://andrey-usa.github.io/navigera/reference/commands.md): Every command, its arguments and flags, and what it prints.
+- [Commands](https://andrey-usa.github.io/navigera/reference/commands.md): The navigera command line: sessions, flags and output, with the command list by topic.
+- [Commands: sessions, tabs and the browser](https://andrey-usa.github.io/navigera/reference/commands-sessions.md): start, batch, sessions and reset, the tabs, status, history, profiles and the installers.
+- [Commands: read the page](https://andrey-usa.github.io/navigera/reference/commands-read.md): goto, the ax tree, text, get, is, eval, find, console, errors, network and locate.
+- [Commands: act on the page](https://andrey-usa.github.io/navigera/reference/commands-act.md): click, fill, type and the other actions, wait, downloads, screenshot, pdf and screencast.
+- [Commands: state, emulation and audit](https://andrey-usa.github.io/navigera/reference/commands-state.md): cookies, storage and state, set, route, clock, init-script, WebMCP, passkey, a11y, vitals and totp.
 - [navigera --help](https://andrey-usa.github.io/navigera/reference/help.md): The command list exactly as this build prints it.
 
 ## Agents

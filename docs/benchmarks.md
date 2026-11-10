@@ -7,7 +7,7 @@ fill+click filter → visible-count eval → screenshot → new tab → goto det
 title/row-count evals → close) driven against the same headless browser by
 each driver. Fixtures are deterministic and local (500-card listing,
 1000-row detail). navigera is the static Linux binary the releases ship.
-Reps are interleaved across contenders. Run in CI via `.github/workflows/bench.yml`.
+Reps are interleaved across contenders.
 
 | contender | session wall, best (median) of 3 | warm eval mean (200×) | cold start, median (best) of 15 | driver CPU (own) | driver peak RSS (own) | browser memory (PSS) |
 |---|---|---|---|---|---|---|
@@ -25,32 +25,22 @@ Reps are interleaved across contenders. Run in CI via `.github/workflows/bench.y
 | `nv-lightpanda` (this repo on Lightpanda, 1 tab) | 0.15s (0.16) | 0.22 ms | 0.11s (0.11) | **<10 ms** | 8 MB | 15 MB |
 
 Measured 2026-11-10 on GitHub-hosted `ubuntu-latest` (AMD EPYC 9V45 96-Core Processor — 4 vCPU · Chrome 156.0.8078.79).
-Every driver produced byte-identical extracted data and counts (correctness
-gate). Session wall is best-of-N (median in brackets); cold start and the
-live-site rows are ranked by their median, with the best run in brackets.
+Every driver produced byte-identical extracted data and counts (the
+correctness gate). Session wall is the best of N, the median in brackets;
+cold start and the live-site rows rank by the median, the best run in brackets.
 The ladder reruns weekly ([`bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/bench.yml)) against
-the latest contender releases. GitHub runners vary between runs, so compare
-rows within one run.
+the latest contender releases; runners vary, so compare rows within one run.
 
 **How driver CPU/RSS are measured.** Each driver's *own* `utime+stime`,
 read from its zombie's `/proc/<pid>/stat` before reaping (`waitid` with
-`WNOWAIT`), and its own VmHWM. The kernel counts CPU in 10 ms ticks, so
-values under ~50 ms are a tie. Not `wait4`: its rusage is RUSAGE_BOTH and
-adds in every child the driver reaped. navigera, chromedp, puppeteer
-and playwright `wait()` on their Chrome, so `wait4` charged them Chrome's
-CPU and RSS; go-rod (its leakless helper reaps Chrome) and chromiumoxide
-were never charged. Earlier versions of this table reported exactly that
-artifact ("0.82s vs 0.03s"). Browser memory is the whole browser process
-tree (every renderer/GPU/utility process), sampled as summed PSS every
-250 ms (shared pages counted once).
+`WNOWAIT`), and its own VmHWM; the kernel's 10 ms ticks make anything under
+~50 ms a tie (`wait4` would add in every reaped child, the artifact earlier
+versions of this table reported). Browser memory is the whole process tree,
+sampled as summed PSS every 250 ms (shared pages counted once).
 
-**Reading the table.** Session wall order: nv-shell 0.26s, nv-serve 0.41s, nv-brave 0.45s, nv-edge 0.50s, gorod 0.55s, puppeteer 0.64s, chromiumoxide 0.65s, chromey 0.77s, chromedp 0.79s, playwright-bun 0.82s, playwright 0.87s. Every driver but `nv-shell`, `nv-edge` and `nv-brave` runs the same Google Chrome; on it, nv-serve (0.41s) is ahead of the fastest other driver, gorod (0.55s). `nv-shell` (0.26s) is navigera on chrome-headless-shell, a lighter build of the same browser that no other row runs, so its lead is partly the browser's. All native drivers (navigera,
-go-rod, chromiumoxide, chromedp) spend tens of milliseconds of their own CPU
-or less; the Node drivers spend hundreds and carry 80–150 MB of their own RSS.
+**Reading the table**: every driver but `nv-shell`, `nv-edge` and `nv-brave` runs the same Google Chrome; on it, nv-serve (0.41s) is ahead of the fastest other driver, gorod (0.55s). `nv-shell`'s lead is partly chrome-headless-shell's, a lighter build no other row runs.
 
 ## Real-world (public internet, median of 9, same run)
-
-Numbers: [bench run 42863598577](https://github.com/andrey-usa/navigera/actions/runs/42863598577).
 
 example.com goto → title check: 11 of 11 pass; nv-shell 0.19s, nv-serve 0.29s, gorod 0.34s, chromey 0.35s, nv-brave 0.36s, chromiumoxide 0.37s, nv-edge 0.37s, puppeteer 0.48s, chromedp 0.53s, playwright-bun 0.62s, playwright 0.65s.
 
@@ -59,41 +49,32 @@ navigera's click returns once the new page has settled; the other drivers'
 clicks return at once and they then poll the URL, so the browse rows do not
 time the same readiness. The example.com check is the title; h1 is read, not checked.
 Live pages change between runs, so these are informational, not part of the
-correctness gate. (The scroll check used to fail at random for every driver:
-GitHub sets CSS `scroll-behavior: smooth`, so `scrollY` was read mid-animation;
-contenders now scroll with `behavior: 'instant'`.)
-
-**chrome-headless-shell** (the same Chrome build without its browser UI
-layer): cold start 0.21s → 0.08s (medians), session 0.41s → 0.26s, browser memory 400 MB → 231 MB.
+correctness gate.
 
 **CDP transport A/B** (same build and run): `--remote-debugging-pipe` (default on Linux/macOS)
 vs a DevTools WebSocket port: cold start 0.21s vs 0.21s (medians),
 session 0.41s vs 0.41s. No speed difference: the WebSocket handshake itself is ~10 ms. The pipe is the default for two other reasons:
 it opens no TCP port that another local process could attach to, and Chrome exits when
 navigera dies (EOF on its command pipe), so a killed agent leaks no browser
-(`tests/edge_cases.rs`: over a WebSocket port the browser outlives its driver).
-Windows has no pipe transport here and uses the WebSocket, with a kill-on-close
-job object giving the same guarantee (`killed_session_server_takes_its_browser_down`
-runs there too).
+(`tests/edge_cases.rs`; on Windows, which has no pipe transport here, a
+kill-on-close job object gives the same guarantee).
 
 **This build vs navigera 0.10.1, same machine and run** (`nv-baseline`,
 built the same way by the ladder's `baseline_ref` A/B):
-session 0.42s → 0.41s (-1%), cold start 0.21s → 0.21s median (-1%), warm eval 0.61 ms → 0.34 ms (-44%), browser CPU per session 0.48s → 0.52s. This build is next since 0.10.1: a11y, vitals, passkey, element screenshots, totp and set cpu; eval answering in one awaited round trip again, its arm compiled once per document, and the pipe's replies found by their braces and with memchr.
+session 0.42s → 0.41s (-1%), cold start 0.21s → 0.21s median (-1%), warm eval 0.61 ms → 0.34 ms (-44%), browser CPU per session 0.48s → 0.52s. built the same way by the ladder's `baseline_ref` A/B):
 
 Where navigera's cold start goes (`NAVIGERA_TIMINGS`, best run): browser up
 123 ms, first page 57 ms, close 3 ms.
 
 ## Agent tools (scripted, warm session, best of 3)
 
-Numbers: [bench run 42863598577](https://github.com/andrey-usa/navigera/actions/runs/42863598577).
-
-How an agent's tool calls drive a browser: CLI tools run one process per
-step (a shell tool), MCP servers get one `tools/call` per step over a
-persistent connection. Same canonical session plus one page snapshot.
+The same canonical session plus one page snapshot, driven as an agent's
+tool calls: CLI tools run one process per step, MCP servers get one
+`tools/call` per step over a persistent connection.
 Snapshot sizes are each tool's default output, what the agent reads.
 Outside the session's total, each tool also snapshots the 1000-row page,
 and navigera starts a second agent's session while the first one's browser
-is up (sessions share one browser, a context each).
+is up.
 
 | tool | kind | calls | total wall | per call | snapshot | its size | 1000-row snapshot | its size | 2nd session start | gate |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -106,20 +87,16 @@ is up (sessions share one browser, a context each).
 | Chrome DevTools MCP 1.12.0 (Google) | MCP | 13 | 2.90s | 188 ms | 67 ms | 34 KB | 224 ms | 78 KB | — | ✓ |
 
 Per-call time includes process start (CLI) or JSON-RPC (MCP), the hop to
-the daemon, and the CDP work. playwright-cli and Playwright MCP share Playwright's tool
-backend, which waits a fixed 500 ms after every action (`timeouts.settle`); playwright-cli
-also starts a Node process per step. `batch` saves calls, which are an agent's turns,
-not time: its row runs the same steps in fewer, longer calls.
+the daemon, and the CDP work. Playwright's tool backend, shared by
+playwright-cli and Playwright MCP, waits a fixed 500 ms after every action;
+playwright-cli also starts a Node process per step. `batch` saves calls, an
+agent's turns, not time.
 
 ## Parallel agents (memory, same run)
 
-Numbers: [bench run 42863598577](https://github.com/andrey-usa/navigera/actions/runs/42863598577).
-
-N agents, each with a session of its own (navigera `-s <name>`, agent-browser and
-playwright-cli sessions, one MCP server each), all open at once on the listing
-after a snapshot. Memory is every process the tool started (browsers, daemons,
-servers), summed as PSS.
-
+N agents, each with a session of its own, all open at once on the listing
+after a snapshot. Memory is every process the tool started (browsers,
+daemons, servers), summed as PSS.
 | tool | 1 agent | 4 agents | 8 agents | per extra agent |
 |---|---|---|---|---|
 | `navigera` (sessions share one browser) | 367 MB | 506 MB | 694 MB | 47 MB |
@@ -131,5 +108,4 @@ servers), summed as PSS.
 
 **Lightpanda** (experimental) passes the same correctness gate in
 0.15s with ~15 MB of browser memory. It has no
-rendering engine and one tab (the session opens the second page in the
-same tab), so it is listed apart from the Chrome-family ranking.
+rendering engine and one tab, so it is listed apart from the Chrome ranking.
