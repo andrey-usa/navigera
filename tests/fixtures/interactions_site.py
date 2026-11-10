@@ -27,6 +27,7 @@ getting wrong, one page each, built the way those sites behave:
 /leader         two tabs of one site: the one opened with ?leader tells the
                 other on beforeunload, which takes over (a tab closed
                 without its unload path leaves the follower waiting)
+/opener         opens /closer in a new window; /closer's button closes it
 /poll           a page that polls one URL every 300 ms, forever
 /long-poll      a chat-style long poll: one request held open (?hold=ms), reconnected
 /beacons        analytics POSTs at irregular 100-900 ms intervals, answered 204
@@ -213,6 +214,12 @@ if (location.search.includes('leader')) {
   bc.onmessage = (e) => { if (e.data === 'bye') role.textContent = 'took over'; };
 }
 </script>""")
+
+PAGES["/opener"] = ("opener", "", """
+<button id=open onclick="window.open('/closer')">Open</button>""")
+
+PAGES["/closer"] = ("closer", "", """
+<button id=close onclick="window.close()">Close</button>""")
 
 PAGES["/poll"] = ("poll", "", """
 <p id=status>idle</p><button id=go>Go</button>

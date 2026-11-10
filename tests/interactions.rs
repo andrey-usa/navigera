@@ -580,6 +580,23 @@ fn closing_a_tab_lets_its_page_hand_over_to_another_tab() {
     assert!(waited["waited_ms"].as_f64().unwrap() < 2000.0, "the follower did not hear the leader go: {waited}");
 }
 
+/// A click on a window's own Close button succeeds and goes on in the tab
+/// left, however the window's end and the click's answers interleave
+/// (Electron's settings window, on a slow runner, came back as an error).
+#[test]
+fn a_click_that_closes_its_own_tab_succeeds() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("closer", &[]);
+    s.ok(&["goto", &format!("{}/opener", site.url)]);
+    for _ in 0..3 {
+        s.ok(&["click", "--selector", "#open"]);
+        let (success, closed) = s.run(&["click", "--selector", "#close"]);
+        assert!(success && closed["ok"] == true, "{closed}");
+        assert!(closed["notes"].to_string().contains("this click closed its tab"), "{closed}");
+        assert_eq!(s.text(&["eval", "() => document.title"]), "opener");
+    }
+}
+
 #[test]
 fn an_op_after_a_late_reload_finds_the_next_page() {
     let (true, Some(site)) = (chrome(), site()) else { return };

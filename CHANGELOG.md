@@ -96,6 +96,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A click on a window's own Close button succeeds and goes on in the tab
+  left, with a note ("this click closed its tab; tab 0 is active now"), and
+  reports that tab's state rather than the closed one's (`tab 1 of 2`, no
+  title). When the window's end overtook the click's own answers, the click
+  failed with "the tab closed while this ran": 23 of 300 such clicks on a
+  loaded 2-core machine before, 0 of 1,000 after (bitti's Electron example
+  failed this way on CI). When all three mouse events of a click were
+  still unanswered as the tab ended, they were taken as refused and the
+  click was sent again as DOM events.
+- On the shared browser, a tab another session's page opened no longer
+  counts as something this session's click did: a click that changed
+  nothing could report a change while another session opened popups.
+
 - `eval` answers in one round trip to the page again. Since 0.10.0 an
   action, `eval` among them, waited for two more: one to arm the
   after-action proof before it, one to put the page's timer functions back

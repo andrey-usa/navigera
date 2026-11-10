@@ -4325,6 +4325,10 @@ impl Driver {
     /// Run one op, reporting dialogs answered and tabs opened along the way.
     fn run_op_inner(&mut self, command: &Command) -> anyhow::Result<Outcome> {
         let mut new_tabs = self.session.sync_tabs();
+        // The tab this op acts on, and the presses before it: an op that
+        // pressed and then lost this tab closed it (a Close button).
+        let acted_on = self.session.page_targets().get(self.session.active_page()).cloned();
+        let presses = crate::cdp::presses();
         // The session's only tab is gone: say so, rather than let the op
         // fail on a CDP session Chrome has forgotten. What doesn't need the
         // tab still runs, and `tab-new`/`reset` give the session a new one.
@@ -4565,13 +4569,17 @@ impl Driver {
             other => other,
         };
         // The tab closed while the op ran, or before its event was read.
-        let result = match result {
+        let mut result = match result {
             Err(e) if format!("{e:#}").contains("Session with given id not found") => {
                 let before = self.session.page_targets().get(self.session.active_page()).cloned();
                 self.session.tab_gone();
                 let now = self.session.page_targets().get(self.session.active_page()).cloned();
                 match self.session.closed_tab() {
                     Some(target) => Err(anyhow::anyhow!("{}", tab_closed_message(target))),
+                    // The press landed, then the tab went: the click closed it.
+                    None if before != now && crate::cdp::presses() > presses => {
+                        Ok(json!({ "tab": self.session.active_page() }))
+                    }
                     None if before != now => Err(anyhow::anyhow!(
                         "the tab closed while this ran; tab {} is active now (`tab-list` shows them)",
                         self.session.active_page()
@@ -4631,6 +4639,21 @@ impl Driver {
             self.session.settle_within(budget);
         }
         new_tabs.extend(opened);
+        // The click saw its tab's session end before the browser said so:
+        // catch up (bounded), so the state reported is the tab left.
+        if let Ok(r) = result.as_mut() {
+            if r.as_object_mut().and_then(|o| o.remove("tab_gone")).is_some()
+                && self.session.page_targets().get(self.session.active_page()) == acted_on.as_ref()
+            {
+                self.session.tab_gone();
+            }
+        }
+        if result.is_ok()
+            && crate::cdp::presses() > presses
+            && acted_on.as_ref().is_some_and(|t| !self.session.page_targets().contains(t))
+        {
+            notes.push(format!("this click closed its tab; tab {} is active now", self.session.active_page()));
+        }
         let dialogs = self.session.take_dialogs();
         let mut result = match (result, new_tabs.is_empty() && notes.is_empty()) {
             // A click that opened a tab: report the state of the new tab.
@@ -4780,6 +4803,9 @@ impl Driver {
                 }
                 if let Some(trace) = point.get("effect_trace") {
                     state["effect_trace"] = trace.clone();
+                }
+                if point.get("tab_gone").and_then(Value::as_bool) == Some(true) {
+                    state["tab_gone"] = json!(true);
                 }
                 if let Some(ms) = point.get("clicked_again").and_then(Value::as_u64) {
                     // A script that clicks right after `goto` should know

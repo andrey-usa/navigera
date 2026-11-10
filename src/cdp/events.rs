@@ -942,10 +942,23 @@ impl Shared {
         [
             self.nav_state(session_id).generation,
             self.dialogs.lock().unwrap().iter().filter(|(s, _)| *s == scope).count() as u64,
-            self.opened.lock().unwrap().len() as u64,
+            self.opened_in(&scope),
             self.popups.lock().unwrap().len() as u64,
             self.downloads.lock().unwrap().items.iter().filter(|d| d.scope == scope).count() as u64,
         ]
+    }
+
+    /// Tabs opened in `scope`: by one of its tabs, or by no tab (an app's
+    /// window). On a shared browser the other sessions' popups are seen
+    /// too; a click there must not count as this session's.
+    fn opened_in(&self, scope: &str) -> u64 {
+        let sessions = self.sessions.lock().unwrap();
+        let scopes = self.scopes.lock().unwrap();
+        let in_scope = |opener: &str| {
+            opener.is_empty()
+                || sessions.iter().any(|(s, t)| t == opener && scopes.get(s).is_some_and(|sc| sc == scope))
+        };
+        self.opened.lock().unwrap().iter().filter(|(_, opener)| in_scope(opener)).count() as u64
     }
 
     /// Mark a navigation we started ourselves as in flight, so ops issued

@@ -18,6 +18,10 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+/// Said of a request still waiting for its answer when its tab's session
+/// ended: it was written to a session that was live when it went out.
+pub(crate) const ENDED_WHILE_PENDING: &str = "the tab's session ended while this ran";
+
 type Responder = oneshot::Sender<Result<Value, Refusal>>;
 
 /// What Chrome answers a command sent to a tab that is gone, and what a
@@ -746,9 +750,7 @@ fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Val
                     pending.iter().filter(|(_, (s, _, _))| s.as_deref() == Some(gone)).map(|(id, _)| *id).collect();
                 for id in ids {
                     if let Some((_, _, responder)) = pending.remove(&id) {
-                        let _ = responder.send(Err(Refusal::Other(format!(
-                            "{SESSION_GONE}: the tab's session ended while this ran"
-                        ))));
+                        let _ = responder.send(Err(Refusal::Other(format!("{SESSION_GONE}: {ENDED_WHILE_PENDING}"))));
                     }
                 }
             }

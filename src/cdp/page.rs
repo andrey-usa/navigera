@@ -8,6 +8,7 @@
 //! `Runtime.evaluate` too (find, auto-wait and act in the page); actions by
 //! `ax` ref resolve the node first (`DOM.resolveNode` + `callFunctionOn`).
 
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,16 @@ use super::events::Shared;
 use super::fxhash::{FxMap, FxSet};
 use super::logs::Report;
 use super::snap::{Child, NewLayout, NewNode, Op, Snap, CAPTURE_STYLES, STYLES};
+
+/// Mouse presses the browser acknowledged, in this process. An op that
+/// pressed and then lost its tab closed the tab itself (a Close button):
+/// it acted, so it succeeded (see `Driver::run_op_inner`).
+static PRESSES: AtomicU64 = AtomicU64::new(0);
+
+/// How many mouse presses the browser has acknowledged so far.
+pub fn presses() -> u64 {
+    PRESSES.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1973,6 +1984,8 @@ enum Effect {
     /// Can't tell: a field, a `<select>`, a right click, frames it didn't
     /// watch, a request still running, the page gone.
     Unknown,
+    /// The tab's session ended after the press: the click closed its tab.
+    Gone,
 }
 
 /// The second half of a DOM-event double click (the first click's events
@@ -5047,6 +5060,9 @@ impl Page {
             if std::env::var_os("NAVIGERA_TRACE_EFFECT").is_some() {
                 point["effect_trace"] = json!(format!("{effect:?}")); // diagnostic knob
             }
+            if effect == Effect::Gone {
+                point["tab_gone"] = json!(true);
+            }
             if let Effect::Nothing { watched_ms, requests } = effect {
                 // Nothing heard it, so no script of the page ran for it:
                 // a listener the page adds later is the page wiring up.
@@ -5160,12 +5176,12 @@ impl Page {
             let gave_up = pending && now >= started + REQUEST_WAIT;
             let last = now >= deadline || gave_up;
             let expr = format!("window.__nvFx ? window.__nvFx.check({last}) : null");
-            let Some(v) = self
-                .send("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true }), timeout)
-                .ok()
-                .and_then(|r| r.pointer("/result/value").cloned())
-                .filter(Value::is_object)
-            else {
+            let answer = self.send("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true }), timeout);
+            if answer.as_ref().is_err_and(|e| format!("{e:#}").contains("Session with given id not found")) {
+                // The click closed its own tab (a Close button).
+                return Effect::Gone;
+            }
+            let Some(v) = answer.ok().and_then(|r| r.pointer("/result/value").cloned()).filter(Value::is_object) else {
                 return Effect::Unknown;
             };
             if let Some(what) = v.get("what").and_then(Value::as_str).filter(|w| !w.is_empty()) {
@@ -5447,10 +5463,24 @@ impl Page {
             };
             let stalled = unanswered(&moved) || unanswered(&pressed) || unanswered(&released);
             self.stalled.store(stalled, Ordering::SeqCst);
+            // Still waiting when the tab's session ended: written to a live
+            // tab (its closing is likely the release's doing), not refused.
+            let ended = |r: &Result<Value>| {
+                r.as_ref().is_err_and(|e| format!("{e:#}").contains(super::client::ENDED_WHILE_PENDING))
+            };
             // Refused outright, all three (no Input domain): nothing was
             // pressed, so the caller's DOM-event click can't double it.
-            if !stalled && moved.is_err() && pressed.is_err() && released.is_err() {
+            if !stalled
+                && ![&moved, &pressed, &released].into_iter().any(ended)
+                && moved.is_err()
+                && pressed.is_err()
+                && released.is_err()
+            {
                 return Ok(false);
+            }
+            // Answered or ended while waiting: the press reached the page.
+            if pressed.is_ok() || ended(&pressed) {
+                PRESSES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             pressed?;
             released?;
@@ -5462,6 +5492,9 @@ impl Page {
                 .enumerate()
         {
             match self.send("Input.dispatchMouseEvent", event(kind, button, buttons), timeout) {
+                Ok(_) if i == 1 => {
+                    PRESSES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 Ok(_) => {}
                 Err(_) if i == 0 => return Ok(false),
                 Err(e) => return Err(e),
