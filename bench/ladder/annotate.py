@@ -33,7 +33,16 @@ if path.suffix == ".json":
         print(f"::error title={title}::{path} is not valid JSON: {e}")
         sys.exit(1)
     # One line, so cut by length; lines stay whole only for text files.
-    chunks = [text[i:i + CHUNK] for i in range(0, len(text), CHUNK)]
+    # No piece begins or ends with a space, so whatever trims a notice's
+    # edges on its way changes nothing: compact JSON has spaces only inside
+    # its strings, and a lost one would still parse.
+    chunks, i = [], 0
+    while i < len(text):
+        j = min(i + CHUNK, len(text))
+        while i + 1 < j < len(text) and (text[j - 1].isspace() or text[j].isspace()):
+            j -= 1
+        chunks.append(text[i:j])
+        i = j
 else:
     chunks, cur = [], ""
     for line in text.splitlines():

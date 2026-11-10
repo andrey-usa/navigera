@@ -95,6 +95,8 @@ Measurement rules the ladder follows:
 - Browser numbers cover the whole process tree as PSS.
 - Every number in the README cites the run it came from; regenerate the table
   from that run's `publish.json` with `bench/ladder/gen_readme.py`.
+  `bench/ladder/fetch_publish.py <run id>` writes that file from the run's
+  notices, with no token and no artifact download.
 
 ## Keeping docs in step
 
