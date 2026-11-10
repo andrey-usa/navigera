@@ -61,6 +61,7 @@ import http.server
 import json
 import math
 import os
+import re
 import socketserver
 import statistics
 import subprocess
@@ -85,6 +86,16 @@ NAVIGERA_ENGINE_ARGS: dict[str, list[str]] = {}
 # master) on the same machine in the same run — the only fair way to judge a
 # perf change, since GitHub runners vary between runs.
 NAVIGERA_BINARY: dict[str, str] = {}
+
+
+def runner_image():
+    """The runner image this run is on, as GitHub's image names it
+    (ImageOS ubuntu24 -> ubuntu-24.04, plus ImageVersion), or None off
+    GitHub. The docs print it: `ubuntu-latest` moves between images."""
+    name, version = os.environ.get("ImageOS", ""), os.environ.get("ImageVersion", "")
+    m = re.fullmatch(r"ubuntu(\d\d)", name)
+    name = f"ubuntu-{m.group(1)}.04" if m else name
+    return f"{name}, image {version}" if name and version else name or None
 
 
 def parse_phases(text: str) -> dict:
@@ -987,6 +998,7 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
         "run_id": os.environ.get("GITHUB_RUN_ID"),
         "commit": os.environ.get("GITHUB_SHA"),
         "env": env_text.replace("**", ""),
+        "runner": runner_image(),
         "reps": reps,
         "versions": versions or {},
         "contenders": rows,

@@ -140,12 +140,14 @@ for r in chrome + exp:
         f"{mem(s['browser_pss_mb'])} |"
     )
 date = doc["generated_utc"][:10]
+# Runs from before the image was recorded ran on the moving label.
+runner = doc.get("runner") or "ubuntu-latest"
 env = doc["env"].replace("**", "").replace("Env: ", "").replace("Chrome: Google Chrome ", "Chrome ")
 lines += [
     "",
     # No link to the run: the ladder may run in a fork or a private mirror,
     # where the link would not resolve for readers.
-    f"Measured {date} on GitHub-hosted `ubuntu-latest` ({env}).",
+    f"Measured {date} on GitHub-hosted `{runner}` ({env}).",
     "Every driver produced byte-identical extracted data and counts (correctness",
     "gate). Session wall is best-of-N (median in brackets); cold start and the",
     "live-site rows are ranked by their median, with the best run in brackets.",
@@ -437,7 +439,7 @@ if page_path:
     head = ["## Benchmarks", "",
             f"One scripted session (goto, evals, fill and click, a screenshot, a second",
             f"tab) driven by each tool against the same headless Chrome, in one CI run",
-            f"({numbers[len('Numbers: '):]}, {date}, GitHub's `ubuntu-latest`); each",
+            f"({numbers[len('Numbers: '):]}, {date}, GitHub's `{runner}`); each",
             "driver's extracted data is checked identical:", "",
             "| driver | session | cold start | warm eval | its own memory |",
             "|---|---|---|---|---|"]
