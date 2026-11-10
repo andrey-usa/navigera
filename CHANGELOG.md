@@ -64,6 +64,20 @@ All notable changes to this project are documented here. The format follows
   Chrome DevTools) runs the page's main thread that many times slower in
   every tab, to measure or test as a phone would. `set cpu off` undoes it.
 
+### Changed
+
+- An action spends less of its own time between the caller and the
+  page. Its after-action arm is compiled once per document and then
+  called (a page compiled the script on every action: about 100 us
+  against 4 us to run it); a reply is found in the pipe with memchr; and
+  a capture's result is cut out by its braces instead of read as JSON.
+  The arm alone: warm `eval` 0.565 ms against 0.651 ms just before it,
+  same machine and run ([bench run
+  42782596458](https://github.com/andrey-usa/navigera/actions/runs/42782596458)).
+  With everything since 0.10.1, the eval fix below included: 0.34 ms
+  against 0.10.1's 0.61 ms, same machine and run ([bench run
+  42863598577](https://github.com/andrey-usa/navigera/actions/runs/42863598577)).
+
 ### Fixed
 
 - `eval` answers in one round trip to the page again. Since 0.10.0 an
