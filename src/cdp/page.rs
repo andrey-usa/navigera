@@ -870,6 +870,11 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
 /// before work today's window would have seen start. Timers keep their ids
 /// and arguments; the hooks are put back by [`SETTLE_UNHOOK`], when the
 /// next action re-arms, or after 10 s, and only while ours are in place.
+///
+/// The arm is kept in the document as a function (`c.arm`), so the next
+/// action there sends [`SETTLE_REARM`] instead: a page compiles a script
+/// sent by `Runtime.evaluate` each time it gets one, and this one costs it
+/// about 0.1 ms to compile against 4 us to run.
 const SETTLE_ARM: &str = r#"(() => {
     let c = window.__nvMut;
     if (!c) {
@@ -878,6 +883,7 @@ const SETTLE_ARM: &str = r#"(() => {
         c.o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
         Object.defineProperty(window, '__nvMut', { value: c, configurable: true, enumerable: false });
     }
+    if (!c.arm) c.arm = () => {
     c.a = c.n;
     if (c.unT) c.unT();
     const T = c.T || (c.T = { st: window.setTimeout, ct: window.clearTimeout, si: window.setInterval, ci: window.clearInterval });
@@ -907,7 +913,13 @@ const SETTLE_ARM: &str = r#"(() => {
     };
     T.st.call(window, () => { if (c.g === g && c.unT) c.unT(); }, 10000);
     return 0;
+    };
+    return c.arm();
 })()"#;
+
+/// [`SETTLE_ARM`] again in a document that has it: the kept function, or
+/// -1 when the document has none (a new one, or the counter stopped).
+const SETTLE_REARM: &str = "(() => { const c = window.__nvMut; return c && c.arm ? c.arm() : -1; })()";
 
 /// The settle proof's minimum span after the last response (see
 /// [`Page::action_settle_wait`]): half the window.
@@ -3255,6 +3267,9 @@ pub struct Page {
     primed: Arc<std::sync::Mutex<Option<u64>>>,
     /// The journal of the last [`Page::pre_read`] (0: none yet).
     pre_journal: Arc<std::sync::atomic::AtomicU64>,
+    /// The navigation generation whose document holds the settle arm, plus
+    /// one (0: none known); see [`SETTLE_REARM`].
+    armed_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A tree read's snapshot, kept with the journal armed with it.
@@ -3369,6 +3384,7 @@ impl Page {
             kept: Default::default(),
             primed: Default::default(),
             pre_journal: Default::default(),
+            armed_generation: Default::default(),
         }
     }
 
@@ -3689,6 +3705,7 @@ impl Page {
         let js =
             "(() => { const c = window.__nvMut; if (c) { c.o.disconnect(); delete window.__nvMut; } return 0; })()";
         let _ = self.send("Runtime.evaluate", json!({ "expression": js, "returnByValue": true }), timeout);
+        self.armed_generation.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Wait until no fetch/XHR is in flight and none started or ended for
@@ -3851,16 +3868,39 @@ impl Page {
 
     /// An action is about to run here (see [`Shared::mark_action`]).
     pub fn mark_action(&self) {
-        self.shared.mark_action(&self.session_id, self.nav_generation());
+        let generation = self.nav_generation();
+        self.shared.mark_action(&self.session_id, generation);
         // Baseline the DOM-change count and start counting short timers
         // for the settle proof (see [`SETTLE_ARM`]). Harmless to a crash
         // retry: it only wraps the page's timer functions, again on a rerun.
-        let _ = self.block_on(self.client.send_harmless(
-            "Runtime.evaluate",
-            json!({ "expression": SETTLE_ARM, "returnByValue": true }),
-            Some(&self.session_id),
-            Duration::from_millis(500),
-        ));
+        let arm = |expression| {
+            self.block_on(self.client.send_harmless(
+                "Runtime.evaluate",
+                json!({ "expression": expression, "returnByValue": true }),
+                Some(&self.session_id),
+                Duration::from_millis(500),
+            ))
+        };
+        let (expression, rearm) = self.arm_expression(generation);
+        let missed =
+            rearm && arm(expression).ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_i64)) == Some(-1);
+        if !rearm || missed {
+            let _ = arm(SETTLE_ARM);
+        }
+        self.armed_generation.store(generation + 1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The arm to send: the whole of [`SETTLE_ARM`] in a document that may
+    /// not have it yet, else [`SETTLE_REARM`] (true). The navigation
+    /// generation can trail a new document by an event; a rearm sent there
+    /// finds no arm and says so (-1), and a proof without one waits the
+    /// plain window.
+    fn arm_expression(&self, generation: u64) -> (&'static str, bool) {
+        if self.armed_generation.load(std::sync::atomic::Ordering::Relaxed) == generation + 1 {
+            (SETTLE_REARM, true)
+        } else {
+            (SETTLE_ARM, false)
+        }
     }
 
     /// [`Page::mark_action`] for an action that is itself a `Runtime`
@@ -3870,12 +3910,15 @@ impl Page {
     /// that starts with an `Input` command, which the browser process
     /// handles and may deliver to the page before the arm has run.
     pub fn mark_action_pipelined(&self) {
-        self.shared.mark_action(&self.session_id, self.nav_generation());
+        let generation = self.nav_generation();
+        self.shared.mark_action(&self.session_id, generation);
+        let (expression, _) = self.arm_expression(generation);
         self.client.post_harmless(
             "Runtime.evaluate",
-            json!({ "expression": SETTLE_ARM, "returnByValue": true }),
+            json!({ "expression": expression, "returnByValue": true }),
             Some(&self.session_id),
         );
+        self.armed_generation.store(generation + 1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The last action's own requests have started, with no navigation
