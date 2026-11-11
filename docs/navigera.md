@@ -517,7 +517,7 @@ browser, and the agent's tabs close when the MCP client ends the server.
 | tool | does |
 |---|---|
 | `browser_navigate` | `goto` |
-| `browser_snapshot` | `ax`: the tree with `[ref=N]` (optional `ref`/`selector` scope, `limit`) |
+| `browser_snapshot` | `ax`: the tree with `[ref=N]` (optional `ref`/`selector` scope, `limit`); with `grep`, `text --grep`: the passages of the page's text with the words |
 | `browser_click`, `browser_fill`, `browser_type`, `browser_press_key`, `browser_select_option`, `browser_hover`, `browser_scroll`, `browser_file_upload` | the element ops, by `ref`, `selector` or `text` |
 | `browser_mouse` | `mouse`: raw input at a point (a canvas, a map, a game), or from an element's corner |
 | `browser_wait_for`, `browser_evaluate`, `browser_screenshot` (returns the image), `browser_tabs` (`select` takes `index`, or `target`: an id from `list`, one of the user's tabs too, or `current`, the tab the user is on), `browser_history`, `browser_handle_dialog` | as the CLI |

@@ -337,7 +337,7 @@ pub fn find(decider: &Decider, what: &str, page: &str, all: &[Candidate]) -> Res
     }
     let state = format!("Page: {page}\nLooking for the element to use for: {what}");
     let instructions = format!("Which element on the page is the one to use for: {what}?");
-    let mut pool: Vec<&Candidate> = all.iter().collect();
+    let mut pool: Vec<&Candidate> = without_repeated_links(all);
     loop {
         let chunks: Vec<&[&Candidate]> = pool.chunks(CHUNK).collect();
         // One question per chunk, as many to a request as fit its budget.
@@ -369,14 +369,12 @@ pub fn find(decider: &Decider, what: &str, page: &str, all: &[Candidate]) -> Res
         }
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
         if chunks.len() == 1 {
-            let confidence = ranked[0].2;
-            let merged = merge_same_links(ranked.iter().map(|(c, p, _)| (*c, *p)).collect());
-            let (chosen, p) = merged[0];
+            let (chosen, p, confidence) = ranked[0];
             return Ok(Found {
                 chosen: chosen.clone(),
                 p,
                 confidence,
-                others: merged[1..].iter().take(3).map(|(c, p)| ((*c).clone(), *p)).collect(),
+                others: ranked[1..].iter().take(3).map(|(c, p, _)| ((*c).clone(), *p)).collect(),
             });
         }
         // The best few of every chunk, asked again side by side.
@@ -384,32 +382,18 @@ pub fn find(decider: &Decider, what: &str, page: &str, all: &[Candidate]) -> Res
     }
 }
 
-/// Links that read the same and lead to the same address are one choice:
-/// a page that links an article from its text and again from its sidebar
-/// splits the model's probability between the two, and either click does
-/// what was asked. Each such group becomes its first-ranked link with the
-/// group's probability; everything else (two "Add to cart" buttons, two
-/// links with one name to different addresses) stays apart. `ranked` is most
-/// likely first, and so is the result.
-fn merge_same_links(ranked: Vec<(&Candidate, f64)>) -> Vec<(&Candidate, f64)> {
-    let mut out: Vec<(&Candidate, f64)> = Vec::with_capacity(ranked.len());
-    // The links kept so far by their line: a page has few distinct ones
-    // among the ranked options, and a map keeps this linear in them.
-    let mut kept: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for (c, p) in ranked {
-        let link = c.line.starts_with("link ") && c.line.contains(" url=");
-        match (link, kept.get(c.line.as_str())) {
-            (true, Some(&i)) => out[i].1 += p,
-            _ => {
-                if link {
-                    kept.insert(c.line.as_str(), out.len());
-                }
-                out.push((c, p));
-            }
-        }
-    }
-    out.sort_by(|a, b| b.1.total_cmp(&a.1));
-    out
+/// The candidates to ask about: links that read the same and lead to the
+/// same address are one choice, its first on the page. A page that links an
+/// article from its text and again from its sidebar otherwise splits the
+/// model's probability between the two (either click does what was asked)
+/// and is paid for twice: 185 of the 495 options on MDN's element index
+/// were such repeats. Everything else (two "Add to cart" buttons, one name
+/// to two addresses) stays apart.
+fn without_repeated_links(all: &[Candidate]) -> Vec<&Candidate> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    all.iter()
+        .filter(|c| !(c.line.starts_with("link ") && c.line.contains(" url=")) || seen.insert(c.line.as_str()))
+        .collect()
 }
 
 /// The probability that the answer to `question` about the page is yes.
@@ -455,13 +439,10 @@ mod tests {
             c(5, "button \"Add to cart\""),
             c(6, "link \"<dialog>\" url=/api/dialog"),
         ];
-        let ranked =
-            vec![(&all[1], 0.3), (&all[0], 0.25), (&all[2], 0.25), (&all[3], 0.1), (&all[4], 0.07), (&all[5], 0.03)];
-        let merged = merge_same_links(ranked);
-        let got: Vec<(u64, f64)> = merged.iter().map(|(c, p)| (c.node_ref, *p)).collect();
-        // The two links to /el/dialog are 0.5 together and now lead; the
-        // same name to another address, and the two buttons, stay apart.
-        assert_eq!(got, [(1, 0.5), (2, 0.3), (4, 0.1), (5, 0.07), (6, 0.03)]);
+        let refs: Vec<u64> = without_repeated_links(&all).iter().map(|c| c.node_ref).collect();
+        // The second link to /el/dialog is the first again; the same name
+        // to another address, and the two buttons, stay apart.
+        assert_eq!(refs, [1, 2, 4, 5, 6]);
     }
 
     #[test]
