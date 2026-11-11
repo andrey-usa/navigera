@@ -320,6 +320,35 @@ fn a_wait_in_a_cross_origin_frame_still_sees_a_change() {
 /// statements with the last value the answer, top-level `await`, or a body
 /// that `return`s.
 #[test]
+fn text_grep_prints_the_passages_that_mention_the_words() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("grep", &[]);
+    s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+    // A long page with one fact in it.
+    s.ok(&[
+        "eval",
+        "document.body.innerHTML = '<h1>Returns</h1>' + Array.from({length: 300}, (_, i) => \
+         `<p>Paragraph ${i} of filler.</p>`).join('') + '<h2>Fees</h2><p>The restocking fee is <b>8%</b> \
+         after 37 days.</p><p>Ask support.</p>'; 1",
+    ]);
+    let whole = s.text(&["text"]);
+    let out = s.text(&["text", "--grep", "Restocking Fee"]);
+    assert!(out.starts_with("1 passage with \"Restocking Fee\":\n"), "{out}");
+    // The heading before it and the line after it come along, as they read.
+    assert!(out.contains(": Fees\n"), "{out}");
+    assert!(out.contains(": The restocking fee is 8% after 37 days.\n"), "{out}");
+    assert!(out.ends_with(": Ask support."), "{out}");
+    assert!(out.len() * 20 < whole.len(), "{} of {} bytes", out.len(), whole.len());
+    // Many matches: the first few, and how many there are.
+    let out = s.text(&["text", "--grep", "filler", "--context", "0", "--limit", "2"]);
+    assert!(out.starts_with("2 of 300 passages with \"filler\" (--limit 300 for all"), "{out}");
+    // Inside one element, and nothing found is an answer, not a failure.
+    let out = s.text(&["text", "--selector", "h2", "--grep", "fees"]);
+    assert!(out.ends_with("1: Fees"), "{out}");
+    assert!(s.text(&["text", "--grep", "warranty"]).starts_with("no line of the text has \"warranty\""));
+}
+
+#[test]
 fn eval_takes_statements_await_and_a_body() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("eval", &[]);

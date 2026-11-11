@@ -421,6 +421,15 @@ pub enum Command {
         /// Empty: the whole page, as it reads (`innerText`).
         #[serde(default)]
         selector: String,
+        /// Only the passages that mention this (`text --grep`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grep: Option<String>,
+        /// Lines shown around each match.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<usize>,
+        /// Passages shown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
         #[serde(default)]
         timeout_ms: Option<f64>,
     },
@@ -1254,7 +1263,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
     ("eval", "<js> | --file <path.js> | - [--main]", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin; --main (Electron) runs it in the app's main process, a function getting the electron module"),
-    ("text", "[--selector <css>]", "textContent of the first match; with no selector, the whole page's text as it reads (innerText)"),
+    ("text", "[--selector <css>] [--grep <words> [--context <lines>] [--limit <passages>]]", "textContent of the first match; with no selector, the whole page's text as it reads (innerText). --grep: only the passages that mention the words, each with the lines around it (1) and its line number; the first 5, letter case aside"),
     ("find", "<description>", "the element a description means, chosen by a decision model (set NAVIGERA_DECIDER_KEY; README: Decisions by a fast model); element ops also take --find <description>"),
     ("title", "", "page title"),
     ("a11y", "[--selector <css>] [--tags wcag2a,wcag2aa,…] [--ignore <rule>,…]", "an accessibility audit with axe-core (built in, run where the page can't see it): the violations by rule, worst first, each with its first elements as refs to act on; WCAG 2.0-2.2 A and AA by default (--tags best-practice adds axe's own advice)"),
@@ -1347,7 +1356,7 @@ const FIRST_COMMANDS: &[(&str, &str, &str)] = &[
     ("select", "<ref> <option>...", "choose a <select> option"),
     ("check", "<target>", "check a checkbox, radio, switch"),
     ("press", "<key>", "Enter, Tab, Control+a"),
-    ("text", "[--selector <css>]", "the text of an element or page"),
+    ("text", "[--grep <words>]", "page text, or what --grep matches"),
     ("eval", "<js>", "run JavaScript, print the result"),
     ("wait", "--selector <css> | --text <t>", "wait until the page shows it"),
     ("batch", "[<file> | -]", "several steps in one call"),
@@ -2271,13 +2280,26 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             }
             Command::Dialog { accept: Some(accept), prompt_text: str_flag(&mut args, "--prompt-text")? }
         }
-        "text" => Command::Text {
-            selector: match str_flag(&mut args, "--selector")? {
-                Some(s) => s,
-                None => positional(&mut args).unwrap_or_default(),
-            },
-            timeout_ms,
-        },
+        "text" => {
+            let grep = str_flag(&mut args, "--grep")?;
+            let count = |args: &mut Args, flag: &str| -> Result<Option<usize>, ArgsError> {
+                Ok(num_flag(args, flag)?.map(|n| n.max(0.0) as usize))
+            };
+            let (context, limit) = (count(&mut args, "--context")?, count(&mut args, "--limit")?);
+            if grep.is_none() && (context.is_some() || limit.is_some()) {
+                return Err(need("text", "--grep <words> with --context or --limit"));
+            }
+            Command::Text {
+                selector: match str_flag(&mut args, "--selector")? {
+                    Some(s) => s,
+                    None => positional(&mut args).unwrap_or_default(),
+                },
+                grep,
+                context,
+                limit,
+                timeout_ms,
+            }
+        }
         "find" => {
             let no_wait = extract_present(&mut args, "--no-wait");
             Command::Find {
@@ -4685,13 +4707,14 @@ impl Driver {
                          `click --find \"<what>\"`, `fill --find \"<what>\" <value>` (any element command \
                          takes --find) and `check \"<yes/no question>\"` act and verify on the whole page \
                          without reading it; `ax --limit {DEFAULT_AX_LIMIT}` (MCP: browser_snapshot with limit) \
-                         shows every line, for text you must report."
+                         shows every line; `text --grep \"<word>\"` prints the passages that mention a word, for text \
+                         you must report."
                     ));
                 } else {
                     notes.push(format!(
                         "this tree is {lines} lines; with the decision model on, `click --find \"<what>\"`, \
                          `fill --find \"<what>\" <value>` and `check \"<yes/no question>\"` act and verify \
-                         without reading it. Read it for text you must report."
+                         without reading it. For text you must report: `text --grep \"<word>\"`."
                     ));
                 }
             }
@@ -5058,14 +5081,23 @@ impl Driver {
                 s.set_dialog_policy(accept, prompt_text.clone());
                 Ok(json!({ "dialogs": if accept { "accept" } else { "dismiss" } }))
             }
-            Command::Text { selector, timeout_ms } if selector.is_empty() => {
-                let text = s.page_text(*timeout_ms).map_err(|e| e.context("text"))?;
-                Ok(json!(text))
-            }
-            Command::Text { selector, timeout_ms } => {
-                let text =
-                    s.text_with_timeout(selector, *timeout_ms).map_err(|e| e.context(format!("text {selector:?}")))?;
-                Ok(json!(text))
+            Command::Text { selector, grep, context, limit, timeout_ms } => {
+                let text = if selector.is_empty() {
+                    json!(s.page_text(*timeout_ms).map_err(|e| e.context("text"))?)
+                } else {
+                    json!(s
+                        .text_with_timeout(selector, *timeout_ms)
+                        .map_err(|e| e.context(format!("text {selector:?}")))?)
+                };
+                match (grep, &text) {
+                    (Some(query), Value::String(all)) => Ok(json!(crate::grep::grep(
+                        all,
+                        query,
+                        context.unwrap_or(crate::grep::DEFAULT_CONTEXT),
+                        limit.unwrap_or(crate::grep::DEFAULT_PASSAGES),
+                    ))),
+                    _ => Ok(text),
+                }
             }
             Command::Eval { expression, timeout_ms, main: true } => {
                 s.eval_main(expression, *timeout_ms).map_err(|e| e.context("eval --main"))

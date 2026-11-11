@@ -13,6 +13,7 @@ pub mod clock;
 pub mod decide;
 pub mod domains;
 pub mod emulate;
+pub mod grep;
 mod help_examples;
 #[cfg(feature = "http")]
 pub mod http;

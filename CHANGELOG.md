@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `text --grep "<words>"`: the passages of the page's text that mention
+  the words, each with the lines around it (`--context`, 1) and its line
+  number, the first five (`--limit`) with a count of the rest. One call
+  and a few hundred bytes for one fact from a long page, where an agent
+  otherwise reads the page or writes `eval` after `eval`. Several words
+  match in any order when the phrase is nowhere; with `--selector`, inside
+  that element.
+
 ## [0.11.0] - 2026-11-10
 
 ### Added

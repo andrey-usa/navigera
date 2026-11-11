@@ -224,8 +224,17 @@ pub const EXAMPLES: &[Help] = &[
     ),
     (
         "text",
-        &[("navigera -s s text --selector \"h3\"", ""), ("navigera -s s text", "the whole page, as it reads")],
-        &[("--selector <css>", "the element whose textContent to print (none: the page's innerText)")],
+        &[
+            ("navigera -s s text --selector \"h3\"", ""),
+            ("navigera -s s text", "the whole page, as it reads"),
+            ("navigera -s s text --grep \"free shipping\"", "one fact from a long page: the passages that mention it"),
+        ],
+        &[
+            ("--selector <css>", "the element whose textContent to print (none: the page's innerText)"),
+            ("--grep <words>", "only the passages that mention the words (letter case aside; all the words in any order when the phrase is nowhere)"),
+            ("--context <lines>", "with --grep: lines shown around each match (1)"),
+            ("--limit <passages>", "with --grep: passages shown (5)"),
+        ],
     ),
     (
         "find",

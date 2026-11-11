@@ -38,5 +38,10 @@ page "Checkout — Acme" http://shop.test/checkout
   `hover` the menu, then `ax` again.
 - Big page: `ax --selector "#results"` or `ax 57` (a ref), `--limit <lines>`
   (default 2000).
+- One fact from a long page (a default, a price, a date): `text --grep
+  "<word or phrase>"` prints the passages that mention it with the lines
+  around them (`--context <lines>`, `--limit <passages>`), a few hundred
+  bytes instead of the page. Several words match in any order when the
+  phrase is nowhere.
 - Many items: one `eval` that returns JSON:
   `navigera -s work eval "() => [...document.querySelectorAll('.item')].map(e => e.innerText)"`
