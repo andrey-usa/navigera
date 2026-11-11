@@ -961,7 +961,7 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
                 "reaped_child_cpu_s": r3(sb.get("cpu_reaped_s")),
                 "driver_rss_mb": r3(sb["maxrss_kb"] / 1024),
                 "browser_cpu_s": r3(sb["browser_cpu_s"]),
-                "browser_pss_mb": r3(sb["browser_pss_kb"] / 1024),
+                "browser_pss_mb": r3(r["session"]["browser_pss_kb"] / 1024),
             },
         }
         if sb.get("phases"):
@@ -1220,7 +1220,16 @@ def main() -> int:
             ok_runs = [r for r in runs if r["ok"]]
             return {"runs": runs,
                     "best": min(ok_runs, key=lambda r: r["wall_s"]) if ok_runs else runs[0]}
-        return {"runs": runs, "best": min(runs, key=lambda r: r["wall_s"])}
+        out = {"runs": runs, "best": min(runs, key=lambda r: r["wall_s"])}
+        if key == "session":
+            # Browser memory is the median of each rep's sampled peak, not the
+            # fastest rep's: PSS is read every 250 ms, so a ~0.4 s session's
+            # peak is caught or missed by phase, and one rep flipped the
+            # navigera/puppeteer order between CI runs (nv-serve 341-400 MB,
+            # puppeteer 365-396 MB).
+            pss = [r["browser_pss_kb"] for r in runs if r.get("browser_pss_kb")]
+            out["browser_pss_kb"] = statistics.median(pss) if pss else 0
+        return out
 
     stages = [("session", "session", args.reps), ("eval", "eval micro", 3),
               ("cold", "cold start", args.cold_reps), ("realworld", "realworld example.com", args.live_reps),
@@ -1385,7 +1394,7 @@ def main() -> int:
                  "tree, sampled from /proc (approximate).")
     lines.append("")
     lines.append("| contender | wall (best of {}) | driver CPU (own) | reaped-child CPU† | "
-                 "browser CPU* | driver peak RSS | browser PSS* | runs |".format(args.reps))
+                 "browser CPU* | driver peak RSS | browser PSS* (median) | runs |".format(args.reps))
     lines.append("|---|---|---|---|---|---|---|---|")
     for name in contenders:
         b = results[name]["session"]["best"]
@@ -1397,7 +1406,7 @@ def main() -> int:
             f"| {label} | {b['wall_s']:.2f}s | {b['cpu_s']:.3f}s | "
             f"{b.get('cpu_reaped_s', float('nan')):.2f}s | "
             f"{b['browser_cpu_s']:.2f}s | {b['maxrss_kb'] / 1024:.0f} MB | "
-            f"{b['browser_pss_kb'] / 1024:.0f} MB | {runs}s |")
+            f"{results[name]['session']['browser_pss_kb'] / 1024:.0f} MB | {runs}s |")
     lines.append("")
     lines.append("\\* browser numbers: whole browser process tree, /proc-sampled every 50 ms (approximate). "
                  "† CPU of descendants the driver itself waited for (its Chrome, "

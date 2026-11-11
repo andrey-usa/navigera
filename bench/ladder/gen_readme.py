@@ -160,7 +160,8 @@ lines += [
     "`WNOWAIT`), and its own VmHWM; the kernel's 10 ms ticks make anything under",
     "~50 ms a tie (`wait4` would add in every reaped child, the artifact earlier",
     "versions of this table reported). Browser memory is the whole process tree,",
-    "sampled as summed PSS every 250 ms (shared pages counted once).",
+    "sampled as summed PSS every 250 ms (shared pages counted once); the median",
+    "of the reps' peaks, since one short session's peak is caught or missed by phase.",
     "",
 ]
 nv_best = next(r for r in chrome if r["name"].startswith("nv-"))
