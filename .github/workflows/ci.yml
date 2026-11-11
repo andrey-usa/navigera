@@ -38,6 +38,12 @@ jobs:
         with:
           toolchain: stable
           components: clippy, rustfmt
+          # No cache from a job that stopped early. A key, once saved, is
+          # kept until the dependencies change, so a job cancelled by a newer
+          # push or failed mid-build would leave a target with nothing in it
+          # for every later run of that key (compara's Windows test job:
+          # 8 min of its 9 compiling under a 70 MB cache hit, 43070419956).
+          cache-on-failure: false
 
       - name: Format
         run: cargo fmt --check
@@ -113,6 +119,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
         with:
           toolchain: stable
+          cache-on-failure: false
       - name: Electron for the fixture app
         working-directory: tests/fixtures/electron-app
         run: |
@@ -167,6 +174,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
+          cache-on-failure: false
       - run: cargo check --locked --all-targets
 
   # The static Linux binaries a release ships (musl, with mimalloc's C
@@ -190,6 +198,7 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
+          cache-on-failure: false
       - uses: ./.github/actions/apt-install
         with:
           packages: musl-tools
@@ -234,6 +243,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
+          cache-on-failure: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.12"
@@ -280,6 +290,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
+          cache-on-failure: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.12"
@@ -370,6 +381,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
         with:
           toolchain: stable
+          cache-on-failure: false
       - name: install.sh as an agent runs it
         if: runner.os != 'Windows'
         run: |
@@ -439,6 +451,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
         with:
           toolchain: stable
+          cache-on-failure: false
       - name: Download ${{ matrix.browser.kind }} ${{ matrix.browser.version }}
         run: |
           curl -sSfL --retry 3 -o /tmp/browser.zip "${{ matrix.browser.url }}"

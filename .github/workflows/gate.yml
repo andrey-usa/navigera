@@ -42,6 +42,7 @@ jobs:
         with:
           toolchain: stable
           target: x86_64-unknown-linux-musl
+          cache-on-failure: false
       - uses: ./.github/actions/apt-install
         with:
           packages: musl-tools
