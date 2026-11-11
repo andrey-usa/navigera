@@ -251,6 +251,8 @@ def run_one(agent: str, browser: str, task: dict, model_spec: str, args, rep: in
         site = ae.Site()
         env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), CI="true", NO_COLOR="1",
                    DO_NOT_TRACK="1", KILO_DISABLE_AUTOUPDATE="1")
+        # The agent reads navigera's default output, not this harness's JSON.
+        env.pop("NAVIGERA_OUTPUT", None)
         if model_spec == "mock":
             mock = Mock(root)
             model = ("mock", "mock", mock.url)
