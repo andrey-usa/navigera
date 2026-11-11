@@ -752,8 +752,15 @@ class Tool:
         return ms, 1, ""
 
     def op_click(self, rep: int):
-        # Same starting state every rep: the box holds "widget" (untimed setup).
-        self.setup("document.getElementById('q').value='widget'")
+        # Same starting state every rep (untimed setup): the box holds
+        # "widget" and every card shows, so the click filters the list each
+        # time. Left filtered from the rep before, the click changed nothing
+        # on the page, and a tool that reports that (navigera: "nothing
+        # changed" after its 200 ms watch) was timed on a wait the others do
+        # not make: 19 ms on the first rep, 215 on the rest (run 43068761390).
+        self.setup("document.getElementById('q').value='widget';"
+                   "for (const c of document.querySelectorAll('.card.hidden')) "
+                   "c.classList.remove('hidden')")
         if self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             ms, _ = self.cli([exe, "--session", self.session, "click",
