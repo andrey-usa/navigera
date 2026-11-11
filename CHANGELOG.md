@@ -20,6 +20,12 @@ All notable changes to this project are documented here. The format follows
   otherwise reads the page or writes `eval` after `eval`. Several words
   match in any order when the phrase is nowhere; with `--selector`, inside
   that element. MCP: `browser_snapshot` takes `grep`.
+  With this and `ax --grep`, an agent (DeepSeek-V4.1-Flash, 8 sessions a
+  task and build) finding one fact from a large docs index took 6 and 7
+  model turns where the build before took 10.5 and 13.5, at 44% and 65%
+  less estimated cost and 57% and 65% less time; small-page tasks did not
+  change (runs [42978179657](https://github.com/andrey-usa/navigera/actions/runs/42978179657) before,
+  [42978184533](https://github.com/andrey-usa/navigera/actions/runs/42978184533) after).
 
 ### Changed
 

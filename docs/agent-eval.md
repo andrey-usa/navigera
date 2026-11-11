@@ -43,6 +43,15 @@ agent's shell never sees, and each run records the decider's calls and
 tokens. `decisions: true` adds the Jev-against-Gemini decision comparison
 above (`bench/decide/compare.py`).
 
+The agent reads navigera's default output, as a user's agent does. Until
+2026-11-11 its shell inherited the harness's own `NAVIGERA_OUTPUT=json`, so
+the runs below that date measured navigera on JSON lines, without the
+report of what an action changed. The report also has a cost table (new
+input, output, and an estimate at list prices that includes the decision
+model's tokens): cached input costs a fiftieth of new input, so a token
+total says little about spend. `endpoint: openrouter` with `rates` runs
+the same sessions on a model SiliconFlow does not serve.
+
 ### One model, six tools
 
 DeepSeek-V4.1-Flash drives each tool through one shell function on a local

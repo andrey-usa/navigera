@@ -36,3 +36,17 @@ tell the agent how to use the decider, Gemini CLI used it unprompted in 3 of
 of five tasks per arm); median tokens per run were 199K without the
 decider, 172K with it and 190K when told, a spread within the run-to-run
 noise at this sample size.
+
+**Measured (2026-11-11, runs [42978184533](https://github.com/andrey-usa/navigera/actions/runs/42978184533) and
+[42978367965](https://github.com/andrey-usa/navigera/actions/runs/42978367965)).** Since `ax --grep` and `text --grep`, an
+agent that knows a word of what it is looking for needs no decision model
+to skip reading a large page, and the model no longer pays for itself
+there: on two large docs pages DeepSeek-V4.1-Flash took 6 and 7 turns
+without the decider and 6 and 6 with it, at an estimated $0.0011 a session
+without and $0.0014 with (Jev's tokens included); told to prefer the
+decider, $0.0019 to $0.0026. GPT-5.6 Terra, at 13 times the token price,
+took 4 turns either way and cost the same within 4%. What is left for the
+decider is the pick an agent cannot name a word for. On 39 decisions with
+known answers Jev picked 23/25 elements and answered 14/14 questions at a
+72 ms median (run [42978205179](https://github.com/andrey-usa/navigera/actions/runs/42978205179)); a link repeated on a
+page is now asked about once, 11% fewer tokens over those decisions.
