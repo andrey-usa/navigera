@@ -16,6 +16,19 @@ All notable changes to this project are documented here. The format follows
   match in any order when the phrase is nowhere; with `--selector`, inside
   that element.
 
+### Changed
+
+- `find` and `--find`: links that read the same and lead to the same
+  address count as one choice. A page that links an article from its text
+  and again from its sidebar split the decision model's probability
+  between the two, and `--find` refused at 0.43 each what it now does at
+  0.85. Two buttons with one name, or one name to two addresses, stay
+  apart.
+- With a decision model on, `start`'s note and the skill's decider page
+  show the shape that saves turns: the known steps in one `batch`, across
+  pages, each naming its element with `--find`, ending with `text --grep`
+  or `check`.
+
 ## [0.11.0] - 2026-11-10
 
 ### Added

@@ -720,7 +720,10 @@ def check(task: dict, answer: str, site, tool: str = "") -> tuple[bool, list[str
 
 
 # A find/check op (after any options), or --find on an element op.
-DECISION = re.compile(r"navigera(\s+(-s|--session)\s+\S+|\s+--?[\w-]+)*\s+(find|check)\s|\bnavigera\b.*\s--find\b")
+# `find`, `--find`, and `check` with a question (quoted words), not `check`
+# on a checkbox (`check 12`, `check --label "…"`), also as a line of a batch.
+DECISION = re.compile(r"(navigera(\s+(-s|--session)\s+\S+|\s+--?[\w-]+)*\s+|^\s*)(find\s|check\s+[\"'][^\"']*\s)|"
+                      r"\s--find\b", re.M)
 
 
 def read_log(path: str | None) -> list:
@@ -755,6 +758,42 @@ def smoke(args) -> int:
         print(f"{args.model} fell back to {extra}: its quota is likely spent for today", file=sys.stderr)
         return 1
     return 0
+
+
+# USD per million tokens (uncached input, cached input, output): list prices,
+# not a bill. DeepSeek-V4.1-Flash: https://www.siliconflow.com/pricing, read
+# 2026-11-05 (the rate card bench/llm uses). EVAL_RATES="in,cached,out" sets
+# them for another model. The decision model reads input only: Jev's list
+# price, https://docs.typesafe.ai, read 2026-10-14.
+RATES = {"deepseek-ai/DeepSeek-V4.1-Flash": (0.15, 0.003, 0.60)}
+DECIDER_RATE = 0.042
+
+
+def rates(model: str):
+    raw = os.environ.get("EVAL_RATES")
+    if raw:
+        try:
+            got = tuple(float(x) for x in raw.split(","))
+        except ValueError:
+            got = ()
+        if len(got) == 3:
+            return got
+    return RATES.get(model)
+
+
+def cost(run: dict, model: str):
+    """A run's estimated spend in USD at list prices, the decision model's
+    included, or None when a rate or a count is not known. Cached input is
+    part of `tokens_in` and is charged at its own rate, once."""
+    rate = rates(model)
+    t_in, t_out = run.get("tokens_in"), run.get("tokens_out")
+    if rate is None or not isinstance(t_in, int) or not isinstance(t_out, int):
+        return None
+    cached = run.get("tokens_cached") or 0
+    if cached > t_in:
+        return None
+    llm = ((t_in - cached) * rate[0] + cached * rate[1] + t_out * rate[2]) / 1e6
+    return llm + (run.get("decider_tokens") or 0) * DECIDER_RATE / 1e6
 
 
 def label(run: dict) -> str:
@@ -798,6 +837,35 @@ def render(mode: str, agent: str, model: str, runs: list, tools: list, tasks: li
                 + (f" {r['tokens_total'] // 1000}K" if r.get("tokens_total") else "")
                 for r in rs) or "—")
         lines.append(f"| {task} | " + " | ".join(cells) + " |")
+    # Where the spend is: tokens a provider has cached cost a fiftieth of new
+    # ones, so the total above says little about cost. Per task and tool, the
+    # medians of what is paid for at full price and of the estimate.
+    costed = [r for r in runs if not r.get("infra") and isinstance(r.get("tokens_in"), int)]
+    if costed:
+        priced = rates(model) is not None
+        lines += ["", "| task | tool | passed | median turns | median new input tokens | median output tokens | "
+                  "median est. cost | cost per pass | median wall |", "|---|---|---|---|---|---|---|---|---|"]
+        for task in tasks:
+            for tool in tools:
+                rs = [r for r in costed if label(r) == tool and r["task"] == task]
+                if not rs:
+                    continue
+                costs = [cost(r, model) for r in rs]
+                known = priced and all(c is not None for c in costs)
+                ok = sum(1 for r in rs if r["ok"])
+                fmt = lambda v, f="{:.0f}": "—" if v is None else f.format(v)
+                lines.append(
+                    f"| {task} | `{tool}` | {ok}/{len(rs)} | {fmt(med([r.get('requests') for r in rs]))} | "
+                    f"{fmt(med([r['tokens_in'] - (r.get('tokens_cached') or 0) for r in rs]))} | "
+                    f"{fmt(med([r.get('tokens_out') for r in rs]))} | "
+                    f"{fmt(med(costs) if known else None, '${:.5f}')} | "
+                    f"{fmt(sum(costs) / ok if known and ok else None, '${:.5f}')} | "
+                    f"{fmt(med([r.get('wall_s') for r in rs]), '{:.0f}s')} |")
+        if priced:
+            r_in, r_cached, r_out = rates(model)
+            lines += ["", f"Estimated at list prices per million tokens: ${r_in} new input, ${r_cached} cached "
+                      f"input, ${r_out} output; decision model ${DECIDER_RATE} input. Cost per pass is every "
+                      "run's cost over the runs that passed. An estimate, not a bill."]
     deciding = [t for t in tools if any("decider_calls" in r for r in runs if label(r) == t)]
     if deciding:
         lines += ["", "| tool | runs that saw the decider | runs that used find/check | find/check commands | "

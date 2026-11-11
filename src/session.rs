@@ -785,10 +785,11 @@ fn fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCo
 }
 
 /// What `start` tells an agent when a decision model is on.
-pub const DECIDER_NOTE: &str = "a decision model is on: act with `click --find \"<what>\"` or \
-     `fill --find \"<what>\" <value>` (any element command takes --find) and verify with \
-     `check \"<yes/no question>\"`, instead of reading `ax` for refs; read `ax` only for text you must report, \
-     or when --find says it is unsure.";
+pub const DECIDER_NOTE: &str = "a decision model is on, so you can act on pages you have not read: put the \
+     steps you know in one `batch`, across pages, each naming its element in words (`click --find \"<what>\"`, \
+     `fill --find \"<what>\" <value>`; any element command takes --find), and end it with `text --grep \
+     \"<word>\"` for text you must report or `check \"<yes/no question>\"` to verify. A step --find is unsure of \
+     stops the batch and lists the candidates: read `ax` only then.";
 
 /// `start`: spawn a detached session server and wait until it accepts.
 pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> ExitCode {
