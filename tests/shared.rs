@@ -343,9 +343,18 @@ fn a_killed_shared_browser_is_relaunched_and_sessions_carry_on() {
         let (_, r) = a.run(&["eval", "location.pathname"]);
         r["ok"] == true && r["result"] == "/posted"
     });
+    let a_done = Instant::now();
     b.ok(&["tab-select", "0"]);
-    // The storage snapshot is taken once a session has been idle for 1 s.
-    std::thread::sleep(Duration::from_millis(1800));
+    let b_done = Instant::now();
+    // The storage snapshot is taken once a session has been idle for 1 s
+    // (a slow runner takes longer; `status` does not count as a command):
+    // wait for one newer than each session's last command.
+    for (s, done) in [(&a, a_done), (&b, b_done)] {
+        eventually("a storage snapshot after the last command", Duration::from_secs(20), || {
+            let age = s.ok(&["status"])["storage_snapshot_ms"].as_u64();
+            age.is_some_and(|ms| u128::from(ms) < done.elapsed().as_millis())
+        });
+    }
     let pids = browser.wait_browsers(1, Duration::from_secs(5));
     assert_eq!(pids.len(), 1);
     kill(pids[0]);

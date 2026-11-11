@@ -3092,6 +3092,8 @@ const STORAGE_EVERY: Duration = Duration::from_millis(500);
 const STORAGE_IDLE: Duration = Duration::from_secs(1);
 /// A tab stuck in a dialog or a loop costs a snapshot no more than this.
 const STORAGE_EVAL: Duration = Duration::from_millis(300);
+/// Snapshots tried while idle before the session waits for its next op.
+const STORAGE_TRIES: u32 = 3;
 /// A second crash this soon after a recovery ends the session.
 const CRASH_LOOP: Duration = Duration::from_secs(10);
 
@@ -3316,10 +3318,16 @@ struct Crash {
     tabs: Vec<(String, bool)>,
     active: usize,
     storage: Option<Value>,
+    /// When `storage` was taken.
     storage_at: Option<Instant>,
+    /// When a snapshot was last tried, taken or not.
+    storage_tried: Option<Instant>,
     recovered_at: Option<Instant>,
     /// An op ran since the last storage snapshot.
     storage_dirty: bool,
+    /// Snapshots that failed since the last op (a tab slower than
+    /// [`STORAGE_EVAL`]); retried while idle, up to [`STORAGE_TRIES`].
+    storage_failed: u32,
     /// When the last op ended.
     last_op: Option<Instant>,
     /// Recovery failed or looped: the session ends.
@@ -3334,8 +3342,10 @@ impl Default for Crash {
             active: 0,
             storage: None,
             storage_at: None,
+            storage_tried: None,
             recovered_at: None,
             storage_dirty: false,
+            storage_failed: 0,
             last_op: None,
             given_up: false,
         }
@@ -4048,7 +4058,11 @@ impl Driver {
                 Err(e) => result = Err(e),
             }
         }
-        self.remember();
+        // `status` reads navigera's own state, not the page: it does not put
+        // off the idle storage snapshot (a test waits for it with `status`).
+        if !matches!(command, Command::Status {}) {
+            self.remember();
+        }
         if matches!(command, Command::Goto { .. }) && result.is_ok() && !self.pre_read.off && pre_read_on() {
             self.pre_read.due = Some((Instant::now(), self.session.page_identity()));
         }
@@ -4161,6 +4175,7 @@ impl Driver {
             }
         }
         self.crash.storage_dirty = true;
+        self.crash.storage_failed = 0;
         self.crash.last_op = Some(Instant::now());
     }
 
@@ -4172,15 +4187,25 @@ impl Driver {
             || !self.session.is_shared()
             || self.session.browser_gone()
             || self.crash.last_op.is_some_and(|t| t.elapsed() < STORAGE_IDLE)
-            || self.crash.storage_at.is_some_and(|t| t.elapsed() < STORAGE_EVERY)
+            || self.crash.storage_tried.is_some_and(|t| t.elapsed() < STORAGE_EVERY)
         {
             return;
         }
-        self.crash.storage_dirty = false;
-        if let Ok(state) = self.session.storage_state_within(STORAGE_EVAL) {
-            self.crash.storage = Some(state);
-            self.crash.storage_at = Some(Instant::now());
+        // A snapshot that failed (a tab slower than STORAGE_EVAL on a busy
+        // machine) is tried again a few times while the session stays
+        // idle; giving up at once left a crash with no storage to restore.
+        match self.session.storage_state_within(STORAGE_EVAL) {
+            Ok(state) => {
+                self.crash.storage = Some(state);
+                self.crash.storage_at = Some(Instant::now());
+                self.crash.storage_dirty = false;
+            }
+            Err(_) => {
+                self.crash.storage_failed += 1;
+                self.crash.storage_dirty = self.crash.storage_failed < STORAGE_TRIES;
+            }
         }
+        self.crash.storage_tried = Some(Instant::now());
     }
 
     /// The shared browser died: join the relaunched one (or launch it, under
@@ -5685,6 +5710,10 @@ impl Driver {
                     None => "own".to_string(),
                 });
                 state["version"] = json!(env!("CARGO_PKG_VERSION"));
+                // What a crash of the shared browser would restore from.
+                if let Some(at) = self.crash.storage_at.filter(|_| self.crash.storage.is_some()) {
+                    state["storage_snapshot_ms"] = json!(at.elapsed().as_millis() as u64);
+                }
                 // The user's other tabs, in their own browser (`tab-list`
                 // names them).
                 if self.session.in_users_browser() {

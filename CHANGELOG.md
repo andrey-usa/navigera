@@ -56,6 +56,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A shared browser's crash restores the cookies and localStorage of a
+  session whose last snapshot failed: a tab slower than the snapshot's
+  300 ms limit (a loaded machine) ended the snapshots until the next
+  command, and the crash found none ("a snapshot none was taken"). A
+  failed one is tried again while the session is idle, three times. A
+  client that polled the session (`status` every 200 ms) kept the
+  snapshot from ever running; now it runs when it is due whatever comes
+  in, and `status` does not count as a command. `status` says how old
+  the snapshot is (`storage_snapshot_ms`).
 - `--selector`, `--frame` or `--gone` with nothing after it says why: an
   unquoted `#` starts a shell comment, so `--selector #items` reached
   navigera as `--selector`. The error now says to quote the selector.

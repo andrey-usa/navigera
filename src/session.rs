@@ -371,6 +371,9 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
         if ran {
             free_since = Instant::now();
         }
+        // A client that polls (`status` every 200 ms) never leaves a whole
+        // tick free: the snapshot, due by its own clock, is taken here too.
+        driver.snapshot_if_idle();
         if quit {
             break;
         }
