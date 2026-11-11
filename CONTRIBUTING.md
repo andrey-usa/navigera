@@ -161,7 +161,7 @@ needs two files in this repository, used by nothing else:
 | file | what Glama does with it |
 |---|---|
 | `glama.json` (repository root, where Glama looks) | names the maintainers, for the listing |
-| `packaging/glama/build.sh` | its build steps: the system libraries Chrome links against, `uv tool install navigera==<version>` from PyPI, `navigera install-browser chrome-headless-shell`, and a check that the browser's libraries load, so a missing one fails the build instead of the first call |
+| `packaging/glama/build.sh` | its build steps: the system libraries Chrome links against, `uv tool install navigera==<version>` from PyPI, `navigera install-browser chrome-headless-shell`, a check that the browser's libraries load, and one page read through `navigera mcp` with no browser variable set, so a missing library or a server that needs a setting fails the build instead of the first call |
 
 Neither goes into a release: the crate is an allowlist (`include` in
 `Cargo.toml`, checked by the "Glama files stay out of the packages" step in
@@ -170,8 +170,11 @@ alone. Glama's admin form holds the rest: the build step is
 `sh packaging/glama/build.sh`, run in Glama's copy of this repository (the
 build's working directory), the command is
 `["mcp-proxy", "--", "/root/.local/bin/navigera", "mcp"]` (Glama's proxy in
-front of navigera's stdio server), and the settings it offers users are
-`CHROME_BIN` (no key fields).
+front of navigera's stdio server), and it offers users **no settings**:
+the environment-variable schema in that form is empty. The server finds the
+browser the build installed by itself, and needs no key. A field left there
+(a browser path, a key) is asked of everyone who tries the server, and a
+wrong browser path breaks it.
 
 A navigera release is a Glama release under the same number: auto-release
 names it after the tag without the `v` (`v0.8.0` is `0.8.0`). Glama builds
@@ -179,7 +182,7 @@ from its copy of the repository, not from the tag, and `build.sh` takes the
 version from that copy's `Cargo.toml`. So after the release merge reaches
 `master`, sync Glama's copy (the link next to its head commit) before the
 build. A stale copy fails the build, or builds the version before. After it,
-check the listing in Glama's "try it": `tools/list` gives the 13 default tools, and
+check the listing in Glama's "try it": it asks for no settings, `tools/list` gives the 13 default tools, and
 `browser_navigate` to https://example.com followed by `browser_snapshot`
 returns the page's tree. Glama can't rebuild a version it has released, so a
 fix to Glama's image alone would need a number of its own. Wait for the next

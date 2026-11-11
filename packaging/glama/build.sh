@@ -57,4 +57,23 @@ if ldd "$shell" | grep "not found"; then
   echo "glama build: libraries missing for $shell" >&2
   exit 1
 fi
-echo "glama build: navigera $version with $shell"
+
+# The server as Glama's users get it, with no settings: no browser path in
+# the environment (it finds the shell installed above), so the listing asks
+# for none. One page read through MCP proves it; the shared browser that
+# read started is stopped before the step ends.
+reply=$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"glama-build"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"browser_navigate","arguments":{"url":"data:text/html,<h1>glama build</h1>"}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"browser_snapshot","arguments":{}}}' \
+  | env -u CHROME_BIN -u NAVIGERA_CHROMIUM timeout 120 "$nav" mcp 2>&1) || true
+"$nav" sessions --clean --all >/dev/null 2>&1 || true
+case "$reply" in
+  *'heading \"glama build\"'*) ;;
+  *)
+    echo "glama build: navigera mcp did not read a page with no settings:" >&2
+    printf '%s\n' "$reply" | tail -n 5 >&2
+    exit 1
+    ;;
+esac
+echo "glama build: navigera $version with $shell, no settings needed"

@@ -27,6 +27,13 @@ All notable changes to this project are documented here. The format follows
   change (runs [42978179657](https://github.com/andrey-usa/navigera/actions/runs/42978179657) before,
   [42978184533](https://github.com/andrey-usa/navigera/actions/runs/42978184533) after).
 
+### Changed
+
+- Glama's image of the MCP server needs no settings: its build reads a
+  page through `navigera mcp` with no browser variable set, using the
+  chrome-headless-shell it installed, and fails if that does not work, so
+  the listing no longer asks for a browser path or a decision-model key.
+
 ### Removed
 
 - The decision model: `find`, `--find <description>` on element commands,
