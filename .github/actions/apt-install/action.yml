@@ -1,11 +1,13 @@
 name: apt-install
 description: >
-  apt-get install on a GitHub-hosted Ubuntu runner that survives Azure's
-  Ubuntu mirror going away. The runner's apt asks that mirror first
-  (mirror+file:/etc/apt/apt-mirrors.txt) and does not move on when its
-  name stops resolving: the install fails after six to ten minutes of
-  retries. When the mirror's name does not resolve, or the install fails,
-  apt is pointed at Ubuntu's own archive and the install runs once more.
+  apt-get install on a GitHub-hosted Ubuntu runner that survives its
+  Ubuntu mirror going away. The runner's apt asks Azure's mirror first
+  (mirror+file:/etc/apt/apt-mirrors.txt) and does not move on when that
+  name stops resolving; on 2026-11-11 Ubuntu's own archive names did not
+  resolve either, and installs failed after up to fifteen minutes of
+  retries. This tries the runner's sources, then Ubuntu's archive, then
+  mirrors outside ubuntu.com (apt checks every package against Ubuntu's
+  signing key, whatever the mirror), each only if its name resolves.
 inputs:
   packages:
     description: the packages, separated by spaces
@@ -18,21 +20,46 @@ runs:
         PACKAGES: ${{ inputs.packages }}
       run: |
         set -euo pipefail
-        lists=(/etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*)
-        direct() {
-          echo "::warning title=apt::$1: installing from Ubuntu's own archive instead of Azure's mirror"
-          for f in "${lists[@]}"; do
-            if [ -f "$f" ]; then
-              sudo sed -i -E 's#//azure\.(archive|ports)\.ubuntu\.com#//\1.ubuntu.com#g' "$f"
-            fi
-          done
-        }
         install() {
           # shellcheck disable=SC2086 # one word per package
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends $PACKAGES
         }
-        mirror=$(grep -ohsE 'azure\.(archive|ports)\.ubuntu\.com' "${lists[@]}" | head -n1 || true)
-        if [ -n "$mirror" ] && ! getent hosts "$mirror" > /dev/null; then
-          direct "$mirror does not resolve"
+        resolves() { getent hosts "$1" > /dev/null; }
+        lists=()
+        for f in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+          if [ -f "$f" ]; then lists+=("$f"); fi
+        done
+        orig="$RUNNER_TEMP/apt-sources"
+        mkdir -p "$orig"
+        for f in "${lists[@]}"; do sudo cp "$f" "$orig/$(basename "$f")"; done
+        # Every Ubuntu source (the runner's mirror list, or URIs naming an
+        # ubuntu.com host) pointed at one mirror; other vendors' left alone.
+        use() {
+          for f in "${lists[@]}"; do
+            sudo cp "$orig/$(basename "$f")" "$f"
+            sudo sed -i -E "s#https?://[a-z.]*ubuntu\.com/ubuntu(-ports)?/?#$1#g" "$f"
+          done
+        }
+        first=$(grep -ohsE 'https?://[a-z.-]+' "${lists[@]}" | grep -m1 'ubuntu\.com' | sed -E 's#https?://##' || true)
+        if [ -z "$first" ] || resolves "$first"; then
+          if install; then exit 0; fi
+          echo "::warning title=apt::the install from the runner's sources failed"
+        else
+          echo "::warning title=apt::$first does not resolve"
         fi
-        install || { direct "the install failed"; install; }
+        if [ "$(dpkg --print-architecture)" = amd64 ]; then
+          mirrors=(archive.ubuntu.com/ubuntu mirrors.edge.kernel.org/ubuntu mirrors.ocf.berkeley.edu/ubuntu)
+        else
+          mirrors=(ports.ubuntu.com/ubuntu-ports mirrors.ocf.berkeley.edu/ubuntu-ports)
+        fi
+        for m in "${mirrors[@]}"; do
+          if ! resolves "${m%%/*}"; then
+            echo "::warning title=apt::${m%%/*} does not resolve"
+            continue
+          fi
+          echo "::warning title=apt::installing from https://$m/"
+          use "https://$m/"
+          if install; then exit 0; fi
+        done
+        echo "::error title=apt::no Ubuntu mirror could install: $PACKAGES"
+        exit 100
