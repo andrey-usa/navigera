@@ -26,7 +26,7 @@ anyhow = "1"
 miniz_oxide = "0.9"
 # Byte search for the reads of large CDP answers (already in the build through serde_json).
 memchr = "2"
-# The `http` feature: requests outside the page (primavera's API tests).
+# The `http` feature: requests outside the page (bitti's API tests).
 ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "platform-verifier"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 
