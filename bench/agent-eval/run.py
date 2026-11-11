@@ -239,6 +239,12 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
         # land under the run's root, so cleanup can find them by path.
         (root / "tmp").mkdir()
         env["TEMP"] = env["TMP"] = str(root / "tmp")
+    else:
+        # navigera keeps its sessions under $XDG_RUNTIME_DIR, which the runner
+        # shares between runs: a task's `start` found the session an earlier
+        # task left running, with that task's tabs. One per run, as $HOME is.
+        (root / "run").mkdir(mode=0o700)
+        env["XDG_RUNTIME_DIR"] = str(root / "run")
     if mode == "onboard":
         # Whatever the agent installs lands in this run's own prefix.
         prefix = home / ".npm-global"
@@ -599,6 +605,34 @@ def cleanup(root: Path):
         return
     for pat in TOOL_PATTERNS:
         subprocess.run(["pkill", "-f", f"{pat}.*{root.name}"], capture_output=True)
+    # A tool's daemon and its browser rarely name the run's directory on
+    # their command line, but their environment does ($HOME,
+    # $XDG_RUNTIME_DIR): on Linux, find them by that.
+    for pid in run_processes(root):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def run_processes(root: Path) -> list[int]:
+    """Linux: the processes whose environment points into the run's root."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return []
+    here = str(root).encode()
+    pids = []
+    for p in proc.iterdir():
+        if not p.name.isdigit() or int(p.name) == os.getpid():
+            continue
+        try:
+            environ = (p / "environ").read_bytes()
+        except OSError:
+            continue
+        values = (e.partition(b"=")[2] for e in environ.split(b"\0"))
+        if any(v == here or v.startswith(here + b"/") for v in values):
+            pids.append(int(p.name))
+    return pids
 
 
 # --- checks -----------------------------------------------------------------
