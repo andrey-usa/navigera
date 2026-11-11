@@ -100,21 +100,22 @@ browsers](https://andrey-usa.github.io/navigera/concepts/browsers.html).
 
 One scripted session (goto, evals, fill and click, a screenshot, a second
 tab) driven by each tool against the same headless Chrome, in one CI run
-([bench run 42863598577](https://github.com/andrey-usa/navigera/actions/runs/42863598577), 2026-11-10, GitHub's `ubuntu-latest`); each
+([bench run 42952776646](https://github.com/andrey-usa/navigera/actions/runs/42952776646), 2026-11-11, GitHub's `ubuntu-24.04, image 20261101.360.1`); each
 driver's extracted data is checked identical:
 
 | driver | session | cold start | warm eval | its own memory |
 |---|---|---|---|---|
-| navigera (chrome-headless-shell) | 0.26 s | 0.08 s | 0.28 ms | 7 MB |
-| navigera (Chrome) | 0.41 s | 0.21 s | 0.34 ms | 7 MB |
-| go-rod 0.116.2 (Go) | 0.55 s | 0.23 s | 0.25 ms | 12 MB |
-| puppeteer-core 25.16.0 (Node) | 0.64 s | 0.40 s | 0.42 ms | 79 MB |
-| playwright-core 1.65.0 (Bun 1.4.4) | 0.82 s | 0.51 s | 0.77 ms | 103 MB |
-| playwright-core 1.65.0 (Node) | 0.87 s | 0.55 s | 0.89 ms | 140 MB |
+| navigera (chrome-headless-shell) | 0.29 s | 0.09 s | 0.31 ms | 7 MB |
+| go-rod 0.116.2 (Go, chrome-headless-shell) | 0.36 s | 0.10 s | 0.26 ms | 12 MB |
+| navigera (Chrome) | 0.48 s | 0.23 s | 0.35 ms | 7 MB |
+| go-rod 0.116.2 (Go) | 0.63 s | 0.27 s | 0.46 ms | 12 MB |
+| puppeteer-core 25.16.0 (Node) | 0.79 s | 0.53 s | 0.45 ms | 79 MB |
+| playwright-core 1.65.0 (Bun 1.4.4) | 0.95 s | 0.60 s | 0.89 ms | 102 MB |
+| playwright-core 1.65.0 (Node) | 1.02 s | 0.68 s | 1.19 ms | 139 MB |
 
-Through an agent's tool calls, one step takes 24 ms with navigera, 85 ms with agent-browser 0.42.0, 188 ms with Chrome DevTools MCP 1.12.0, 369 ms with Playwright MCP 0.0.85, 616 ms with playwright-cli 0.1.24 (same run).
+Through an agent's tool calls, one step takes 26 ms with navigera, 92 ms with agent-browser 0.42.0, 194 ms with Chrome DevTools MCP 1.12.0, 384 ms with Playwright MCP 0.0.85, 687 ms with playwright-cli 0.1.24 (same run).
 
-Where another tool did better in this run (by more than 2%): warm eval: go-rod 0.116.2 (Go) 0.25 ms, navigera 0.34 ms; browser memory: puppeteer-core 25.16.0 (Node) 368 MB, navigera 400 MB.
+Where another tool did better in this run (by more than 2%): warm eval on chrome-headless-shell: go-rod 0.116.2 (Go, chrome-headless-shell) 0.26 ms, navigera 0.31 ms.
 
 Every table, the method and how to rerun it: [Benchmarks](https://andrey-usa.github.io/navigera/benchmarks/results.html).
 

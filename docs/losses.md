@@ -1,6 +1,6 @@
 # Where navigera is not ahead
 
-Numbers: [bench run 42863598577](https://github.com/andrey-usa/navigera/actions/runs/42863598577).
+Numbers: [bench run 42952776646](https://github.com/andrey-usa/navigera/actions/runs/42952776646).
 
 Each measure of the benchmarks on which another tool beat navigera in this
 run by more than 2%, from its publish.json: navigera on Chrome against every
@@ -9,5 +9,4 @@ go-rod on it, and navigera against every other agent tool. Closer
 than 2% is a tie. Driver CPU is left out: the kernel counts it in 10 ms
 ticks, so every native driver ties.
 
-- Warm eval: go-rod 0.116.2 (Go) 0.25 ms, navigera 0.34 ms.
-- Browser memory: puppeteer-core 25.16.0 (Node) 368 MB, navigera 400 MB.
+- Warm eval on chrome-headless-shell: go-rod 0.116.2 (Go, chrome-headless-shell) 0.26 ms, navigera 0.31 ms.
