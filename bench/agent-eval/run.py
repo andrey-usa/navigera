@@ -433,6 +433,9 @@ SHELL_TIMEOUT = 240  # Gemini CLI's shell inactivity timeout, for parity
 TOOL_OUTPUT_LIMIT = 32000
 
 
+SECRET_NAME = re.compile(r"API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.I)
+
+
 def openai_endpoint(env: dict, args) -> tuple[str, str]:
     base = (args.base_url or env.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
             or OPENAI_DEFAULT_BASE).rstrip("/")
@@ -478,6 +481,9 @@ def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
     requests = tool_calls = 0
     decider_seen = timed_out = False
     exit_code = 0
+    # The model's commands run without this job's credentials: the harness
+    # makes the model calls itself, and a page may ask an agent for anything.
+    shell_env = {k: v for k, v in env.items() if not SECRET_NAME.search(k)}
     group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
     for _turn in range(GEMINI_SETTINGS["model"]["maxSessionTurns"]):
         if time.time() > deadline:
@@ -511,7 +517,7 @@ def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
                 command = ""
             shells.append(command)
             try:
-                p = subprocess.run(["bash", "-lc", command], cwd=work, env=env, capture_output=True,
+                p = subprocess.run(["bash", "-lc", command], cwd=work, env=shell_env, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace",
                                    timeout=min(SHELL_TIMEOUT, max(10, deadline - time.time())), **group)
                 output, status = (p.stdout or "") + (p.stderr or ""), "success" if p.returncode == 0 else "error"

@@ -30,6 +30,9 @@ name: agent-eval
 # instead of Gemini CLI (run.py --agent openai): the model is any id the
 # endpoint serves (e.g. DeepSeek V4.1 Flash via SiliconFlow, whose key is
 # SILICONFLOW_API_KEY in the main environment; one key for every tool job).
+# `endpoint: openrouter` sends the same runs to OpenRouter instead
+# (OPENROUTER_API_KEY), for a model SiliconFlow does not serve; `rates` are
+# that model's list prices for the cost table.
 # The decisions baseline follows the model id the same way: `gemini-*`
 # ids use GEMINI_API_KEY, other ids the OpenAI-compatible endpoint.
 #
@@ -60,6 +63,12 @@ on:
       model:
         description: "model id for the chosen agent (Gemini free tier: a Flash-Lite model has the largest daily quota)"
         default: "gemini-3.5-flash-lite"
+      endpoint:
+        description: "agent openai: siliconflow (SILICONFLOW_API_KEY) or openrouter (OPENROUTER_API_KEY; model ids as OpenRouter names them)"
+        default: "siliconflow"
+      rates:
+        description: "list prices of the model, USD per million tokens: new input,cached input,output (empty: the built-in card, DeepSeek-V4.1-Flash only)"
+        default: ""
       reps:
         description: "repetitions per tool x task"
         default: "1"
@@ -87,6 +96,8 @@ env:
   # The CLI's default output is the compact form for agents; the steps
   # here read the JSON lines.
   NAVIGERA_OUTPUT: json
+  # What the cost table multiplies tokens by (run.py: EVAL_RATES).
+  EVAL_RATES: ${{ inputs.rates }}
 
 jobs:
   plan:
@@ -193,6 +204,8 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ ((matrix.run.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2) || (matrix.run.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3) || secrets.GEMINI_API_KEY) }}
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+          OPENAI_API_KEY: ${{ inputs.endpoint == 'openrouter' && secrets.OPENROUTER_API_KEY || '' }}
+          OPENAI_BASE_URL: ${{ inputs.endpoint == 'openrouter' && 'https://openrouter.ai/api/v1' || '' }}
         run: |
           log="$RUNNER_TEMP/smoke.txt"
           if ! python bench/agent-eval/run.py --smoke --agent "$AGENT" --run-timeout 300 --model "$MODEL" --gemini "$GEMINI_BIN" \
@@ -212,6 +225,8 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ ((matrix.run.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2) || (matrix.run.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3) || secrets.GEMINI_API_KEY) }}
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+          OPENAI_API_KEY: ${{ inputs.endpoint == 'openrouter' && secrets.OPENROUTER_API_KEY || '' }}
+          OPENAI_BASE_URL: ${{ inputs.endpoint == 'openrouter' && 'https://openrouter.ai/api/v1' || '' }}
         run: |
           bash bench/agent-eval/logged.sh "agent run log (onboard, $TOOL, ${{ matrix.run.os }})" \
             python bench/agent-eval/run.py --mode onboard --agent "$AGENT" --tools "$TOOL" --model "$MODEL" \
@@ -230,6 +245,8 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ ((matrix.run.key == 'GEMINI_API_KEY_2' && secrets.GEMINI_API_KEY_2) || (matrix.run.key == 'GEMINI_API_KEY_3' && secrets.GEMINI_API_KEY_3) || secrets.GEMINI_API_KEY) }}
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+          OPENAI_API_KEY: ${{ inputs.endpoint == 'openrouter' && secrets.OPENROUTER_API_KEY || '' }}
+          OPENAI_BASE_URL: ${{ inputs.endpoint == 'openrouter' && 'https://openrouter.ai/api/v1' || '' }}
         run: |
           bash bench/agent-eval/logged.sh "agent run log (skilled, $TOOL, ${{ matrix.run.os }})" \
             python bench/agent-eval/run.py --mode skilled --agent "$AGENT" --tools "$TOOL" --tasks "$TASKS" \
