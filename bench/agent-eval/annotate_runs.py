@@ -4,7 +4,8 @@
 GitHub keeps at most 10 notices per step and ~3.5 KB fits per notice, so
 the per-run record is trimmed (no model text; passing runs lose their
 command lists first, failed runs keep their last commands, failing steps
-and `in_flight`) until the whole summary fits in 10 chunks.
+and `in_flight`) until the whole summary fits in 10 chunks; a run of very
+many sessions keeps one line of numbers for each.
 
   annotate_runs.py out/gemini/summary-skilled.json "agent eval json skilled"
 """
@@ -42,7 +43,20 @@ def main() -> int:
         text = json.dumps(doc, indent=0)
         if len(text) <= CHUNK * MAX_NOTICES * 0.9:
             break
+    else:
+        # Many runs (8 reps of 4 tasks on 3 tools is 96): each keeps the
+        # numbers the tables are made of, one run to a line; the artifact
+        # has the rest. Still too long: the per-tool summary alone.
+        keep = ("tool", "task", "rep", "os", "ok", "infra", "timed_out", "requests", "shell_count", "tokens_in",
+                "tokens_cached", "tokens_out", "wall_s", "decision_commands", "decider_calls", "decider_tokens")
+        said = lambda v: not (v is None or v is False or v == "linux")
+        lines = [json.dumps({k: run[k] for k in keep if said(run.get(k))}, separators=(",", ":")) for run in runs]
+        head = {k: v for k, v in doc.items() if k != "runs"}
+        text = json.dumps(head, indent=0)[:-2] + ',\n"runs": [\n' + ",\n".join(lines) + "\n]\n}"
+        if len(text) > CHUNK * MAX_NOTICES * 0.9:
+            text = json.dumps(dict(head, runs_left_out=len(runs)), indent=0)
     tmp = path + ".annot"
+
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
     here = os.path.dirname(os.path.abspath(__file__))
