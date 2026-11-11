@@ -190,7 +190,9 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: musl-tools
       - run: cargo build --release --locked --bin navigera --target ${{ matrix.target }}
       - name: Binary size against the last release
         env:

@@ -42,9 +42,11 @@ jobs:
         with:
           toolchain: stable
           target: x86_64-unknown-linux-musl
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: musl-tools
       - name: The candidate (static musl, as a release builds it)
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
           cargo build --locked --release --bin navigera --target x86_64-unknown-linux-musl
       - name: The release before it
         env:

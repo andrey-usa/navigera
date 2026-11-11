@@ -112,7 +112,9 @@ jobs:
           cache: false
       - name: musl tools
         if: contains(matrix.target, 'musl')
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+        uses: ./.github/actions/apt-install
+        with:
+          packages: musl-tools
       - name: Build
         env:
           # Windows: link the C runtime statically, so the .exe runs on a

@@ -1,0 +1,38 @@
+name: apt-install
+description: >
+  apt-get install on a GitHub-hosted Ubuntu runner that survives Azure's
+  Ubuntu mirror going away. The runner's apt asks that mirror first
+  (mirror+file:/etc/apt/apt-mirrors.txt) and does not move on when its
+  name stops resolving: the install fails after six to ten minutes of
+  retries. When the mirror's name does not resolve, or the install fails,
+  apt is pointed at Ubuntu's own archive and the install runs once more.
+inputs:
+  packages:
+    description: the packages, separated by spaces
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        lists=(/etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*)
+        direct() {
+          echo "::warning title=apt::$1: installing from Ubuntu's own archive instead of Azure's mirror"
+          for f in "${lists[@]}"; do
+            if [ -f "$f" ]; then
+              sudo sed -i -E 's#//azure\.(archive|ports)\.ubuntu\.com#//\1.ubuntu.com#g' "$f"
+            fi
+          done
+        }
+        install() {
+          # shellcheck disable=SC2086 # one word per package
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends $PACKAGES
+        }
+        mirror=$(grep -ohsE 'azure\.(archive|ports)\.ubuntu\.com' "${lists[@]}" | head -n1 || true)
+        if [ -n "$mirror" ] && ! getent hosts "$mirror" > /dev/null; then
+          direct "$mirror does not resolve"
+        fi
+        install || { direct "the install failed"; install; }
