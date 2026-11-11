@@ -135,7 +135,7 @@ TOOLS = {
     },
 }
 
-SKILLED_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}". Read that skill first, then use `{cmd}` (through shell commands) for every browser interaction.{hint} Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
+SKILLED_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}" (the file `.agents/skills/{skill}/SKILL.md` in this directory). Read that skill first, then use `{cmd}` (through shell commands) for every browser interaction.{hint} Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
 
 The website is running at {base}.
 
