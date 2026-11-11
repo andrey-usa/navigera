@@ -117,6 +117,7 @@ pub fn tools() -> Vec<Value> {
                     target_props(),
                     json!({"limit": {"type": "integer", "description": "Max lines (2000)"}}),
                     json!({"full_text": {"type": "boolean", "description": "Uncut texts, names and values"}}),
+                    json!({"grep": {"type": "string", "description": "Instead: the text passages with these words"}}),
                 ]),
                 &[],
             ),
@@ -460,6 +461,16 @@ fn plan(name: &str, arguments: &Value) -> Result<Plan, String> {
     };
     let mut plan = match name {
         "browser_navigate" => single("goto", args),
+        "browser_snapshot" if args.contains_key("grep") => {
+            // One fact from a long page: the passages of its text, not the tree.
+            let mut text = Map::new();
+            for key in ["grep", "selector", "limit"] {
+                if let Some(v) = args.remove(key) {
+                    text.insert(key.into(), v);
+                }
+            }
+            Plan { full_state: false, steps: vec![op("text", text)], snapshot: false }
+        }
         "browser_snapshot" => {
             args.insert("format".into(), json!("text"));
             Plan { full_state: false, steps: vec![op("ax", args)], snapshot: false }
@@ -1057,6 +1068,8 @@ mod tests {
         assert_eq!(p.steps[1], json!({"op": "press", "key": "Enter"}));
         let p = plan("browser_snapshot", &json!({"ref": "e12"})).unwrap();
         assert_eq!(p.steps[0]["format"], "text");
+        let p = plan("browser_snapshot", &json!({"grep": "restocking fee", "limit": 2})).unwrap();
+        assert_eq!(p.steps[0], json!({"op": "text", "grep": "restocking fee", "limit": 2}));
         assert!(plan("browser_tabs", &json!({"action": "explode"})).is_err());
         assert!(plan("browser_run", &json!({"steps": [{"ref": 1}]})).is_err());
         assert!(plan("browser_run", &json!({"steps": [{"op": "quit"}]})).is_err());
