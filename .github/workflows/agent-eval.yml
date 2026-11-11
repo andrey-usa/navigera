@@ -207,8 +207,8 @@ jobs:
         if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'skilled' || env.MODE == 'both') && !startsWith(env.TOOL, 'navigera') && steps.smoke.outcome == 'success'"
         run: |
           case "$TOOL" in
-            agent-browser*) npm install -g agent-browser@0.39.1 ;;
-            playwright-cli) npm install -g @playwright/cli@0.1.22 ;;
+            agent-browser*) npm install -g agent-browser@0.42.0 ;;
+            playwright-cli) npm install -g @playwright/cli@0.1.24 ;;
           esac
           npm ls -g --depth=0
       - name: Skilled runs (tool installed, its own skill in the workspace)

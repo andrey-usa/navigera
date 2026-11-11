@@ -112,7 +112,7 @@ jobs:
       - name: Install agent-browser (for skilled runs)
         if: startsWith(matrix.run.tool, 'agent-browser')
         run: |
-          npm install -g agent-browser@0.39.1
+          npm install -g agent-browser@0.42.0
           npm ls -g --depth=0
       # The variant setup steps are agent-eval.yml's: Lightpanda jobs get
       # the release binary on $LIGHTPANDA_BIN, shell jobs point

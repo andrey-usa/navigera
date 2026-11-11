@@ -127,7 +127,7 @@ jobs:
       - name: Install agent-browser (for skilled runs)
         if: startsWith(matrix.cell.tool, 'agent-browser')
         run: |
-          npm install -g agent-browser@0.39.1
+          npm install -g agent-browser@0.42.0
           npm ls -g --depth=0
       - name: Install the suite's evaluator
         run: |
