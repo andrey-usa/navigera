@@ -44,6 +44,39 @@ input, output, and an estimate at list prices): cached input costs a fiftieth of
 total says little about spend. `endpoint: openrouter` with `rates` runs
 the same sessions on a model SiliconFlow does not serve.
 
+### Six tasks, three tools, each with its own skill
+
+DeepSeek-V4.1-Flash, skilled mode, the six tasks 8 times per tool on
+Linux, navigera next 4caaca4 against agent-browser 0.42.0 and
+playwright-cli 0.1.24 (their latest releases), each tool with its
+vendor's skill (run
+[43061276529](https://github.com/andrey-usa/navigera/actions/runs/43061276529),
+2026-11-11). The harness's own tables:
+
+| tool | passed | median model turns | median shell cmds | median tokens | median wall |
+|---|---|---|---|---|---|
+| `navigera` | 48/48 | 8 | 8 | 31,730 | 19 s |
+| `agent-browser` | 48/48 | 14 | 13 | 96,320 | 28 s |
+| `playwright-cli` | 48/48 | 12 | 10 | 75,744 | 28 s |
+
+Per task, median turns, estimated cost (m$) and wall time:
+
+| task | `navigera` | `agent-browser` | `playwright-cli` |
+|---|---|---|---|
+| lookup | 5, 0.93, 11 s | 12, 2.12, 15 s | 9, 2.79, 23 s |
+| purchase | 16, 3.31, 52 s | 21, 5.17, 69 s | 22, 6.53, 90 s |
+| account | 10, 2.27, 24 s | 16, 3.59, 30 s | 14, 3.53, 26 s |
+| docs | 6, 1.18, 13 s | 10, 2.34, 17 s | 9, 2.60, 23 s |
+| support | 7, 1.19, 12 s | 14, 2.70, 26 s | 10, 2.20, 23 s |
+| preferences | 12, 2.65, 26 s | 15, 4.52, 31 s | 14, 4.82, 41 s |
+
+Cost is estimated at list prices, not billed. navigera had the fewest
+turns, the lowest cost and the shortest time on every task; the closest
+is account's wall time (24 s against 26 s). Earlier runs are not
+comparable: the preferences page showed the defaults after a save (an
+agent that reloaded to check failed: 3 of 8 in run 42978179657), and a
+task could attach to a session an earlier task left running.
+
 ### One model, six tools
 
 DeepSeek-V4.1-Flash drives each tool through one shell function on a local
