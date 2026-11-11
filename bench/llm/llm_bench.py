@@ -873,9 +873,8 @@ def setup_arm(arm, sess, b, cwd):
         cfg_path = os.path.join(cwd, "mcp-pw.config.json")
         with open(cfg_path, "w") as f:
             json.dump(cfg, f)
-        mcp = McpServer(["node", os.path.join(
-            tools_dir, "node_modules", "@playwright", "mcp", "cli.js"),
-            "--headless", "--config", cfg_path], {})
+        mcp = McpServer(["node", npm_bin(tools_dir, "@playwright/mcp", "playwright-mcp"),
+                         "--headless", "--config", cfg_path], {})
         try:
             mcp.call("browser_navigate", {"url": home})
         except Exception:
@@ -883,9 +882,8 @@ def setup_arm(arm, sess, b, cwd):
             raise
         return mcp
     if arm == "chrome-devtools-mcp":
-        mcp = McpServer(["node", os.path.join(
-            tools_dir, "node_modules", "chrome-devtools-mcp", "build", "src",
-            "bin", "chrome-devtools-mcp.js"), "--headless",
+        mcp = McpServer(["node", npm_bin(tools_dir, "chrome-devtools-mcp", "chrome-devtools-mcp"),
+            "--headless",
             "--no-usage-statistics", "--isolated",
             "--executablePath", chrome_path(),
             "--chrome-arg=--no-sandbox",
@@ -898,6 +896,17 @@ def setup_arm(arm, sess, b, cwd):
             raise
         return mcp
     raise ValueError(arm)
+
+
+def npm_bin(tools_dir, package, name):
+    """The script a package's `bin` entry names, read from its package.json:
+    a release may move it (chrome-devtools-mcp 1.13.0 moved its from
+    build/src/bin to out/Default/gen/src/bin, and the arm ran 0 turns)."""
+    root = os.path.join(tools_dir, "node_modules", *package.split("/"))
+    with open(os.path.join(root, "package.json")) as f:
+        bins = json.load(f).get("bin")
+    rel = bins if isinstance(bins, str) else bins[name]
+    return os.path.join(root, rel)
 
 
 def cleanup(arm, sess, b, cwd, mcp):

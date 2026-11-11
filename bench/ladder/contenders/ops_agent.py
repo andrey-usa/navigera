@@ -395,9 +395,14 @@ class Tool:
                 # Filesystem tools are restricted to the OS temp dir unless
                 # a workspace is configured; take_screenshot writes its file
                 # into the ops out dir, so that dir must be a workspace root.
+                # Absolute: the server resolves paths against its own cwd
+                # (the temp dir below), so a relative out dir named a root
+                # that does not exist, and the screenshot went under the
+                # temp dir while the check looked here (run 43068761390,
+                # 0/10 "missing or empty").
                 argv = [exe, "--headless", "--executable-path", chrome, "--isolated",
                         "--chrome-arg=--no-sandbox", "--no-usage-statistics",
-                        "--workspace", str(self.out_dir)]
+                        "--workspace", str(self.out_dir.resolve())]
             t0 = time.perf_counter()
             self.mcp = Mcp(argv, dict(os.environ), cwd)
             self.log("setup", "start", (time.perf_counter() - t0) * 1000, True,
@@ -900,7 +905,7 @@ class Tool:
                 self._mcp_call("browser_take_screenshot", {"filename": shot.name}, "screenshot")
                 shot = Path(self.cwd) / shot.name
             else:
-                self._cd_call("take_screenshot", {"filePath": str(shot)}, "screenshot")
+                self._cd_call("take_screenshot", {"filePath": str(shot.resolve())}, "screenshot")
             ms = (time.perf_counter() - t0) * 1000
         else:  # bu
             ms, out = self._bu_exec(
