@@ -72,6 +72,7 @@ pub const EXAMPLES: &[Help] = &[
             ("navigera -s s click --selector \"input[type=checkbox]\"", ""),
             ("navigera -s s click --text \"Add Element\"", "on /add_remove_elements/"),
             ("navigera -s s click --button right --selector \"input[type=checkbox]\"", ""),
+            ("navigera -s s click --text \"Load more\" --until-gone", "the whole list, in one call"),
         ],
         &[
             ("<ref>", "the element's ref from ax"),
@@ -80,6 +81,8 @@ pub const EXAMPLES: &[Help] = &[
             ("--frame <css>", "look only inside this iframe"),
             ("--button left|right|middle", "which mouse button; default left"),
             ("--force", "click even if another element covers it"),
+            ("--until-gone", "click again until it is gone, hidden or disabled, or a click changes nothing"),
+            ("--max <n>", "with --until-gone: at most this many clicks (50)"),
         ],
     ),
     (

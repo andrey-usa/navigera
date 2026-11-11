@@ -211,7 +211,7 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 
 | command | args | result |
 |---|---|---|
-| `click` | target; `--button right\|middle`; `--force` | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box); `no_effect` note if the page did nothing in response |
+| `click` | target; `--button right\|middle`; `--force`; `--until-gone [--max <n>]` (JSON `until_gone`: `true` or the most clicks) | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box); `no_effect` note if the page did nothing in response. `--until-gone` clicks again (a "Load more" button) while the element is there, shown and enabled and each click changes the page, at most 50 clicks: it follows the element first clicked, lets what each click fetched land, waits for a disabled one while the page is loading, and stops when the element is gone, hidden or stays disabled, a click changes nothing, a click opens another page, or at the limit; `clicks` and `stopped` say how many and why. A later click that fails ends the clicks and is named in `stopped`, not an error |
 | `fill` | target, `<value>` or `--value`; `--keys` selects what the field holds and types the value key by key (apps that keep only typed input, observable-model forms); waits (up to the command timeout) for the field to be visible, enabled and editable, and the timeout error names the check that failed; `--force` skips the checks | state |
 | `type` | `<text>` or `--value`; optional `--selector/--ref/--text` to focus first | state |
 | `press` | `<key>` or `--key`; optional target to focus first | state |

@@ -67,12 +67,13 @@ fn props(base: &[Value]) -> Map<String, Value> {
 }
 
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": schema,
-        "annotations": {"readOnlyHint": read_only},
-    })
+    let mut tool = json!({ "name": name, "description": description, "inputSchema": schema });
+    // `readOnlyHint` is false unless said: only a read says it, and the
+    // list stays small for the model's context.
+    if read_only {
+        tool["annotations"] = json!({"readOnlyHint": true});
+    }
+    tool
 }
 
 /// The core tool list, in the order agents usually need them: what an agent
@@ -116,7 +117,10 @@ pub fn tools() -> Vec<Value> {
             "browser_click",
             "Click an element with a real mouse event; waits for it and any navigation it starts. Fails, naming what covers it.",
             object(
-                action(json!({"button": {"type": "string", "enum": ["left", "right", "middle"], "description": "Default left"}})),
+                action(json!({
+                    "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "Default left"},
+                    "until_gone": {"type": ["boolean", "integer"], "description": "Click again (Load more) until it is gone or disabled or a click changes nothing; true, or the most clicks (50)"}
+                })),
                 &[],
             ),
             false,

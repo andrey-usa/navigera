@@ -106,6 +106,20 @@ async function login() { try {
 fetch('/slow?ms=300').then(r => r.text()).then(() => setTimeout(() => { s.textContent = 'Loaded 3 items' }, 200))</script>""",
     "/counter": """<!doctype html><title>counter</title><p>Page <span id=n>0</span></p><button id=next onclick="n.textContent=+n.textContent+1">Next page</button>""",
     "/prompt": """<!doctype html><title>prompt</title><button onclick="o.textContent='got:'+prompt('Name?','Ada')">ask</button><div id=o></div>""",
+    # A list behind "Load more": each page by fetch from the same URL (as
+    # a poll would be), the button disabled and renamed while it loads,
+    # removed after the fourth page.
+    "/more": """<!doctype html><title>more</title><ul id=l></ul><button id=m>Load more</button><script>
+let page = 0;
+async function load() {
+  m.disabled = true; m.textContent = 'Loading…';
+  await fetch('/slow?ms=250&page=' + page);
+  for (let i = 1; i <= 3; i++) { const li = document.createElement('li'); li.textContent = 'item ' + (page * 3 + i); l.append(li); }
+  page += 1;
+  if (page < 4) { m.disabled = false; m.textContent = 'Load more'; } else m.remove();
+}
+m.onclick = load; load();
+</script>""",
 }
 
 

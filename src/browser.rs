@@ -2527,6 +2527,12 @@ impl BrowserSession {
     }
 
     /// The locators that find `target`'s element again (`locate`).
+    /// The `ax` ref of the element `target` names now (see [`cdp::Page::element_ref`]).
+    pub fn element_ref(&self, target: &Target, timeout_ms: Option<f64>) -> Result<u64> {
+        let (wait, timeout) = self.element_budget(timeout_ms);
+        self.active_tab().element_ref(target, wait, timeout)
+    }
+
     pub fn locate(&self, target: &Target, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         self.active_tab().locate(target, wait, timeout)

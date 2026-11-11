@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn tool_exe() -> String {
     env!("CARGO_BIN_EXE_navigera").to_string()
@@ -532,6 +532,39 @@ fn permissions_are_granted_denied_and_reset_and_more_devices_are_known() {
         assert_eq!(a.ok(&["eval", "[screen.width, devicePixelRatio]"]), serde_json::json!([402, 3]));
         a.ok(&["set", "device", "Pixel", "9"]);
         assert_eq!(a.ok(&["eval", "[screen.width, devicePixelRatio]"]), serde_json::json!([360, 3]));
+    }
+}
+
+#[test]
+fn click_until_gone_loads_a_whole_list() {
+    let Some(site) = edge_site() else { return };
+    for (engine, bin) in engines() {
+        let a = Agent::new("more", engine, bin);
+        a.ok(&["goto", &format!("{}/more", site.base)]);
+        // By its text, which reads "Loading…" between pages: the clicks
+        // follow the button, and wait for each page.
+        let r = a.ok(&["click", "--text", "Load more", "--until-gone"]);
+        assert_eq!((&r["clicks"], &r["stopped"]), (&json!(3), &json!("the element is gone")), "[{engine}] {r}");
+        assert_eq!(a.ok(&["get", "count", "li"]), 12, "[{engine}]");
+        a.ok(&["goto", &format!("{}/more", site.base)]);
+        let r = a.ok(&["click", "--selector", "#m", "--until-gone", "--max", "2"]);
+        assert_eq!(r["clicks"], 2, "[{engine}] {r}");
+        assert!(r["stopped"].as_str().is_some_and(|s| s.contains("limit")), "[{engine}] {r}");
+        a.ok(&["wait", "--text", "item 9"]);
+        // A button that stops doing anything ends the clicks; that is
+        // not an error.
+        a.ok(&["goto", &format!("{}/counter", site.base)]);
+        a.ok(&[
+            "eval",
+            "() => { next.onclick = () => { if (+n.textContent < 2) n.textContent = +n.textContent + 1 } }",
+        ]);
+        let r = a.ok(&["click", "--selector", "#next", "--until-gone"]);
+        assert_eq!(
+            (&r["clicks"], &r["stopped"]),
+            (&json!(3), &json!("click 3 changed nothing on the page")),
+            "[{engine}] {r}"
+        );
+        assert!(r.get("no_effect").is_none(), "[{engine}] the stop says it: {r}");
     }
 }
 

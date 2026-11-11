@@ -70,6 +70,8 @@ EOF
   what the click should show, and click again only if it never comes. A
   click that ran before the page wired the element up is sent again by
   navigera itself (`"clicked_again"`): don't click it again yourself.
+- A list behind "Load more": `click <ref> --until-gone` clicks it until it
+  is gone or disabled, each page loaded first, in one call.
 - Element commands wait up to 5 s for the element and take `--selector`,
   `--text`, `--label` and more locators besides a ref (references/acting.md).
 

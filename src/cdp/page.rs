@@ -7057,6 +7057,12 @@ fn clickables_from(snap: &Snap) -> ax::Clickables {
 }
 
 impl Page {
+    /// Backend node id (an `ax` ref) of the element `target` names now, so
+    /// a later op can follow that element while its text or name changes.
+    pub fn element_ref(&self, target: &Target, wait: Duration, timeout: Duration) -> Result<u64> {
+        self.backend_id(target, wait, timeout)
+    }
+
     /// Backend node id of the element `target` names (for `ax --selector`).
     fn backend_id(&self, target: &Target, wait: Duration, timeout: Duration) -> Result<u64> {
         if let Target::Ref(node) = target {

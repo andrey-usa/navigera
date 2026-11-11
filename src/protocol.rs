@@ -261,6 +261,11 @@ pub enum Command {
         /// user's click passes).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         force: bool,
+        /// Click again while the element is there and enabled and each
+        /// click changes the page (a "Load more" button), at most this many
+        /// clicks in all. JSON takes `true` for the default limit.
+        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "until_gone_limit")]
+        until_gone: Option<u32>,
     },
     /// Set an input's value (native setter + input/change events).
     #[serde(rename = "fill")]
@@ -1043,6 +1048,27 @@ fn stale_ref(e: &anyhow::Error) -> bool {
 /// its response starts and for the page to render the data.
 const AFTER_ACTION_QUIET: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// `click --until-gone` with no `--max`: clicks in all, the first included.
+const UNTIL_GONE_MAX: u32 = 50;
+
+/// `click --until-gone`: an element disabled while no request has been in
+/// flight for this long is not waiting for one.
+const DISABLED_QUIET: Duration = Duration::from_millis(500);
+
+/// `until_gone` in JSON: `true` for the default limit, or the limit.
+fn until_gone_limit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+    use serde::de::Error;
+    match Option::<Value>::deserialize(d)? {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(None),
+        Some(Value::Bool(true)) => Ok(Some(UNTIL_GONE_MAX)),
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(n @ 1..) => Ok(Some(u32::try_from(n).unwrap_or(u32::MAX))),
+            _ => Err(D::Error::custom("until_gone takes true or a number of clicks (1 or more)")),
+        },
+        Some(_) => Err(D::Error::custom("until_gone takes true or a number of clicks (1 or more)")),
+    }
+}
+
 /// Default idle shutdown for session servers: an agent that forgot its
 /// session (or crashed) leaves it for this long at most.
 pub const DEFAULT_IDLE_TIMEOUT_S: u64 = 600;
@@ -1232,7 +1258,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("start", "[--attach [<where>] [--tab current] | --auto-connect | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open (--auto-connect, a bare --attach: your running browser, whichever serves remote debugging; $NAVIGERA_AUTO_CONNECT=1 for every start; --tab current: in the tab you are on, not a window of its own); --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
     ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait] | --grep <words> [--limit <lines>]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …). --grep: only the lines that mention the words (letter case aside), under the containers they sit in, with their refs; the first 30"),
-    ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
+    ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force] [--until-gone [--max <n>]]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts. --until-gone: clicks again (a \"Load more\" button) while the element is there and enabled and each click changes the page, letting what each click loads land, at most 50 clicks (--max); says how many and why it stopped"),
     ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys] [--force]", "set an input/textarea's value once the field is visible, enabled and editable (waits for it; the timeout error names which check failed; --force skips the checks); --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
     ("type", "<text> [--selector <css> | --ref <n>]", "type key by key into the target or the focused element"),
     ("press", "<key> [--selector <css> | --ref <n>]", "press a key or chord: Enter, Tab, Escape, ArrowDown, Control+a"),
@@ -2115,7 +2141,20 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 }
             }
             let force = extract_present(&mut args, "--force");
-            Command::Click { target: target_args(&mut args, true)?, timeout_ms, button, force }
+            let until_gone = extract_present(&mut args, "--until-gone");
+            let max = match str_flag(&mut args, "--max")? {
+                Some(raw) => match raw.parse::<u32>() {
+                    Ok(n) if n >= 1 => Some(n),
+                    _ => return invalid(format!("click --max takes a number of clicks (1 or more), got {raw:?}")),
+                },
+                None => None,
+            };
+            let until_gone = match (until_gone, max) {
+                (true, max) => Some(max.unwrap_or(UNTIL_GONE_MAX)),
+                (false, Some(_)) => return invalid("click --max goes with --until-gone"),
+                (false, None) => None,
+            };
+            Command::Click { target: target_args(&mut args, true)?, timeout_ms, button, force, until_gone }
         }
         "hover" => Command::Hover { target: target_args(&mut args, true)?, timeout_ms },
         "mouse" => {
@@ -4598,6 +4637,95 @@ impl Driver {
         }
     }
 
+    /// `click --until-gone`: after the first click (its result in `point`),
+    /// click again while the element is there and enabled and each click
+    /// changed the page, at most `max` clicks in all. The clicks follow the
+    /// element first clicked (`node`), so a button that reads "Loading…"
+    /// between pages is still the one; when the page replaces it, the
+    /// target finds the new one. Between clicks, what a click fetched lands
+    /// first, and a disabled element is waited for. Returns the clicks made
+    /// and why they stopped; `point` ends as the last click's. A later
+    /// click that fails stops the loop (the clicks before it happened); it
+    /// is not an error.
+    #[allow(clippy::too_many_arguments)]
+    fn click_until_gone(
+        &self,
+        t: &Target,
+        mut node: Option<u64>,
+        page: &(String, u64),
+        opts: &crate::cdp::ClickOptions,
+        timeout_ms: Option<f64>,
+        max: u32,
+        point: &mut Value,
+    ) -> (u32, String) {
+        let s = &self.session;
+        let wait =
+            timeout_ms.map(|ms| Duration::from_secs_f64(ms / 1000.0)).unwrap_or_else(crate::browser::element_wait);
+        let mut clicks = 1;
+        loop {
+            if point.get("no_effect").is_some() {
+                // The first click's note says what to check; a later one
+                // is how a list that stops growing ends.
+                if clicks > 1 {
+                    if let Some(o) = point.as_object_mut() {
+                        o.remove("no_effect");
+                    }
+                }
+                return (clicks, format!("click {clicks} changed nothing on the page"));
+            }
+            if point.get("tab_gone").is_some() || s.page_identity() != *page {
+                return (clicks, format!("click {clicks} opened another page"));
+            }
+            if clicks >= max {
+                return (clicks, format!("{max} clicks, the limit (--max)"));
+            }
+            // What the click fetched lands and renders before the look.
+            let window = s.network_quiet_window().min(AFTER_ACTION_QUIET);
+            s.action_settle_wait(window, NETWORK_QUIET_MAX);
+            let start = Instant::now();
+            let next = loop {
+                let here = node.map(Target::Ref).unwrap_or_else(|| t.clone());
+                let enabled = s.is_state(&here, "enabled", Some(0.0)).unwrap_or(false);
+                let disabled = !enabled && s.is_state(&here, "disabled", Some(0.0)).unwrap_or(false);
+                if !enabled && !disabled {
+                    if node.take().is_some() {
+                        // Taken out: a new one in its place is the next.
+                        node = s.element_ref(t, Some(0.0)).ok();
+                        if node.is_some() {
+                            continue;
+                        }
+                    }
+                    if start.elapsed() < wait && !s.network_quiet(AFTER_ACTION_QUIET, Duration::ZERO) {
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    return (clicks, "the element is gone".into());
+                }
+                if !s.is_lightpanda() && s.is_state(&here, "hidden", Some(0.0)).unwrap_or(false) {
+                    return (clicks, "the element is hidden".into());
+                }
+                if enabled {
+                    break here;
+                }
+                // Disabled with nothing loading: nothing is coming to
+                // enable it ("Load more" greyed out after the last page).
+                if start.elapsed() >= wait || s.network_quiet(DISABLED_QUIET, Duration::ZERO) {
+                    return (clicks, "the element is disabled".into());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            // Each click is an action of its own: what it fetches is its
+            // traffic (not a poll of the URL the last one fetched), and its
+            // render is what the settle proof waits for.
+            s.mark_action();
+            match s.click_target(&next, opts, timeout_ms) {
+                Ok(p) => *point = p,
+                Err(e) => return (clicks, format!("click {} failed: {:#}", clicks + 1, on_target("click", &next, e))),
+            }
+            clicks += 1;
+        }
+    }
+
     fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
         let s = &self.session;
         match command {
@@ -4634,11 +4762,21 @@ impl Driver {
                 s.reload().map_err(|e| e.context("reload"))?;
                 Ok(self.state_json())
             }
-            Command::Click { target, timeout_ms, button, force } => {
+            Command::Click { target, timeout_ms, button, force, until_gone } => {
                 let t = target.target("click")?;
                 let opts = crate::cdp::ClickOptions { button: button.clone().unwrap_or_default(), force: *force };
-                let point = s.click_target(&t, &opts, *timeout_ms).map_err(|e| on_target("click", &t, e))?;
+                // `--until-gone` follows the element it clicks first, on
+                // the page it clicks it on.
+                let node = until_gone.and_then(|_| s.element_ref(&t, *timeout_ms).ok());
+                let page = s.page_identity();
+                let mut point = s.click_target(&t, &opts, *timeout_ms).map_err(|e| on_target("click", &t, e))?;
+                let repeated =
+                    until_gone.map(|max| self.click_until_gone(&t, node, &page, &opts, *timeout_ms, max, &mut point));
                 let mut state = self.state_json();
+                if let Some((clicks, stopped)) = repeated {
+                    state["clicks"] = json!(clicks);
+                    state["stopped"] = json!(stopped);
+                }
                 // Lightpanda lays nothing out, so a DOM-event click there is
                 // the normal case, not a sign of an overlay.
                 if point.get("synthetic").and_then(Value::as_bool) == Some(true) && !s.is_lightpanda() {
@@ -7401,7 +7539,8 @@ mod tests {
                 target: TargetArgs { node_ref: Some(12), ..Default::default() },
                 timeout_ms: None,
                 button: None,
-                force: false
+                force: false,
+                until_gone: None,
             }
         );
         assert_eq!(
@@ -7411,6 +7550,7 @@ mod tests {
                 timeout_ms: Some(900.0),
                 button: None,
                 force: false,
+                until_gone: None,
             }
         );
         assert_eq!(
@@ -7430,6 +7570,7 @@ mod tests {
                 timeout_ms: None,
                 button: None,
                 force: false,
+                until_gone: None,
             }
         );
         assert_eq!(
@@ -7715,7 +7856,8 @@ mod tests {
                 target: TargetArgs { node_ref: Some(7), ..Default::default() },
                 timeout_ms: None,
                 button: None,
-                force: false
+                force: false,
+                until_gone: None,
             }
         );
         let command: Command = serde_json::from_str(r#"{"op":"select","ref":3,"values":["a","b"]}"#).expect("values");
@@ -7773,6 +7915,7 @@ mod tests {
                 timeout_ms: Some(500.0),
                 button: None,
                 force: false,
+                until_gone: None,
             },
             Command::Ax {
                 max_depth: None,
@@ -7814,9 +7957,31 @@ mod tests {
             timeout_ms: None,
             button: None,
             force: false,
+            until_gone: None,
         })
         .unwrap();
         assert_eq!(wire, r#"{"op":"click","ref":9}"#);
+        // `until_gone`: true is the default limit, a number is the limit.
+        let until = |json: &str| match serde_json::from_str::<Command>(json) {
+            Ok(Command::Click { until_gone, .. }) => Ok(until_gone),
+            Ok(other) => panic!("{other:?}"),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(until(r#"{"op":"click","ref":9,"until_gone":true}"#), Ok(Some(UNTIL_GONE_MAX)));
+        assert_eq!(until(r#"{"op":"click","ref":9,"until_gone":7}"#), Ok(Some(7)));
+        assert_eq!(until(r#"{"op":"click","ref":9,"until_gone":false}"#), Ok(None));
+        assert!(until(r#"{"op":"click","ref":9,"until_gone":0}"#).is_err());
+        let cmd = |a: &[&str]| parse_args(argv(&[&["navigera", "-s", "s"], a].concat())).map(|p| p.command);
+        assert!(matches!(
+            cmd(&["click", "--text", "Load more", "--until-gone"]),
+            Ok(Some(Command::Click { until_gone: Some(UNTIL_GONE_MAX), .. }))
+        ));
+        assert!(matches!(
+            cmd(&["click", "7", "--until-gone", "--max", "5"]),
+            Ok(Some(Command::Click { until_gone: Some(5), .. }))
+        ));
+        assert!(cmd(&["click", "7", "--max", "5"]).is_err());
+        assert!(cmd(&["click", "7", "--until-gone", "--max", "0"]).is_err());
     }
 
     #[test]

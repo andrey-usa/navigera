@@ -4,6 +4,7 @@
 |---|---|
 | `goto <url> [--wait load\|domcontentloaded\|commit]` | navigate (`example.com` gets `https://`) |
 | `click <ref>` / `--selector <css>` / `--text "<visible text>"` | real mouse click; waits for the element and for any page load it triggers |
+| `click <ref> --until-gone [--max 50]` | a list behind "Load more": clicks until the button is gone or disabled, each page loaded first; says how many clicks |
 | `fill <ref> "<value>"` | set an input/textarea value (replaces existing text) |
 | `type "<text>" [--ref N]` | type key by key (autocomplete, key listeners) |
 | `press <key> [--ref N]` | `Enter`, `Tab`, `Escape`, `ArrowDown`, `Control+a`, … |

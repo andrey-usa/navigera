@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `click <target> --until-gone [--max <n>]` (JSON and MCP `until_gone`):
+  a list behind a "Load more" button in one call. It clicks again while
+  the element is there, shown and enabled and each click changes the
+  page, at most 50 clicks: it follows the element it clicked first (a
+  button that reads "Loading…" between pages is still the one), lets what
+  each click fetched land, waits while it is disabled and the page is
+  loading, and stops when the element is gone, hidden or stays disabled,
+  a click changes nothing or opens another page, or at the limit;
+  `clicks` and `stopped` say how many and why. In llm-bench's catalog task
+  a model wrote an `eval` loop of clicks and sleeps instead, got a wrong
+  count, and spent five turns checking it.
+
 - `ax --grep "<words>"`: the lines of the page's tree that mention the
   words, each under the containers it sits in, with refs to act on. On
   MDN's element index the lines for `<dialog>` are 0.6 KB of a 93 KB
@@ -29,6 +41,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The MCP tool list says `readOnlyHint` only for the tools that read
+  (`false` is the protocol's default): 200 bytes less of every session's
+  context, with `until_gone` on `browser_click` added.
 - Glama's image of the MCP server needs no settings: its build reads a
   page through `navigera mcp` with no browser variable set, using the
   chrome-headless-shell it installed, and fails if that does not work, so
