@@ -46,5 +46,7 @@ page "Checkout — Acme" http://shop.test/checkout
   around them (`--context <lines>`, `--limit <passages>`), a few hundred
   bytes instead of the page. Several words match in any order when the
   phrase is nowhere.
-- Many items: one `eval` that returns JSON:
+- A list, one item a line: `text --selector '#items'` (quote a selector:
+  an unquoted `#` starts a shell comment). Many items as data: one `eval`
+  that returns JSON:
   `navigera -s work eval "() => [...document.querySelectorAll('.item')].map(e => e.innerText)"`

@@ -550,6 +550,14 @@ fn locators_reads_states_and_keys() {
         a.ok(&["click", "--testid", "save-btn"]);
         assert_eq!(a.ok(&["get", "text", "--role", "listitem", "--nth", "-1"]), "three", "[{engine}]");
         assert_eq!(a.ok(&["get", "count", "li"]), 3);
+        // An element's text reads as the page shows it: a list as lines
+        // (Lightpanda has no layout, so it reads as textContent there).
+        let list = a.ok(&["text", "--selector", "ul"]);
+        if engine == "chrome" {
+            assert_eq!(list, "one\ntwo\nthree", "[{engine}]");
+        } else {
+            assert!(list.as_str().is_some_and(|t| t.contains("one") && t.contains("three")), "[{engine}] {list}");
+        }
         assert_eq!(a.ok(&["get", "attr", "title", "--role", "link"]), "Go");
         assert_eq!(a.ok(&["get", "style", "color", "--role", "link"]), "rgb(255, 0, 0)");
         assert_eq!(a.ok(&["is", "visible", "#hide"]), false);

@@ -402,7 +402,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_text: Option<String>,
     },
-    /// First element's textContent for the selector.
+    /// First element's text as it reads (innerText; textContent when not rendered).
     #[serde(rename = "text")]
     Text {
         /// Empty: the whole page, as it reads (`innerText`).
@@ -1244,7 +1244,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
     ("eval", "<js> | --file <path.js> | - [--main]", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin; --main (Electron) runs it in the app's main process, a function getting the electron module"),
-    ("text", "[--selector <css>] [--grep <words> [--context <lines>] [--limit <passages>]]", "textContent of the first match; with no selector, the whole page's text as it reads (innerText). --grep: only the passages that mention the words, each with the lines around it (1) and its line number; the first 5, letter case aside"),
+    ("text", "[--selector <css>] [--grep <words> [--context <lines>] [--limit <passages>]]", "the first match's text as it reads (innerText; textContent when it is not rendered); with no selector, the whole page's. --grep: only the passages that mention the words, each with the lines around it (1) and its line number; the first 5, letter case aside"),
     ("title", "", "page title"),
     ("a11y", "[--selector <css>] [--tags wcag2a,wcag2aa,…] [--ignore <rule>,…]", "an accessibility audit with axe-core (built in, run where the page can't see it): the violations by rule, worst first, each with its first elements as refs to act on; WCAG 2.0-2.2 A and AA by default (--tags best-practice adds axe's own advice)"),
     ("vitals", "", "the page's web vitals as the browser measured them: LCP, FCP, TTFB, load (ms), CLS, INP (the slowest interaction; under 104 ms the browser keeps none), each rated good, needs-improvement or poor, with the elements behind LCP, CLS and INP as selectors"),
@@ -1558,7 +1558,18 @@ fn suggest(op: &str) -> Option<&'static str> {
 }
 
 fn next_value(args: &mut std::collections::VecDeque<String>, flag: &str) -> Result<String, String> {
-    args.pop_front().ok_or_else(|| format!("missing value after {flag}"))
+    args.pop_front().ok_or_else(|| {
+        // `--selector #items` unquoted: the shell reads `#items` and the
+        // rest of the line as a comment, so the flag arrives last.
+        if matches!(flag, "--selector" | "--frame" | "--gone") {
+            format!(
+                "missing value after {flag} (an unquoted `#` starts a shell comment, which drops the rest of the \
+                 line: quote the selector, as in {flag} '#id')"
+            )
+        } else {
+            format!("missing value after {flag}")
+        }
+    })
 }
 
 /// Why [`parse_args`] failed: `Help` is a deliberate `--help` (exit 0),
@@ -7610,6 +7621,18 @@ mod tests {
         }
         match parse_args(argv(&["navigera", "evaluat"])).expect_err("typo") {
             ArgsError::Invalid(message) => assert!(message.contains("did you mean `eval`"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        // `text --selector #items` unquoted: the shell drops `#items`, and
+        // the error says why the value is missing.
+        match parse_args(argv(&["navigera", "-s", "s", "text", "--selector"])).expect_err("no value") {
+            ArgsError::Invalid(message) => {
+                assert!(message.contains("shell comment") && message.contains("'#id'"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_args(argv(&["navigera", "-s", "s", "wait", "--text"])).expect_err("no value") {
+            ArgsError::Invalid(message) => assert_eq!(message, "missing value after --text"),
             other => panic!("{other:?}"),
         }
         // A swap is one edit; a word that is nothing like a command gets no

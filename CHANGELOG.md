@@ -33,6 +33,17 @@ All notable changes to this project are documented here. The format follows
   page through `navigera mcp` with no browser variable set, using the
   chrome-headless-shell it installed, and fails if that does not work, so
   the listing no longer asks for a browser path or a decision-model key.
+- `text --selector` prints the element's text as it reads (`innerText`),
+  as `text` with no selector does for the whole page: a list reads as one
+  item a line, where its `textContent` ran the items together into one
+  word. An element that is not rendered (hidden, a script holding JSON,
+  or any element on Lightpanda) still gives its `textContent`.
+
+### Fixed
+
+- `--selector`, `--frame` or `--gone` with nothing after it says why: an
+  unquoted `#` starts a shell comment, so `--selector #items` reached
+  navigera as `--selector`. The error now says to quote the selector.
 
 ### Removed
 

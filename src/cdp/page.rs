@@ -6259,6 +6259,9 @@ impl Page {
         Ok(value.as_str().unwrap_or_default().to_string())
     }
 
+    /// The first match's text as it reads (`innerText`: a list reads as
+    /// lines, as the page's whole `text` does), or its `textContent` when
+    /// it is not rendered (hidden, a script, or an engine without layout).
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
         // Code and styles inside the element aren't text a user reads (an
@@ -6266,6 +6269,7 @@ impl Page {
         let value = self.evaluate_raw(
             &format!(
                 "(() => {{ const el = {DEEP}.first({sel}); if (!el) return null; \
+                 if (typeof el.innerText === 'string' && el.getClientRects().length) return el.innerText; \
                  if (!el.querySelector || !el.querySelector('script, style, template, noscript')) return el.textContent; \
                  const c = el.cloneNode(true); \
                  for (const n of c.querySelectorAll('script, style, template, noscript')) n.remove(); \

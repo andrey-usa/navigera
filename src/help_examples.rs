@@ -232,7 +232,7 @@ pub const EXAMPLES: &[Help] = &[
             ("navigera -s s text --grep \"free shipping\"", "one fact from a long page: the passages that mention it"),
         ],
         &[
-            ("--selector <css>", "the element whose textContent to print (none: the page's innerText)"),
+            ("--selector <css>", "the element whose text to print, as it reads (none: the whole page)"),
             ("--grep <words>", "only the passages that mention the words (letter case aside; all the words in any order when the phrase is nowhere)"),
             ("--context <lines>", "with --grep: lines shown around each match (1)"),
             ("--limit <passages>", "with --grep: passages shown (5)"),
