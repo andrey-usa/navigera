@@ -538,26 +538,31 @@ PREF_DEFAULTS = {**{k: d for k, _, d in PREF_CHECKS}, **{k: d for k, _, _, d in 
                  **{k: d for k, _, _, d in PREF_RADIOS}, **{k: d for k, _, d in PREF_MATRIX}}
 
 
-def preferences_page():
+def preferences_page(saved):
+    # The page shows what this visitor saved last, as a real settings page
+    # does: an agent that reloads to check its save must see it.
+    def on(k):
+        return saved[k]
+
     def checks(keys):
-        return "".join(f'<label><input type="checkbox" name="{k}"{" checked" if d else ""}> {html.escape(t)}</label><br>'
-                       for k, t, d in PREF_CHECKS if k in keys)
+        return "".join(f'<label><input type="checkbox" name="{k}"{" checked" if on(k) else ""}> {html.escape(t)}</label><br>'
+                       for k, t, _ in PREF_CHECKS if k in keys)
 
     def select(k):
-        _, t, opts, d = next(x for x in PREF_SELECTS if x[0] == k)
-        o = "".join(f'<option{" selected" if v == d else ""}>{html.escape(v)}</option>' for v in opts)
+        _, t, opts, _ = next(x for x in PREF_SELECTS if x[0] == k)
+        o = "".join(f'<option{" selected" if v == on(k) else ""}>{html.escape(v)}</option>' for v in opts)
         return f'<label>{html.escape(t)} <select name="{k}">{o}</select></label><br>'
 
     def radios(k):
-        _, t, opts, d = next(x for x in PREF_RADIOS if x[0] == k)
-        o = "".join(f'<label><input type="radio" name="{k}" value="{html.escape(v)}"{" checked" if v == d else ""}> '
+        _, t, opts, _ = next(x for x in PREF_RADIOS if x[0] == k)
+        o = "".join(f'<label><input type="radio" name="{k}" value="{html.escape(v)}"{" checked" if v == on(k) else ""}> '
                     f'{html.escape(v)}</label> ' for v in opts)
         return f'<fieldset><legend>{html.escape(t)}</legend>{o}</fieldset>'
 
     matrix = "".join(
         "<tr><th scope=\"row\">" + html.escape(c) + "</th>" + "".join(
-            f'<td><label><input type="checkbox" name="{k}"{" checked" if d else ""}> {html.escape(t)}</label></td>'
-            for k, t, d in PREF_MATRIX if t.endswith(" " + c)) + "</tr>"
+            f'<td><label><input type="checkbox" name="{k}"{" checked" if on(k) else ""}> {html.escape(t)}</label></td>'
+            for k, t, _ in PREF_MATRIX if t.endswith(" " + c)) + "</tr>"
         for c in PREF_CATEGORIES)
     groups = [
         ("Alerts by category", f"<table><thead><tr><th>Category</th>"
@@ -718,7 +723,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/support":
             return self.send(200, support_page())
         if path == "/preferences":
-            return self.send(200, preferences_page())
+            with STATE.lock:
+                saved = STATE.preferences.get(sid, PREF_DEFAULTS) if sid else PREF_DEFAULTS
+            return self.send(200, preferences_page(saved))
         if path == "/support/widget":
             return self.send(200, SUPPORT_WIDGET)
         if path == "/slow":
