@@ -3,7 +3,10 @@
 
 Two self-contained pages (no external resources — no network weather):
   page_a.html — product listing: 500 `.card` elements, a search box + button
-                that client-side filters cards by title substring.
+                that client-side filters cards by title substring, and an
+                order form (#cust, #qty, submit #place) whose submit a script
+                handles (no navigation; #status records the order). The ops
+                stage times a click on that submit and a 4-step form batch.
   page_b.html — detail page: heading + a 1000-row `#rows` table.
 
 Seeded RNG => byte-identical fixtures on every machine.
@@ -44,6 +47,12 @@ def gen_page_a() -> str:
 <h1>Search results</h1>
 <input id="q" type="text" value="">
 <button id="search">Search</button>
+<form id="order">
+<input id="cust" type="text" value="" placeholder="Name">
+<input id="qty" type="text" value="" placeholder="Qty">
+<button id="place" type="submit">Place order</button>
+<p id="status"></p>
+</form>
 <div id="list">
 {body}
 </div>
@@ -54,6 +63,17 @@ document.getElementById('search').addEventListener('click', () => {{
     const t = c.querySelector('.t').textContent.toLowerCase();
     c.classList.toggle('hidden', !t.includes(q));
   }}
+}});
+// The order form's submit is handled by a script: no navigation, the
+// status line records the order. The ops stage clicks #place to time a
+// click on a submit a script handles, and fills #cust/#qty + clicks
+// #place + reads #status as its 4-step form batch.
+document.getElementById('order').addEventListener('submit', (e) => {{
+  e.preventDefault();
+  const cust = document.getElementById('cust').value;
+  const qty = document.getElementById('qty').value;
+  document.getElementById('status').textContent = 'placed: ' + cust + ' x ' + qty;
+  window.__placed = (window.__placed || 0) + 1;
 }});
 </script>
 </body></html>
@@ -92,6 +112,10 @@ def main() -> None:
         "visible_after_filter_widget": N_CARDS // 2,  # every other card is a Widget
         "title_b": "Part detail — assembly diagram",
         "rows_b": N_ROWS,
+        # The ops stage's 4-step form batch fills #cust "ada" and #qty "2",
+        # clicks #place (submit, handled by the page script) and reads #status.
+        "status_after_batch": "placed: ada x 2",
+        "heading_a": "Search results",
     }
     (OUT / "expected.json").write_text(json.dumps(expected, indent=2), encoding="utf-8")
     for p in ("page_a.html", "page_b.html"):

@@ -308,6 +308,65 @@ if agent:
         "agent's turns, not time.",
         "",
     ]
+ops = doc.get("ops") or []
+if ops:
+    ops_order = ["navigera", "navigera (baseline)", "agent-browser",
+                 "playwright-cli", "Playwright MCP", "Chrome DevTools MCP",
+                 "browser-use"]
+    ops_cols = [o for o in ops if o["name"] in ops_order]
+    ops_cols.sort(key=lambda o: ops_order.index(o["name"]))
+    ops_cols += [o for o in ops if o["name"] not in ops_order]
+    op_names = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
+                "screenshot", "form-batch")
+    ops_label = {**label,
+                 "navigera (baseline)": "`navigera` (baseline build)",
+                 "browser-use": f"`browser-use` {ver('browser-use', '')} (exec model)".replace("  ", " ")}
+    lines += [
+        "### Matched operations (one call per op, warm session, median of 10)",
+        "",
+        numbers + ".",
+        "",
+        "One CLI process (or one MCP `tools/call`) per op, against a warm session,",
+        "on the same fixture page. `goto` re-navigates to the listing; `fill` fills",
+        "the search box; `click` clicks Search (client-side filter, no navigation);",
+        "`click-submit` clicks the order form's submit, which a script handles (no",
+        "navigation); `read-text` reads the heading; `snapshot` is each tool's default",
+        "accessibility output; `screenshot` writes a PNG; `form-batch` fills two fields,",
+        "clicks submit and reads the status — one call for tools with a batch command,",
+        "four calls otherwise. Two rounds of 5 reps: rounds are the outer loop and tools",
+        "the inner loop, with the second round in reversed tool order. Each tool runs in",
+        "its default output mode (MCP tools over JSON-RPC, their only interface); no tool",
+        "is switched into a machine mode. A cell is complete only with all 10 reps and no",
+        "round error; a partial cell is shown as `incomplete (n/N)` and left out of the",
+        "per-op losses below.",
+        "",
+        "| op | " + " | ".join(ops_label.get(o["name"], o["name"]) for o in ops_cols) + " |",
+        "|---|" + "---|" * len(ops_cols),
+    ]
+    for op in op_names:
+        row = [f"`{op}`"]
+        for o in ops_cols:
+            cell = (o.get("cells") or {}).get(op) or {}
+            if cell.get("median_ms") is None:
+                row.append("failed")
+            elif cell.get("incomplete"):
+                n = cell.get("reps", 0)
+                n_expected = cell.get("expected_reps", 10)
+                row.append(f"incomplete ({n}/{n_expected}) {cell['median_ms']:.1f} ms "
+                           f"({cell['calls']} call{'s' if cell['calls'] != 1 else ''})")
+            else:
+                row.append(f"{cell['median_ms']:.1f} ms ({cell['calls']} call"
+                           f"{'s' if cell['calls'] != 1 else ''})")
+        lines.append("| " + " | ".join(row) + " |")
+    lines += [
+        "",
+        "Snapshot outputs differ in form (each tool's default tree), so that row compares",
+        "call latency, not equivalent work. The browser-use snapshot comes from its",
+        "documented raw `cdp()` route; it has no built-in snapshot command. Per-call time",
+        "includes process start (CLI) or JSON-RPC (MCP) and the daemon hop. An `incomplete",
+        "(n/N)` cell has only n of the 10 expected reps; its median is partial evidence.",
+        "",
+    ]
 par = doc.get("parallel") or []
 if par:
     ns = [r_["n"] for r_ in par[0]["runs"]]
@@ -402,6 +461,31 @@ if nav_agent:
         v, a = min(rivals, key=lambda t: t[0])
         if v < mine * (1 - TIE):
             losses.append(f"{what}: {tool(a)} {fmt(v)}, navigera {fmt(mine)}")
+nav_ops = next((o for o in ops if o["name"] == "navigera"), None)
+if nav_ops:
+    # Per-op losses: only against tools that took the same number of calls
+    # (the form-batch cell is 1 call for batch tools, 4 for the rest).
+    # Incomplete cells are left out entirely: a partial median
+    # is not a ranking, for navigera or for a rival.
+    for op in ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
+               "screenshot", "form-batch"):
+        mine = (nav_ops.get("cells") or {}).get(op) or {}
+        mine_ms, mine_calls = mine.get("median_ms"), mine.get("calls")
+        if mine_ms is None or mine.get("incomplete"):
+            continue
+        rivals = []
+        for o in ops:
+            if o["name"].startswith("navigera") or not o.get("cells"):
+                continue
+            cell = o["cells"].get(op) or {}
+            if (cell.get("median_ms") is not None and not cell.get("incomplete")
+                    and cell.get("calls") == mine_calls):
+                rivals.append((cell["median_ms"], o))
+        if not rivals:
+            continue
+        v, o = min(rivals, key=lambda t: t[0])
+        if v < mine_ms * (1 - TIE):
+            losses.append(f"{op} per call: {tool(o)} {v:.1f} ms, navigera {mine_ms:.1f} ms")
 loss_text = ("Where another tool did better in this run (by more than 2%): " + "; ".join(losses) + "."
              if losses else "No other tool did better than navigera by more than 2% on any measure in this run.")
 

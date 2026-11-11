@@ -27,9 +27,9 @@ on:
         required: false
         default: ''
       scenarios:
-        description: "optional stages besides the session gate: eval,cold,realworld,browse,agent,parallel"
+        description: "optional stages besides the session gate: eval,cold,realworld,browse,agent,parallel,ops"
         required: false
-        default: 'eval,cold,realworld,browse,agent,parallel'
+        default: 'eval,cold,realworld,browse,agent,parallel,ops'
       baseline_ref:
         description: "A/B: also run navigera built from this ref (branch, tag or FULL commit SHA) as nv-baseline; same machine, same run"
         required: false
@@ -151,6 +151,16 @@ jobs:
           npm install -g agent-browser@latest @playwright/cli@latest @playwright/mcp@latest chrome-devtools-mcp@latest
           npm ls -g --depth=0
 
+      - name: Install browser-use CLI (ops stage)
+        # Optional: the ops stage drives it via its exec model (one Python
+        # block per op against its own throwaway Chrome). A failed install
+        # shows up under "Skipped" in the table.
+        continue-on-error: true
+        run: |
+          python3 -m pip install --user -q "browser-use[cli]"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          browser-use --version || true
+
       - uses: ./.github/actions/apt-install
         with:
           packages: musl-tools
@@ -212,7 +222,7 @@ jobs:
         env:
           LADDER_PROFILE: ${{ inputs.profile == 'true' && '1' || '0' }}
           ONLY: ${{ inputs.only || '' }}
-          SCENARIOS: ${{ inputs.scenarios || 'eval,cold,realworld,browse,agent,parallel' }}
+          SCENARIOS: ${{ inputs.scenarios || 'eval,cold,realworld,browse,agent,parallel,ops' }}
         run: |
           set -o pipefail
           export CHROME_BIN

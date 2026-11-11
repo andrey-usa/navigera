@@ -124,7 +124,15 @@ NOTES: dict[str, list[str]] = {}
 BROWSER_TAGS = {"nv-edge": "msedge", "nv-brave": "brave", "nv-lightpanda": "lightpanda",
                 "nv-shell": "chrome-headless-shell"}
 
-OPTIONAL_SCENARIOS = ("eval", "cold", "realworld", "browse", "agent", "parallel")
+OPTIONAL_SCENARIOS = ("eval", "cold", "realworld", "browse", "agent", "parallel", "ops")
+
+# Matched-operation per-call stage: one call per op, warm session.
+OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
+       "screenshot", "form-batch")
+# Two rounds of 5 reps each, second round in reverse tool order: a slow
+# minute shifts every tool alike, and the cell is the median of 10.
+OPS_ROUNDS = 2
+OPS_REPS_PER_ROUND = 5
 
 # Parallel agents: how many sessions are held open at once.
 PARALLEL_NS = (1, 4, 8)
@@ -694,6 +702,8 @@ def bench_cold(name: str, argv: list[str], env: dict, chrome_tag: str,
 
 AGENT_DAEMON_MARKERS = (b"agent-browser", b"playwright-cli", b"@playwright/cli",
                         b"playwright-mcp", b"@playwright/mcp", b"chrome-devtools-mcp",
+                        # browser-use's harness daemon (BU_NAME namespaced).
+                        b"browser-use", b"browser-harness",
                         # navigera's shared-browser host (0.6.5+) outlives a
                         # session's `quit` by its grace period, like the
                         # daemons above.
@@ -823,6 +833,136 @@ def bench_parallel(tools: dict[str, str], env: dict, chrome_tag: str) -> dict:
     return results
 
 
+def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
+              expected: dict) -> tuple[dict, dict]:
+    """Matched-operation per-call stage: one call per op, warm
+    session, median of 10 per cell.
+
+    Rounds are the OUTER loop and tools the inner loop: round 1 runs the
+    tools in order, round 2 in REVERSED tool order, so no tool always runs
+    first or last and a slow first round cannot bias one tool. Each tool
+    runs contenders/ops_agent.py once per round (5 reps a round); the cell
+    merges both rounds. A tool that is not installed, or whose session will
+    not start, is recorded in the skipped map with the reason — never as a
+    zero.
+
+    Completeness: a cell is complete only with all 10
+    expected reps and no round errors. Partial samples stay in the cell
+    (runs_ms, incomplete=true) and are shown as 'incomplete (n/N)' in the
+    table, but are left out of rankings, ratios and the losses page.
+    """
+    import shutil
+
+    tools: dict[str, list[str]] = {}
+    if "nv-serve" in contenders:
+        tools["navigera"] = ["--tool", "nv"]
+        if "nv-baseline" in contenders:
+            tools["navigera (baseline)"] = ["--tool", "nv", "--navigera",
+                                            NAVIGERA_BINARY["nv-baseline"]]
+    for label, tool, env_var, binary, hint in [
+        ("agent-browser", "ab", "AGENT_BROWSER", "agent-browser", "npm i -g agent-browser"),
+        ("playwright-cli", "pw", "PLAYWRIGHT_CLI", "playwright-cli", "npm i -g @playwright/cli"),
+        ("Playwright MCP", "pwmcp", "PLAYWRIGHT_MCP", "playwright-mcp", "npm i -g @playwright/mcp"),
+        ("Chrome DevTools MCP", "cdmcp", "CHROME_DEVTOOLS_MCP", "chrome-devtools-mcp",
+         "npm i -g chrome-devtools-mcp"),
+        ("browser-use", "bu", "BROWSER_USE", "browser-use", "pip install 'browser-use[cli]'"),
+    ]:
+        found = os.environ.get(env_var) or shutil.which(binary)
+        if found:
+            env[env_var] = found
+            tools[label] = ["--tool", tool]
+        else:
+            SKIPPED[label] = f"not installed ({hint})"
+    print("== matched operations: " + ", ".join(tools), flush=True)
+    # Per-tool state, created up front so the round loop can fill it.
+    # Per-label slug for the transcript tag: two tools can share one
+    # --tool code (navigera vs its baseline), so the tag, not the code,
+    # is what keeps their transcripts apart in one round dir.
+    state: dict[str, dict] = {}
+    for label, extra in tools.items():
+        slug = label.lower().replace(" ", "-").replace("(", "").replace(")", "")
+        state[label] = {
+            "extra": extra, "slug": slug,
+            "cells": {op: {"runs_ms": [], "calls": 1, "ok": True,
+                           "errors": []} for op in OPS},
+            "round_errors": [],
+        }
+    for rnd in range(OPS_ROUNDS):
+        order = list(tools) if rnd % 2 == 0 else list(reversed(list(tools)))
+        for label in order:
+            st = state[label]
+            slug = st["slug"]
+            cells = st["cells"]
+            round_errors = st["round_errors"]
+            kill_stray_chrome(chrome_tag)
+            kill_agent_daemons()
+            round_dir = out_dir / "ops" / f"r{rnd}"
+            round_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [sys.executable, str(CONTENDERS / "ops_agent.py"), *st["extra"],
+                   "--reps", str(OPS_REPS_PER_ROUND), "--out", str(round_dir),
+                   "--tag", slug,
+                   "--session", f"ops-{slug}-{rnd}-{os.getpid()}"]
+            try:
+                _, _, _, out = run_once(cmd, env, 600, chrome_tag)
+                doc = json.loads(out.decode().strip().splitlines()[-1])
+            except Exception as e:
+                round_errors.append(f"round {rnd}: {' '.join(str(e).split())[-400:]}")
+                print(f"  [ops] {label} round {rnd + 1}/{OPS_ROUNDS}: FAILED ({e})",
+                      flush=True)
+                continue
+            if doc.get("error"):
+                round_errors.append(f"round {rnd}: {doc['error'][:400]}")
+            # The stdout summary is compact (medians only, no per-rep runs);
+            # the transcript file is the record bench_ops merges from. A
+            # round with no readable transcript contributes no runs — and is
+            # recorded as a round error, never silently merged as zeros.
+            try:
+                tdoc = json.loads((round_dir / f"ops-{slug}.json")
+                                  .read_text(encoding="utf-8"))
+            except Exception as e:
+                round_errors.append(f"round {rnd}: transcript ops-{slug}.json "
+                                    f"unreadable: {' '.join(str(e).split())[-200:]}")
+                print(f"  [ops] {label} round {rnd + 1}/{OPS_ROUNDS}: FAILED "
+                      f"(no transcript)", flush=True)
+                continue
+            for op, cell in tdoc.get("ops", {}).items():
+                merged = cells[op]
+                merged["runs_ms"].extend(cell.get("runs_ms") or [])
+                merged["calls"] = cell.get("calls", 1)
+                merged["errors"].extend(cell.get("errors") or [])
+                if not cell.get("ok"):
+                    merged["ok"] = False
+            print(f"  [ops] {label} round {rnd + 1}/{OPS_ROUNDS}: done", flush=True)
+    results: dict[str, dict] = {}
+    expected_reps = OPS_ROUNDS * OPS_REPS_PER_ROUND
+    for label, st in state.items():
+        cells = st["cells"]
+        round_errors = st["round_errors"]
+        for op in OPS:
+            merged = cells[op]
+            runs = merged["runs_ms"]
+            merged["median_ms"] = round(statistics.median(runs), 2) if runs else None
+            merged["reps"] = len(runs)
+            merged["expected_reps"] = expected_reps
+            # Complete only with every expected rep and no round error: a
+            # round that failed outright cannot leave a complete cell
+            # behind, even for ops that passed in the other round.
+            complete = (len(runs) == expected_reps and not merged["errors"]
+                        and not round_errors)
+            merged["complete"] = complete
+            merged["incomplete"] = (not complete and bool(runs))
+            merged["ok"] = complete
+            if not runs:
+                merged["errors"].append("no passing reps in either round")
+            if not merged["errors"]:
+                merged.pop("errors")
+        results[label] = {"cells": cells, "ok": all(c["ok"] for c in cells.values()),
+                          **({"round_errors": round_errors} if round_errors else {})}
+    kill_stray_chrome(chrome_tag)
+    kill_agent_daemons()
+    return results, {}
+
+
 def collect_versions() -> dict[str, str]:
     """The version of every contender, tool and browser this run measured.
 
@@ -885,6 +1025,17 @@ def collect_versions() -> dict[str, str]:
                     v[pkg] = deps[pkg]["version"]
         except Exception:
             pass
+    bu = shutil.which("browser-use")
+    if bu:
+        # `browser-use --version` prints the harness version (0.1.13); the
+        # package version is the browser-use release (0.13.14).
+        try:
+            r = subprocess.run(["pip", "show", "browser-use"], capture_output=True,
+                               text=True, timeout=30)
+            m = re.search(r"^Version: (\S+)", r.stdout or "", re.M)
+            v["browser-use"] = m.group(1) if m else first_line([bu, "--version"])
+        except Exception:
+            v["browser-use"] = first_line([bu, "--version"])
     return v
 
 
@@ -939,7 +1090,8 @@ def _passed(stage: dict) -> str:
 
 def write_publish_json(out_dir: Path, results: dict, contenders: dict,
                        reps: int, env_text: str, agent_results: dict | None = None,
-                       versions: dict | None = None, parallel_results: dict | None = None) -> None:
+                       versions: dict | None = None, parallel_results: dict | None = None,
+                       ops_results: dict | None = None) -> None:
     """Compact, chart-ready results (publish.json): what a results page or a
     remote agent needs, small enough to ship as check-run annotations."""
     def r3(x):
@@ -1021,6 +1173,21 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
             for name, r in (agent_results or {}).items()
         ],
         "parallel": [{"name": name, "runs": rows} for name, rows in (parallel_results or {}).items()],
+        "ops": [{"name": name,
+                 "ok": bool(r.get("ok")),
+                 "cells": {op: {"median_ms": cell.get("median_ms"),
+                                "calls": cell.get("calls"),
+                                "reps": cell.get("reps"),
+                                "expected_reps": cell.get("expected_reps"),
+                                "complete": bool(cell.get("complete")),
+                                **({"incomplete": True} if cell.get("incomplete") else {}),
+                                # Partial samples stay in the JSON.
+                                "runs_ms": cell.get("runs_ms", []),
+                                "ok": bool(cell.get("ok")),
+                                **({"errors": cell["errors"]} if cell.get("errors") else {})}
+                         for op, cell in r["cells"].items()},
+                 **({"round_errors": r["round_errors"]} if r.get("round_errors") else {})}
+                for name, r in (ops_results or {}).items()],
     }
     # indent=1 keeps lines short so annotate.py can chunk it.
     (out_dir / "publish.json").write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8")
@@ -1337,6 +1504,10 @@ def main() -> int:
         print("== parallel agents: " + ", ".join(ptools), flush=True)
         parallel_results = bench_parallel(ptools, env, chrome_tag)
 
+    ops_results: dict = {}
+    if "ops" in scenarios:
+        ops_results, _ = bench_ops(contenders, env, out_dir, chrome_tag, expected)
+
     summary = {
         "contenders": list(contenders),
         "reps": args.reps,
@@ -1499,6 +1670,60 @@ def main() -> int:
                      "and the 2nd session start are extra steps, outside the total. `navigera (batch)` puts "
                      "the known steps in three `batch` calls (per step = per call).")
         lines.append("")
+    if ops_results:
+        # Fixed column order: navigera first, then the baseline A/B build,
+        # then the other agent tools.
+        ops_order = ["navigera", "navigera (baseline)", "agent-browser",
+                     "playwright-cli", "Playwright MCP", "Chrome DevTools MCP",
+                     "browser-use"]
+        ops_cols = [n for n in ops_order if n in ops_results]
+        ops_cols += [n for n in ops_results if n not in ops_order]
+        lines.append("### matched operations: one call per op, warm session (median of 10)")
+        lines.append("")
+        lines.append("One CLI process (or one MCP `tools/call`) per op, against a warm "
+                     "session, on the same fixture page. `goto` re-navigates to the "
+                     "listing; `fill` fills the search box; `click` clicks Search "
+                     "(client-side filter, no navigation); `click-submit` clicks the "
+                     "order form's submit, which a script handles (no navigation); "
+                     "`read-text` reads the heading; `snapshot` is each tool's default "
+                     "accessibility output; `screenshot` writes a PNG; `form-batch` "
+                     "fills two fields, clicks submit and reads the status — one call "
+                     "for tools with a batch command, four calls otherwise. "
+                     "Per-call time includes process start (CLI) or JSON-RPC (MCP) "
+                     "and the daemon hop. Two rounds of 5 reps: rounds are the outer "
+                     "loop and tools the inner loop, with the second round in "
+                     "reversed tool order. Each tool runs in its default output "
+                     "mode (MCP tools over JSON-RPC, their only interface); no tool "
+                     "is switched into a machine mode. A cell is complete only with "
+                     "all 10 reps and no round error; a partial cell is shown as "
+                     "`incomplete (n/N)` and left out of the per-op losses below.")
+        lines.append("")
+        lines.append("| op | " + " | ".join(f"`{n}`" for n in ops_cols) + " |")
+        lines.append("|---|" + "---|" * len(ops_cols))
+        for op in OPS:
+            row = [f"`{op}`"]
+            for name in ops_cols:
+                cell = ops_results[name]["cells"][op]
+                if cell.get("median_ms") is None:
+                    row.append("failed")
+                elif cell.get("incomplete"):
+                    n = cell.get("reps", 0)
+                    n_expected = cell.get("expected_reps", 10)
+                    row.append(f"incomplete ({n}/{n_expected}) {cell['median_ms']:.1f} ms "
+                               f"({cell['calls']} call{'s' if cell['calls'] != 1 else ''})")
+                else:
+                    n = cell.get("reps", 10)
+                    row.append(f"{cell['median_ms']:.1f} ms ({cell['calls']} call"
+                               f"{'s' if cell['calls'] != 1 else ''}"
+                               + (f", n={n}" if n != 10 else "") + ")")
+            lines.append("| " + " | ".join(row) + " |")
+        lines.append("")
+        lines.append("Snapshot outputs differ in form (each tool's default tree), so "
+                     "that row compares call latency, not equivalent work. The "
+                     "browser-use snapshot comes from its documented raw `cdp()` "
+                     "route (`Accessibility.getFullAXTree`); it has no built-in "
+                     "snapshot command.")
+        lines.append("")
     if parallel_results:
         lines.append("### parallel agents: N sessions open at once, each after goto + snapshot "
                      "(PSS of every process the tool started, MB)")
@@ -1530,7 +1755,7 @@ def main() -> int:
     (out_dir / "table.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     versions = collect_versions()
     write_publish_json(out_dir, results, contenders, args.reps, env_line(""), agent_results, versions,
-                       parallel_results)
+                       parallel_results, ops_results)
     print("\n".join(lines), flush=True)
 
     server.shutdown()

@@ -53,6 +53,34 @@ what an agent reads. `navigera (batch)` runs the known steps in `batch`
 calls as navigera's skill tells agents to; `navigera (own browser)` and
 `navigera (baseline)` (with `baseline_ref`) are diagnostics.
 
+**Matched operations** (`contenders/ops_agent.py`, scenario `ops`):
+one call per op, warm session, median of 10 — the per-call table the README
+quotes instead of the session's per-step mean. Ops, all on the listing page:
+`goto`, `fill`, `click` (Search, no navigation), `click-submit` (the order
+form's submit, handled by the page script, no navigation), `read-text`,
+`snapshot`, `screenshot`, and `form-batch` (fill two fields, click submit,
+read the status — one call for tools with a batch command, four calls
+otherwise). Tools: navigera (plus `navigera (baseline)` with `baseline_ref`),
+agent-browser, playwright-cli, Playwright MCP, Chrome DevTools MCP, and
+browser-use's CLI (its exec model: one Python block per op against its own
+throwaway Chrome; its snapshot comes from the documented raw `cdp()` route,
+it has no built-in snapshot command). Each tool runs in its default output
+mode (MCP tools over JSON-RPC, their only interface); no tool is switched
+into a machine mode. Each op is verified after the call (same expected
+value for every tool, verification untimed and outside the timed call for
+every tool); a failed rep is recorded, not dropped, and a tool that cannot
+run an op records why instead of a zero. Run in two rounds of 5 reps:
+rounds are the outer loop and tools the inner loop, the second round in
+reverse tool order. A cell is complete only with all 10 reps and no round
+error; a partial cell keeps its samples in `publish.json` with
+`incomplete: true`, is shown as `incomplete (n/N)` in the table, and is
+left out of rankings, ratios and the losses page. Snapshot checks assert
+the page's known heading and the Search button; screenshot checks fully
+decode the PNG (chunk CRCs, IDAT decompression, exact raster size, every
+scanline filter byte 0-4) and
+assert its dimensions equal the session's live viewport, read untimed
+(the tools run at different viewports, so no single size is asserted).
+
 ## Accounting
 
 * **wall** — best of N, `perf_counter` around the run; `publish.json` also
