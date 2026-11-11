@@ -443,6 +443,20 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_wait: bool,
     },
+    /// The lines of the page's tree that mention the words, with the
+    /// containers they sit in (`ax --grep`).
+    #[serde(rename = "grep")]
+    Grep {
+        query: String,
+        /// Matching lines shown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default)]
+        timeout_ms: Option<f64>,
+        /// Skip the network-quiet wait before reading (`--no-wait`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_wait: bool,
+    },
     /// The probability that a yes/no question about the page is yes.
     #[serde(rename = "check")]
     Check {
@@ -1250,7 +1264,7 @@ pub struct ParsedArgs {
 const OPS: &[(&str, &str, &str)] = &[
     ("start", "[--attach [<where>] [--tab current] | --auto-connect | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open (--auto-connect, a bare --attach: your running browser, whichever serves remote debugging; $NAVIGERA_AUTO_CONNECT=1 for every start; --tab current: in the tab you are on, not a window of its own); --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
-    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …)"),
+    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait] | --grep <words> [--limit <lines>]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …). --grep: only the lines that mention the words (letter case aside), under the containers they sit in, with their refs; the first 30"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts"),
     ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys] [--force]", "set an input/textarea's value once the field is visible, enabled and editable (waits for it; the timeout error names which check failed; --force skips the checks); --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
     ("type", "<text> [--selector <css> | --ref <n>]", "type key by key into the target or the focused element"),
@@ -2450,6 +2464,15 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             ignore: crate::a11y::list(&extract_values(&mut args, "--ignore").map_err(ArgsError::Invalid)?),
             timeout_ms,
         },
+        "ax" | "snapshot" if args.iter().any(|a| a == "--grep") => {
+            let query = str_flag(&mut args, "--grep")?.unwrap_or_default();
+            Command::Grep {
+                query,
+                limit: num_flag(&mut args, "--limit")?.map(|v| v.max(0.0) as usize),
+                timeout_ms,
+                no_wait: extract_present(&mut args, "--no-wait"),
+            }
+        }
         "ax" | "snapshot" => Command::Ax {
             max_depth: num_flag(&mut args, "--max-depth")?.map(|v| v as u32),
             all: extract_present(&mut args, "--all").then_some(true),
@@ -4432,7 +4455,11 @@ impl Driver {
             // re-waiting costs the whole quiet window again.
             if (matches!(
                 command,
-                Command::Ax { .. } | Command::Screenshot { .. } | Command::Find { .. } | Command::Check { .. }
+                Command::Ax { .. }
+                    | Command::Screenshot { .. }
+                    | Command::Find { .. }
+                    | Command::Check { .. }
+                    | Command::Grep { .. }
             ) || command.find_target().is_some())
                 && !command.no_wait()
                 && !self.session.quiet_synced()
@@ -4763,6 +4790,10 @@ impl Driver {
                 let mut out = f.to_json();
                 out["sure"] = json!(f.p >= find_min());
                 Ok(out)
+            }
+            Command::Grep { query, limit, timeout_ms, .. } => {
+                let tree = self.page_tree(*timeout_ms)?;
+                Ok(json!(crate::grep::grep_tree(&tree, query, limit.unwrap_or(crate::grep::DEFAULT_TREE_LINES))))
             }
             Command::Check { question, timeout_ms, .. } => {
                 let decider =
@@ -5998,7 +6029,7 @@ impl Command {
 
     fn no_wait(&self) -> bool {
         match self {
-            Command::Find { no_wait, .. } | Command::Check { no_wait, .. } => *no_wait,
+            Command::Find { no_wait, .. } | Command::Check { no_wait, .. } | Command::Grep { no_wait, .. } => *no_wait,
             _ => self.clone().target_mut().is_some_and(|t| t.no_wait),
         }
     }

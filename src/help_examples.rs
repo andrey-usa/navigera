@@ -50,6 +50,7 @@ pub const EXAMPLES: &[Help] = &[
             ("navigera -s s ax", ""),
             ("navigera -s s ax --limit 20", ""),
             ("navigera -s s ax --selector \"input[type=number]\"", ""),
+            ("navigera -s s ax --grep \"number\"", "only the lines that mention it, with their refs"),
         ],
         &[
             ("<ref>", "scope the tree to the element with this ref"),
@@ -57,6 +58,7 @@ pub const EXAMPLES: &[Help] = &[
             ("--text <text>", "scope the tree to the element with this text"),
             ("<locator>", "scope via --role/--name/--label/--testid/--near/--nth"),
             ("--limit <lines>", "most lines to print; default 2000"),
+            ("--grep <words>", "only the lines that mention the words, under their containers (--limit: matching lines, 30)"),
             ("--max-depth <n>", "stop the tree at this depth"),
             ("--all", "every node of the accessibility tree, as a JSON list"),
             ("--refs all", "put [ref=N] on every node, not just actionable ones"),

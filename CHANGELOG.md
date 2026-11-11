@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `ax --grep "<words>"`: the lines of the page's tree that mention the
+  words, each under the containers it sits in, with refs to act on. On
+  MDN's element index the lines for `<dialog>` are 0.6 KB of a 93 KB
+  tree; an agent that knows a word of an element's name gets its ref
+  without reading the page and without a decision model.
 - `text --grep "<words>"`: the passages of the page's text that mention
   the words, each with the lines around it (`--context`, 1) and its line
   number, the first five (`--limit`) with a count of the rest. One call

@@ -161,6 +161,76 @@ pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
     format!("{head}\n{}", body.trim_end())
 }
 
+/// Matching lines `ax --grep` shows when `--limit` is not given.
+pub const DEFAULT_TREE_LINES: usize = 30;
+
+/// The lines of an `ax` text tree that mention `query`, each under the
+/// containers it sits in, so a ref comes with what it belongs to: the tree,
+/// pruned to what was asked for. Matching is as for [`grep`]. One pass; a
+/// container is printed once, before the first match inside it.
+pub fn grep_tree(tree: &str, query: &str, limit: usize) -> String {
+    let phrase = lower(query.trim());
+    if phrase.is_empty() {
+        return "ax --grep needs something to look for".to_string();
+    }
+    let limit = limit.max(1);
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    let mut all = tree.lines();
+    let head = all.next().unwrap_or("");
+    let lines: Vec<&str> = all.filter(|l| l.trim_start().starts_with("- ")).collect();
+    let lowered: Vec<String> = lines.iter().map(|l| lower(l)).collect();
+    let mut by_words = false;
+    let mut hits: Vec<usize> = (0..lines.len()).filter(|&i| lowered[i].contains(&phrase)).collect();
+    if hits.is_empty() && words.len() > 1 {
+        by_words = true;
+        hits = (0..lines.len()).filter(|&i| words.iter().all(|w| lowered[i].contains(w))).collect();
+    }
+    if hits.is_empty() {
+        return format!(
+            "{head}\nno line of the tree has {query:?} ({} lines searched). What a page has not opened yet (closed \
+             sections, menus, pages of a list) is not in it; try one distinctive word, or `text --grep` for prose",
+            lines.len()
+        );
+    }
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    // The open containers above the current line, and whether each is printed.
+    let mut open: Vec<(usize, usize, bool)> = Vec::new();
+    let mut out = String::new();
+    let mut next_hit = 0;
+    let shown = hits.len().min(limit);
+    for (i, line) in lines.iter().enumerate() {
+        if next_hit >= shown {
+            break;
+        }
+        let depth = indent(line);
+        while open.last().is_some_and(|(d, _, _)| *d >= depth) {
+            open.pop();
+        }
+        if hits[next_hit] == i {
+            next_hit += 1;
+            for (_, at, printed) in open.iter_mut().filter(|(_, _, printed)| !*printed) {
+                out.push_str(&window(lines[*at], 0, CONTEXT_CHARS + indent(lines[*at])));
+                out.push('\n');
+                *printed = true;
+            }
+            out.push_str(&window(line, 0, BEFORE_CHARS + AFTER_CHARS + depth));
+            out.push('\n');
+            open.push((depth, i, true));
+        } else {
+            open.push((depth, i, false));
+        }
+    }
+    let what = if by_words { format!("all of {query:?}, in any order") } else { format!("{query:?}") };
+    let count = if shown < hits.len() {
+        format!("{shown} of {} lines with {what} (--limit {} for all)", hits.len(), hits.len())
+    } else if hits.len() == 1 {
+        format!("1 line with {what}")
+    } else {
+        format!("{} lines with {what}", hits.len())
+    };
+    format!("{head}\n{count}, under their containers:\n{}", out.trim_end())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +296,23 @@ mod tests {
         // A character that lowercases to several keeps positions aligned.
         let out = grep("İstanbul is the needle here", "needle", 0, 5);
         assert!(out.ends_with("1: İstanbul is the needle here"), "{out}");
+    }
+
+    #[test]
+    fn a_tree_is_pruned_to_the_matching_lines_and_their_containers() {
+        let tree = "page \"Elements\" http://x/el\n- banner:\n  - link \"Home\" [ref=1] url=/\n- main:\n  - region \"Interactive\":\n    - table:\n      - row:\n        - cell: link \"<dialog>\" [ref=7] url=/el/dialog\n        - cell \"A dialog box or subwindow.\"\n      - row:\n        - cell: link \"<details>\" [ref=9] url=/el/details\n- navigation \"Related\":\n  - link \"<dialog>\" [ref=20] url=/el/dialog";
+        let out = grep_tree(tree, "DIALOG", 30);
+        assert_eq!(
+            out,
+            "page \"Elements\" http://x/el\n3 lines with \"DIALOG\", under their containers:\n- main:\n  - region \"Interactive\":\n    - table:\n      - row:\n        - cell: link \"<dialog>\" [ref=7] url=/el/dialog\n        - cell \"A dialog box or subwindow.\"\n- navigation \"Related\":\n  - link \"<dialog>\" [ref=20] url=/el/dialog"
+        );
+        // The limit counts matching lines; what was left out is said.
+        let out = grep_tree(tree, "dialog", 1);
+        assert!(out.contains("1 of 3 lines with \"dialog\" (--limit 3 for all)"), "{out}");
+        assert!(out.ends_with("[ref=7] url=/el/dialog"), "{out}");
+        // Words in any order, and nothing found.
+        assert!(grep_tree(tree, "url=/el/details link", 30).contains("1 line with all of"), "{out}");
+        assert!(grep_tree(tree, "popover", 30).contains("no line of the tree has \"popover\" (12 lines searched)"));
     }
 
     #[test]

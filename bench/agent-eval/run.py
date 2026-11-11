@@ -62,7 +62,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# navigera prints compact output by default; this reads its JSON lines.
+# navigera prints compact output by default; this harness reads its JSON
+# lines. The agent's own shell does not get this (see `prepare`): an agent
+# is measured on the output a user's agent reads.
 os.environ.setdefault("NAVIGERA_OUTPUT", "json")
 
 WINDOWS = os.name == "nt"
@@ -263,6 +265,10 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
     }
     if os.environ.get("LIGHTPANDA_BIN"):
         env["LIGHTPANDA_BIN"] = os.environ["LIGHTPANDA_BIN"]
+    # The agent reads navigera's default output, as a user's agent does: the
+    # JSON mode this harness sets for itself is longer, and has no report of
+    # what an action changed.
+    env.pop("NAVIGERA_OUTPUT", None)
     env.pop("NAVIGERA_ENGINE", None)
     if TOOLS[tool].get("engine"):
         env["NAVIGERA_ENGINE"] = TOOLS[tool]["engine"]
@@ -592,6 +598,7 @@ def scripted_plan(tool: str, task: str, base: str) -> list[list[str]]:
 
 
 def run_scripted(tool: str, task: str, base: str, work: Path, env: dict) -> dict:
+    env = {**env, "NAVIGERA_OUTPUT": "json"}  # the plans' results are read as JSON
     started = time.time()
     shells, outputs = [], []
     plan = scripted_plan(tool, task, base)

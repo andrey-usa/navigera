@@ -342,6 +342,19 @@ fn text_grep_prints_the_passages_that_mention_the_words() {
     // Many matches: the first few, and how many there are.
     let out = s.text(&["text", "--grep", "filler", "--context", "0", "--limit", "2"]);
     assert!(out.starts_with("2 of 300 passages with \"filler\" (--limit 300 for all"), "{out}");
+    // The tree, pruned the same way: a ref to act on without reading the page.
+    s.ok(&[
+        "eval",
+        "document.body.insertAdjacentHTML('beforeend', '<nav aria-label=\"Help\"><a href=\"#fees\">Fee \
+           schedule</a></nav>'); 1",
+    ]);
+    let out = s.text(&["ax", "--grep", "fee schedule"]);
+    assert!(out.contains("1 line with \"fee schedule\", under their containers:\n- navigation \"Help\":\n"), "{out}");
+    let link = out.lines().last().unwrap();
+    assert!(link.trim_start().starts_with("- link \"Fee schedule\" [ref="), "{out}");
+    let number = link.split("[ref=").nth(1).unwrap().split(']').next().unwrap();
+    s.ok(&["click", number]);
+    assert!(s.ok(&["eval", "location.hash"]) == "#fees");
     // Inside one element, and nothing found is an answer, not a failure.
     let out = s.text(&["text", "--selector", "h2", "--grep", "fees"]);
     assert!(out.ends_with("1: Fees"), "{out}");

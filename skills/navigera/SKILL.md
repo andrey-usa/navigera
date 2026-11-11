@@ -28,9 +28,10 @@ information an agent needs:
    at the first failure and names the line.
 3. **Read narrowly.** `ax --selector form`, `ax <ref>` or `ax --limit 40`
    instead of the whole page; `get value <ref>` for one value. A whole-page
-   `ax` after every step is the biggest cost there is. One fact from a
-   long page: `text --grep "<word>"` prints the passages that mention it;
-   don't hunt for it with `eval`.
+   `ax` after every step is the biggest cost there is. On a long page,
+   search instead of reading: `ax --grep "<word>"` prints the lines that
+   mention it with their refs, `text --grep "<word>"` the passages of
+   text. Don't hunt with `eval`.
 4. **Don't look again after an action.** Its output already is the look:
    what appeared, went or changed since your last `ax`. A new `ax` is for
    a new page, or when the change was too long to show (it says so).

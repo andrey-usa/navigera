@@ -38,6 +38,9 @@ page "Checkout — Acme" http://shop.test/checkout
   `hover` the menu, then `ax` again.
 - Big page: `ax --selector "#results"` or `ax 57` (a ref), `--limit <lines>`
   (default 2000).
+- An element on a long page by a word of its name: `ax --grep "<word>"`
+  prints the lines that mention it under the containers they sit in, with
+  refs to act on (`--limit <lines>`, 30 by default).
 - One fact from a long page (a default, a price, a date): `text --grep
   "<word or phrase>"` prints the passages that mention it with the lines
   around them (`--context <lines>`, `--limit <passages>`), a few hundred
