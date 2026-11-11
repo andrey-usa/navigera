@@ -238,14 +238,6 @@ pub const EXAMPLES: &[Help] = &[
             ("--limit <passages>", "with --grep: passages shown (5)"),
         ],
     ),
-    (
-        "find",
-        &[("navigera -s s find \"the number input\"", "needs a decision model")],
-        &[
-            ("<description>", "the element, described in words; needs a decision model"),
-            ("--no-wait", "skip the wait for the network to go quiet (up to 3 s after the last fetch/XHR, so a list still loading has landed); steady polls never hold it"),
-        ],
-    ),
     ("title", &[("navigera -s s title", "")], &[]),
     (
         "passkey",
@@ -542,15 +534,8 @@ pub const EXAMPLES: &[Help] = &[
     ),
     (
         "check",
-        &[
-            ("navigera -s s check --selector \"input[type=checkbox]\"", ""),
-            ("navigera -s s check \"Is a box checked?\"", "a yes/no question: needs a decision model"),
-        ],
-        &[
-            ("<target>", "the checkbox/radio/switch, by ref, --selector, …"),
-            ("<yes/no question>", "ask the decision model; needs NAVIGERA_DECIDER_KEY"),
-            ("--no-wait", "with a question: skip the wait for the network to go quiet (see `ax --no-wait`)"),
-        ],
+        &[("navigera -s s check --selector \"input[type=checkbox]\"", "")],
+        &[("<target>", "the checkbox/radio/switch, by ref, --selector, …")],
     ),
     (
         "uncheck",

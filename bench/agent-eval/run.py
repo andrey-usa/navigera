@@ -19,24 +19,6 @@ calls, how many shell commands used the tool, and off-tool workarounds
   run.py --tools navigera,agent-browser,playwright-cli --tasks all \
          --mode skilled --model gemini-3.5-flash-lite --out out/
 
-`navigera+jev` is navigera with a decision model (`find`, `--find`,
-`check`): the session gets `--decider-url` (bench/decide/relay.py in front
-of TypeSafe's API, holding the key), and each run records the decider's
-calls and input tokens from the relay's `--decider-log`.
-
-Measuring the decider takes three arms on the same tasks, model and reps,
-each on its own model key so a spent quota cannot fall on one arm only:
-`navigera` (no decider), `navigera+jev` (the decider is on and the agent
-learns it only as a user would: `start`'s note, a note on a long `ax`, the
-skill) and `navigera+jev-told` (the prompt asks for it too). The first pair
-measures adoption, the second what a used decider saves. Tasks where
-deciding pays are the ones where reading the page costs more than naming
-the element: `preferences` (a 170-line form, four named changes and a
-confirmation to check) and the live docs tasks; on the small pages of the
-others one `ax` is cheaper, and an agent that skips the decider there is
-right to. Compare success first, then agent tokens plus decider tokens,
-turns and wall time, per task.
-
 `--agent scripted` replays known-good navigera command plans instead of
 calling a model: it validates the site, the checks and this harness without
 an API key (CI runs it on every eval, and locally).
@@ -86,7 +68,7 @@ TOOLS = {
     },
     # navigera on Lightpanda ($NAVIGERA_ENGINE, so the agent's commands are
     # the same as on Chrome) and on chrome-headless-shell (the job points
-    # $CHROME_BIN at it); each also with the decider.
+    # $CHROME_BIN at it).
     "navigera-lightpanda": {
         "cmd": "navigera", "skill": "navigera",
         "repo": "https://github.com/andrey-usa/navigera",
@@ -95,28 +77,6 @@ TOOLS = {
     "navigera-shell": {
         "cmd": "navigera", "skill": "navigera",
         "repo": "https://github.com/andrey-usa/navigera",
-    },
-    "navigera+jev": {
-        "cmd": "navigera", "skill": "navigera", "decider": True,
-        "repo": "https://github.com/andrey-usa/navigera",
-    },
-    "navigera-lightpanda+jev": {
-        "cmd": "navigera", "skill": "navigera", "decider": True,
-        "repo": "https://github.com/andrey-usa/navigera",
-        "engine": "lightpanda",
-    },
-    "navigera-shell+jev": {
-        "cmd": "navigera", "skill": "navigera", "decider": True,
-        "repo": "https://github.com/andrey-usa/navigera",
-    },
-    # The same, with the prompt asking for the decider: what Jev saves when
-    # the agent uses it, apart from whether the skill alone gets it used.
-    "navigera+jev-told": {
-        "cmd": "navigera", "skill": "navigera", "decider": True,
-        "repo": "https://github.com/andrey-usa/navigera",
-        "hint": " A decision model is configured for this browser session: prefer `--find \"<description>\"` on"
-                " element commands and `check \"<question>\"` over reading the page with `ax`; read the page only"
-                " for text you must report, or when --find says it is unsure.",
     },
     "agent-browser": {
         "cmd": "agent-browser", "skill": "agent-browser",
@@ -135,7 +95,7 @@ TOOLS = {
     },
 }
 
-SKILLED_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}" (the file `.agents/skills/{skill}/SKILL.md` in this directory). Read that skill first, then use `{cmd}` (through shell commands) for every browser interaction.{hint} Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
+SKILLED_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}" (the file `.agents/skills/{skill}/SKILL.md` in this directory). Read that skill first, then use `{cmd}` (through shell commands) for every browser interaction. Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
 
 The website is running at {base}.
 
@@ -160,7 +120,7 @@ PASS_ENV = ["CHROME_BIN", "RUSTUP_HOME", "CARGO_HOME", "NPM_CONFIG_PREFIX",
             "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS",
             "PLAYWRIGHT_MCP_EXECUTABLE_PATH", "PLAYWRIGHT_MCP_SANDBOX",
             "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "DO_NOT_TRACK", "DISABLE_TELEMETRY", "CI",
-            "NAVIGERA_DECIDER_URL", "LIGHTPANDA_BIN", "NAVIGERA_ENGINE", "LIGHTPANDA_DISABLE_TELEMETRY",
+            "LIGHTPANDA_BIN", "NAVIGERA_ENGINE", "LIGHTPANDA_DISABLE_TELEMETRY",
             "AGENT_BROWSER_ENGINE",
             # Windows: what a desktop session has (npm, Node and PowerShell
             # look things up there; Gemini CLI keeps only TEMP/USERPROFILE/…).
@@ -274,13 +234,6 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
         env["NAVIGERA_ENGINE"] = TOOLS[tool]["engine"]
     for key, value in TOOLS[tool].get("env", {}).items():
         env[key] = os.path.expandvars(value)
-    # Only the relay holds the TypeSafe key; only navigera+jev gets a decider.
-    env.pop("TYPESAFE_API_KEY", None)
-    env.pop("NAVIGERA_DECIDER_URL", None)
-    if TOOLS[tool].get("decider"):
-        if not args.decider_url:
-            raise RuntimeError(f"{tool} needs --decider-url")
-        env["NAVIGERA_DECIDER_URL"] = args.decider_url
     if WINDOWS:
         # A temp dir per run: tool daemons' sockets and browser profiles
         # land under the run's root, so cleanup can find them by path.
@@ -395,8 +348,6 @@ def run_gemini(prompt: str, work: Path, env: dict, args) -> dict:
             requests += 1
             after_tools = False
     errors = [e.get("message", "") for e in events if e.get("type") == "error"]
-    # Whether the agent saw `start` report a decider (navigera+jev runs).
-    decider_seen = any('"decider"' in str(e.get("output") or "") for e in events if e.get("type") == "tool_result")
     return {
         "exit": proc.returncode, "timed_out": timed_out, "wall_s": round(wall, 1),
         "text": text, "shell_commands": shells, "shell_steps": shell_steps, "tools_used": tool_names,
@@ -406,7 +357,6 @@ def run_gemini(prompt: str, work: Path, env: dict, args) -> dict:
         "tokens_total": stats.get("total_tokens"), "tokens_cached": stats.get("cached"),
         "tool_calls": stats.get("tool_calls"),
         "errors": errors[-3:], "stderr_tail": stderr_tail(err) if proc.returncode else "",
-        "decider_seen": decider_seen,
     }
 
 
@@ -479,7 +429,7 @@ def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
     shells, shell_steps, texts, errors = [], [], [], []
     tokens_in = tokens_out = tokens_total = tokens_cached = 0
     requests = tool_calls = 0
-    decider_seen = timed_out = False
+    timed_out = False
     exit_code = 0
     # The model's commands run without this job's credentials: the harness
     # makes the model calls itself, and a page may ask an agent for anything.
@@ -524,8 +474,6 @@ def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
             except subprocess.TimeoutExpired as e:
                 output, status = ((e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes)
                                   else (e.stdout or "")) + "\n[command timed out]", "error"
-            if '"decider"' in output:
-                decider_seen = True
             shell_steps.append({"cmd": command[:200], "status": status, "tail": output[-300:]})
             if len(output) > TOOL_OUTPUT_LIMIT:
                 output = output[:2000] + "\n[output truncated]\n" + output[-TOOL_OUTPUT_LIMIT + 2000:]
@@ -543,7 +491,6 @@ def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
         "tokens_total": tokens_total or None, "tokens_cached": tokens_cached or None,
         "tool_calls": tool_calls,
         "errors": errors[-3:], "stderr_tail": errors[-1] if errors and exit_code else "",
-        "decider_seen": decider_seen,
     }
 
 
@@ -732,24 +679,6 @@ def check(task: dict, answer: str, site, tool: str = "") -> tuple[bool, list[str
     return not why, why
 
 
-# A find/check op (after any options), or --find on an element op.
-# `find`, `--find`, and `check` with a question (quoted words), not `check`
-# on a checkbox (`check 12`, `check --label "…"`), also as a line of a batch.
-DECISION = re.compile(r"(navigera(\s+(-s|--session)\s+\S+|\s+--?[\w-]+)*\s+|^\s*)(find\s|check\s+[\"'][^\"']*\s)|"
-                      r"\s--find\b", re.M)
-
-
-def read_log(path: str | None) -> list:
-    if not path or not os.path.exists(path):
-        return []
-    with open(path, encoding="utf-8") as f:
-        return [json.loads(l) for l in f if l.strip()]
-
-
-def log_lines(path: str | None) -> int:
-    return len(read_log(path))
-
-
 OFF_TOOL = re.compile(r"\b(curl|wget|httpie)\b.*127\.0\.0\.1|require\(['\"](playwright|puppeteer)|"
                       r"from playwright|import (playwright|puppeteer)|chromedp|selenium", re.I)
 
@@ -776,10 +705,8 @@ def smoke(args) -> int:
 # USD per million tokens (uncached input, cached input, output): list prices,
 # not a bill. DeepSeek-V4.1-Flash: https://www.siliconflow.com/pricing, read
 # 2026-11-05 (the rate card bench/llm uses). EVAL_RATES="in,cached,out" sets
-# them for another model. The decision model reads input only: Jev's list
-# price, https://docs.typesafe.ai, read 2026-10-14.
+# them for another model.
 RATES = {"deepseek-ai/DeepSeek-V4.1-Flash": (0.15, 0.003, 0.60)}
-DECIDER_RATE = 0.042
 
 
 def rates(model: str):
@@ -795,9 +722,9 @@ def rates(model: str):
 
 
 def cost(run: dict, model: str):
-    """A run's estimated spend in USD at list prices, the decision model's
-    included, or None when a rate or a count is not known. Cached input is
-    part of `tokens_in` and is charged at its own rate, once."""
+    """A run's estimated spend in USD at list prices, or None when a rate or
+    a count is not known. Cached input is part of `tokens_in` and is charged
+    at its own rate, once."""
     rate = rates(model)
     t_in, t_out = run.get("tokens_in"), run.get("tokens_out")
     if rate is None or not isinstance(t_in, int) or not isinstance(t_out, int):
@@ -805,8 +732,7 @@ def cost(run: dict, model: str):
     cached = run.get("tokens_cached") or 0
     if cached > t_in:
         return None
-    llm = ((t_in - cached) * rate[0] + cached * rate[1] + t_out * rate[2]) / 1e6
-    return llm + (run.get("decider_tokens") or 0) * DECIDER_RATE / 1e6
+    return ((t_in - cached) * rate[0] + cached * rate[1] + t_out * rate[2]) / 1e6
 
 
 def label(run: dict) -> str:
@@ -877,20 +803,8 @@ def render(mode: str, agent: str, model: str, runs: list, tools: list, tasks: li
         if priced:
             r_in, r_cached, r_out = rates(model)
             lines += ["", f"Estimated at list prices per million tokens: ${r_in} new input, ${r_cached} cached "
-                      f"input, ${r_out} output; decision model ${DECIDER_RATE} input. Cost per pass is every "
+                      f"input, ${r_out} output. Cost per pass is every "
                       "run's cost over the runs that passed. An estimate, not a bill."]
-    deciding = [t for t in tools if any("decider_calls" in r for r in runs if label(r) == t)]
-    if deciding:
-        lines += ["", "| tool | runs that saw the decider | runs that used find/check | find/check commands | "
-                  "decider calls | decider input tokens | decider errors |", "|---|---|---|---|---|---|---|"]
-        for tool in deciding:
-            rs = [r for r in runs if label(r) == tool and not r.get("infra")]
-            lines.append(f"| `{tool}` | {sum(1 for r in rs if r.get('decider_seen'))}/{len(rs)} | "
-                         f"{sum(1 for r in rs if r.get('decision_commands'))}/{len(rs)} | "
-                         f"{sum(r.get('decision_commands') or 0 for r in rs)} | "
-                         f"{sum(r.get('decider_calls') or 0 for r in rs)} | "
-                         f"{sum(r.get('decider_tokens') or 0 for r in rs)} | "
-                         f"{sum(r.get('decider_errors') or 0 for r in rs)} |")
     fails = [r for r in runs if not r["ok"]]
     if fails:
         lines += ["", "Failures:"]
@@ -947,8 +861,6 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--merge", nargs="*", help="combine these summary-<mode>.json files into --out and exit")
     ap.add_argument("--require-pass", action="store_true", help="exit 1 unless every run passed (CI checks)")
-    ap.add_argument("--decider-url", help="decision-model endpoint for navigera+jev (bench/decide/relay.py)")
-    ap.add_argument("--decider-log", help="the relay's request log, to count each run's decider calls")
     ap.add_argument("--smoke", action="store_true",
                     help="one 'reply OK' call with exactly the runs' settings; prints the models used")
     args = ap.parse_args()
@@ -990,17 +902,10 @@ def main() -> int:
                     spec = TOOLS[tool]
                     template = SKILLED_PROMPT if args.mode == "skilled" else ONBOARD_PROMPT
                     prompt = template.format(workdir=work, cmd=spec["cmd"], skill=spec["skill"], name=tool,
-                                             repo=spec["repo"], base=site.base, task=task["prompt"],
-                                             hint=spec.get("hint", ""))
-                    before = log_lines(args.decider_log)
+                                             repo=spec["repo"], base=site.base, task=task["prompt"])
                     res = run_gemini(prompt, work, env, args) if args.agent == "gemini" \
                         else run_openai(prompt, work, env, args) if args.agent == "openai" \
                         else run_scripted(tool, task["id"], site.base, work, env)
-                    if spec.get("decider"):
-                        calls = read_log(args.decider_log)[before:]
-                        res["decider_calls"] = len(calls)
-                        res["decider_tokens"] = sum((c.get("usage") or {}).get("input_tokens") or 0 for c in calls)
-                        res["decider_errors"] = sum(1 for c in calls if c.get("status") != 200)
                     answer = final_answer(res["text"])
                     ok, why = check(task, answer, site, tool)
                     shells = res["shell_commands"]
@@ -1028,7 +933,6 @@ def main() -> int:
                         "tool_commands": sum(1 for c in shells if spec["cmd"] in c),
                         "off_tool_commands": [c[:200] for c in shells if OFF_TOOL.search(c)],
                         "shell_count": len(shells),
-                        "decision_commands": sum(1 for c in shells if DECISION.search(c)),
                     })
                 except Exception as e:  # harness/setup problem: record, keep going
                     rec.update({"ok": False, "why": [f"harness: {e}"]})

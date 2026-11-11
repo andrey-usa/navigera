@@ -48,7 +48,7 @@ def main() -> int:
         # numbers the tables are made of, one run to a line; the artifact
         # has the rest. Still too long: the per-tool summary alone.
         keep = ("tool", "task", "rep", "os", "ok", "infra", "timed_out", "requests", "shell_count", "tokens_in",
-                "tokens_cached", "tokens_out", "wall_s", "decision_commands", "decider_calls", "decider_tokens")
+                "tokens_cached", "tokens_out", "wall_s")
         said = lambda v: not (v is None or v is False or v == "linux")
         lines = [json.dumps({k: run[k] for k in keep if said(run.get(k))}, separators=(",", ":")) for run in runs]
         head = {k: v for k, v in doc.items() if k != "runs"}

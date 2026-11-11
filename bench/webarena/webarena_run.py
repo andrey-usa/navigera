@@ -383,7 +383,7 @@ def main() -> int:
             last_use[s] = i
     sites = SiteManager()
     agent_args = types.SimpleNamespace(run_timeout=args.run_timeout)
-    setup_args = types.SimpleNamespace(model="", decider_url=None, nv_bin_dir=args.nv_bin_dir)
+    setup_args = types.SimpleNamespace(model="", nv_bin_dir=args.nv_bin_dir)
     started = time.time()
     runs, spent = [], 0.0
 

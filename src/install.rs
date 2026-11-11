@@ -5,9 +5,9 @@
 //! navigera's own cache (`navigera install-browser --where` prints it) and is
 //! found there on every launch after; nothing outside that directory changes.
 //!
-//! The index and the archive come through `curl`, as the decider's requests
-//! do, so the binary carries no TLS stack; the archive is unpacked here, every
-//! entry checked against its CRC and kept inside the directory it goes to.
+//! The index and the archive come through `curl`, so the binary carries no
+//! TLS stack; the archive is unpacked here, every entry checked against its
+//! CRC and kept inside the directory it goes to.
 
 use std::path::{Component, Path, PathBuf};
 

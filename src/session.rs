@@ -784,13 +784,6 @@ fn fail(output: &mut dyn Write, config: &SessionConfig, error: String) -> ExitCo
     ExitCode::from(1)
 }
 
-/// What `start` tells an agent when a decision model is on.
-pub const DECIDER_NOTE: &str = "a decision model is on, so you can act on pages you have not read: put the \
-     steps you know in one `batch`, across pages, each naming its element in words (`click --find \"<what>\"`, \
-     `fill --find \"<what>\" <value>`; any element command takes --find), and end it with `text --grep \
-     \"<word>\"` for text you must report or `check \"<yes/no question>\"` to verify. A step --find is unsure of \
-     stops the batch and lists the candidates: read `ax` only then.";
-
 /// `start`: spawn a detached session server and wait until it accepts.
 pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> ExitCode {
     let path = match socket_path(name) {
@@ -946,12 +939,6 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
                         }
                     }
                 }
-            }
-            if let Some(decider) = crate::decide::Decider::from_env() {
-                response["result"]["decider"] = json!(decider.model());
-                // The contract, where the agent decides how to proceed: a
-                // skill section further down is read once, if at all.
-                add_note(&mut response, DECIDER_NOTE.to_string());
             }
             print_json(output, &response, config);
             return ExitCode::SUCCESS;

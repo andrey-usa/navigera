@@ -36,22 +36,11 @@ and confirm irreversible actions (payments, deletions, messages) against the use
 
 /// The JSON Schema fragment every element tool shares.
 fn target_props() -> Value {
-    let mut props = json!({
+    json!({
         "ref": {"type": ["integer", "string"], "description": "ref from browser_snapshot"},
         "selector": {"type": "string", "description": "CSS selector, instead of ref"},
         "text": {"type": "string", "description": "Visible text/label, instead of ref"},
-    });
-    if deciding() {
-        props["find"] = json!({"type": "string", "description": "Or describe it: a decision model picks it"});
-    }
-    props
-}
-
-/// `browser_find`, `browser_check` and `find` targets exist only when a
-/// decision model is configured (`decide`), so the default tool list stays
-/// what every agent already knows.
-fn deciding() -> bool {
-    crate::decide::Decider::from_env().is_some()
+    })
 }
 
 fn state_prop() -> Value {
@@ -94,7 +83,7 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 pub fn tools() -> Vec<Value> {
     let action =
         |extra: Value| props(&[target_props(), extra, json!({"snapshot": snapshot_prop(), "state": state_prop()})]);
-    let mut list = vec![
+    vec![
         tool(
             "browser_navigate",
             "Open a URL and wait for it to load; a bare host gets https://.",
@@ -241,30 +230,7 @@ pub fn tools() -> Vec<Value> {
             object(Map::new(), &[]),
             false,
         ),
-    ];
-    if deciding() {
-        list.push(tool(
-            "browser_find",
-            "Which element a description means, picked by a fast decision model from the whole page: its ref, the \
-             probability and the runners-up. Cheaper than reading a snapshot to find one element.",
-            object(
-                props(&[json!({"description": {"type": "string", "description": "The element in words, e.g. the search box"}})]),
-                &["description"],
-            ),
-            true,
-        ));
-        list.push(tool(
-            "browser_check",
-            "The probability that the answer to a yes/no question about the page is yes, from a fast decision model. \
-             Cheaper than reading a snapshot to verify one thing; near 0.5 means unsure, so look.",
-            object(
-                props(&[json!({"question": {"type": "string", "description": "A yes/no question about the page"}})]),
-                &["question"],
-            ),
-            true,
-        ));
-    }
-    list
+    ]
 }
 
 /// The rarely needed tools: off `tools/list` so the per-turn list stays
@@ -496,13 +462,6 @@ fn plan(name: &str, arguments: &Value) -> Result<Plan, String> {
         "browser_mouse" => single("mouse", args),
         "browser_scroll" => single("scroll", args),
         "browser_wait_for" => single("wait", args),
-        "browser_find" => {
-            if let Some(d) = args.remove("description") {
-                args.insert("what".into(), d);
-            }
-            Plan { full_state: false, steps: vec![op("find", args)], snapshot: false }
-        }
-        "browser_check" => Plan { full_state: false, steps: vec![op("check", args)], snapshot: false },
         "browser_evaluate" => single("eval", args),
         "browser_screenshot" => single("screenshot", args),
         "browser_tabs" => {
@@ -812,8 +771,6 @@ impl<'a> Server<'a> {
             match self.run(&json!({"op": "ax", "format": "text"}), true) {
                 Ok(outcome) => {
                     text.push(describe(&outcome.result));
-                    // A long tree is a preview while a decision model is on,
-                    // and its note says how to read the rest.
                     text.extend(notes(&[], &[], &outcome.notes));
                 }
                 Err(e) => text.push(format!("snapshot failed: {e}")),
@@ -1085,14 +1042,12 @@ mod tests {
     #[test]
     fn no_baseline_tool_is_lost() {
         const BASELINE: &[&str] = &[
-            "browser_check",
             "browser_click",
             "browser_close",
             "browser_console_messages",
             "browser_evaluate",
             "browser_file_upload",
             "browser_fill",
-            "browser_find",
             "browser_handle_dialog",
             "browser_handoff",
             "browser_history",
@@ -1117,11 +1072,6 @@ mod tests {
             .filter_map(|t| t["name"].as_str().map(str::to_string))
             .collect();
         for name in BASELINE {
-            // `browser_find`/`browser_check` are advertised only with a
-            // decision model configured - in the baseline too.
-            if !deciding() && (*name == "browser_find" || *name == "browser_check") {
-                continue;
-            }
             assert!(advertised.contains(*name), "{name} lost from the advertised tools");
         }
     }

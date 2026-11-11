@@ -95,7 +95,6 @@ Installed beside this file by `navigera install-skill`:
 - `references/sessions.md` - sessions, several agents at once, the user's
   own browser, `show` for a step only they can do.
 - `references/electron.md` - driving Electron apps.
-- `references/decider.md` - a decision model is on: `--find`, `check`.
 - `references/setup.md` - Windows, quoting JavaScript, finding Chrome.
 - `references/troubleshooting.md` - what each common error asks you to do.
 

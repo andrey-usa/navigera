@@ -10,7 +10,6 @@ pub mod browser;
 pub mod cdp;
 pub mod cli;
 pub mod clock;
-pub mod decide;
 pub mod domains;
 pub mod emulate;
 pub mod grep;

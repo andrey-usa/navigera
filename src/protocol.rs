@@ -41,13 +41,12 @@ pub const SKILL_MD: &str = include_str!("../skills/navigera/SKILL.md");
 
 /// The skill's reference files, installed beside SKILL.md under
 /// `references/` and read by the agent only when the topic comes up.
-pub const SKILL_REFS: [(&str, &str); 8] = [
+pub const SKILL_REFS: [(&str, &str); 7] = [
     ("acting.md", include_str!("../skills/navigera/references/acting.md")),
     ("reading.md", include_str!("../skills/navigera/references/reading.md")),
     ("inspecting.md", include_str!("../skills/navigera/references/inspecting.md")),
     ("sessions.md", include_str!("../skills/navigera/references/sessions.md")),
     ("electron.md", include_str!("../skills/navigera/references/electron.md")),
-    ("decider.md", include_str!("../skills/navigera/references/decider.md")),
     ("setup.md", include_str!("../skills/navigera/references/setup.md")),
     ("troubleshooting.md", include_str!("../skills/navigera/references/troubleshooting.md")),
 ];
@@ -103,10 +102,6 @@ pub struct TargetArgs {
     /// Visible text / label of the element (best match, actionable first).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// A description of the element, resolved to a ref by the decision
-    /// model before the op runs (see `decide`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub find: Option<String>,
     /// ARIA role (`button`, `link`, `textbox`, `checkbox`, …), with `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -132,8 +127,8 @@ pub struct TargetArgs {
     /// `#outer >> #inner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
-    /// Skip the network-quiet wait a snapshot or `--find` makes before it
-    /// reads the page (`--no-wait`).
+    /// Skip the network-quiet wait a snapshot makes before it reads the
+    /// page (`--no-wait`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_wait: bool,
 }
@@ -171,18 +166,13 @@ impl TargetArgs {
     /// checked when the command is parsed (a typo costs no browser), and
     /// again when it runs.
     fn conflict(&self) -> Option<&'static str> {
-        let given = [
-            self.node_ref.is_some(),
-            self.text.is_some(),
-            self.find.is_some(),
-            self.selector.is_some() || self.locator(),
-        ]
-        .iter()
-        .filter(|b| **b)
-        .count();
+        let given = [self.node_ref.is_some(), self.text.is_some(), self.selector.is_some() || self.locator()]
+            .iter()
+            .filter(|b| **b)
+            .count();
         let counted = self.locator() || self.selector.is_some();
         if given > 1 {
-            Some("give only one of ref, --text, --find, or --selector/--role/--name/--label/--placeholder/--testid")
+            Some("give only one of ref, --text, or --selector/--role/--name/--label/--placeholder/--testid")
         } else if self.near.is_some() && !counted {
             Some("--near narrows --role/--name, --label, --placeholder, --testid or --selector to the match in the part of the page that shows the text")
         } else if self.nth.is_some() && !counted {
@@ -198,9 +188,6 @@ impl TargetArgs {
     fn unframed(&self, op: &str) -> anyhow::Result<Option<Target>> {
         if let Some(m) = self.conflict() {
             anyhow::bail!("{op}: {m}");
-        }
-        if self.find.is_some() {
-            anyhow::bail!("{op}: --find was not resolved to an element");
         }
         if self.locator() || self.nth.is_some() || self.near.is_some() {
             return Ok(Some(Target::Locator(crate::cdp::Locator {
@@ -433,16 +420,6 @@ pub enum Command {
         #[serde(default)]
         timeout_ms: Option<f64>,
     },
-    /// The element a description means, chosen by the decision model.
-    #[serde(rename = "find")]
-    Find {
-        what: String,
-        #[serde(default)]
-        timeout_ms: Option<f64>,
-        /// Skip the network-quiet wait before reading (`--no-wait`).
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        no_wait: bool,
-    },
     /// The lines of the page's tree that mention the words, with the
     /// containers they sit in (`ax --grep`).
     #[serde(rename = "grep")]
@@ -451,16 +428,6 @@ pub enum Command {
         /// Matching lines shown.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
-        #[serde(default)]
-        timeout_ms: Option<f64>,
-        /// Skip the network-quiet wait before reading (`--no-wait`).
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        no_wait: bool,
-    },
-    /// The probability that a yes/no question about the page is yes.
-    #[serde(rename = "check")]
-    Check {
-        question: String,
         #[serde(default)]
         timeout_ms: Option<f64>,
         /// Skip the network-quiet wait before reading (`--no-wait`).
@@ -1278,7 +1245,6 @@ const OPS: &[(&str, &str, &str)] = &[
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
     ("eval", "<js> | --file <path.js> | - [--main]", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin; --main (Electron) runs it in the app's main process, a function getting the electron module"),
     ("text", "[--selector <css>] [--grep <words> [--context <lines>] [--limit <passages>]]", "textContent of the first match; with no selector, the whole page's text as it reads (innerText). --grep: only the passages that mention the words, each with the lines around it (1) and its line number; the first 5, letter case aside"),
-    ("find", "<description>", "the element a description means, chosen by a decision model (set NAVIGERA_DECIDER_KEY; README: Decisions by a fast model); element ops also take --find <description>"),
     ("title", "", "page title"),
     ("a11y", "[--selector <css>] [--tags wcag2a,wcag2aa,…] [--ignore <rule>,…]", "an accessibility audit with axe-core (built in, run where the page can't see it): the violations by rule, worst first, each with its first elements as refs to act on; WCAG 2.0-2.2 A and AA by default (--tags best-practice adds axe's own advice)"),
     ("vitals", "", "the page's web vitals as the browser measured them: LCP, FCP, TTFB, load (ms), CLS, INP (the slowest interaction; under 104 ms the browser keeps none), each rated good, needs-improvement or poor, with the elements behind LCP, CLS and INP as selectors"),
@@ -1301,7 +1267,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("dblclick", "<target>", "trusted double click"),
     ("drag", "<from> <to> | --from-text <t> --to-text <t> [--from-at <x>,<y>] [--to-at <x>,<y>]", "drag one element onto another (each a ref or CSS selector): HTML5 drag and drop for a draggable source, a held mouse moved across otherwise; --to-at drops at a point of the target (from its top-left corner), e.g. its top edge to land before it in a list"),
     ("focus", "<target>", "focus an element"),
-    ("check", "<target> | <yes/no question>", "check a checkbox, radio or switch (clicks only if needed). With a question instead of a target: the probability that the answer about the page is yes, from a decision model (set NAVIGERA_DECIDER_KEY)"),
+    ("check", "<target>", "check a checkbox, radio or switch (clicks only if needed)"),
     ("uncheck", "<target>", "uncheck a checkbox/switch"),
     ("keydown", "<key>", "hold a key (Shift, Control, a character) until keyup"),
     ("keyup", "<key>", "release a held key"),
@@ -1821,7 +1787,6 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
             None => None,
         },
         text: str_flag(args, "--text")?,
-        find: str_flag(args, "--find")?,
         role: str_flag(args, "--role")?,
         name: str_flag(args, "--name")?,
         label: str_flag(args, "--label")?,
@@ -1839,7 +1804,7 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
     };
     // A bare first word is the target when no flag names one; `--nth`,
     // `--near` and `--frame` only narrow it (`click .row --nth 2`).
-    let named = t.node_ref.is_some() || t.text.is_some() || t.find.is_some() || t.selector.is_some() || t.locator();
+    let named = t.node_ref.is_some() || t.text.is_some() || t.selector.is_some() || t.locator();
     if positional_target && !named {
         if let Some(first) = args.front().filter(|a| !a.starts_with("--")).cloned() {
             args.pop_front();
@@ -1850,16 +1815,6 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
         }
     }
     Ok(t)
-}
-
-/// The remaining positional words as one string (`find add to cart` works
-/// unquoted).
-fn rest_words(args: &mut Args) -> Option<String> {
-    let mut words = Vec::new();
-    while let Some(w) = positional(args) {
-        words.push(w);
-    }
-    (!words.is_empty()).then(|| words.join(" "))
 }
 
 fn positional(args: &mut Args) -> Option<String> {
@@ -2314,46 +2269,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 timeout_ms,
             }
         }
-        "find" => {
-            let no_wait = extract_present(&mut args, "--no-wait");
-            Command::Find {
-                what: rest_words(&mut args).ok_or_else(|| need("find", "a description of the element"))?,
-                timeout_ms,
-                no_wait,
-            }
-        }
-        // `check <target>` checks a checkbox; `check <question>` asks the
-        // decision model. A target is a ref or a targeting flag.
-        "check" | "uncheck"
-            if op == "uncheck"
-                || args.iter().any(|a| {
-                    matches!(
-                        a.as_str(),
-                        "--selector"
-                            | "--ref"
-                            | "--text"
-                            | "--find"
-                            | "--role"
-                            | "--name"
-                            | "--label"
-                            | "--placeholder"
-                            | "--testid"
-                            | "--near"
-                            | "--nth"
-                            | "--frame"
-                    )
-                })
-                || (args.len() == 1 && parse_ref(&args[0]).is_some()) =>
-        {
+        "check" | "uncheck" => {
             Command::SetChecked { checked: op == "check", target: target_args(&mut args, true)?, timeout_ms }
-        }
-        "check" => {
-            let no_wait = extract_present(&mut args, "--no-wait");
-            Command::Check {
-                question: rest_words(&mut args).ok_or_else(|| need("check", "a yes/no question about the page"))?,
-                timeout_ms,
-                no_wait,
-            }
         }
         "get" => {
             let what = positional(&mut args).ok_or_else(|| need("get", "what to read"))?;
@@ -2925,41 +2842,6 @@ pub fn write_own(path: impl AsRef<std::path::Path>, bytes: &[u8]) -> std::io::Re
 ///
 /// Construct once per session; every [`Command`] runs against the same warm
 /// Chrome (no relaunch between ops).
-/// A tree longer than this, read while a decision model is on, is shown as a
-/// preview of its first [`AX_PREVIEW_LINES`] lines, with a note that acting
-/// does not need the rest.
-const AX_DECIDER_LINES: usize = 60;
-
-/// The lines a plain `ax` shows of a large tree while a decision model is on.
-///
-/// The note alone, after the whole tree, came too late: the agent had read
-/// the tree by the time it was told it need not, and in 12 runs it reached
-/// for `--find` or `check` unasked in 3. The preview makes the cheap path the
-/// default one; `ax --limit <n>` (or a scope) still reads everything.
-const AX_PREVIEW_LINES: usize = 40;
-
-/// How large a tree is before a plain `ax` shows a preview of it
-/// (`NAVIGERA_AX_PREVIEW_BYTES`, default 16 KB, `0` for never).
-///
-/// Size, not length: the pages where deciding paid were documentation
-/// indexes of 56 and 95 KB, where `--find` cut the agent's tokens by a third
-/// (eval run 39733028440). A 170-line form is 8 KB, read once for every ref
-/// it needs; previewed at a line count, the agent went around the preview and
-/// spent 63% more.
-fn ax_preview_bytes() -> usize {
-    std::env::var("NAVIGERA_AX_PREVIEW_BYTES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(16 * 1024)
-}
-
-/// The first `keep` lines of `tree`, and how many lines were left out.
-fn ax_preview(tree: &str, keep: usize) -> (String, usize) {
-    let total = tree.lines().count();
-    if total <= keep {
-        return (tree.to_string(), 0);
-    }
-    let shown: Vec<&str> = tree.lines().take(keep).collect();
-    (shown.join("\n"), total - keep)
-}
-
 pub struct Driver {
     session: BrowserSession,
     /// What `history` returns (the newest [`HISTORY_MAX`]).
@@ -4453,14 +4335,7 @@ impl Driver {
             // `wait` just synced with the page and no request has happened
             // since: the agent already waited for what it needed, and
             // re-waiting costs the whole quiet window again.
-            if (matches!(
-                command,
-                Command::Ax { .. }
-                    | Command::Screenshot { .. }
-                    | Command::Find { .. }
-                    | Command::Check { .. }
-                    | Command::Grep { .. }
-            ) || command.find_target().is_some())
+            if matches!(command, Command::Ax { .. } | Command::Screenshot { .. } | Command::Grep { .. })
                 && !command.no_wait()
                 && !self.session.quiet_synced()
             {
@@ -4483,31 +4358,6 @@ impl Driver {
                 quiet_waited_ms = waited.as_millis() as u64;
             }
         }
-        // `--find <description>`: the decision model picks the element and the
-        // op runs on its ref; the result says which one it was.
-        let mut found = None;
-        let resolved;
-        let command = match command.find_target() {
-            Some(what) => {
-                let f = self.find(&what, op_timeout_ms(command))?;
-                let min = find_min();
-                if f.p < min {
-                    anyhow::bail!(
-                        "--find {what:?}: not sure which element that is (best p={:.2} < {min}): {}; pass a ref instead",
-                        f.p,
-                        std::iter::once((&f.chosen, f.p))
-                            .chain(f.others.iter().map(|(c, p)| (c, *p)))
-                            .map(|(c, p)| format!("[ref={}] {} ({p:.2})", c.node_ref, c.line))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
-                resolved = command.with_ref(f.chosen.node_ref);
-                found = Some(f);
-                &resolved
-            }
-            None => command,
-        };
         // An action goes in `history`; one on a ref with the locators of its
         // element, read now (the action may take the element away).
         let at =
@@ -4704,48 +4554,11 @@ impl Driver {
             notes.push(format!("this click closed its tab; tab {} is active now", self.session.active_page()));
         }
         let dialogs = self.session.take_dialogs();
-        let mut result = match (result, new_tabs.is_empty() && notes.is_empty()) {
+        let result = match (result, new_tabs.is_empty() && notes.is_empty()) {
             // A click that opened a tab: report the state of the new tab.
             (Ok(r), false) if r.get("tab").is_some() => Ok(self.state_json()),
             (r, _) => r,
         }?;
-        if let (Some(f), Some(obj)) = (found, result.as_object_mut()) {
-            obj.insert("found".into(), json!({ "ref": f.chosen.node_ref, "element": f.chosen.line, "p": f.p }));
-        }
-        // A long tree read while a decision model is on: a plain `ax` shows
-        // its top, and says that acting needs no more of it. Asked for with a
-        // limit, a depth or a scope, the tree is what was asked for, and the
-        // note still says acting does not need it.
-        if let (Command::Ax { max_depth, all, limit, scope, .. }, Value::String(tree)) = (command, &mut result) {
-            let lines = tree.lines().count();
-            if lines > AX_DECIDER_LINES && crate::decide::Decider::from_env().is_some() {
-                let threshold = ax_preview_bytes();
-                let plain = max_depth.is_none()
-                    && *all != Some(true)
-                    && limit.is_none()
-                    && scope.optional("ax").ok().flatten().is_none()
-                    && threshold > 0
-                    && tree.len() > threshold;
-                if plain {
-                    let (shown, hidden) = ax_preview(tree, AX_PREVIEW_LINES);
-                    *tree = format!("{shown}\n... {hidden} more lines not shown");
-                    notes.push(format!(
-                        "the first {AX_PREVIEW_LINES} of {lines} lines: with the decision model on, \
-                         `click --find \"<what>\"`, `fill --find \"<what>\" <value>` (any element command \
-                         takes --find) and `check \"<yes/no question>\"` act and verify on the whole page \
-                         without reading it; `ax --limit {DEFAULT_AX_LIMIT}` (MCP: browser_snapshot with limit) \
-                         shows every line; `text --grep \"<word>\"` prints the passages that mention a word, for text \
-                         you must report."
-                    ));
-                } else {
-                    notes.push(format!(
-                        "this tree is {lines} lines; with the decision model on, `click --find \"<what>\"`, \
-                         `fill --find \"<what>\" <value>` and `check \"<yes/no question>\"` act and verify \
-                         without reading it. For text you must report: `text --grep \"<word>\"`."
-                    ));
-                }
-            }
-        }
         // Last: what this snapshot itself waited for, if anything. It goes
         // after the tree notes so their order does not change.
         // An app window with nothing in it yet: an Electron app that is still
@@ -4765,7 +4578,7 @@ impl Driver {
         Ok(Outcome { result, dialogs, new_tabs, notes, recovered: None })
     }
 
-    /// The page as `find` and `check` see it: the whole text tree.
+    /// The page as `ax --grep` sees it: the whole text tree.
     fn page_tree(&self, timeout_ms: Option<f64>) -> anyhow::Result<String> {
         let opts = AxOptions { limit: 20_000, ..AxOptions::default() };
         match self.session.ax(&opts, timeout_ms).map_err(|e| e.context("ax"))? {
@@ -4774,34 +4587,12 @@ impl Driver {
         }
     }
 
-    fn find(&self, what: &str, timeout_ms: Option<f64>) -> anyhow::Result<crate::decide::Found> {
-        let decider = crate::decide::Decider::from_env().ok_or_else(|| crate::decide::Decider::missing("find"))?;
-        let tree = self.page_tree(timeout_ms)?;
-        let page = tree.lines().next().unwrap_or("").to_string();
-        crate::decide::find(&decider, what, &page, &crate::decide::candidates(&tree))
-            .map_err(|e| e.context(format!("find {what:?}")))
-    }
-
     fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
         let s = &self.session;
         match command {
-            Command::Find { what, timeout_ms, .. } => {
-                let f = self.find(what, *timeout_ms)?;
-                let mut out = f.to_json();
-                out["sure"] = json!(f.p >= find_min());
-                Ok(out)
-            }
             Command::Grep { query, limit, timeout_ms, .. } => {
                 let tree = self.page_tree(*timeout_ms)?;
                 Ok(json!(crate::grep::grep_tree(&tree, query, limit.unwrap_or(crate::grep::DEFAULT_TREE_LINES))))
-            }
-            Command::Check { question, timeout_ms, .. } => {
-                let decider =
-                    crate::decide::Decider::from_env().ok_or_else(|| crate::decide::Decider::missing("check"))?;
-                let tree = self.page_tree(*timeout_ms)?;
-                let yes = crate::decide::check(&decider, question, &tree)
-                    .map_err(|e| e.context(format!("check {question:?}")))?;
-                Ok(json!({ "question": question, "yes": (yes * 1000.0).round() / 1000.0, "answer": yes >= 0.5 }))
             }
             Command::Open { url } => {
                 if let Some(url) = url {
@@ -5915,12 +5706,6 @@ impl Driver {
 /// `example.com` -> `https://example.com`; `localhost:3000` -> `http://…`.
 /// Anything with a scheme (http:, file:, data:, about:) is left alone.
 /// The op's own `timeout_ms`, if it carries one.
-/// The probability `--find` needs before it acts (`NAVIGERA_FIND_MIN`,
-/// default 0.5); below it the op fails and lists the candidates.
-fn find_min() -> f64 {
-    std::env::var("NAVIGERA_FIND_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5)
-}
-
 impl Command {
     fn target_mut(&mut self) -> Option<&mut TargetArgs> {
         match self {
@@ -6029,21 +5814,15 @@ impl Command {
 
     fn no_wait(&self) -> bool {
         match self {
-            Command::Find { no_wait, .. } | Command::Check { no_wait, .. } | Command::Grep { no_wait, .. } => *no_wait,
+            Command::Grep { no_wait, .. } => *no_wait,
             _ => self.clone().target_mut().is_some_and(|t| t.no_wait),
         }
     }
 
-    /// The description given with `--find`, if any.
-    fn find_target(&self) -> Option<String> {
-        self.clone().target_mut().and_then(|t| t.find.clone())
-    }
-
-    /// This command with its `--find` replaced by a ref.
+    /// This command with its target replaced by a ref.
     fn with_ref(&self, node_ref: u64) -> Command {
         let mut c = self.clone();
         if let Some(t) = c.target_mut() {
-            t.find = None;
             t.node_ref = Some(node_ref);
         }
         c
@@ -7268,17 +7047,6 @@ mod tests {
             let back: f64 = serde_json::from_str(&v.to_string()).unwrap();
             assert_eq!(back.to_bits(), text.parse::<f64>().unwrap().to_bits(), "{text}");
         }
-    }
-
-    #[test]
-    fn ax_preview_keeps_the_top_and_counts_the_rest() {
-        let tree: String = (1..=100).map(|i| format!("line {i}\n")).collect();
-        let (shown, hidden) = super::ax_preview(&tree, 40);
-        assert_eq!(hidden, 60);
-        assert_eq!(shown.lines().count(), 40);
-        assert!(shown.starts_with("line 1\n") && shown.ends_with("line 40"), "{shown}");
-        let short = "a\nb\n";
-        assert_eq!(super::ax_preview(short, 40), (short.to_string(), 0));
     }
 
     use super::*;

@@ -36,19 +36,11 @@ any OpenAI-compatible model instead of Gemini CLI (DeepSeek-V4.1-Flash
 through SiliconFlow by default; `OPENAI_BASE_URL`, `SILICONFLOW_API_KEY`), so
 a result can be checked against a second model family.
 
-`navigera+jev` runs navigera with the decider configured, and
-`navigera+jev-told` also asks for `--find` / `check` in the prompt; the
-TypeSafe key (`TYPESAFE_API_KEY` in `main`) stays in a local relay that the
-agent's shell never sees, and each run records the decider's calls and
-tokens. `decisions: true` adds the Jev-against-Gemini decision comparison
-above (`bench/decide/compare.py`).
-
 The agent reads navigera's default output, as a user's agent does. Until
 2026-11-11 its shell inherited the harness's own `NAVIGERA_OUTPUT=json`, so
 the runs below that date measured navigera on JSON lines, without the
 report of what an action changed. The report also has a cost table (new
-input, output, and an estimate at list prices that includes the decision
-model's tokens): cached input costs a fiftieth of new input, so a token
+input, output, and an estimate at list prices): cached input costs a fiftieth of new input, so a token
 total says little about spend. `endpoint: openrouter` with `rates` runs
 the same sessions on a model SiliconFlow does not serve.
 
@@ -106,9 +98,7 @@ the tree instead of three.
 
 - DeepSeek-V4.1-Flash (run 39699303497): navigera passed 12/12 at a median
   50K tokens and 9 model turns, and 12/12 on Lightpanda (121K);
-  playwright-cli 11/12 (96K), agent-browser 12/12 (153K). With the decider
-  on, navigera passed 12/12 at 43K and the agent used it in 3 of 12 runs
-  unprompted; asked to, in 11 of 12 (12/12, 62K).
+  playwright-cli 11/12 (96K), agent-browser 12/12 (153K).
 - Gemini 3.5 Flash-Lite (run 39691538974): navigera 12/12 at 127K, and
   12/12 on Lightpanda (167K).
 

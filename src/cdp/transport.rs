@@ -727,15 +727,14 @@ impl BodyScan {
     }
 }
 
-/// The response body once `buf` holds all of it (by Content-Length or
-/// chunked encoding); `None` while more bytes are needed or the framing is
-/// unknown (then the caller reads to EOF).
-pub(crate) fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
-    BodyScan::new().feed(buf)
-}
-
 #[cfg(test)]
 mod tests {
+    /// The response body once `buf` holds all of it (by Content-Length or
+    /// chunked encoding), in one look.
+    fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
+        BodyScan::new().feed(buf)
+    }
+
     #[test]
     fn a_crash_keeps_its_fatal_line_past_the_stack_dump() {
         let mut log = String::from("[1:1:1011/030707.3:FATAL:zygote_host_impl_linux.cc:130] No usable sandbox! ...\n");

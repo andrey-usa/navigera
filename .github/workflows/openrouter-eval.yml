@@ -5,9 +5,7 @@ name: openrouter-eval
 # chat-completions loop on OpenRouter, alternating the two models so
 # neither always goes first, and reports pass/turns/tokens/cost per run.
 # One job per tool variant (the matrix below); each job runs both models.
-# Keys: OPENROUTER_API_KEY in the `main` environment; the +jev variants
-# also use TYPESAFE_API_KEY, held by the decider relay
-# (.github/actions/jev-relay) so the agent's shell never sees it.
+# Keys: OPENROUTER_API_KEY in the `main` environment.
 # The agent-browser variants install that tool from npm (agent-eval.yml's
 # pin) and run it with its own skill, like the Gemini eval's skilled legs.
 
@@ -20,8 +18,8 @@ on:
   workflow_dispatch:
     inputs:
       tools:
-        description: "comma-separated: navigera,navigera-lightpanda,navigera-shell,navigera+jev,navigera-lightpanda+jev,navigera-shell+jev,agent-browser,agent-browser-lightpanda"
-        default: "navigera,navigera-lightpanda,navigera-shell,navigera+jev,navigera-lightpanda+jev,navigera-shell+jev,agent-browser,agent-browser-lightpanda"
+        description: "comma-separated: navigera,navigera-lightpanda,navigera-shell,agent-browser,agent-browser-lightpanda"
+        default: "navigera,navigera-lightpanda,navigera-shell,agent-browser,agent-browser-lightpanda"
       tasks:
         description: "comma-separated task ids (lookup,purchase,account,docs,support,preferences) or all"
         default: "lookup,purchase,account,docs,support,preferences"
@@ -52,12 +50,11 @@ jobs:
     steps:
       - id: m
         env:
-          TOOLS: ${{ inputs.tools || 'navigera,navigera-lightpanda,navigera-shell,navigera+jev,navigera-lightpanda+jev,navigera-shell+jev,agent-browser,agent-browser-lightpanda' }}
+          TOOLS: ${{ inputs.tools || 'navigera,navigera-lightpanda,navigera-shell,agent-browser,agent-browser-lightpanda' }}
         run: |
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
           known = ["navigera", "navigera-lightpanda", "navigera-shell",
-                   "navigera+jev", "navigera-lightpanda+jev", "navigera-shell+jev",
                    "agent-browser", "agent-browser-lightpanda"]
           tools = [t.strip() for t in os.environ["TOOLS"].split(",") if t.strip() in known]
           print("matrix=" + json.dumps([{"tool": t} for t in tools]))
@@ -135,23 +132,15 @@ jobs:
           bin="$RUNNER_TEMP/chs/chrome-headless-shell-linux64/chrome-headless-shell"
           echo "CHROME_BIN=$bin" >> "$GITHUB_ENV"
           echo "::notice title=openrouter eval chrome::$("$bin" --version)"
-      - name: Decider relay (TypeSafe Jev)
-        if: contains(matrix.run.tool, '+jev')
-        uses: ./.github/actions/jev-relay
-        with:
-          key: ${{ secrets.TYPESAFE_API_KEY }}
       - name: Head-to-head runs
         run: |
           bash bench/agent-eval/logged.sh "agent run log (openrouter, $TOOL)" \
             python3 bench/agent-eval/openrouter_run.py --tool "$TOOL" --tasks "$TASKS" --reps "$REPS" \
-            --models "$MODELS" --out out/openrouter \
-            ${DECIDER_URL:+--decider-url "$DECIDER_URL" --decider-log "$DECIDER_LOG"}
+            --models "$MODELS" --out out/openrouter
       - name: Upload the results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: openrouter-eval-${{ matrix.run.tool }}
-          path: |
-            out/openrouter/
-            ${{ runner.temp }}/jev.jsonl
+          path: out/openrouter/
           if-no-files-found: ignore

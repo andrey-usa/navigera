@@ -16,12 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = (
     'bench/webarena/harproxy.py',
     'bench/quiet-traps/server.py',
-    'bench/decide/relay.py',
-    'bench/decide/compare.py',
     'bench/llm/llm_bench.py',
     'bench/gate/gate.py',
     'bench/ide-eval/mock_llm.py',
-    'bench/decide/mock_jev.py',
     'bench/site/server.py',
     'tests/fixtures/local_server.py',
 )

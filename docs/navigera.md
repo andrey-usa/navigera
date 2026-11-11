@@ -117,8 +117,6 @@ Other names the parser takes, for agents used to other tools' names: `navigate`
 | `ax` (`snapshot`) | `[<ref> \| --selector <css> \| --text t]` scope; `--limit <lines>` (2000); `--refs all`; `--format json` (old flat list: `{ref, role, name, value?, url?}`; with `--all` `{id, role, name, backendNodeId}`); `--all`; `--grep <words> [--limit <lines>]` | text tree (below). `--grep`: only the lines that mention the words (letter case aside; all the words in any order when the phrase is nowhere), each under the containers it sits in, with refs to act on; the first 30 matching lines and how many there are |
 | `eval` (`evaluate`) | `<js>`, `--expression <js>`, `--file <path.js>`, or `-` (read the script from stdin) | the JSON value: an expression's, an arrow function's (it is called), or for statements the last expression's; `await` works at the top level, and a body that `return`s gives what it returns; promises are awaited |
 | `text` | `[--selector <css>] [--grep <words> [--context <lines>] [--limit <passages>]]` | `textContent` without the `<script>`, `<style>`, `<template>` and `<noscript>` inside the element (one that is itself a script keeps its text), or `null`; with no selector, the whole page as it reads (`innerText`). `--grep`: only the passages that mention the words, letter case aside, each with the lines around it (`--context`, 1) and each line's number in the text; the first `--limit` (5) and how many there are; several words match in any order when the phrase is nowhere; nothing found is said, not an error. Long lines are shown around the match, and the reply stops at 12,000 characters |
-| `find` | `<description>` | `{ref, element, in, p, confidence, others, sure}`: the element a decision model chose ([below](#decisions-find-and-check)) |
-| `check` | `<yes/no question>` (no target given) | `{question, yes, answer}`: the probability the answer is yes |
 | `get` | `text\|value\|html\|outer\|box\|checked` target; `attr <name>` / `style <prop>` target; `count <css>`; `title`; `url` | the value (`url`: the state object, as `url` returns it); `box` is `{x, y, width, height}` in top-level viewport pixels (inside a cross-origin frame, that frame's) |
 | `is` | `visible\|hidden\|enabled\|disabled\|checked\|editable\|focused` target | `true`/`false` (a missing element is not visible, after 500 ms) |
 | `console` | `--level error\|warn\|info\|log\|debug`, `--limit <n>` (200), `--clear`, `--json` | `[level] text  (url:line)` per line: console calls, uncaught exceptions (`[exception]`), failed loads and CSP reports; `--clear` prints them, then empties the list |
@@ -267,7 +265,7 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
   those requests and 100 ms more, not the whole window: a click that loads
   data for 200 ms is read about 300 ms later, with the data. A window set
   with `set network-quiet <ms>` holds after actions too. `--no-wait` (on
-  `ax`, `screenshot`, `find`, `check` and `--find`) skips the wait.
+  `ax`, `screenshot` and `ax --grep`) skips the wait.
 - **Clicks** are trusted mouse events at the element's centre after
   scrolling it into view, once the element has stopped moving: CSS
   animations and transitions running on it or an ancestor (a dialog sliding
@@ -398,50 +396,6 @@ for. A browser navigera didn't start (`--attach`, a profile that was
 already open) needs `--enable-features=WebMCP` at its own start; without it
 `webmcp-list` says so instead of returning nothing.
 
-## Decisions: `find` and `check`
-
-Two small decisions an agent otherwise spends a page snapshot and an LLM turn
-on can go to a System One model instead: TypeSafe's
-[Jev](https://docs.typesafe.ai), which answers typed questions (a choice
-among options, a yes/no probability) in a few hundred milliseconds and bills
-input tokens only. Opt-in: nothing is sent anywhere unless one of these is set
-where the session (or `navigera mcp`) starts:
-
-| variable | Value |
-|---|---|
-| `NAVIGERA_DECIDER_KEY` | the API key, the same for every model (`TYPESAFE_API_KEY` is read when it is unset); with no URL, TypeSafe's API, `https://api.typesafe.ai/v1/systemone` |
-| `NAVIGERA_DECIDER_URL` | an endpoint with the same API (a LiteLLM proxy's `/typesafe/v1/systemone`, a mock); `http://` directly, `https://` through `curl` |
-| `NAVIGERA_DECIDER_MODEL` | model id (default `jev-latest`; any model the endpoint serves, such as a Kev model) |
-| `NAVIGERA_FIND_MIN` | probability `--find` needs before it acts (default 0.5) |
-
-`start` reports `"decider": "<model>"` when one is configured, so an agent can
-tell without looking at the variables.
-
-- `find "add the brass valve to the cart"` returns the chosen element's ref,
-  its line, the probability and the three runners-up. Every element with a
-  ref is an option, described by its line and the containers around it (the
-  card's heading, a dialog's name), so twelve "Add to cart" buttons are told
-  apart. Large pages are split into choices of 200 and the winners asked
-  again.
-- Element ops take `--find "<description>"` in place of a ref (`click --find
-  "accept the cookies"`, `fill --find "email field" a@b.c`): the op runs on
-  the chosen element and its result carries `found`. Below `NAVIGERA_FIND_MIN`
-  the op fails and lists the candidates, so a guess is never acted on.
-- `check "Did the order go through?"` returns the probability of yes. The
-  page goes as its text tree without refs; near 0.5 means unsure.
-- A plain `ax` of a tree over 16 KB (`NAVIGERA_AX_PREVIEW_BYTES`; `0` turns
-  it off) shows its first 40 lines, ends with `... N more lines not shown`,
-  and notes that `--find` and `check` act on the whole page; a tree over 60
-  lines but under that size is shown whole, with the note; `ax --limit <n>`, `--max-depth`, `--all` or a scope
-  (`--selector`, a ref) returns what was asked for, with the note. Without a
-  decider, `ax` is unchanged.
-
-What leaves the machine: the page's tree, with what was typed into text
-fields replaced by `(filled)` (password fields are masked by the browser
-already). MCP clients see `browser_find`, `browser_check` and a `find` target
-only when a decider is configured. `docs/multi-model.md` is the design and the
-measurements.
-
 ## Serve protocol (programs)
 
 `ax` without `format` returns the flat JSON list (`[{ref, role, name,
@@ -543,7 +497,7 @@ HAR or response body from `network`, a PDF, a screenshot's path, a
 the client opened). `NAVIGERA_MCP_ALLOW_FILES=1` lifts these limits.
 
 Every action takes `snapshot: true` to return the updated tree in the same
-call. The default tool list (13 of the 26 tools, 15 of 28 with a decision model; `browser_more` lists the rest on demand) is about 8 KB
+call. The default tool list (13 of the 26 tools; `browser_more` lists the rest on demand) is about 8 KB
 (~2,000 tokens), against ~30 KB for Chrome DevTools MCP 1.12.0.
 
 Client configuration (all run the same command):

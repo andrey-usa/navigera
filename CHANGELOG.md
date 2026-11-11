@@ -12,7 +12,7 @@ All notable changes to this project are documented here. The format follows
   words, each under the containers it sits in, with refs to act on. On
   MDN's element index the lines for `<dialog>` are 0.6 KB of a 93 KB
   tree; an agent that knows a word of an element's name gets its ref
-  without reading the page and without a decision model.
+  without reading the page.
 - `text --grep "<words>"`: the passages of the page's text that mention
   the words, each with the lines around it (`--context`, 1) and its line
   number, the first five (`--limit`) with a count of the rest. One call
@@ -27,19 +27,23 @@ All notable changes to this project are documented here. The format follows
   change (runs [42978179657](https://github.com/andrey-usa/navigera/actions/runs/42978179657) before,
   [42978184533](https://github.com/andrey-usa/navigera/actions/runs/42978184533) after).
 
-### Changed
+### Removed
 
-- `find` and `--find`: links that read the same and lead to the same
-  address are one choice, the first on the page. A page that links an
-  article from its text and again from its sidebar split the decision
-  model's probability between the two, so `--find` refused at 0.43 each
-  what it now does at 0.85, and both were sent: 185 of the 495 options on
-  MDN's element index were such repeats. Two buttons with one name, or
-  one name to two addresses, stay apart.
-- With a decision model on, `start`'s note and the skill's decider page
-  show the shape that saves turns: the known steps in one `batch`, across
-  pages, each naming its element with `--find`, ending with `text --grep`
-  or `check`.
+- The decision model: `find`, `--find <description>` on element commands,
+  `check "<yes/no question>"`, MCP's `browser_find` and `browser_check`,
+  the long-tree preview `ax` showed while a model was on, and the
+  `NAVIGERA_DECIDER_KEY`, `NAVIGERA_DECIDER_URL`, `NAVIGERA_DECIDER_MODEL`,
+  `NAVIGERA_FIND_MIN` and `NAVIGERA_AX_PREVIEW_BYTES` variables. Measured
+  on the same tasks with and without it, it saved no model turn and cost
+  more: on the two large-page tasks 1.44 and 1.36 m$ a session with it
+  against 1.14 and 1.10 without, at 6 to 7 turns either way
+  (DeepSeek-V4.1-Flash, run [42978184533](https://github.com/andrey-usa/navigera/actions/runs/42978184533)),
+  and no gain on a model 13 times the price either (GPT-5.6 Terra, run
+  [42978367965](https://github.com/andrey-usa/navigera/actions/runs/42978367965)).
+  `ax --grep` and `text --grep` do the reading it was meant to save, with
+  no second model, key or network call. `check <target>` still checks a
+  checkbox, radio or switch. Nothing on the page leaves the machine but
+  the browser's own traffic.
 
 ## [0.11.0] - 2026-11-10
 

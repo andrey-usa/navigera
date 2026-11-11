@@ -16,7 +16,7 @@ navigera runs a real browser for an agent that opens pages nobody vetted.
 | the downloaded binary | `install.sh` / `install.ps1` verify the SHA-256 published with each release; release builds carry GitHub build-provenance attestations (`gh attestation verify <file> -R andrey-usa/navigera`) |
 | the MCP server's file access | every file a tool or `browser_run` step reads or writes (upload, route `body_file`, `state`, `network --har`/`--body-file`, `pdf`, `screenshot --path`, `downloads --dir`) must be inside the working directory, and `file:` and `chrome://`/`devtools://` pages are refused, unless `NAVIGERA_MCP_ALLOW_FILES=1` |
 | what a session may reach | `start --allow-domains <list>` (`$NAVIGERA_ALLOW_DOMAINS`, `mcp --allow-domains`): navigation and requests to other hosts are refused before they are sent, on every redirect hop. `--allow-domains-docs-only` checks top-level navigation only: a navigation limit, not exfiltration protection |
-| page content vs. third parties | nothing leaves the machine but the browser's own traffic, unless you configure a decision model (`NAVIGERA_DECIDER_KEY` / `NAVIGERA_DECIDER_URL`). Then `find` and `check` send the page's accessibility tree to it, with text typed into fields replaced by `(filled)`; the key goes to `curl` on stdin, not in its arguments |
+| page content vs. third parties | nothing leaves the machine but the browser's own traffic |
 
 ## Known exposures
 

@@ -53,12 +53,6 @@ about = "One browser on a pipe with `navigera serve`: one JSON command per line 
 source = [{ file = "docs/guides/programs.md" }, { file = "docs/navigera.md", section = "Serve protocol (programs)", keep_heading = true }]
 
 [[part.page]]
-title = "Let a fast model pick the element"
-path = "guides/decider.md"
-about = "Hand the small decisions, which element and did it work, to a fast decision model, not the agent's LLM."
-source = [{ file = "docs/guides/decider.md" }, { file = "docs/navigera.md", section = "Decisions: find and check", keep_heading = true }]
-
-[[part.page]]
 title = "Use a page's own tools (WebMCP)"
 path = "guides/webmcp.md"
 about = "Call the tools a page registers for agents through WebMCP, and see which ones it offers."
@@ -96,18 +90,6 @@ title = "Electron and natural mode"
 path = "concepts/electron.md"
 about = "Electron apps, `--electron`; `--natural`: a headless run a page cannot tell."
 source = { file = "docs/navigera.md", section = "Electron and natural mode" }
-
-[[part.page]]
-title = "Several models, one browser"
-path = "concepts/multi-model.md"
-about = "Why a small decision model sits beside the agent's LLM; what it was measured to do."
-source = { file = "docs/multi-model.md", preamble = true, sections = ["The models", "What is built"], intro = "[What comes next, why Jev doesn't drive, and the risks](multi-model-next.md) are on their own page." }
-
-[[part.page]]
-title = "What comes next, and the risks"
-path = "concepts/multi-model-next.md"
-about = "The work still ahead, by expected value; why not the LLM alone; the risks."
-source = { file = "docs/multi-model.md", sections = ["What comes next, by expected value", "Why not let Jev drive", "Risks"] }
 
 [[part]]
 title = "Reference"
@@ -168,7 +150,7 @@ title = "Skill references"
 path = "agents/skill-references.md"
 about = "The detail the skill sends an agent to: acting on a page and reading one."
 source = [
-  { file = "skills/navigera/references/acting.md", demote = true, intro = "More: [inspecting and sessions](skill-references-inspecting.md), [Electron, the decider, setup and errors](skill-references-setup.md)." },
+  { file = "skills/navigera/references/acting.md", demote = true, intro = "More: [inspecting and sessions](skill-references-inspecting.md), [Electron, setup and errors](skill-references-setup.md)." },
   { file = "skills/navigera/references/reading.md", demote = true },
 ]
 
@@ -184,10 +166,9 @@ source = [
 [[part.page]]
 title = "Skill references: setup and errors"
 path = "agents/skill-references-setup.md"
-about = "Electron, the decider, setup, when something fails."
+about = "Electron, setup, when something fails."
 source = [
   { file = "skills/navigera/references/electron.md", demote = true },
-  { file = "skills/navigera/references/decider.md", demote = true },
   { file = "skills/navigera/references/setup.md", demote = true },
   { file = "skills/navigera/references/troubleshooting.md", demote = true },
 ]

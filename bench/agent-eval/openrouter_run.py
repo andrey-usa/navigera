@@ -7,12 +7,10 @@ prompt, same checks — with the Gemini CLI swapped for a direct
 chat-completions loop against OpenRouter. The model gets one tool,
 run_shell_command (the shell tool the Gemini harness gives the agent),
 and drives the browser tool named by --tool through it: plain navigera
-(Chrome), navigera-lightpanda, navigera-shell, the +jev variants (whose
-decider relay, --decider-url/--decider-log, bench/decide/relay.py, is
-run.py's own wiring, held outside the agent's shell), or agent-browser
-(on Chrome, or on its Lightpanda engine).
+(Chrome), navigera-lightpanda, navigera-shell, or agent-browser (on
+Chrome, or on its Lightpanda engine).
 
-  openrouter_run.py --tool navigera-lightpanda+jev \
+  openrouter_run.py --tool navigera-lightpanda \
                     --models deepseek/deepseek-v4.1-flash,inception/mercury-3 \
                     --tasks lookup,support --reps 1 --out out/openrouter
 
@@ -122,7 +120,6 @@ def run_agent(key: str, model: str, prompt: str, work: Path, env: dict, args) ->
     cost, cost_seen = 0.0, False
     text_parts, commands, errors = [], [], []
     timed_out, stuck = False, None
-    decider_seen = False
     last_cmd, repeat = None, 0
     while turns < MAX_TURNS:
         if time.time() > deadline:
@@ -168,10 +165,6 @@ def run_agent(key: str, model: str, prompt: str, work: Path, env: dict, args) ->
             commands.append(cmd)
             rc, out = run_shell(cmd, work, env)
             result_text = tool_text(rc, out)
-            # Whether the agent saw `start` report a decider (navigera+jev
-            # runs), as run.py records it for the Gemini driver.
-            if '"decider"' in result_text:
-                decider_seen = True
             messages.append({"role": "tool", "tool_call_id": call.get("id"),
                              "content": result_text})
             if rc:
@@ -191,7 +184,7 @@ def run_agent(key: str, model: str, prompt: str, work: Path, env: dict, args) ->
         "tokens_in": tokens_in, "tokens_out": tokens_out,
         "tokens_cached": tokens_cached, "tokens_total": tokens_in + tokens_out,
         "cost_usd": round(cost, 6) if cost_seen else None,
-        "errors": errors[-3:], "stuck": stuck, "decider_seen": decider_seen,
+        "errors": errors[-3:], "stuck": stuck,
     }
 
 
@@ -214,19 +207,6 @@ def render(tool: str, models: list, runs: list) -> str:
         lines.append(f"| `{m}` | {sum(1 for r in rs if r['ok'])}/{len(rs)} | "
                      f"{sum(r.get('requests') or 0 for r in rs)} | {sum(r.get('tokens_total') or 0 for r in rs)} | "
                      f"${cost:.4f} | {sum(r.get('wall_s') or 0 for r in rs):.0f}s |")
-    if any("decider_calls" in r for r in runs):
-        lines += ["", "| model | runs that saw the decider | runs that used find/check | find/check commands | "
-                      "decider calls | decider input tokens | decider errors |", "|---|---|---|---|---|---|---|"]
-        for m in models:
-            rs = [r for r in runs if r["model"] == m]
-            if not rs:
-                continue
-            lines.append(f"| `{m}` | {sum(1 for r in rs if r.get('decider_seen'))}/{len(rs)} | "
-                         f"{sum(1 for r in rs if r.get('decision_commands'))}/{len(rs)} | "
-                         f"{sum(r.get('decision_commands') or 0 for r in rs)} | "
-                         f"{sum(r.get('decider_calls') or 0 for r in rs)} | "
-                         f"{sum(r.get('decider_tokens') or 0 for r in rs)} | "
-                         f"{sum(r.get('decider_errors') or 0 for r in rs)} |")
     fails = [r for r in runs if not r["ok"]]
     if fails:
         lines += ["", "Failures:"]
@@ -241,10 +221,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tool", default="navigera",
                     help="run.py tool variant: navigera, navigera-lightpanda, navigera-shell, "
-                         "a +jev variant (which needs --decider-url/--decider-log), "
                          "agent-browser or agent-browser-lightpanda")
-    ap.add_argument("--decider-url", help="decision-model endpoint for +jev tools (bench/decide/relay.py)")
-    ap.add_argument("--decider-log", help="the relay's request log, to count each run's decider calls")
     ap.add_argument("--models", default=DEFAULT_MODELS)
     ap.add_argument("--tasks", default="lookup,support")
     ap.add_argument("--reps", type=int, default=1)
@@ -272,7 +249,7 @@ def main() -> int:
         tasks = [t for t in all_tasks if t["id"] in wanted]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    setup_args = types.SimpleNamespace(model="", decider_url=args.decider_url, nv_bin_dir=args.nv_bin_dir)
+    setup_args = types.SimpleNamespace(model="", nv_bin_dir=args.nv_bin_dir)
     runs, spent, stop = [], 0.0, False
     for rep in range(args.reps):
         for ti, task in enumerate(tasks):
@@ -296,16 +273,8 @@ def main() -> int:
                     spec = evalrun.TOOLS[args.tool]
                     prompt = evalrun.SKILLED_PROMPT.format(
                         workdir=work, cmd=spec["cmd"], skill=spec["skill"], name=args.tool,
-                        repo=spec["repo"], base=site.base, task=task["prompt"],
-                        hint=spec.get("hint", ""))
-                    before = evalrun.log_lines(args.decider_log) if spec.get("decider") else 0
+                        repo=spec["repo"], base=site.base, task=task["prompt"])
                     res = run_agent(key, model, prompt, work, env, args)
-                    if spec.get("decider"):
-                        calls = evalrun.read_log(args.decider_log)[before:]
-                        res["decider_calls"] = len(calls)
-                        res["decider_tokens"] = sum((c.get("usage") or {}).get("input_tokens") or 0
-                                                    for c in calls)
-                        res["decider_errors"] = sum(1 for c in calls if c.get("status") != 200)
                     answer = evalrun.final_answer(res["text"])
                     ok, why = evalrun.check(task, answer, site, args.tool)
                     if res.get("stuck"):
@@ -320,8 +289,6 @@ def main() -> int:
                         "ok": ok, "why": why, "infra": infra, "answer": answer[-300:],
                         "shell_count": len(res["shell_commands"]),
                         "tool_commands": sum(1 for c in res["shell_commands"] if spec["cmd"] in c),
-                        "decision_commands": sum(1 for c in res["shell_commands"]
-                                                 if evalrun.DECISION.search(c)),
                         "off_tool_commands": [c[:200] for c in res["shell_commands"]
                                               if evalrun.OFF_TOOL.search(c)],
                     })
