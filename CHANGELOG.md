@@ -93,11 +93,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
-- `cookies` lists an HttpOnly cookie without its value (its length, and
-  `--values` to show it); `--json` is complete, for programs. Such a cookie
+- `cookies` lists an HttpOnly cookie without its value (`--values` shows
+  it; `--json` is complete, for programs). Such a cookie
   is usually a session's key: in the agent eval's `api` task, agents
   exploring with `cookies` put the session id in their own context in 5 of
-  16 runs (run 43173307176 and its A/B), though none needed it.
+  16 runs (run 43173307176 and its A/B), though none needed it. The line
+  doesn't name `--values`: told how, 3 agents of 24 asked for it.
 - An attach endpoint's key stays out of sight: the values in its query
   (`?apiKey=…`, `?token=…`) and any `user:password@` are shown as `***` in
   every message, the `start` note and `status`'s `endpoint` and

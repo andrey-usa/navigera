@@ -6229,7 +6229,7 @@ fn cookies_text(cookies: &Value, values: bool) -> String {
             let get = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("");
             let http_only = c.get("httpOnly").and_then(Value::as_bool) == Some(true);
             let value: String = if http_only && !values {
-                format!("(hidden: {} characters, HttpOnly; --values shows it)", get("value").chars().count())
+                "(HttpOnly, hidden: the browser sends it with its own requests)".to_string()
             } else {
                 get("value").chars().take(120).collect()
             };
