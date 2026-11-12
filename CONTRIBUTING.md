@@ -97,7 +97,7 @@ Measurement rules the ladder follows:
   typed by hand: `bench/ladder/fetch_publish.py <run id>` writes the run's
   `publish.json` from its notices (no token, no artifact download), then
   `bench/ladder/gen_readme.py README.md publish.json "<what changed>"
-  --page docs/benchmarks.md --losses docs/losses.md` writes every table to
+  --page docs/benchmarks.md --losses docs/losses.md --ops docs/operations.md` writes every table to
   the docs site's Benchmarks pages, the measures another tool won to its
   losses page, and the headline to the README.
 

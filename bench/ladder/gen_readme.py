@@ -1,7 +1,7 @@
 """Write the benchmark docs from a ladder publish.json.
 
 Usage: gen_readme.py README.md publish.json ["what the nv-baseline A/B changed"]
-                     [--run ID] [--page PATH [--losses PATH]]
+                     [--run ID] [--page PATH [--losses PATH] [--ops PATH]]
 
 Numbers in the docs come from a run's publish.json, never retyped. Every
 generated page opens with a link to the run (all its tables are that run's):
@@ -9,7 +9,9 @@ ID from --run, else the run_id the ladder recorded in publish.json.
 
 With --page (docs/benchmarks.md), every table goes to that page, and the
 measures where another tool beat navigera in the run to a section closing
-it, or to the page --losses names (docs/losses.md); README.md's `## Benchmarks` gets the headline: one table of
+it, or to the page --losses names (docs/losses.md), and the matched-operations
+table to the page --ops names (docs/operations.md: the results page stays
+under the site's 1,500 words); README.md's `## Benchmarks` gets the headline: one table of
 the main drivers, the per-call time of the agent tools, the same list of
 losses, and a link to the page. Without it, every table goes to README.md
 (how runs before the docs site were written)."""
@@ -19,12 +21,12 @@ import sys
 
 args = sys.argv[1:]
 opts = {}
-for flag in ("--run", "--page", "--losses"):
+for flag in ("--run", "--page", "--losses", "--ops"):
     if flag in args:
         i = args.index(flag)
         opts[flag] = args[i + 1]
         del args[i:i + 2]
-run_arg, page_path, losses_path = opts.get("--run"), opts.get("--page"), opts.get("--losses")
+run_arg, page_path, losses_path, ops_path = opts.get("--run"), opts.get("--page"), opts.get("--losses"), opts.get("--ops")
 readme_path, pub_path = args[0], args[1]
 change_note = args[2].strip() if len(args) > 2 else ""
 doc = json.load(open(pub_path))
@@ -321,7 +323,7 @@ if ops:
     ops_label = {**label,
                  "navigera (baseline)": "`navigera` (baseline build)",
                  "browser-use": f"`browser-use` {ver('browser-use', '')} (exec model)".replace("  ", " ")}
-    lines += [
+    ops_lines = [
         "### Matched operations (one call per op, warm session, median of 10)",
         "",
         numbers + ".",
@@ -357,8 +359,8 @@ if ops:
             else:
                 row.append(f"{cell['median_ms']:.1f} ms ({cell['calls']} call"
                            f"{'s' if cell['calls'] != 1 else ''})")
-        lines.append("| " + " | ".join(row) + " |")
-    lines += [
+        ops_lines.append("| " + " | ".join(row) + " |")
+    ops_lines += [
         "",
         "Snapshot outputs differ in form (each tool's default tree), so that row compares",
         "call latency, not equivalent work. The browser-use snapshot comes from its",
@@ -367,6 +369,17 @@ if ops:
         "(n/N)` cell has only n of the 10 expected reps; its median is partial evidence.",
         "",
     ]
+    if ops_path:
+        # Its own page: the heading becomes the title, and the results page
+        # points at it (the site holds every page under 1,500 words).
+        ops_page = ["# " + ops_lines[0][4:]] + ops_lines[1:]
+        open(ops_path, "w").write("\n".join(ops_page))
+        lines += [
+            "Per op: [Matched operations](https://andrey-usa.github.io/navigera/benchmarks/operations.html).",
+            "",
+        ]
+    else:
+        lines += ops_lines
 par = doc.get("parallel") or []
 if par:
     ns = [r_["n"] for r_ in par[0]["runs"]]
@@ -538,4 +551,4 @@ if not page_path:
 end = rest + 1 if rest >= 0 else len(text)
 text = text[:start] + "\n".join(lines) + "\n" + text[end:]
 open(readme_path, "w").write(text)
-print("README" + "".join(f", {p}" for p in (page_path, losses_path) if p) + " updated from run", run_id)
+print("README" + "".join(f", {p}" for p in (page_path, losses_path, ops_path) if p) + " updated from run", run_id)

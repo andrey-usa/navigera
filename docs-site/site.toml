@@ -189,6 +189,12 @@ about = "Every driver and agent tool on the same scripted session, from one CI r
 source = { file = "docs/benchmarks.md" }
 
 [[part.page]]
+title = "Matched operations"
+path = "benchmarks/operations.md"
+about = "One call per op, warm session, median of 10: navigera against agent-browser, playwright-cli, Playwright MCP, Chrome DevTools MCP and browser-use, each in its default output."
+source = { file = "docs/operations.md" }
+
+[[part.page]]
 title = "Where navigera is not ahead"
 path = "benchmarks/losses.md"
 about = "Each measure on which another tool beat navigera in the same run."

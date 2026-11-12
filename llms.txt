@@ -45,6 +45,7 @@ Each page below is markdown. The whole site in one file: https://andrey-usa.gith
 ## Benchmarks
 
 - [Results](https://andrey-usa.github.io/navigera/benchmarks/results.md): Every driver and agent tool on the same scripted session, from one CI run, with how each number is taken.
+- [Matched operations](https://andrey-usa.github.io/navigera/benchmarks/operations.md): One call per op, warm session, median of 10: navigera against agent-browser, playwright-cli, Playwright MCP, Chrome DevTools MCP and browser-use, each in its default output.
 - [Where navigera is not ahead](https://andrey-usa.github.io/navigera/benchmarks/losses.md): Each measure on which another tool beat navigera in the same run.
 - [Agent eval](https://andrey-usa.github.io/navigera/benchmarks/agent-eval.md): A generic coding agent, given only the tool and its docs, finishing real tasks: navigera, Playwright, agent-browser.
 
