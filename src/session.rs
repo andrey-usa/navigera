@@ -571,6 +571,8 @@ pub fn batch(
     };
     let caller = caller_id();
     let mut responses = Vec::new();
+    let defers = if config.compact { protocol::batch_defers(steps) } else { Vec::new() };
+    let mut deferred = false;
     for (i, step) in steps.iter().enumerate() {
         let mut request = match serde_json::to_value(&step.command) {
             Ok(value) => value,
@@ -580,10 +582,15 @@ pub fn batch(
         if let Some(caller) = &caller {
             request[CALLER] = json!(caller);
         }
-        // An action in a batch says what it changed, as it does alone: the
-        // agent needs no look after the batch to see how it ended.
+        // Actions in a batch say what they changed: the agent needs no look
+        // after the batch to see how it ended.
         if config.compact {
             request["compact"] = json!(true);
+        }
+        // In a run of actions the last one says what they all changed.
+        if defers.get(i) == Some(&true) {
+            request["defer"] = json!(true);
+            deferred = true;
         }
         localize_request(&mut request, config);
         let mut writer = &stream;
@@ -598,6 +605,21 @@ pub fn batch(
         });
         let failed = response["ok"] != true;
         responses.push(response);
+        // The step that was to report for the ones before it failed: ask
+        // for what they changed.
+        if failed && deferred {
+            let mut ask = json!({ "id": "owed", "owed_report": true });
+            if let Some(caller) = &caller {
+                ask[CALLER] = json!(caller);
+            }
+            let mut line = String::new();
+            if writer.write_all(format!("{ask}\n").as_bytes()).and_then(|_| writer.flush()).is_ok() {
+                let _ = reader.read_line(&mut line);
+            }
+            if let Ok(answer) = serde_json::from_str::<Value>(line.trim()) {
+                protocol::put_owed_report(&mut responses, &answer["result"]);
+            }
+        }
         if (failed && !keep_going) || matches!(step.command, Command::Quit { .. }) {
             break;
         }

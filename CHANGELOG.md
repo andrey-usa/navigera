@@ -65,6 +65,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- In a compact `batch`, actions one right after another report once, at
+  the last of them: what they changed together since the last look. Each
+  used to report its own change, reading the page again each time, and a
+  change one step made and the next undid cost two lines that said
+  nothing. Two fills, a click and an `eval` on a 500-card page after a
+  look (40 runs each, interleaved, local release build, Chrome 153):
+  median 64.0 to 46.8 ms, output 74 to 16 bytes. A step that starts a
+  request still reports at once, as does one followed by a read or a
+  wait; entries alone (fill, type, select, check) report as before; when
+  the last action fails, what the ones before it changed is still said.
+  The page read once after the run equals a full read on 41 trap pages
+  in three batch shapes.
 - The MCP tool list says `readOnlyHint` only for the tools that read
   (`false` is the protocol's default): 200 bytes less of every session's
   context, with `until_gone` on `browser_click` added.

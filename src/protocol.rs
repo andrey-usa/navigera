@@ -2965,6 +2965,13 @@ pub struct Driver {
     /// The last tree `ax` gave as text, so an action can say what it changed
     /// on the page (see [`Driver::page_change`]).
     look: Option<Look>,
+    /// The step being reported may leave its change report to a later step
+    /// of the same batch (see [`batch_defers`]); the step's id.
+    defer: Option<Value>,
+    /// A step that did: its id, its command and what it said itself. The
+    /// next report is read from the page (no shortcut through the change
+    /// journal, which judges one entry at a time) and covers it too.
+    owed: Option<(Value, Command, Value)>,
     /// The last report was compact: an agent reads what actions change.
     compact: bool,
     /// Reads are an agent's that reads again (the MCP server's), whatever
@@ -3468,6 +3475,8 @@ impl Driver {
                 crash: Crash::default(),
                 reported: None,
                 look: None,
+                defer: None,
+                owed: None,
                 compact: false,
                 agent_reads: false,
                 read_answer: None,
@@ -3487,6 +3496,8 @@ impl Driver {
                 crash: Crash::default(),
                 reported: None,
                 look: None,
+                defer: None,
+                owed: None,
                 compact: false,
                 agent_reads: false,
                 read_answer: None,
@@ -3513,6 +3524,8 @@ impl Driver {
             crash: Crash::default(),
             reported: None,
             look: None,
+            defer: None,
+            owed: None,
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -3541,6 +3554,8 @@ impl Driver {
             crash,
             reported: None,
             look: None,
+            defer: None,
+            owed: None,
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -3584,6 +3599,8 @@ impl Driver {
             crash,
             reported: None,
             look: None,
+            defer: None,
+            owed: None,
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -3934,6 +3951,7 @@ impl Driver {
     pub(crate) fn report_state(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
         self.compact = compact;
         self.report_state_inner(command, result, compact);
+        self.defer = None;
         // After an action, put the page's timer functions back (see
         // [`crate::cdp::Page::settle_unhook`]) unless a settle proof still
         // needs them: once the action's requests have started, the read
@@ -3947,10 +3965,30 @@ impl Driver {
         self.session.publish_own_tabs();
     }
 
+    /// The next report may be left to a later step of the same batch
+    /// (step `id`, see [`batch_defers`]).
+    pub(crate) fn defer_report(&mut self, id: Value) {
+        self.defer = Some(id);
+    }
+
+    /// The report a batch step left to a later one that never made it (it
+    /// failed, or the batch stopped before it): the step's id and what it
+    /// says now, the change since the last look included. None when no
+    /// report is owed or nothing the look showed changed.
+    pub(crate) fn owed_report(&mut self) -> Option<(Value, Value)> {
+        self.defer = None;
+        let (id, command, short) = self.owed.clone()?;
+        let report = self.page_change(&command, &short);
+        self.owed = None;
+        Some((id, report?))
+    }
+
     fn report_state_inner(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
         if let (Command::Ax { .. }, Some(Value::String(tree))) = (command, result.as_ref()) {
             self.look =
                 Some(Look::new(command.clone(), tree.clone(), self.session.page_identity(), self.session.journal_id()));
+            // The look shows what the steps before it changed.
+            self.owed = None;
         }
         let Some(value) = result.as_ref() else { return };
         let (own, state) = split_state(value);
@@ -4009,6 +4047,7 @@ impl Driver {
         }
         let mut look = self.look.take()?;
         if look.page != self.session.page_identity() {
+            self.owed = None;
             return None;
         }
         // Read after what the action started, not before it: once its
@@ -4019,7 +4058,19 @@ impl Driver {
         // as the journal armed with the last read can prove: the report is
         // what a read would say (nothing beyond the entry), without reading
         // a large page again. The entry waits in `typed` for the next read.
-        if let (Some(v), Some(id), false) = (typed.filter(|v| !v.is_empty()), look.journal, traffic) {
+        // A step of a batch with another action right behind it, which
+        // started no request: the page is not read for it. The last action
+        // of the run reads it once and says what they all changed (a read
+        // per step cost a large page 15-20 ms each, and a change one step
+        // made and the next undid cost the agent two lines for nothing).
+        if let (Some(id), false) = (self.defer.take(), traffic) {
+            look.typed.extend(typed.filter(|v| !v.is_empty()).map(str::to_string));
+            self.look = Some(look);
+            self.owed = Some((id, command.clone(), short.clone()));
+            return None;
+        }
+        let owed = self.owed.take().is_some();
+        if let (Some(v), Some(id), false, false) = (typed.filter(|v| !v.is_empty()), look.journal, traffic, owed) {
             if self.session.journal_unchanged(id, v) {
                 look.typed.push(v.to_string());
                 self.look = Some(look);
@@ -4030,8 +4081,8 @@ impl Driver {
         entered.extend(typed);
         // A check or a choice that changed nothing else the tree shows: its
         // controls' own lines, rewritten, are what a read would say.
-        if let (true, Some(id), false) =
-            (matches!(command, Command::Select { .. } | Command::SetChecked { .. }), look.journal, traffic)
+        if let (true, Some(id), false, false) =
+            (matches!(command, Command::Select { .. } | Command::SetChecked { .. }), look.journal, traffic, owed)
         {
             if let Some(tree) = self.session.journal_restate(id).and_then(|moved| restate(&look.tree, &moved)) {
                 let change = tree_change(&look.tree, &tree, &entered);
@@ -6193,6 +6244,15 @@ fn handle_value(driver: &mut Driver, value: Value) -> (Response, bool) {
         Value::Object(mut map) => {
             let id = map.remove("id").unwrap_or(Value::Null);
             let compact = map.remove("compact").and_then(|c| c.as_bool()).unwrap_or(false);
+            // A batch asks for the report a step left to a later one.
+            if map.remove("owed_report").is_some() {
+                let started = Instant::now();
+                let owed = driver.owed_report().map(|(step, result)| json!({ "step": step, "result": result }));
+                return (ok_response(id, owed.unwrap_or(Value::Null), started), false);
+            }
+            if map.remove("defer").and_then(|d| d.as_bool()) == Some(true) && compact {
+                driver.defer_report(id.clone());
+            }
             match serde_json::from_value::<Command>(Value::Object(map)) {
                 Ok(command) => (id, command, compact),
                 Err(e) => return (err_response(id, format!("bad command: {e}"), Instant::now()), false),
@@ -6886,6 +6946,54 @@ fn with_change(command: &Command, short: &Value, change: String) -> String {
     }
 }
 
+/// Which steps of a compact batch leave their change report to a later
+/// one. In a run of actions with nothing between them, the last says what
+/// the run changed, once; the ones before it say nothing, when the run
+/// would otherwise read the page more than once: every step before the
+/// run's last click, press, drag or upload, and every step after one that
+/// deferred. Entries alone (fill, type, select, check) keep their own
+/// reports: the change journal answers those without a read. A step that
+/// reads or waits between two actions ends the run, so it sees the page
+/// as settled as it did before.
+pub fn batch_defers(steps: &[BatchStep]) -> Vec<bool> {
+    let entry = |c: &Command| {
+        matches!(
+            c,
+            Command::Fill { .. }
+                | Command::Type { .. }
+                | Command::InsertText { .. }
+                | Command::Select { .. }
+                | Command::SetChecked { .. }
+        )
+    };
+    let mut out = vec![false; steps.len()];
+    let mut start = 0;
+    while start < steps.len() {
+        if !reports_page_change(&steps[start].command) {
+            start += 1;
+            continue;
+        }
+        let end = start + steps[start..].iter().take_while(|s| reports_page_change(&s.command)).count();
+        let last_other = (start..end).rev().find(|&i| !entry(&steps[i].command));
+        let mut owed = false;
+        for (i, defer) in out.iter_mut().enumerate().take(end - 1).skip(start) {
+            owed |= last_other.is_some_and(|l| l > i);
+            *defer = owed;
+        }
+        start = end;
+    }
+    out
+}
+
+/// Put the report a batch step left to a later one (see
+/// [`Driver::owed_report`]) into that step's response.
+pub fn put_owed_report(responses: &mut [Value], owed: &Value) {
+    let (Some(step), Some(result)) = (owed.get("step"), owed.get("result")) else { return };
+    if let Some(r) = responses.iter_mut().find(|r| r.get("id") == Some(step) && r["ok"] == true) {
+        r["result"] = result.clone();
+    }
+}
+
 /// Actions whose compact output says what they changed on the page.
 pub(crate) fn reports_page_change(command: &Command) -> bool {
     matches!(
@@ -7258,7 +7366,7 @@ pub fn batch_response(steps: &[BatchStep], responses: &[Value], elapsed_ms: f64)
 
 /// How a batch prints: the whole response as JSON, or (`--raw`) each
 /// result on its own line (the page state when no step read anything; in
-/// compact output, what each action changed and any title or URL a step
+/// compact output, what the actions changed and any title or URL a step
 /// changed), notes and the failure on stderr.
 pub fn print_batch(output: &mut dyn Write, response: &Value, config: &SessionConfig) -> bool {
     let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
@@ -7328,17 +7436,27 @@ fn run_batch(source: Option<&str>, keep_going: bool, config: &SessionConfig, out
         Err(e) => return batch_fail(output, config, format!("{e:#}")),
     };
     let mut responses = Vec::new();
+    let defers = if config.compact { batch_defers(&steps) } else { Vec::new() };
     for (i, step) in steps.iter().enumerate() {
         let t = Instant::now();
         let id = json!(i + 1);
         let mut response = match driver.run_op(&step.command) {
-            Ok(outcome) => outcome_response(id, outcome, t),
-            Err(e) => err_response(id, format!("{e:#}"), t),
+            Ok(outcome) => outcome_response(id.clone(), outcome, t),
+            Err(e) => err_response(id.clone(), format!("{e:#}"), t),
         };
+        if defers.get(i) == Some(&true) {
+            driver.defer_report(id);
+        }
         driver.report_state(&step.command, &mut response.result, config.compact);
         let response = serde_json::to_value(&response).unwrap_or(Value::Null);
         let failed = response["ok"] != true;
         responses.push(response);
+        // The step that was to report for the ones before it failed.
+        if failed {
+            if let Some((step, result)) = driver.owed_report() {
+                put_owed_report(&mut responses, &json!({ "step": step, "result": result }));
+            }
+        }
         if (failed && !keep_going) || matches!(step.command, Command::Quit { .. }) {
             break;
         }
@@ -7489,6 +7607,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_run_of_batch_actions_reports_at_its_last() {
+        let defers = |text: &str| {
+            batch_defers(&batch_steps(text).unwrap()).iter().map(|&d| if d { 'd' } else { '.' }).collect::<String>()
+        };
+        // Before the run's last click, every step; the last reports.
+        assert_eq!(defers("fill --label A a\nfill --label B b\nclick --text Go\neval 1"), "dd..");
+        assert_eq!(defers("click --text A\nclick --text B\nclick --text C"), "dd.");
+        // Entries alone keep their own reports (the journal answers them).
+        assert_eq!(defers("fill --label A a\nfill --label B b"), "..");
+        // After a click that reports, entries again their own; after one
+        // that deferred, the last of the run.
+        assert_eq!(defers("click --text A\nfill --label B b\nfill --label C c"), "...");
+        assert_eq!(defers("fill --label A a\nclick --text B\nfill --label C c\nfill --label D d"), "ddd.");
+        // A read or a wait between two actions ends the run.
+        assert_eq!(defers("click --text A\ntext\nclick --text B\ngoto /x\nclick --text C"), ".....");
+        assert_eq!(defers("click --text A"), ".");
+    }
 
     #[test]
     fn batch_lines_split_like_a_shell_and_parse_as_steps() {

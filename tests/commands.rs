@@ -852,6 +852,40 @@ fn compact_output_says_only_what_changed() {
         let (ok, out) = batch("fill --label 'Email address' z\nclick --text Cancel\n");
         assert!(ok && out.contains("cancel") && !out.lines().any(|l| l == "ok"), "[{engine}] {out}");
         assert_eq!(batch("fill --label 'Email address' y\n"), (true, "ok".to_string()), "[{engine}]");
+        // Actions one after another report once, at the last: what the run
+        // changed since the look, not each step's own change.
+        assert!(compact(&["ax"]).0, "[{engine}]");
+        let (ok, out) = batch("click --testid save-btn\nclick --text Cancel\nclick --testid save-btn\n");
+        assert_eq!((ok, out.as_str()), (true, "+ paragraph: saved\n- paragraph: cancel"), "[{engine}]");
+        // A change one step made and the next undid is no change.
+        assert_eq!(batch("click --text Cancel\nclick --testid save-btn\n"), (true, "ok".to_string()), "[{engine}]");
+        // An entry before a click leaves its report to the click, and is not
+        // reported as a change itself.
+        let (ok, out) = batch("fill --label 'Email address' q@r.s\nclick --text Cancel\n");
+        assert_eq!((ok, out.as_str()), (true, "+ paragraph: cancel\n- paragraph: saved"), "[{engine}]");
+        // The step that was to report failed: what the ones before it
+        // changed is still said.
+        let (ok, out) = batch("click --testid save-btn\nclick --text Nowhere --timeout-ms 300\n");
+        assert_eq!((ok, out.as_str()), (false, "+ paragraph: saved\n- paragraph: cancel"), "[{engine}]");
+        // The same without a session (a browser for the batch alone).
+        let mut cmd = Command::new(tool_exe());
+        cmd.env_remove("NAVIGERA_OUTPUT").env_remove("NAVIGERA_SESSION").args(["--engine", engine]);
+        if let Some(bin) = &bin {
+            cmd.arg("--chromium").arg(bin);
+        }
+        let mut child =
+            cmd.args(["batch", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("run navigera");
+        let steps = format!(
+            "goto {base}/form\nax\nclick --text Cancel\nclick --testid save-btn\nclick --text Nowhere --timeout-ms 300\n"
+        );
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), steps.as_bytes()).unwrap();
+        let out = child.wait_with_output().expect("batch");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let changed: Vec<&str> = text.lines().filter(|l| l.starts_with("+ ")).collect();
+        assert!(
+            !out.status.success() && changed == ["+ paragraph: saved"] && !text.contains("cancel"),
+            "[{engine}] {text}"
+        );
         // The page's own script isn't text it shows.
         let (ok, out, _) = compact(&["text", "--selector", "body"]);
         assert!(ok && out.contains("I accept the terms") && !out.contains("addEventListener"), "[{engine}] {out}");
