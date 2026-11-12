@@ -406,8 +406,11 @@ fn vitals() {
     // A heading painted at once, a paragraph that pushes it down once the
     // page has painted (a shift before the first paint is no layout shift,
     // and a slow runner paints later than any fixed delay), a quick button
-    // and one whose handler keeps the page busy for 250 ms.
-    let page = "data:text/html,<h1 id=t>Hello</h1><button id=slow onclick=\"let t=performance.now();while(performance.now()-t<250){}\">slow</button><button id=quick>quick</button><script>new PerformanceObserver((l,o)=>{if(!l.getEntries().some(e=>e.name==='first-contentful-paint'))return;o.disconnect();setTimeout(()=>{const p=document.createElement('p');p.style.height='300px';p.textContent='pushed';document.body.prepend(p)},100)}).observe({type:'paint',buffered:true})</script>";
+    // and one whose handler keeps the page busy for 250 ms. The browser
+    // records a shift with the frame that shows it, not when the DOM
+    // changes: `window.shifted` says it has (the test waits for that, not
+    // for the paragraph's text, which is there a frame earlier).
+    let page = "data:text/html,<h1 id=t>Hello</h1><button id=slow onclick=\"let t=performance.now();while(performance.now()-t<250){}\">slow</button><button id=quick>quick</button><script>new PerformanceObserver((l)=>{if(l.getEntries().some(e=>e.value>0))window.shifted=true}).observe({type:'layout-shift',buffered:true});new PerformanceObserver((l,o)=>{if(!l.getEntries().some(e=>e.name==='first-contentful-paint'))return;o.disconnect();setTimeout(()=>{const p=document.createElement('p');p.style.height='300px';p.textContent='pushed';document.body.prepend(p)},100)}).observe({type:'paint',buffered:true})</script>";
     for (engine, bin) in engines() {
         let a = Agent::new("vitals", engine, bin);
         a.ok(&["goto", page]);
@@ -416,6 +419,7 @@ fn vitals() {
             continue;
         }
         a.ok(&["wait", "--text", "pushed"]);
+        a.ok(&["wait", "--js", "window.shifted === true"]);
         let v = a.ok(&["vitals"]);
         assert!(v["lcp"].as_f64().is_some_and(|n| n > 0.0), "{v}");
         assert_eq!(v["lcp_element"], "#t", "{v}");
