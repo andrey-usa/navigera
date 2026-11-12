@@ -310,7 +310,11 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    eprintln!("navigera: session listening on {} ({})", path.display(), driver.session().endpoint());
+    eprintln!(
+        "navigera: session listening on {} ({})",
+        path.display(),
+        crate::cdp::attach::shown(&driver.session().endpoint())
+    );
 
     let last_activity = Arc::new(AtomicU64::new(now_s()));
     if config.idle_timeout_s > 0 {
@@ -851,9 +855,12 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
     if let Some(transport) = &config.transport {
         cmd.arg("--transport").arg(transport);
     }
-    if let Some(spec) = &config.attach {
-        cmd.arg(format!("--attach={spec}"));
-    }
+    // Where to attach goes in the environment: a command line is anyone's
+    // to read (`ps`), and a cloud browser's endpoint carries its key.
+    match &config.attach {
+        Some(spec) => cmd.env("NAVIGERA_ATTACH", spec),
+        None => cmd.env_remove("NAVIGERA_ATTACH"),
+    };
     if config.in_current_tab {
         cmd.arg("--tab").arg("current");
     }
@@ -910,8 +917,13 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
 
     // Attaching to the user's Chrome waits for them to click Allow.
     let wait = if config.attach.is_some() { 180 } else { 60 };
-    if config.attach.is_some() {
-        eprintln!("navigera: connecting to your browser; if it asks to allow the connection, click Allow");
+    match config.attach.as_deref() {
+        // A browser in the cloud asks nobody.
+        Some(spec) if spec.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("wss:")) => {
+            eprintln!("navigera: connecting to {}", crate::cdp::attach::shown(spec))
+        }
+        Some(_) => eprintln!("navigera: connecting to your browser; if it asks to allow the connection, click Allow"),
+        None => {}
     }
     let deadline = Instant::now() + Duration::from_secs(wait);
     loop {

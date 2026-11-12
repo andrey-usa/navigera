@@ -442,3 +442,139 @@ fn two_sessions_in_the_users_browser_never_list_each_others_windows_as_theirs() 
     let urls = page_urls(port).expect("browser still serves DevTools");
     assert!(urls.iter().any(|u| u.contains("AfterReset")), "--keep-tabs after reset: {urls:?}");
 }
+
+/// A certificate authority and a `localhost` certificate it signed, made
+/// with `openssl` for this run (no key is kept in the repository).
+#[cfg(target_os = "linux")]
+fn test_certs() -> Option<tempfile::TempDir> {
+    let dir = tempfile::tempdir().unwrap();
+    let openssl =
+        |args: &[&str]| Command::new("openssl").args(args).current_dir(dir.path()).stdin(Stdio::null()).output();
+    if openssl(&["version"]).is_err() {
+        assert!(std::env::var_os("NAVIGERA_REQUIRE_BROWSER").is_none(), "the wss test needs openssl on the PATH");
+        return None;
+    }
+    std::fs::write(dir.path().join("leaf.cnf"), "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n").unwrap();
+    let ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"];
+    for step in [
+        [
+            &["req", "-x509"][..],
+            &ec,
+            &["-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=navigera test CA"],
+            &["-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign"],
+        ]
+        .concat(),
+        [&["req"][..], &ec, &["-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=localhost"]].concat(),
+        [
+            "x509",
+            "-req",
+            "-in",
+            "leaf.csr",
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-out",
+            "leaf.pem",
+            "-days",
+            "2",
+            "-extfile",
+            "leaf.cnf",
+        ]
+        .to_vec(),
+    ] {
+        let out = openssl(&step).unwrap();
+        assert!(out.status.success(), "openssl {step:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    Some(dir)
+}
+
+/// The TLS front of a cloud browser, before the test's local one.
+#[cfg(target_os = "linux")]
+struct Relay(Child, u16);
+
+#[cfg(target_os = "linux")]
+impl Drop for Relay {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// One navigera call; its stdout and stderr together, for what it shows.
+#[cfg(target_os = "linux")]
+fn shown(session: &str, args: &[&str], env: &[(&str, &str)]) -> (bool, String) {
+    let mut cmd = Command::new(tool_exe());
+    cmd.arg("--session").arg(session).args(args).stdin(Stdio::null()).env_remove("SSL_CERT_FILE");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run navigera");
+    (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+}
+
+/// A browser in the cloud is reached at a `wss://` endpoint with the
+/// service's key in its query. navigera connects over TLS, checking the
+/// certificate, and the key is in no output, log or command line. (Linux:
+/// there `SSL_CERT_FILE` names the test's CA to the system verifier.)
+#[cfg(target_os = "linux")]
+#[test]
+fn a_wss_endpoint_attaches_over_tls_and_its_key_is_never_shown() {
+    let Some(exe) = chrome() else { return };
+    let Some(certs) = test_certs() else { return };
+    let (_user, profile, port, _mine) = users_browser(&exe);
+    let (_, path) = active_port(profile.path(), Duration::from_secs(5)).expect("the browser endpoint's path");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls_relay.py");
+    let mut child = Command::new(python())
+        .arg(&fixture)
+        .arg(port.to_string())
+        .arg(certs.path().join("leaf.pem"))
+        .arg(certs.path().join("leaf.key"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the TLS relay");
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let relay = Relay(child, line.trim().parse().expect("the relay prints its port"));
+    let key = "k3y-n0t-to-be-shown";
+    let url = format!("wss://localhost:{}{path}?token={key}", relay.1);
+    let ca = certs.path().join("ca.pem").display().to_string();
+    let s = session_name("wss");
+
+    // A certificate this machine doesn't trust: refused, saying where a
+    // private CA goes.
+    let (ok_untrusted, text) = shown(&s, &["start", "--attach", &url], &[]);
+    assert!(!ok_untrusted, "an untrusted certificate must be refused: {text}");
+    assert!(text.contains("SSL_CERT_FILE") && text.contains("token=***"), "{text}");
+    assert!(!text.contains(key), "the key is shown: {text}");
+
+    // Trusted, and the endpoint from the environment (no command line has it).
+    let env = [("SSL_CERT_FILE", ca.as_str()), ("NAVIGERA_ATTACH", url.as_str())];
+    let (started, text) = shown(&s, &["start"], &env);
+    assert!(started, "{text}");
+    assert!(!text.contains(key), "the key is shown: {text}");
+    let json_start = text.find('{').expect("start's JSON");
+    let result: Value = serde_json::from_str(text[json_start..].lines().next().unwrap()).unwrap();
+    let pid = result["result"]["pid"].as_u64().or(result["pid"].as_u64()).expect("the server's pid");
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+    assert!(!String::from_utf8_lossy(&cmdline).contains(key), "the key is on the server's command line");
+
+    let mut seen = String::new();
+    for args in
+        [&["goto", "data:text/html,<title>Cloud</title><h1>over tls</h1>"][..], &["text"], &["status"], &["quit"]]
+    {
+        let (ok_step, text) = shown(&s, args, &[]);
+        assert!(ok_step, "{args:?}: {text}");
+        seen.push_str(&text);
+    }
+    assert!(seen.contains("over tls"), "{seen}");
+    assert!(seen.contains("\"endpoint\":\"wss://localhost:") && seen.contains("token=***"), "{seen}");
+    assert!(seen.contains("left open"), "{seen}");
+    assert!(!seen.contains(key), "the key is shown: {seen}");
+    let log = result["result"]["log"].as_str().or(result["log"].as_str()).expect("the session log");
+    assert!(!std::fs::read_to_string(log).unwrap_or_default().contains(key), "the key is in the session log");
+    drop(relay);
+}

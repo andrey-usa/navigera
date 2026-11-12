@@ -25,5 +25,6 @@ pub mod screencast;
 pub mod session;
 pub mod shared;
 pub mod timing;
+pub mod tls;
 pub mod totp;
 pub mod vitals;

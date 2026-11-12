@@ -1074,13 +1074,13 @@ impl BrowserSession {
         };
         let (ws_url, what) = match target {
             AttachTarget::Running(spec) => match &adopt {
-                Some((http, _)) => (cdp::attach::resolve(http)?, format!("attach {spec}")),
+                Some((http, _)) => (cdp::attach::resolve(http)?, format!("attach {}", cdp::attach::shown(spec))),
                 None if spec == cdp::attach::AUTO => {
                     let (url, which) = cdp::attach::discover().map_err(|e| anyhow::anyhow!("--attach: {e:#}"))?;
                     eprintln!("navigera: attaching to {which}");
                     (url, format!("attach {which}"))
                 }
-                None => (cdp::attach::resolve(spec)?, format!("attach {spec}")),
+                None => (cdp::attach::resolve(spec)?, format!("attach {}", cdp::attach::shown(spec))),
             },
             AttachTarget::Profile { name, executable, headless, from, from_profile } => {
                 let dir = cdp::attach::profile_dir(name)?;

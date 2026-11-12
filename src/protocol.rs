@@ -1255,7 +1255,7 @@ pub struct ParsedArgs {
 
 /// One op's CLI documentation: (name, synopsis, what it does).
 const OPS: &[(&str, &str, &str)] = &[
-    ("start", "[--attach [<where>] [--tab current] | --auto-connect | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open (--auto-connect, a bare --attach: your running browser, whichever serves remote debugging; $NAVIGERA_AUTO_CONNECT=1 for every start; --tab current: in the tab you are on, not a window of its own); --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
+    ("start", "[--attach [<where>] [--tab current] | --auto-connect | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open (--auto-connect, a bare --attach: your running browser, whichever serves remote debugging; $NAVIGERA_AUTO_CONNECT=1 for every start; --attach wss://… a browser in the cloud, $NAVIGERA_ATTACH to keep its key off the command line; --tab current: in the tab you are on, not a window of its own); --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
     ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait] | --grep <words> [--limit <lines>]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …). --grep: only the lines that mention the words (letter case aside), under the containers they sit in, with their refs; the first 30"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force] [--until-gone [--max <n>]]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts. --until-gone: clicks again (a \"Load more\" button) while the element is there and enabled and each click changes the page, letting what each click loads land, at most 50 clicks (--max); says how many and why it stopped"),
@@ -1985,15 +1985,20 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         }
     }
     consume_globals(&mut args, &mut config).map_err(ArgsError::Invalid)?;
-    // `$NAVIGERA_AUTO_CONNECT`: sessions and the MCP server work in the
-    // user's running browser unless told where else.
+    // Unless told where else, sessions and the MCP server work in the
+    // browser `$NAVIGERA_ATTACH` names (a cloud browser's `wss://` endpoint
+    // with its key: from the environment, the key is on no command line),
+    // or with `$NAVIGERA_AUTO_CONNECT` in the user's running browser.
     if matches!(op.as_str(), "start" | "serve" | "mcp")
         && config.attach.is_none()
         && config.profile.is_none()
         && config.electron.is_none()
-        && auto_connect_env()
     {
-        config.attach = Some(DEFAULT_ATTACH.to_string());
+        if let Some(spec) = std::env::var("NAVIGERA_ATTACH").ok().filter(|v| !v.trim().is_empty()) {
+            config.attach = Some(spec.trim().to_string());
+        } else if auto_connect_env() {
+            config.attach = Some(DEFAULT_ATTACH.to_string());
+        }
     }
     if config.in_current_tab && config.attach.is_none() {
         return invalid("--tab current works in your own browser's tab: add --attach (or --auto-connect)");
@@ -5700,7 +5705,7 @@ impl Driver {
                 let mut state = self.state_json();
                 state["engine"] = json!(if self.session.is_lightpanda() { "lightpanda" } else { "chrome" });
                 state["executable"] = json!(self.session.executable());
-                state["endpoint"] = json!(self.session.endpoint());
+                state["endpoint"] = json!(crate::cdp::attach::shown(&self.session.endpoint()));
                 state["attached"] = json!(self.session.is_attached());
                 state["browser"] = json!(match self.session.shared_sessions() {
                     Some(1) => "shared (1 session)".to_string(),
@@ -6340,7 +6345,7 @@ pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn W
     };
     eprintln!(
         "navigera: live session on {} (engine={}); send JSON lines, {{\"op\":\"quit\"}} to exit",
-        driver.session().endpoint(),
+        crate::cdp::attach::shown(&driver.session().endpoint()),
         config.engine,
     );
 

@@ -16,7 +16,9 @@ include = ["/src/**", "/skills/**", "/tests/**", "/bench/site/server.py", "/buil
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "net", "macros"] }
-tokio-tungstenite = "0.30"
+# `__rustls-tls`: a `wss://` DevTools endpoint (a browser in the cloud), over
+# the rustls config of `src/tls.rs`; the crate builds no TLS config of its own.
+tokio-tungstenite = { version = "0.30", features = ["__rustls-tls"] }
 futures-util = "0.3"
 tempfile = "3"
 base64 = "0.23"
@@ -26,9 +28,13 @@ anyhow = "1"
 miniz_oxide = "0.9"
 # Byte search for the reads of large CDP answers (already in the build through serde_json).
 memchr = "2"
+# TLS for connections navigera opens itself (`--attach wss://`, and the
+# `http` feature's requests): rustls with ring, certificates checked by the
+# operating system's verifier.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
 # The `http` feature: requests outside the page (bitti's API tests).
 ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "platform-verifier"], optional = true }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 
 [build-dependencies]
 # Deflates the vendored axe-core into the binary (see build.rs).
@@ -37,7 +43,7 @@ miniz_oxide = "0.9"
 [features]
 # HTTP outside the page, for a crate that uses navigera as a library;
 # navigera's own binary doesn't build it.
-http = ["dep:ureq", "dep:rustls"]
+http = ["dep:ureq"]
 
 # musl's allocator is slow on the many small allocations a large snapshot makes.
 [target.'cfg(target_env = "musl")'.dependencies]

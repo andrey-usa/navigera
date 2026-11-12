@@ -15,8 +15,13 @@
 //!   `--remote-debugging-port` switch is ignored for the default profile.)
 //! * a user data directory: any Chrome started with
 //!   `--remote-debugging-port` and that `--user-data-dir`;
-//! * `ws://…` (the browser endpoint), `http://host:port`, `host:port` or a bare port:
-//!   a DevTools HTTP server's `/json/version` names the endpoint.
+//! * `ws://…` or `wss://…` (the browser endpoint; `wss://` is how browsers
+//!   in the cloud are reached, over TLS, see `crate::tls`), `http://host:port`,
+//!   `host:port` or a bare port: a DevTools HTTP server's `/json/version`
+//!   names the endpoint.
+//!
+//! An endpoint's query often carries the service's key (`?apiKey=…`,
+//! `?token=…`): [`shown`] is the form every message prints.
 //!
 //! `--profile <name|dir>` is the self-contained version: a persistent,
 //! visible Chrome on its own user data directory that navigera starts when
@@ -193,13 +198,56 @@ pub fn discover() -> Result<(String, String)> {
     )
 }
 
+/// `url` fit to print: the values in its query (`?apiKey=…`, `?token=…`,
+/// how browsers in the cloud take their key), its fragment and any
+/// `user:password@` become `***`; scheme, host, port and path stay, so the
+/// message still says where.
+pub fn shown(url: &str) -> String {
+    let (head, fragment) = match url.split_once('#') {
+        Some((h, _)) => (h, "#***"),
+        None => (url, ""),
+    };
+    let (base, query) = head.split_once('?').map_or((head, None), |(b, q)| (b, Some(q)));
+    let base = match base.split_once("://") {
+        Some((scheme, rest)) => {
+            let end = rest.find('/').unwrap_or(rest.len());
+            let (authority, path) = rest.split_at(end);
+            match authority.rsplit_once('@') {
+                Some((_, host)) => format!("{scheme}://***@{host}{path}"),
+                None => base.to_string(),
+            }
+        }
+        None => base.to_string(),
+    };
+    let query = query.map_or(String::new(), |q| {
+        let pairs: Vec<String> = q
+            .split('&')
+            .map(|pair| match pair.split_once('=') {
+                Some((name, value)) if !value.is_empty() => format!("{name}=***"),
+                Some((name, _)) => format!("{name}="),
+                None if pair.is_empty() => String::new(),
+                None => "***".to_string(),
+            })
+            .collect();
+        format!("?{}", pairs.join("&"))
+    });
+    format!("{base}{query}{fragment}")
+}
+
 pub fn resolve(spec: &str) -> Result<String> {
     let spec = spec.trim();
     if spec == AUTO {
         return discover().map(|(url, _)| url).map_err(|e| anyhow::anyhow!("--attach: {e:#}"));
     }
-    if spec.starts_with("ws://") || spec.starts_with("wss://") {
+    let lower = spec.get(..6).unwrap_or(spec).to_ascii_lowercase();
+    if lower.starts_with("ws://") || lower.starts_with("wss://") {
         return Ok(spec.to_string());
+    }
+    if lower.starts_with("https:") {
+        bail!(
+            "--attach {}: an https:// address is a web page, not a DevTools endpoint; give the wss:// endpoint the service hands out (its docs call it the CDP or WebSocket URL)",
+            shown(spec)
+        );
     }
     let http = spec
         .strip_prefix("http://")
@@ -211,9 +259,9 @@ pub fn resolve(spec: &str) -> Result<String> {
             hostport
                 .rsplit_once(':')
                 .and_then(|(h, p)| Some((h.to_string(), p.parse::<u16>().ok()?)))
-                .with_context(|| format!("--attach {spec}: expected http://host:port, host:port or a port"))?;
+                .with_context(|| format!("--attach {}: expected http://host:port, host:port or a port", shown(spec)))?;
         let body = super::transport::http_get_body(&host, port, "/json/version")
-            .with_context(|| format!("--attach {spec}: no DevTools HTTP server there"))?;
+            .with_context(|| format!("--attach {}: no DevTools HTTP server there", shown(spec)))?;
         let v: serde_json::Value = serde_json::from_str(&body).context("/json/version is not JSON")?;
         let url = v
             .get("webSocketDebuggerUrl")
@@ -348,6 +396,30 @@ fn start_profile_browser(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_endpoint_is_shown_without_its_key() {
+        for (url, want) in [
+            ("ws://127.0.0.1:9222/devtools/browser/abc", "ws://127.0.0.1:9222/devtools/browser/abc"),
+            ("wss://connect.example.com?apiKey=SECRET", "wss://connect.example.com?apiKey=***"),
+            ("wss://h.example/?token=SECRET&sessionId=s1&x=", "wss://h.example/?token=***&sessionId=***&x="),
+            ("wss://user:pass@h.example:443/cdp", "wss://***@h.example:443/cdp"),
+            ("wss://TOKEN@h.example/cdp?k=v#frag", "wss://***@h.example/cdp?k=***#***"),
+            ("wss://h.example/cdp?SECRET", "wss://h.example/cdp?***"),
+            ("wss://h.example/a@b/cdp", "wss://h.example/a@b/cdp"),
+        ] {
+            assert_eq!(shown(url), want, "{url}");
+            assert!(!shown(url).contains("SECRET") && !shown(url).contains("pass"), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_secure_endpoint_is_taken_as_given_and_a_web_address_is_refused_with_the_fix() {
+        assert_eq!(resolve("wss://h.example/cdp?token=t").unwrap(), "wss://h.example/cdp?token=t");
+        assert_eq!(resolve("WSS://h.example/cdp").unwrap(), "WSS://h.example/cdp");
+        let err = format!("{:#}", resolve("https://h.example/?token=SECRET").unwrap_err());
+        assert!(err.contains("wss://") && !err.contains("SECRET"), "{err}");
+    }
 
     #[test]
     fn a_host_and_port_without_http_is_an_address_and_a_path_stays_a_path() {

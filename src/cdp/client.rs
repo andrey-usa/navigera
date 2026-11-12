@@ -162,6 +162,32 @@ impl Clone for CdpClient {
     }
 }
 
+/// A failed WebSocket connect, once (tungstenite's IO errors repeat their
+/// source), with what to do about a certificate this machine doesn't trust
+/// or an endpoint that turned the key down.
+fn connect_error(e: &tokio_tungstenite::tungstenite::Error) -> String {
+    use tokio_tungstenite::tungstenite::Error;
+    match e {
+        Error::Io(io) => {
+            let text = io.to_string();
+            if text.contains("certificate") {
+                format!(
+                    "{text}: the endpoint's TLS certificate is not one this machine trusts. A private CA's certificate \
+                     goes in the system's store, or on Linux in a PEM file named by $SSL_CERT_FILE"
+                )
+            } else {
+                text
+            }
+        }
+        Error::Http(response) if matches!(response.status().as_u16(), 401 | 403) => format!(
+            "the endpoint refused the connection ({}): check the key in its URL, or whether that browser session has ended",
+            response.status()
+        ),
+        Error::Http(response) => format!("the endpoint answered {} instead of opening a WebSocket", response.status()),
+        other => other.to_string(),
+    }
+}
+
 impl CdpClient {
     /// Connect to the browser-level debugger URL and start the pump task.
     pub async fn connect(ws_url: &str) -> Result<Self> {
@@ -173,10 +199,21 @@ impl CdpClient {
     /// [`CdpClient::connect`] with its own bound: attaching to a user's
     /// Chrome waits while Chrome asks them to allow the connection.
     pub async fn connect_within(ws_url: &str, bound: Duration) -> Result<Self> {
-        let (ws, _) = tokio::time::timeout(bound, tokio_tungstenite::connect_async(ws_url))
-            .await
-            .map_err(|_| anyhow::anyhow!("could not connect to the browser at {ws_url} within {} s", bound.as_secs()))?
-            .with_context(|| format!("connect to the browser at {ws_url}"))?;
+        // `wss://`: a browser in the cloud, over TLS. Messages name the
+        // endpoint without its query, where such a service takes its key.
+        let shown = crate::cdp::attach::shown(ws_url);
+        let tls = if ws_url.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("wss:")) {
+            Some(tokio_tungstenite::Connector::Rustls(crate::tls::client_config()?))
+        } else {
+            None
+        };
+        let (ws, _) =
+            tokio::time::timeout(bound, tokio_tungstenite::connect_async_tls_with_config(ws_url, None, false, tls))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("could not connect to the browser at {shown} within {} s", bound.as_secs())
+                })?
+                .map_err(|e| anyhow::anyhow!("connect to the browser at {shown}: {}", connect_error(&e)))?;
         let (mut sink, mut stream) = ws.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, _) = broadcast::channel::<Value>(512);

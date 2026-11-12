@@ -34,6 +34,14 @@ differently. A step only the person can do (a login, 2FA, a CAPTCHA):
 sign-ins; tell them what to do, `wait --url /dashboard --timeout-ms
 300000`, then `hide` and carry on.
 
+## A browser in the cloud
+
+Its service hands out a `wss://` endpoint, usually with the key in the
+query. Have it in `$NAVIGERA_ATTACH` (the user's environment or the MCP
+config's `env`), then `navigera -s me start`: the key stays off command
+lines and out of your context (navigera prints it as `***`). Never echo the
+variable or paste the key into a command.
+
 ## Sessions
 
 - The browser, its tabs and cookies persist between commands of a session.

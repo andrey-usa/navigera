@@ -294,9 +294,8 @@ impl Browser {
     /// browser, its windows and tabs stay as they are.
     pub fn connect(handle: &tokio::runtime::Handle, ws_url: &str, bound: Duration) -> Result<Self> {
         let started = std::time::Instant::now();
-        let client = handle
-            .block_on(CdpClient::connect_within(ws_url, bound))
-            .with_context(|| format!("connect to the running browser at {ws_url}"))?;
+        // The client's error names the endpoint (without its key).
+        let client = handle.block_on(CdpClient::connect_within(ws_url, bound))?;
         crate::timing::record("ws_connect", started);
         Ok(Self::finish(handle, client, None, None, ws_url.to_string()))
     }

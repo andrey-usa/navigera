@@ -56,6 +56,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `--attach wss://…` connects: the DevTools client was built without TLS,
+  so every browser in the cloud (their endpoints are `wss://`) failed with
+  "TLS support not compiled in". It now speaks TLS (rustls with ring, the
+  certificate checked against the system's store; on Linux the system
+  bundle or `$SSL_CERT_FILE`), and an untrusted certificate, a refused key
+  (401/403) or an endpoint that isn't one (404) each say what to do. The
+  binary grows 1.3 MB (5.9 to 7.2 MB, 0.67 MB more compressed). An
+  `https://` address given to `--attach` is refused with the fix.
 - A shared browser's crash restores the cookies and localStorage of a
   session whose last snapshot failed: a tab slower than the snapshot's
   300 ms limit (a loaded machine) ended the snapshots until the next
@@ -68,6 +76,16 @@ All notable changes to this project are documented here. The format follows
 - `--selector`, `--frame` or `--gone` with nothing after it says why: an
   unquoted `#` starts a shell comment, so `--selector #items` reached
   navigera as `--selector`. The error now says to quote the selector.
+
+### Security
+
+- An attach endpoint's key stays out of sight: the values in its query
+  (`?apiKey=…`, `?token=…`) and any `user:password@` are shown as `***` in
+  every message, the `start` note and `status`'s `endpoint` and
+  `executable`; `start` gives the endpoint to its session server in the
+  environment instead of on its command line, which any user of the
+  machine can read (`ps`). `$NAVIGERA_ATTACH` gives `start`, `serve` and
+  `mcp` the endpoint without a command line at all.
 
 ### Removed
 
