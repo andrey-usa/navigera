@@ -146,7 +146,7 @@ fn a_profile_seeded_from_another_browser_starts_signed_in() {
     let who: Value = serde_json::from_str(title.as_str().unwrap()).unwrap();
     assert_eq!(who["user"], "ada", "localStorage came over: {who}");
     assert!(who["cookie"].as_str().unwrap().contains("seen=1"), "{who}");
-    let cookies = ok(&s.name, &["cookies"]).to_string();
+    let cookies = ok(&s.name, &["cookies", "--values"]).to_string();
     assert!(cookies.contains("sid=ada-session"), "the HttpOnly cookie came over: {cookies}");
     drop(s);
 
