@@ -944,6 +944,20 @@ fn call_if_function(expression: &str) -> String {
     format!("(() => {{ const __r = ({expression}\n); return (typeof __r === 'function') ? __r() : __r; }})()")
 }
 
+/// What [`promise_marked`] gives in place of a promise.
+const PROMISE_MARK: &str = "\u{0}nv:promise";
+
+/// [`call_if_function`], but a value that is a promise (of any frame's
+/// realm) comes back as [`PROMISE_MARK`]: by value a promise is `{}`, which
+/// an empty object is too.
+fn promise_marked(expression: &str) -> String {
+    format!(
+        "(() => {{ const __r = ({expression}\n); const __v = (typeof __r === 'function') ? __r() : __r; \
+         return Object.prototype.toString.call(__v) === '[object Promise]' ? {} : __v; }})()",
+        serde_json::to_string(PROMISE_MARK).unwrap_or_default()
+    )
+}
+
 /// Puts back the timer functions [`SETTLE_ARM`] wrapped.
 const SETTLE_UNHOOK: &str = "(() => { const c = window.__nvMut; if (c && c.unT) c.unT(); return 0; })()";
 
@@ -4017,20 +4031,28 @@ impl Page {
     /// says what went wrong, if anything did. An error is the browser's (it
     /// is gone, or did not answer): the caller reports it as the op's.
     pub fn evaluate_read(&self, expression: &str, timeout: Duration) -> Result<Option<Value>> {
-        let res = self.send(
-            "Runtime.evaluate",
-            json!({
-                "expression": call_if_function(expression),
-                "returnByValue": true,
-                "awaitPromise": true,
-                "throwOnSideEffect": true,
-            }),
-            timeout,
-        )?;
-        if res.get("exceptionDetails").is_some() {
-            return Ok(None);
+        // Without `awaitPromise`: from Chrome 159 on, V8 refuses every
+        // side-effect-free evaluation that asks for it unless the result is
+        // a promise (measured on 159.0.8154.6: `1+1` refused, so each read
+        // fell back to the action's three round trips). A result that is a
+        // promise comes back as a mark instead and is asked for again,
+        // awaited: both runs are under the same check, so neither changes
+        // anything.
+        let read = |expression: String, wait: bool| -> Result<Option<Value>> {
+            let mut params = json!({ "expression": expression, "returnByValue": true, "throwOnSideEffect": true });
+            if wait {
+                params["awaitPromise"] = json!(true);
+            }
+            let res = self.send("Runtime.evaluate", params, timeout)?;
+            if res.get("exceptionDetails").is_some() {
+                return Ok(None);
+            }
+            Ok(Some(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null)))
+        };
+        match read(promise_marked(expression), false)? {
+            Some(Value::String(mark)) if mark == PROMISE_MARK => read(call_if_function(expression), true),
+            other => Ok(other),
         }
-        Ok(Some(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null)))
     }
 
     /// Run `source` as a script, as a console does: statements (`a(); b`),

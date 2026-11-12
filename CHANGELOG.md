@@ -92,6 +92,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- On Chrome 159 (beta as of 2026-11-12) every `eval` that only reads
+  ran as an action: V8 there refuses a side-effect-free evaluation that
+  also asks to await its result unless the result is a promise (`1+1`
+  was refused), so the read was run again the action's way, which arms
+  the page and counts as a change for the next report. A read is now
+  asked for without the wait, and only a result that is a promise is
+  asked for again with it. Same answers on Chrome 153 and 159; the full
+  suite passes on both (373 tests).
 - `click <ref> --until-gone` on a button that removes itself (a cookie
   banner's "Accept all") never returned, and the session answered no
   command after it: once the element was gone the loop looked for its

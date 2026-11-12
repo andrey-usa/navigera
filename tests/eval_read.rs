@@ -84,6 +84,12 @@ fn a_read_is_answered_without_arming_the_page() {
     assert_eq!(s.eval("document.title"), "t");
     assert_eq!(s.eval("() => document.querySelectorAll('p').length"), 1);
     assert_eq!(s.eval("typeof window.__nvMut"), "undefined", "a read armed the page");
+    // A read whose value is a promise is awaited, still as a read; an empty
+    // object is not taken for one.
+    assert_eq!(s.eval("(async () => 7)()"), 7);
+    assert_eq!(s.eval("({})"), serde_json::json!({}));
+    assert_eq!(s.eval("[1, 'a', null]"), serde_json::json!([1, "a", null]));
+    assert_eq!(s.eval("typeof window.__nvMut"), "undefined", "a read armed the page");
 }
 
 #[test]
