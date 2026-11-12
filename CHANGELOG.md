@@ -62,6 +62,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `click <ref> --until-gone` on a button that removes itself (a cookie
+  banner's "Accept all") never returned, and the session answered no
+  command after it: once the element was gone the loop looked for its
+  successor by reading the ref again, which finds the same element, and
+  went round for good. A ref has no successor; a locator's new element
+  must differ from the old one and turn up within the wait. Found by the
+  agent eval (an agent's 900 s run timed out on it); now one click,
+  `stopped: the element is gone`, in 0.2 s.
 - `--attach wss://…` connects: the DevTools client was built without TLS,
   so every browser in the cloud (their endpoints are `wss://`) failed with
   "TLS support not compiled in". It now speaks TLS (rustls with ring, the

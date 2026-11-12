@@ -573,6 +573,22 @@ fn click_until_gone_loads_a_whole_list() {
             "[{engine}] {r}"
         );
         assert!(r.get("no_effect").is_none(), "[{engine}] the stop says it: {r}");
+        // By ref, a button that takes itself away (a cookie banner's
+        // "Accept"): one click, and the session answers the next command.
+        // This spun for good once: a ref read again finds the same element.
+        a.ok(&["goto", "data:text/html,<div id=banner><button id=ok onclick=\"banner.remove()\">Accept all</button></div><p>page</p>"]);
+        let ax = a.ok(&["ax"]).as_str().unwrap_or_default().to_string();
+        let r#ref = ax
+            .split("Accept all\" [ref=")
+            .nth(1)
+            .and_then(|t| t.split(']').next())
+            .unwrap_or_else(|| panic!("{ax}"))
+            .to_string();
+        let started = std::time::Instant::now();
+        let r = a.ok(&["click", &r#ref, "--until-gone"]);
+        assert_eq!((&r["clicks"], &r["stopped"]), (&json!(1), &json!("the element is gone")), "[{engine}] {r}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "[{engine}] {:?}", started.elapsed());
+        assert_eq!(a.ok(&["get", "count", "#banner"]), 0, "[{engine}] the session still answers");
     }
 }
 

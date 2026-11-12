@@ -4723,11 +4723,18 @@ impl Driver {
                 let enabled = s.is_state(&here, "enabled", Some(0.0)).unwrap_or(false);
                 let disabled = !enabled && s.is_state(&here, "disabled", Some(0.0)).unwrap_or(false);
                 if !enabled && !disabled {
-                    if node.take().is_some() {
-                        // Taken out: a new one in its place is the next.
-                        node = s.element_ref(t, Some(0.0)).ok();
-                        if node.is_some() {
-                            continue;
+                    if let Some(old) = node.take() {
+                        // Taken out: a new one the same locator finds in its
+                        // place is the next. A ref names that one element and
+                        // finds it again, gone or not: it has no successor
+                        // (re-reading it spun here for good, the session with
+                        // it). And only a different element, within the wait.
+                        let by_locator = !matches!(t, Target::Ref(_));
+                        if by_locator && start.elapsed() < wait {
+                            node = s.element_ref(t, Some(0.0)).ok().filter(|n| *n != old);
+                            if node.is_some() {
+                                continue;
+                            }
                         }
                     }
                     if start.elapsed() < wait && !s.network_quiet(AFTER_ACTION_QUIET, Duration::ZERO) {
