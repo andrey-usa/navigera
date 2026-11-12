@@ -14,6 +14,7 @@
 | `network [--failed] [--filter api] [--since <n>]`, `network <n>` | requests one per line (`--since`: after #n); one request with its body |
 | `downloads [--dir <path>]`, `wait --download "*.csv"` | downloaded files with their paths; `--dir` sets where they go |
 | `cookies`, `cookies set <name> <value>`, `storage [get\|set k v]` | cookies (an HttpOnly one's value hidden: a session's key you don't need) and localStorage |
+| `http POST <url> --json '{…}'` (also GET, PUT, `--form`, `--header`) | an API outside the page (another origin, or a POST a link can't make), signed in as the browser is: its cookies for that URL are sent (HttpOnly too) and never shown; cookies the answer sets go into the browser |
 | `eval "fetch('/api/me').then(r => r.json())"` | the site's own API, signed in as the page is, in one call: the browser sends its cookies (HttpOnly too) and you never see them. Don't copy cookies out into `curl`: that puts the session's secrets in your context and on a command line |
 | `state save auth.json` … `state load auth.json` | sign in once, reuse it later (cookies and localStorage in one file) |
 | `fill --label Code "$(navigera totp SHOP_TOTP)"` | a two-factor code from the authenticator secret in `$SHOP_TOTP` (base32 or otpauth:// URI) |

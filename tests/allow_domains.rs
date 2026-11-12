@@ -183,6 +183,27 @@ fn strict_refuses_other_hosts_and_docs_only_does_not() {
 /// document is a top-level navigation): nothing reaches the other host,
 /// and `status` names it.
 #[test]
+fn http_requests_and_their_redirects_keep_to_the_allowed_hosts() {
+    if !chrome_available() {
+        return;
+    }
+    let site = site();
+    let mut s = Serve::spawn(&["serve", "--allow-domains", "127.0.0.1"], None);
+    let r = s.call(1, "goto", json!({ "url": format!("http://127.0.0.1:{}/", site.port) }));
+    assert!(r["ok"].as_bool().unwrap(), "{r}");
+    let r = s.call(2, "http", json!({ "url": format!("http://127.0.0.1:{}/", site.port) }));
+    assert!(r["ok"].as_bool().unwrap(), "an allowed host: {r}");
+    let r = s.call(3, "http", json!({ "url": format!("http://localhost:{}/other", site.port) }));
+    assert!(!r["ok"].as_bool().unwrap(), "{r}");
+    assert!(r["error"].as_str().unwrap().contains("localhost is outside this session's --allow-domains"), "{r}");
+    // A redirect from an allowed host to another one is refused at that hop.
+    let r = s.call(4, "http", json!({ "url": format!("http://127.0.0.1:{}/redir", site.port) }));
+    assert!(!r["ok"].as_bool().unwrap(), "a redirect led the request off the allowed hosts: {r}");
+    assert!(r["error"].as_str().unwrap().contains("localhost is outside"), "{r}");
+    s.quit();
+}
+
+#[test]
 fn popups_to_other_hosts_are_refused_before_their_first_request() {
     if !chrome_available() {
         return;

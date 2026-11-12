@@ -553,6 +553,36 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         since: Option<u64>,
     },
+    /// One HTTP request outside the page (an API the page can't call: another
+    /// origin without CORS, or a method a navigation can't make), sent with
+    /// the cookies the browser holds for its URL (HttpOnly too, never shown);
+    /// the cookies it sets go back into the browser.
+    #[serde(rename = "http")]
+    Http {
+        /// GET when none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        url: String,
+        /// `Name: value` lines.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        headers: Vec<String>,
+        /// A JSON body (text or a value), sent as `application/json`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        json: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        /// `name=value` fields, sent as a form.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        form: Vec<String>,
+        /// Accept any certificate.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        insecure: bool,
+        /// The most of the answer's body to show (bytes; 16384).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+    },
     /// Cookies of the current page (or all of them), or set / delete / clear.
     #[serde(rename = "cookies")]
     Cookies {
@@ -1281,6 +1311,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
     ("errors", "[--limit <n>] [--clear] [--json]", "only the errors: exceptions, console.error, failed loads"),
     ("network", "[<n>] [--filter <text>] [--type fetch|xhr|document|…] [--failed] [--since <n>] [--limit <n>] [--clear] [--har <file>] [--body-file <file>]", "the active tab's requests, one line each (#n METHOD STATUS type url size time); `network <n>` shows one in full with its response body"),
+    ("http", "[GET|POST|PUT|PATCH|DELETE|HEAD] <url> [--json <body> | --body <text> | --form <name=value>]... [--header 'Name: value']... [--max <bytes>] [--insecure] [--as-json]", "one request outside the page, with the cookies the browser holds for that URL (HttpOnly too; never shown); cookies it sets go into the browser. For an API the page can't call: another origin without CORS, or a POST"),
     ("cookies", "[set <name> <value> [--url <u> | --domain <d>] [--path <p>] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax|Strict|None] | delete <name> [--url <u>] | clear] [--all] [--values] [--json]", "the current page's cookies (--all: every cookie), or set, delete or clear them; an HttpOnly cookie's value (a session's key) is shown only with --values or --json"),
     ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
@@ -2495,6 +2526,26 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 None => None,
             },
         },
+        "http" => {
+            let headers = extract_values(&mut args, "--header").map_err(ArgsError::Invalid)?;
+            let form = extract_values(&mut args, "--form").map_err(ArgsError::Invalid)?;
+            let json = str_flag(&mut args, "--json")?.map(Value::String);
+            let body = str_flag(&mut args, "--body")?;
+            let insecure = extract_present(&mut args, "--insecure");
+            let max = num_flag(&mut args, "--max")?.map(|m| m.max(0.0) as usize);
+            let format = extract_present(&mut args, "--as-json").then(|| "json".to_string());
+            let first = positional(&mut args).ok_or_else(|| need("http", "a URL (http <METHOD> <url>)"))?;
+            const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+            let (method, url) = if METHODS.contains(&first.to_ascii_uppercase().as_str()) {
+                (Some(first.to_ascii_uppercase()), positional(&mut args).ok_or_else(|| need("http", "a URL"))?)
+            } else {
+                (None, first)
+            };
+            if [json.is_some(), body.is_some(), !form.is_empty()].iter().filter(|b| **b).count() > 1 {
+                return invalid("http: one body: --json, --body or --form");
+            }
+            Command::Http { method, url, headers, json, body, form, insecure, max, format }
+        }
         "cookies" | "cookie" => {
             let action = match args.front().map(String::as_str) {
                 Some("set" | "delete" | "clear" | "list" | "get") => args.pop_front(),
@@ -4382,6 +4433,7 @@ impl Driver {
                 | Command::Network { .. }
                 | Command::Downloads { .. }
                 | Command::Cookies { .. }
+                | Command::Http { .. }
                 | Command::State { .. }
                 | Command::Passkey { .. }
                 | Command::Route { .. }
@@ -5206,6 +5258,18 @@ impl Driver {
                 har.as_deref(),
                 body_file.as_deref(),
                 *since,
+            ),
+            Command::Http { method, url, headers, json, body, form, insecure, max, format } => http_op(
+                s,
+                method.as_deref(),
+                url,
+                headers,
+                json.as_ref(),
+                body.as_deref(),
+                form,
+                *insecure,
+                *max,
+                format.as_deref(),
             ),
             Command::Cookies {
                 values,
@@ -6213,6 +6277,160 @@ pub fn print_cli_response(output: &mut dyn Write, response: &Value, config: &Ses
     }
     let _ = output.flush();
     ok
+}
+
+/// `http`: one request with the cookies the browser holds for `url`;
+/// what it sets is stored in the browser. Cookie values are never shown.
+#[allow(clippy::too_many_arguments)]
+fn http_op(
+    s: &BrowserSession,
+    method: Option<&str>,
+    url: &str,
+    headers: &[String],
+    json: Option<&Value>,
+    body: Option<&str>,
+    form: &[String],
+    insecure: bool,
+    max: Option<usize>,
+    format: Option<&str>,
+) -> anyhow::Result<Value> {
+    #[cfg(not(feature = "http"))]
+    {
+        let _ = (s, method, url, headers, json, body, form, insecure, max, format);
+        anyhow::bail!("http: this navigera was built without the `http` feature");
+    }
+    #[cfg(feature = "http")]
+    {
+        use crate::http;
+        let mut send: Vec<String> = headers.to_vec();
+        let own_cookie = http::has_header(&send, "cookie");
+        let mut payload = if let Some(j) = json {
+            if !http::has_header(&send, "content-type") {
+                send.push("Content-Type: application/json".into());
+            }
+            Some(http::Body::Raw(match j {
+                Value::String(t) => t.clone(),
+                other => other.to_string(),
+            }))
+        } else if let Some(b) = body {
+            Some(http::Body::Raw(b.to_string()))
+        } else if !form.is_empty() {
+            let fields = form
+                .iter()
+                .map(|f| f.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| anyhow::anyhow!("http --form takes name=value"))?;
+            Some(http::Body::Form(fields))
+        } else {
+            None
+        };
+        let mut method = method.unwrap_or(if payload.is_some() { "POST" } else { "GET" }).to_string();
+        // Redirects are followed here, one hop at a time, as the browser
+        // would: each hop checked against the session's --allow-domains,
+        // sent the browser's cookies for its own URL, and what it sets
+        // stored before the next. (The client following them by itself
+        // would let an allowed host redirect the request anywhere.)
+        let how = http::How { follow: false, insecure };
+        let now = http::unix_now();
+        let (mut at, mut sent_cookies, mut stored, mut ms) = (url.to_string(), 0, Vec::new(), 0.0);
+        let mut hops = 0;
+        let r = loop {
+            let lower = at.to_ascii_lowercase();
+            if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                anyhow::bail!("http: {at:?} is not an http:// or https:// URL");
+            }
+            if !s.allows_request(&at) {
+                anyhow::bail!("http: {} is outside this session's --allow-domains", crate::domains::refusal_host(&at));
+            }
+            let mut hop = send.clone();
+            if !own_cookie {
+                let jar = s.cookies(false, Some(&at))?;
+                let pairs: Vec<String> = jar
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| Some(format!("{}={}", c.get("name")?.as_str()?, c.get("value")?.as_str()?)))
+                    .collect();
+                sent_cookies = sent_cookies.max(pairs.len());
+                if !pairs.is_empty() {
+                    hop.push(format!("Cookie: {}", pairs.join("; ")));
+                }
+            }
+            let r = http::request(&method, &at, &hop, payload.as_ref(), s.op_timeout(), how)
+                .map_err(|e| anyhow::anyhow!("http: {e}"))?;
+            ms += r.ms;
+            // What the answers set goes into the browser, as if it had
+            // made the request: a sign-in through the API carries to its
+            // pages.
+            for (set_cookie, from) in &r.cookies {
+                let Some((delete, name, params)) = http::cdp_cookie(set_cookie, from, now) else { continue };
+                if delete {
+                    s.delete_cookies(params)?;
+                } else {
+                    s.set_cookie(params)?;
+                }
+                if !stored.contains(&name) {
+                    stored.push(name);
+                }
+            }
+            let location = r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("location")).map(|(_, v)| v.clone());
+            match (r.status, location) {
+                (301 | 302 | 303 | 307 | 308, Some(to)) if hops < 20 => {
+                    hops += 1;
+                    at = http::resolve(&at, &to);
+                    // As browsers do: a 303 becomes a GET, and so does a
+                    // POST answered 301 or 302; 307 and 308 keep both.
+                    if r.status == 303 || (matches!(r.status, 301 | 302) && method == "POST") {
+                        if method != "HEAD" {
+                            method = "GET".into();
+                        }
+                        payload = None;
+                        send.retain(|h| !h.to_ascii_lowercase().starts_with("content-type:"));
+                    }
+                }
+                _ => break r,
+            }
+        };
+        let limit = max.unwrap_or(16 << 10);
+        let content_type =
+            r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.clone());
+        let mut cut = r.body.len().min(limit);
+        while !r.body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let rest = r.body.len() - cut;
+        if format == Some("json") {
+            return Ok(json!({
+                "status": r.status,
+                "ms": (ms * 10.0).round() / 10.0,
+                "url": at,
+                "content_type": content_type,
+                "body": &r.body[..cut],
+                "more_bytes": rest,
+                "cookies_sent": sent_cookies,
+                "cookies_stored": stored,
+            }));
+        }
+        let mut text = format!("HTTP {} · {:.0} ms", r.status, ms);
+        if hops > 0 {
+            text.push_str(&format!(" · {at} after {hops} redirect(s)"));
+        }
+        if let Some(t) = &content_type {
+            text.push_str(&format!(" · {t}"));
+        }
+        if sent_cookies > 0 {
+            text.push_str(&format!(" · sent the browser's {sent_cookies} cookie(s) for this URL"));
+        }
+        if !stored.is_empty() {
+            text.push_str(&format!(" · stored in the browser: {}", stored.join(", ")));
+        }
+        text.push('\n');
+        text.push_str(&r.body[..cut]);
+        if rest > 0 {
+            text.push_str(&format!("\n… {rest} more bytes (--max <bytes>)"));
+        }
+        Ok(json!(text))
+    }
 }
 
 /// One line per cookie: `name=value; domain=…; path=/; expires=…; HttpOnly; Secure; SameSite=Lax`.

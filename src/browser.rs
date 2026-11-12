@@ -2937,6 +2937,17 @@ impl BrowserSession {
         self.browser.intercept_all(self.is_shared())
     }
 
+    /// Whether the session's `--allow-domains` policy lets a request go to
+    /// `url` (always, without one).
+    pub fn allows_request(&self, url: &str) -> bool {
+        self.browser.shared().allow_policy(&self.scope()).is_none_or(|p| p.allows_url(url))
+    }
+
+    /// The op time limit, for a request navigera makes itself.
+    pub fn op_timeout(&self) -> Duration {
+        self.timeout(None)
+    }
+
     /// The session's allowlist for `status`: its entries, whether only
     /// top-level navigation is checked, and the hosts it refused, if any.
     pub fn allow_status(&self) -> Option<serde_json::Value> {

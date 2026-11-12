@@ -544,6 +544,48 @@ fn permissions_are_granted_denied_and_reset_and_more_devices_are_known() {
 }
 
 #[test]
+fn http_sends_the_browsers_cookies_and_keeps_what_it_sets() {
+    let Some(site) = edge_site() else { return };
+    let base = &site.base;
+    for (engine, bin) in engines() {
+        if engine == "lightpanda" {
+            continue;
+        }
+        let a = Agent::new("http", engine, bin);
+        a.ok(&["goto", &format!("{base}/form")]);
+        a.ok(&["cookies", "set", "sid", "s3cret-value", "--http-only"]);
+        // The browser's cookies for the URL go with the request, HttpOnly
+        // too, and no value is printed (the site reports names only).
+        let r = a.text(&["http", &format!("{base}/api/whoami")]);
+        assert!(r.starts_with("HTTP 200 · ") && r.contains("sent the browser's 1 cookie(s)"), "[{engine}] {r}");
+        assert!(r.contains(r#""cookies": ["sid"]"#) && r.contains(r#""sid_length": 12"#), "[{engine}] {r}");
+        assert!(!r.contains("s3cret"), "[{engine}] {r}");
+        // A JSON body is a POST with its type; a form, a form.
+        let r = a.ok(&["http", "POST", &format!("{base}/api/whoami"), "--json", r#"{"n":1}"#, "--as-json"]);
+        let got: Value = serde_json::from_str(r["body"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            (&got["method"], &got["content_type"], &got["body"]),
+            (&json!("POST"), &json!("application/json"), &json!(r#"{"n":1}"#)),
+            "[{engine}] {r}"
+        );
+        assert_eq!((&r["status"], &r["cookies_sent"]), (&json!(200), &json!(1)), "[{engine}] {r}");
+        let r = a.ok(&["http", &format!("{base}/api/whoami"), "--form", "a=1", "--as-json"]);
+        let got: Value = serde_json::from_str(r["body"].as_str().unwrap()).unwrap();
+        assert_eq!((&got["method"], &got["body"]), (&json!("POST"), &json!("a=1")), "[{engine}] {r}");
+        // A sign-in through the API: the cookie it sets is in the browser
+        // before the redirect's next hop, which sends it (a 303 is a GET).
+        let r = a.ok(&["http", "POST", &format!("{base}/api/sign-in"), "--json", "{}", "--as-json"]);
+        let got: Value = serde_json::from_str(r["body"].as_str().unwrap()).unwrap();
+        assert_eq!((&got["method"], &got["cookies"]), (&json!("GET"), &json!(["fresh", "sid"])), "[{engine}] {r}");
+        assert_eq!(r["cookies_stored"], json!(["fresh"]), "[{engine}] {r}");
+        assert!(r["url"].as_str().is_some_and(|u| u.ends_with("/api/whoami")), "[{engine}] {r}");
+        assert!(!r.to_string().contains("f-0123456789"), "[{engine}] the value it set is not shown: {r}");
+        assert!(a.text(&["cookies", "--values"]).contains("fresh=f-0123456789"), "[{engine}]");
+        assert!(a.err(&["http", "ftp://example.com/x"]).contains("not an http:// or https:// URL"), "[{engine}]");
+    }
+}
+
+#[test]
 fn click_until_gone_loads_a_whole_list() {
     let Some(site) = edge_site() else { return };
     for (engine, bin) in engines() {

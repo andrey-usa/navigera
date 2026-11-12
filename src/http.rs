@@ -584,6 +584,45 @@ pub fn cookie_words(set_cookie: &str, url: &str, now: i64) -> Option<Vec<String>
     Some(words)
 }
 
+/// A `Set-Cookie` value answered for `url` as the browser's own cookie:
+/// `Network.setCookie` parameters, or `Network.deleteCookies` ones for a
+/// cookie it expires (`true`); and the cookie's name.
+pub fn cdp_cookie(set_cookie: &str, url: &str, now: i64) -> Option<(bool, String, serde_json::Value)> {
+    let c = SetCookie::parse(set_cookie, now)?;
+    let mut p = serde_json::json!({ "name": c.name });
+    match &c.domain {
+        Some(d) => p["domain"] = serde_json::json!(d),
+        None => p["url"] = serde_json::json!(url),
+    }
+    if let Some(path) = &c.path {
+        p["path"] = serde_json::json!(path);
+    } else if c.domain.is_some() {
+        p["path"] = serde_json::json!("/");
+    }
+    if c.until.is_some_and(|t| t <= now) {
+        return Some((true, c.name, p));
+    }
+    p["value"] = serde_json::json!(c.value.trim_matches('"'));
+    if let Some(t) = c.until {
+        p["expires"] = serde_json::json!(t as f64);
+    }
+    if c.http_only {
+        p["httpOnly"] = serde_json::json!(true);
+    }
+    if c.secure {
+        p["secure"] = serde_json::json!(true);
+    }
+    if let Some(ss) = &c.same_site {
+        let ss = match ss.to_ascii_lowercase().as_str() {
+            "strict" => "Strict",
+            "none" => "None",
+            _ => "Lax",
+        };
+        p["sameSite"] = serde_json::json!(ss);
+    }
+    Some((false, c.name, p))
+}
+
 /// One cookie a scenario without a browser holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cookie {
@@ -833,6 +872,28 @@ mod tests {
         assert!(!kind.ends_with(b), "{kind}");
         assert!(multipart(&[("x".into(), "@/no/such/file".into())], 1).unwrap_err().starts_with("/no/such/file: "));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_set_cookie_becomes_the_browsers_own_cookie() {
+        let now = 1_000_000;
+        let (delete, name, p) =
+            cdp_cookie("sid=abc; Path=/app; HttpOnly; Secure; SameSite=None; Max-Age=60", "https://a.test/app/x", now)
+                .unwrap();
+        assert_eq!((delete, name.as_str()), (false, "sid"));
+        assert_eq!(
+            p,
+            serde_json::json!({"name": "sid", "value": "abc", "url": "https://a.test/app/x", "path": "/app",
+                "expires": (now + 60) as f64, "httpOnly": true, "secure": true, "sameSite": "None"})
+        );
+        let (_, _, p) = cdp_cookie("t=\"q\"; Domain=.a.test; SameSite=strict", "https://www.a.test/", now).unwrap();
+        assert_eq!(
+            p,
+            serde_json::json!({"name": "t", "value": "q", "domain": "a.test", "path": "/", "sameSite": "Strict"})
+        );
+        let (delete, _, p) = cdp_cookie("sid=; Max-Age=0", "https://a.test/", now).unwrap();
+        assert!(delete && p.get("value").is_none(), "{p}");
+        assert!(cdp_cookie("no equals sign", "https://a.test/", now).is_none());
     }
 
     #[test]

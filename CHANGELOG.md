@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `http [METHOD] <url> [--json … | --body … | --form k=v] [--header …]`
+  (MCP: a `browser_run` step `{"op": "http", …}`): one request outside
+  the page with the cookies the browser holds for its URL, HttpOnly ones
+  included and never printed; the cookies the answers set go into the
+  browser. For an API the page can't call: another origin without CORS,
+  or a POST a link can't make. Redirects are followed one hop at a time,
+  each checked against `--allow-domains`. In the agent eval's `api` task
+  (DeepSeek-V4.1-Flash, 32 runs each; runs 43173307176, 43173999730,
+  43239617655, 43239662822), agents used it in 26 of 32 runs: median
+  turns 14 to 12.5 and wall time 37 to 29 s, both 95% intervals clear of
+  zero; tokens -12% (interval touching zero); the session id in the
+  model's context 12 of 32 runs to 4. The binary grows 0.4 MB (the TLS
+  stack was already in it).
 - `--attach wss://…` behind a proxy: the connection goes through
   `$HTTPS_PROXY` (or `$ALL_PROXY`) as an HTTP CONNECT tunnel, by curl's
   rules (`$NO_PROXY` skips it; credentials in the proxy's URL,

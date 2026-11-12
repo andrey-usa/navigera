@@ -156,6 +156,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if url.path == "/api/whoami":
+            return self.whoami("")
         if url.path == "/missing.png":
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -178,9 +180,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+    def whoami(self, body):
+        """What a request brought: its method, the names of its cookies
+        (never their values) and the length of the `sid` one, its body."""
+        jar = dict(c.strip().split("=", 1) for c in self.headers.get("Cookie", "").split(";") if "=" in c)
+        out = json.dumps({"method": self.command, "cookies": sorted(jar), "sid_length": len(jar.get("sid", "")),
+                          "content_type": self.headers.get("Content-Type", ""), "body": body}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length).decode("utf-8", "replace")
+        if urllib.parse.urlparse(self.path).path == "/api/whoami":
+            return self.whoami(body)
+        if urllib.parse.urlparse(self.path).path == "/api/sign-in":
+            # A sign-in through the API: an HttpOnly session cookie, then
+            # on to who the caller now is.
+            self.send_response(303)
+            self.send_header("Set-Cookie", "fresh=f-0123456789; Path=/; HttpOnly")
+            self.send_header("Location", "/api/whoami")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if urllib.parse.urlparse(self.path).path == "/api/echo":
             out = ('{"got": %s, "len": %d}' % (json.dumps(body), len(body))).encode()
             self.send_response(200)

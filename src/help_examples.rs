@@ -319,6 +319,24 @@ pub const EXAMPLES: &[Help] = &[
         ],
     ),
     (
+        "http",
+        &[
+            ("navigera -s s http https://api.example.com/v1/me", ""),
+            ("navigera -s s http POST https://api.example.com/hooks --json '{\"n\": 1}'", ""),
+            ("navigera -s s http PUT https://example.com/profile --form name=Ada", ""),
+        ],
+        &[
+            ("GET|POST|PUT|PATCH|DELETE|HEAD", "the method; GET, or POST with a body"),
+            ("--json <body>", "a JSON body, sent as application/json"),
+            ("--body <text>", "a body as given"),
+            ("--form <name=value>", "a form field (repeat for more)"),
+            ("--header 'Name: value'", "a request header (repeat for more)"),
+            ("--max <bytes>", "the most of the answer's body to show; 16384"),
+            ("--insecure", "accept any certificate"),
+            ("--as-json", "the answer as JSON: status, body, cookies"),
+        ],
+    ),
+    (
         "cookies",
         &[
             ("navigera -s s cookies", ""),
