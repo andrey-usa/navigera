@@ -15,12 +15,14 @@ All notable changes to this project are documented here. The format follows
   browser. For an API the page can't call: another origin without CORS,
   or a POST a link can't make. Redirects are followed one hop at a time,
   each checked against `--allow-domains`. In the agent eval's `api` task
-  (DeepSeek-V4.1-Flash, 32 runs each; runs 43173307176, 43173999730,
-  43239617655, 43239662822), agents used it in 26 of 32 runs: median
-  turns 14 to 12.5 and wall time 37 to 29 s, both 95% intervals clear of
-  zero; tokens -12% (interval touching zero); the session id in the
-  model's context 12 of 32 runs to 4. The binary grows 0.4 MB (the TLS
-  stack was already in it).
+  (DeepSeek-V4.1-Flash), 56 runs with it against 32 without (runs
+  43173307176 and 43239617655 without; 43173999730, 43239662822 and
+  43250943497 with): used in 43 of 56; median turns 14 to 13 and wall
+  time 37 to 31 s, both 95% intervals clear of zero; tokens -11% and
+  estimated cost -6%, inside the noise; the session id in the model's
+  context in 12 of 32 runs without, 6 of 56 with. Alone, the confirmation
+  run on this build (24 runs) shows -1 turn with an interval touching
+  zero. The binary grows 0.4 MB (the TLS stack was already in it).
 - `--attach wss://…` behind a proxy: the connection goes through
   `$HTTPS_PROXY` (or `$ALL_PROXY`) as an HTTP CONNECT tunnel, by curl's
   rules (`$NO_PROXY` skips it; credentials in the proxy's URL,
