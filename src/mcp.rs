@@ -879,7 +879,10 @@ fn inside(root: &std::path::Path, path: &std::path::Path) -> bool {
 
 fn screenshot_path() -> String {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    std::env::temp_dir().join(format!("navigera-mcp-{}-{nanos}.png", std::process::id())).display().to_string()
+    // This user's own temp directory: the shared one would show the page to
+    // every account on the machine until the image is read back.
+    let dir = crate::session::private_temp_dir().unwrap_or_else(|_| std::env::temp_dir());
+    dir.join(format!("navigera-mcp-{}-{nanos}.png", std::process::id())).display().to_string()
 }
 
 fn screenshot_content(result: &Value) -> Result<Value, String> {
@@ -988,6 +991,16 @@ mod tests {
     use super::*;
 
     /// An agent reads the schema field by field: none is left unexplained.
+    #[cfg(unix)]
+    #[test]
+    fn a_screenshot_is_handed_over_where_only_this_user_can_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::path::PathBuf::from(screenshot_path());
+        let dir = path.parent().unwrap();
+        assert_ne!(dir, std::env::temp_dir(), "{}", path.display());
+        assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o077, 0, "{}", dir.display());
+    }
+
     #[test]
     fn every_tool_parameter_says_what_it_is() {
         for tool in tools().into_iter().chain(deferred_tools()) {

@@ -111,8 +111,12 @@ impl Browser {
         let args = lightpanda_serve_args(port);
         // Write child output to a temp file for diagnostics (not piped to avoid
         // the pipe-buffer deadlock). The file is read only on poll failure.
-        let log_path = std::env::temp_dir().join(format!("lightpanda-serve-{port}.log"));
-        let log_file = std::fs::File::create(&log_path).ok();
+        // In this user's own temp directory and never through a link: the
+        // name is guessable, and the shared temp directory is anyone's.
+        let log_path = crate::session::private_temp_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join(format!("lightpanda-serve-{port}.log"));
+        let log_file = crate::session::create_log(&log_path).ok();
         let log_file_err = log_file.as_ref().and_then(|f| f.try_clone().ok());
         let mut cmd = std::process::Command::new(&program);
         #[cfg(unix)]
@@ -421,11 +425,7 @@ impl Browser {
                 )
                 .await
                 .context("Target.createTarget")?;
-            let target_id = target
-                .get("targetId")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("createTarget: no targetId"))?
-                .to_string();
+            let target_id = target.get("targetId").and_then(Value::as_str).ok_or_else(no_target_id)?.to_string();
             let session = self
                 .client
                 .send("Target.attachToTarget", json!({ "targetId": target_id, "flatten": true }), None, CMD_TIMEOUT)
@@ -685,11 +685,7 @@ impl Browser {
                 .send("Target.createTarget", params, None, CMD_TIMEOUT)
                 .await
                 .context("Target.createTarget")?;
-            let target_id = target
-                .get("targetId")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("createTarget: no targetId"))?
-                .to_string();
+            let target_id = target.get("targetId").and_then(Value::as_str).ok_or_else(no_target_id)?.to_string();
             let session = self
                 .client
                 .send("Target.attachToTarget", json!({ "targetId": target_id, "flatten": true }), None, CMD_TIMEOUT)
@@ -979,6 +975,17 @@ fn lightpanda_serve_args(port: u16) -> Vec<String> {
 }
 
 /// Pick a free localhost TCP port by binding to port 0 and releasing it.
+/// The endpoint answered `Target.createTarget` without a tab: it speaks
+/// WebSocket but is not a browser's own DevTools endpoint (a page's or a
+/// worker's `/devtools/page/...` URL, a relay that answers for the browser).
+fn no_target_id() -> anyhow::Error {
+    anyhow::anyhow!(
+        "the endpoint opened no tab (its createTarget answer has no targetId): it is not a browser's \
+         DevTools endpoint. Attach to the browser's own WebSocket URL (`webSocketDebuggerUrl` of its \
+         /json/version, a path starting /devtools/browser/), not a page's"
+    )
+}
+
 fn free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind 127.0.0.1:0 for a free port")?;
     Ok(listener.local_addr()?.port())

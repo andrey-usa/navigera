@@ -108,6 +108,10 @@ All notable changes to this project are documented here. The format follows
 - `--selector`, `--frame` or `--gone` with nothing after it says why: an
   unquoted `#` starts a shell comment, so `--selector #items` reached
   navigera as `--selector`. The error now says to quote the selector.
+- An `--attach` endpoint that is not a browser's own (a page's
+  `/devtools/page/…` URL, a relay answering in its place) failed with
+  `createTarget: no targetId`; the error now says what the endpoint is
+  not and which URL to give.
 
 ### Security
 
@@ -124,6 +128,13 @@ All notable changes to this project are documented here. The format follows
   environment instead of on its command line, which any user of the
   machine can read (`ps`). `$NAVIGERA_ATTACH` gives `start`, `serve` and
   `mcp` the endpoint without a command line at all.
+- Two files left the user's own directories for the shared temp
+  directory, under names another account on the machine could guess. The
+  MCP server's screenshot hand-off (`navigera-mcp-<pid>-<time>.png`) was
+  readable by all until read back; Lightpanda's log
+  (`lightpanda-serve-<port>.log`) was opened through a link planted at
+  its name, emptying the file the link led to. Both are now in
+  `navigera-<uid>` (mode 0700) and the log is never opened through a link.
 
 ### Removed
 
