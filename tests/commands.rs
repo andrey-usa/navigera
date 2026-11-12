@@ -175,7 +175,8 @@ fn cookies_storage_pdf_init_scripts_and_routes() {
         a.ok(&["cookies", "set", "token", "t1", "--http-only"]);
         let cookies = a.text(&["cookies"]);
         assert!(
-            cookies.contains("theme=dark") && cookies.contains("token=(hidden: 2 characters, HttpOnly; --values")
+            cookies.contains("theme=dark")
+                && cookies.contains("token=(hidden: 2 characters, HttpOnly; --values")
                 && !cookies.contains("t1"),
             "[{engine}] an HttpOnly value stays out of the list: {cookies}"
         );
