@@ -175,9 +175,12 @@ fn cookies_storage_pdf_init_scripts_and_routes() {
         a.ok(&["cookies", "set", "token", "t1", "--http-only"]);
         let cookies = a.text(&["cookies"]);
         assert!(
-            cookies.contains("theme=dark") && cookies.contains("token=t1; ") && cookies.contains("HttpOnly"),
-            "[{engine}] {cookies}"
+            cookies.contains("theme=dark") && cookies.contains("token=(hidden: 2 characters, HttpOnly; --values")
+                && !cookies.contains("t1"),
+            "[{engine}] an HttpOnly value stays out of the list: {cookies}"
         );
+        let cookies = a.text(&["cookies", "--values"]);
+        assert!(cookies.contains("token=t1; ") && cookies.contains("HttpOnly"), "[{engine}] {cookies}");
         assert_eq!(a.ok(&["eval", "document.cookie"]), "theme=dark", "[{engine}] HttpOnly stays out of JS");
         a.ok(&["cookies", "delete", "theme"]);
         assert!(!a.text(&["cookies"]).contains("theme"), "[{engine}]");
@@ -247,7 +250,7 @@ fn state_saved_in_one_session_loads_in_another() {
         let r = b.ok(&["state", "load", file]);
         assert_eq!((r["cookies"].as_u64(), r["origins"].as_u64()), (Some(1), Some(1)), "[{engine}] {r}");
         b.ok(&["goto", &format!("{base}/form")]);
-        assert!(b.text(&["cookies"]).contains("sid=s3cret"), "[{engine}]");
+        assert!(b.text(&["cookies", "--values"]).contains("sid=s3cret"), "[{engine}]");
         assert_eq!(b.ok(&["storage", "get", "cart"]), "[1,2]", "[{engine}]");
         assert!(b.err(&["state", "load", "/nonexistent/state.json"]).contains("state load"), "[{engine}]");
         let _ = std::fs::remove_file(file);

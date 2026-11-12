@@ -328,6 +328,7 @@ pub const EXAMPLES: &[Help] = &[
         &[
             ("set <name> <value>", "set a cookie on the current page"),
             ("delete <name>", "delete a cookie from the current page"),
+            ("--values", "show HttpOnly cookies' values too (hidden by default)"),
             ("clear", "delete all of the current page's cookies"),
             ("--url <u>", "the URL the cookie belongs to"),
             ("--domain <d>", "the domain the cookie belongs to"),

@@ -556,6 +556,10 @@ pub enum Command {
     /// Cookies of the current page (or all of them), or set / delete / clear.
     #[serde(rename = "cookies")]
     Cookies {
+        /// The values of HttpOnly cookies in the text list too (hidden by
+        /// default: a session's key, which no page script may read either).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        values: bool,
         /// `list` (default), `set`, `delete`, `clear`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<String>,
@@ -1277,7 +1281,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("console", "[--level error|warn|info|log|debug] [--limit <n>] [--clear] [--json]", "console messages, uncaught exceptions and browser log entries of the active tab"),
     ("errors", "[--limit <n>] [--clear] [--json]", "only the errors: exceptions, console.error, failed loads"),
     ("network", "[<n>] [--filter <text>] [--type fetch|xhr|document|…] [--failed] [--since <n>] [--limit <n>] [--clear] [--har <file>] [--body-file <file>]", "the active tab's requests, one line each (#n METHOD STATUS type url size time); `network <n>` shows one in full with its response body"),
-    ("cookies", "[set <name> <value> [--url <u> | --domain <d>] [--path <p>] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax|Strict|None] | delete <name> [--url <u>] | clear] [--all] [--json]", "the current page's cookies (--all: every cookie), or set, delete or clear them"),
+    ("cookies", "[set <name> <value> [--url <u> | --domain <d>] [--path <p>] [--expires <unix s>] [--http-only] [--secure] [--same-site Lax|Strict|None] | delete <name> [--url <u>] | clear] [--all] [--values] [--json]", "the current page's cookies (--all: every cookie), or set, delete or clear them; an HttpOnly cookie's value (a session's key) is shown only with --values or --json"),
     ("pdf", "[--path <f.pdf>] [--landscape] [--background]", "the page as a PDF file"),
     ("storage", "[local|session] [get [<key>] | set <key> <value> | remove <key> | clear]", "the current page's localStorage (or sessionStorage)"),
     ("state", "save|load <file.json>", "every cookie and the open tabs' localStorage to a file, or back (`{cookies, origins}`, the common storage-state format): sign in once, reuse it in later sessions"),
@@ -2497,6 +2501,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 _ => None,
             };
             let mut cmd = Command::Cookies {
+                values: extract_present(&mut args, "--values"),
                 action: action.map(|a| if a == "get" { "list".into() } else { a }),
                 name: None,
                 value: None,
@@ -5196,6 +5201,7 @@ impl Driver {
                 *since,
             ),
             Command::Cookies {
+                values,
                 action,
                 name,
                 value,
@@ -5214,7 +5220,7 @@ impl Driver {
                     if format.as_deref() == Some("json") {
                         return Ok(cookies);
                     }
-                    Ok(json!(cookies_text(&cookies)))
+                    Ok(json!(cookies_text(&cookies, *values)))
                 }
                 "set" => {
                     let mut c = json!({ "name": name, "value": value });
@@ -6203,14 +6209,23 @@ pub fn print_cli_response(output: &mut dyn Write, response: &Value, config: &Ses
 }
 
 /// One line per cookie: `name=value; domain=…; path=/; expires=…; HttpOnly; Secure; SameSite=Lax`.
-fn cookies_text(cookies: &Value) -> String {
+/// An HttpOnly cookie's value is left out unless `values`: it is usually a
+/// session's key, the one thing about a sign-in an agent never needs to
+/// read (requests from the browser, `eval fetch(…)`, carry it), and once
+/// printed it is in the agent's context and transcript.
+fn cookies_text(cookies: &Value, values: bool) -> String {
     let lines: Vec<String> = cookies
         .as_array()
         .into_iter()
         .flatten()
         .map(|c| {
             let get = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("");
-            let value: String = get("value").chars().take(120).collect();
+            let http_only = c.get("httpOnly").and_then(Value::as_bool) == Some(true);
+            let value: String = if http_only && !values {
+                format!("(hidden: {} characters, HttpOnly; --values shows it)", get("value").chars().count())
+            } else {
+                get("value").chars().take(120).collect()
+            };
             let mut line = format!("{}={value}; domain={}; path={}", get("name"), get("domain"), get("path"));
             match c.get("expires").and_then(Value::as_f64) {
                 Some(e) if e > 0.0 => line.push_str(&format!("; expires={}", e as i64)),
