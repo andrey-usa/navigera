@@ -2930,10 +2930,26 @@ pub fn har_entries(text: &[u8]) -> anyhow::Result<Vec<crate::cdp::HarEntry>> {
 /// directory); the file is then created new, so a link put back in between
 /// fails the write instead of being followed. A plain file is replaced.
 pub fn write_own(path: impl AsRef<std::path::Path>, bytes: &[u8]) -> std::io::Result<()> {
+    write_file(path.as_ref(), bytes, false)
+}
+
+/// [`write_own`] for a file that holds credentials (saved cookies and
+/// storage, a HAR with its request headers): readable and writable by its
+/// owner only, whatever the umask, and a file already there loses what it
+/// granted to anyone else.
+pub fn write_private(path: impl AsRef<std::path::Path>, bytes: &[u8]) -> std::io::Result<()> {
+    write_file(path.as_ref(), bytes, true)
+}
+
+fn write_file(path: &std::path::Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
     use std::io::Write;
-    let path = path.as_ref();
     let mut options = std::fs::OpenOptions::new();
     options.write(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
             std::fs::remove_file(path)?;
@@ -2946,7 +2962,17 @@ pub fn write_own(path: impl AsRef<std::path::Path>, bytes: &[u8]) -> std::io::Re
             options.create_new(true);
         }
     }
-    options.open(path)?.write_all(bytes)
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file.metadata()?.permissions().mode();
+        if mode & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o700))?;
+        }
+    }
+    let _ = private;
+    file.write_all(bytes)
 }
 
 /// A live browser plus the policy defaults the model gets for free.
@@ -3776,7 +3802,7 @@ impl Driver {
                     }
                 }
             }
-            write_own(path, &serde_json::to_vec_pretty(&har)?)
+            write_private(path, &serde_json::to_vec_pretty(&har)?)
                 .map_err(|e| anyhow::Error::from(e).context(format!("network --har {path}")))?;
             return Ok(json!({ "har": path, "entries": picked.len() }));
         }
@@ -5463,7 +5489,7 @@ impl Driver {
                 let state = self.session.storage_state()?;
                 let (cookies, origins) =
                     (state["cookies"].as_array().map_or(0, Vec::len), state["origins"].as_array().map_or(0, Vec::len));
-                write_own(path, (serde_json::to_string_pretty(&state)? + "\n").as_bytes())
+                write_private(path, (serde_json::to_string_pretty(&state)? + "\n").as_bytes())
                     .map_err(|e| anyhow::Error::from(e).context(format!("state save {path}")))?;
                 let mut out = json!({ "saved": path, "cookies": cookies, "origins": origins });
                 if let Some(p) = state["credentials"].as_array() {
@@ -7592,6 +7618,24 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "again");
         super::write_own(dir.path().join("new.txt"), b"new").unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("new.txt")).unwrap(), "new");
+    }
+
+    /// A file of credentials is its owner's alone, new or already there.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_of_credentials_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let new = dir.path().join("state.json");
+        super::write_private(&new, b"{}").unwrap();
+        assert_eq!(mode(&new), 0o600);
+        let old = dir.path().join("old.json");
+        std::fs::write(&old, "x").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::write_private(&old, b"{\"cookies\":[]}").unwrap();
+        assert_eq!(mode(&old), 0o600);
+        assert_eq!(std::fs::read(&old).unwrap(), b"{\"cookies\":[]}");
     }
 
     #[test]

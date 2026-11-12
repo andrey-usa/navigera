@@ -131,6 +131,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- `state save` and `network --har` wrote their file readable by every
+  account on the machine (mode 0644 under the usual umask): the saved
+  cookies and storage, and a HAR's `Cookie` and `Authorization` headers.
+  Both files are now their owner's alone (0600), and one already there
+  loses what it granted to group and others when it is written again.
 - `cookies` lists an HttpOnly cookie without its value (`--values` shows
   it; `--json` is complete, for programs). Such a cookie
   is usually a session's key: in the agent eval's `api` task, agents
