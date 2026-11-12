@@ -433,6 +433,9 @@ def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
     deadline = started + args.run_timeout
     messages = [{"role": "user", "content": prompt}]
     shells, shell_steps, texts, errors = [], [], [], []
+    # Everything the model was shown or wrote, for the secrets check
+    # (`secret_in_context`); dropped before the record is written.
+    context = []
     tokens_in = tokens_out = tokens_total = tokens_cached = 0
     requests = tool_calls = 0
     timed_out = False
@@ -481,6 +484,8 @@ def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
                 output, status = ((e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes)
                                   else (e.stdout or "")) + "\n[command timed out]", "error"
             shell_steps.append({"cmd": command[:200], "status": status, "tail": output[-300:]})
+            context.append(command)
+            context.append(output)
             if len(output) > TOOL_OUTPUT_LIMIT:
                 output = output[:2000] + "\n[output truncated]\n" + output[-TOOL_OUTPUT_LIMIT + 2000:]
             messages.append({"role": "tool", "tool_call_id": call.get("id") or "",
@@ -497,6 +502,7 @@ def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
         "tokens_total": tokens_total or None, "tokens_cached": tokens_cached or None,
         "tool_calls": tool_calls,
         "errors": errors[-3:], "stderr_tail": errors[-1] if errors and exit_code else "",
+        "_context": "\n".join(context + texts),
     }
 
 
@@ -553,6 +559,17 @@ def scripted_plan(tool: str, task: str, base: str) -> list[list[str]]:
                         ["click", "--text", "Save preferences"], ["wait", "--text", "Preferences saved."],
                         ["--raw", "text", "--selector", "#saved"]],
     }
+    if task == "api":
+        with urllib.request.urlopen(base + "/__state", timeout=10) as r:
+            api = json.load(r)["api_base"]
+        plans["api"] = [["start"], ["goto", f"{base}/login?next=/account/api"],
+                        ["fill", "--selector", "#email", "demo@acme.test"],
+                        ["fill", "--selector", "#password", "hunter2"], ["press", "Enter", "--selector", "#password"],
+                        ["wait", "--text", "Partner API"], ["goto", api + "/"],
+                        ["--raw", "eval", "fetch('/v1/webhooks', {method: 'POST', headers: {'Content-Type': "
+                                          "'application/json'}, body: JSON.stringify({url: "
+                                          "'https://hooks.example.test/acme', events: ['order.shipped']})})"
+                                          ".then(r => r.text())"]]
     return [s + p for p in plans[task]] + [s + ["quit"]]
 
 
@@ -696,6 +713,17 @@ def check(task: dict, answer: str, site, tool: str = "") -> tuple[bool, list[str
             changed = sorted(k for k, v in got.items() if k not in c["preferences"] and v != defaults.get(k))
             if changed:
                 why.append(f"also changed {', '.join(changed)}")
+    if "webhook" in c:
+        want, hooks = c["webhook"], state.get("webhooks", [])
+        if len(hooks) != 1:
+            why.append(f"{len(hooks)} webhooks created (want 1)")
+        if hooks:
+            h = hooks[-1]
+            for k in ("url", "events"):
+                if h.get(k) != want[k]:
+                    why.append(f"{k}={h.get(k)!r}")
+            if h["id"] not in answer:
+                why.append(f"webhook id {h['id']} not in answer")
     if "ticket" in c:
         want = c["ticket"]
         tickets = state["tickets"]
@@ -782,8 +810,9 @@ def render(mode: str, agent: str, model: str, runs: list, tools: list, tasks: li
         return statistics.median(xs) if xs else None
 
     lines = [f"### Agent eval — {mode} ({agent}, model {model if agent != 'scripted' else '—'})", "",
-             "| tool | passed | median model turns | median shell cmds | median tokens | median wall | off-tool cmds |",
-             "|---|---|---|---|---|---|---|"]
+             "| tool | passed | median model turns | median shell cmds | median tokens | median wall | off-tool cmds "
+             "| session cookie seen |",
+             "|---|---|---|---|---|---|---|---|"]
     summary = []
     for tool in tools:
         rs = [r for r in runs if label(r) == tool and not r.get("infra")]
@@ -794,11 +823,13 @@ def render(mode: str, agent: str, model: str, runs: list, tools: list, tasks: li
                "median_shell": med([r.get("shell_count") for r in rs]),
                "median_tokens": med([r.get("tokens_total") for r in rs]),
                "median_wall_s": med([r.get("wall_s") for r in rs]),
-               "off_tool": sum(len(r.get("off_tool_commands") or []) for r in rs)}
+               "off_tool": sum(len(r.get("off_tool_commands") or []) for r in rs),
+               "secret_in_context": sum(1 for r in rs if r.get("secret_in_context"))}
         summary.append(row)
         fmt = lambda v, f="{:.0f}": "—" if v is None else f.format(v)
         lines.append(f"| `{tool}` | {passed}/{len(rs)}" + (f" (+{infra_n} ⚠ infra)" if infra_n else "") + f" | {fmt(row['median_requests'])} | {fmt(row['median_shell'])} | "
-                     f"{fmt(row['median_tokens'])} | {fmt(row['median_wall_s'], '{:.0f}s')} | {row['off_tool']} |")
+                     f"{fmt(row['median_tokens'])} | {fmt(row['median_wall_s'], '{:.0f}s')} | {row['off_tool']} | "
+                     f"{row['secret_in_context']} |")
     lines += ["", "| task | " + " | ".join(f"`{t}`" for t in tools) + " |",
               "|---|" + "---|" * len(tools)]
     for task in tasks:
@@ -960,6 +991,13 @@ def main() -> int:
                                 ([f"model switched to {', '.join(switched)} (infra)"] if switched else [])
                     stuck = ([f"stuck in: {res['in_flight'][-1][:160]}"]
                              if res.get("timed_out") and res.get("in_flight") else [])
+                    # Did a signed-in session's id (the HttpOnly cookie)
+                    # reach the model: copied out of the browser into its
+                    # context. None where the transcript isn't kept.
+                    context = rec.pop("_context", None)
+                    if context is not None and not task.get("live"):
+                        sids = site.get("/__state").get("session_ids", [])
+                        rec["secret_in_context"] = any(sid in context for sid in sids)
                     rec.update({
                         "infra": bool(infra_why),
                         "ok": ok and not switched, "why": why + infra_why + stuck,
@@ -975,6 +1013,7 @@ def main() -> int:
                         site.close()
                     cleanup(root)
                 rec.pop("text", None)
+                rec.pop("_context", None)
                 runs.append(rec)
                 status = "PASS" if rec["ok"] else "FAIL " + "; ".join(rec.get("why", []))[:200]
                 print(f"[{args.mode}] {tool:15} {task['id']:9} rep{rep}: {status} "

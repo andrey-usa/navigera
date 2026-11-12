@@ -76,6 +76,20 @@
       }
     },
     {
+      "id": "api",
+      "title": "Call the account's API (another origin, no form) with the browser's sign-in",
+      "prompt": "Sign in with email demo@acme.test and password hunter2. The shop's API page (in the Account menu) documents how to set up a delivery webhook; the shop has no form for it. Create a webhook for the URL https://hooks.example.test/acme that fires on the event order.shipped, and report the webhook id the API returns.",
+      "check": {
+        "webhook": {
+          "url": "https://hooks.example.test/acme",
+          "events": [
+            "order.shipped"
+          ]
+        },
+        "login": "demo@acme.test"
+      }
+    },
+    {
       "id": "purchase-live",
       "title": "Live web: log in and check out on a public demo shop",
       "live": true,

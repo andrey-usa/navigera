@@ -42,7 +42,7 @@ on:
         description: "Lightpanda stable release tag for the navigera-lightpanda tools (empty: the newest stable)"
         default: ""
       tasks:
-        description: "comma-separated task ids (lookup,purchase,account,docs,support,purchase-live) or all (local tasks)"
+        description: "comma-separated task ids (lookup,purchase,account,docs,support,preferences,api,purchase-live) or all (local tasks)"
         default: "all"
       mode:
         description: "skilled (skill preinstalled), onboard (agent installs the tool from its docs), both, or scripted (no model: the scripted baseline only)"
