@@ -184,7 +184,9 @@ jobs:
           git fetch --depth=1 origin "$BASELINE_REF"
           git worktree add /tmp/nv-baseline FETCH_HEAD
           cd /tmp/nv-baseline
-          cargo build --release --bin navigera --target x86_64-unknown-linux-musl \
+          # A released tree: a warning a newer cargo has for it can't be
+          # fixed there, so it is not denied there.
+          CARGO_BUILD_WARNINGS=warn cargo build --release --bin navigera --target x86_64-unknown-linux-musl \
             --target-dir /tmp/nv-baseline-target
           echo "NAVIGERA_BASELINE=/tmp/nv-baseline-target/x86_64-unknown-linux-musl/release/navigera" >> "$GITHUB_ENV"
           echo "baseline: $(git rev-parse --short HEAD)"
