@@ -548,6 +548,24 @@ impl SetCookie {
         c.until = max_age.map(|a| now + a).or(expires);
         Some(c)
     }
+
+    /// Whether an answer from `u` may set (or expire) this cookie, by a
+    /// browser's rules: its `Domain` is the answering host or a parent of
+    /// it, never another site's, and `Secure` needs a secure origin. The
+    /// browser's own cookie API checks neither: it stores what it is given.
+    fn allowed_from(&self, u: &Url) -> bool {
+        self.domain.as_ref().is_none_or(|d| domain_match(&u.host, d)) && (!self.secure || secure_context(u))
+    }
+
+    /// `Domain` as the browser's cookie API reads it: with a leading dot
+    /// the cookie goes to subdomains too (what the attribute means; a
+    /// public suffix the browser keeps to that one host itself), without
+    /// one it is the host's alone. None for a host-only cookie: no
+    /// `Domain`, or one naming an IP address or a single-label host.
+    fn api_domain(&self, u: &Url) -> Option<String> {
+        let d = self.domain.as_ref()?;
+        (!is_ip(&u.host) && d.contains('.')).then(|| format!(".{d}"))
+    }
 }
 
 /// A `Set-Cookie` value as navigera `cookies` words for the scenario's
@@ -555,12 +573,17 @@ impl SetCookie {
 /// expires it.
 pub fn cookie_words(set_cookie: &str, url: &str, now: i64) -> Option<Vec<String>> {
     let c = SetCookie::parse(set_cookie, now)?;
+    let u = Url::parse(url)?;
+    if !c.allowed_from(&u) {
+        return None;
+    }
+    let domain = c.api_domain(&u);
     let value = c.value.trim_matches('"').to_string();
     let mut words = match c.until {
         Some(t) if t <= now => vec!["cookies".to_string(), "delete".into(), c.name],
         _ => vec!["cookies".to_string(), "set".into(), c.name, value],
     };
-    match c.domain {
+    match domain {
         Some(d) => words.extend(["--domain".to_string(), d]),
         None => words.extend(["--url".to_string(), url.to_string()]),
     }
@@ -586,17 +609,24 @@ pub fn cookie_words(set_cookie: &str, url: &str, now: i64) -> Option<Vec<String>
 
 /// A `Set-Cookie` value answered for `url` as the browser's own cookie:
 /// `Network.setCookie` parameters, or `Network.deleteCookies` ones for a
-/// cookie it expires (`true`); and the cookie's name.
+/// cookie it expires (`true`); and the cookie's name. None for one a
+/// browser would not take from that URL (another site's `Domain`, `Secure`
+/// over plain http).
 pub fn cdp_cookie(set_cookie: &str, url: &str, now: i64) -> Option<(bool, String, serde_json::Value)> {
     let c = SetCookie::parse(set_cookie, now)?;
+    let u = Url::parse(url)?;
+    if !c.allowed_from(&u) {
+        return None;
+    }
+    let domain = c.api_domain(&u);
     let mut p = serde_json::json!({ "name": c.name });
-    match &c.domain {
+    match &domain {
         Some(d) => p["domain"] = serde_json::json!(d),
         None => p["url"] = serde_json::json!(url),
     }
     if let Some(path) = &c.path {
         p["path"] = serde_json::json!(path);
-    } else if c.domain.is_some() {
+    } else if domain.is_some() {
         p["path"] = serde_json::json!("/");
     }
     if c.until.is_some_and(|t| t <= now) {
@@ -806,7 +836,7 @@ mod tests {
         );
         assert_eq!(
             cookie_words("t=1; Domain=.shop.test; Max-Age=60; Secure", "https://shop.test/", now).unwrap().join(" "),
-            format!("cookies set t 1 --domain shop.test --expires {} --secure", now + 60)
+            format!("cookies set t 1 --domain .shop.test --expires {} --secure", now + 60)
         );
         assert_eq!(
             cookie_words("sid=; Expires=Thu, 01 Jan 1970 00:00:00 GMT", "http://h/", now).unwrap().join(" "),
@@ -889,8 +919,25 @@ mod tests {
         let (_, _, p) = cdp_cookie("t=\"q\"; Domain=.a.test; SameSite=strict", "https://www.a.test/", now).unwrap();
         assert_eq!(
             p,
-            serde_json::json!({"name": "t", "value": "q", "domain": "a.test", "path": "/", "sameSite": "Strict"})
+            serde_json::json!({"name": "t", "value": "q", "domain": ".a.test", "path": "/", "sameSite": "Strict"})
         );
+        // Another site's cookie, a sibling's, and a Secure one over plain
+        // http: a browser takes none of them, and neither does this.
+        for (set, from) in [
+            ("sid=x; Domain=bank.test", "https://evil.test/"),
+            ("sid=x; Domain=b.a.test", "https://c.a.test/"),
+            ("sid=x; Domain=evil.test", "https://notevil.test/"),
+            ("sid=; Max-Age=0; Domain=bank.test", "https://evil.test/"),
+            ("sid=x; Secure", "http://a.test/"),
+        ] {
+            assert!(cdp_cookie(set, from, now).is_none(), "{set} from {from}");
+            assert!(cookie_words(set, from, now).is_none(), "{set} from {from}");
+        }
+        // A Domain naming the host itself on an IP or a bare name: host-only.
+        let (_, _, p) = cdp_cookie("a=1; Domain=127.0.0.1", "http://127.0.0.1:8000/x", now).unwrap();
+        assert_eq!(p, serde_json::json!({"name": "a", "value": "1", "url": "http://127.0.0.1:8000/x"}));
+        let words = cookie_words("t=q; Domain=a.test", "https://www.a.test/", now).unwrap();
+        assert_eq!(words, ["cookies", "set", "t", "q", "--domain", ".a.test"]);
         let (delete, _, p) = cdp_cookie("sid=; Max-Age=0", "https://a.test/", now).unwrap();
         assert!(delete && p.get("value").is_none(), "{p}");
         assert!(cdp_cookie("no equals sign", "https://a.test/", now).is_none());

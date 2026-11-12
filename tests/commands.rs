@@ -582,6 +582,19 @@ fn http_sends_the_browsers_cookies_and_keeps_what_it_sets() {
         assert!(!r.to_string().contains("f-0123456789"), "[{engine}] the value it set is not shown: {r}");
         assert!(a.text(&["cookies", "--values"]).contains("fresh=f-0123456789"), "[{engine}]");
         assert!(a.err(&["http", "ftp://example.com/x"]).contains("not an http:// or https:// URL"), "[{engine}]");
+        // A redirect to another host: the Authorization line written for
+        // the first stays there, and a cookie the first answer names for
+        // the other host is not stored (so not sent to it either).
+        let key = ["--header", "Authorization: Bearer k-123", "--as-json"];
+        let r = a.ok(&[&["http", &format!("{base}/api/whoami")], &key[..]].concat());
+        let got: Value = serde_json::from_str(r["body"].as_str().unwrap()).unwrap();
+        assert_eq!(got["authorization"], true, "[{engine}] {r}");
+        let r = a.ok(&[&["http", &format!("{base}/api/hop")], &key[..]].concat());
+        let got: Value = serde_json::from_str(r["body"].as_str().unwrap()).unwrap();
+        assert!(r["url"].as_str().is_some_and(|u| u.starts_with("http://localhost:")), "[{engine}] {r}");
+        assert_eq!((&got["authorization"], &got["cookies"]), (&json!(false), &json!([])), "[{engine}] {r}");
+        assert_eq!(r["cookies_stored"], json!([]), "[{engine}] {r}");
+        assert!(!a.text(&["cookies", "--all"]).contains("planted"), "[{engine}]");
     }
 }
 

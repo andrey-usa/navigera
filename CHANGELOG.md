@@ -14,7 +14,10 @@ All notable changes to this project are documented here. The format follows
   included and never printed; the cookies the answers set go into the
   browser. For an API the page can't call: another origin without CORS,
   or a POST a link can't make. Redirects are followed one hop at a time,
-  each checked against `--allow-domains`. In the agent eval's `api` task
+  each checked against `--allow-domains`; an `Authorization` or `Cookie`
+  header written for the first URL is not sent on to another origin, and
+  an answer can set cookies only for its own host or a parent of it, as
+  in a browser. In the agent eval's `api` task
   (DeepSeek-V4.1-Flash), 56 runs with it against 32 without (runs
   43173307176 and 43239617655 without; 43173999730, 43239662822 and
   43250943497 with): used in 43 of 56; median turns 14 to 13 and wall

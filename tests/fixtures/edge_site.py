@@ -158,6 +158,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if url.path == "/api/whoami":
             return self.whoami("")
+        if url.path == "/api/hop":
+            # On to another host (this server by its other name), with a
+            # cookie for that host on the way: neither the caller's
+            # credentials nor the cookie may arrive there.
+            self.send_response(302)
+            self.send_header("Set-Cookie", "planted=p; Domain=localhost; Path=/")
+            self.send_header("Location", "http://localhost:%d/api/whoami" % self.server.server_address[1])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if url.path == "/missing.png":
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -185,6 +195,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         (never their values) and the length of the `sid` one, its body."""
         jar = dict(c.strip().split("=", 1) for c in self.headers.get("Cookie", "").split(";") if "=" in c)
         out = json.dumps({"method": self.command, "cookies": sorted(jar), "sid_length": len(jar.get("sid", "")),
+                          "authorization": "Authorization" in self.headers,
                           "content_type": self.headers.get("Content-Type", ""), "body": body}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

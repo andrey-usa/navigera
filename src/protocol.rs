@@ -6333,6 +6333,9 @@ fn http_op(
         let how = http::How { follow: false, insecure };
         let now = http::unix_now();
         let (mut at, mut sent_cookies, mut stored, mut ms) = (url.to_string(), 0, Vec::new(), 0.0);
+        let mut refused: Vec<String> = Vec::new();
+        let origin = |url: &str| http::Url::parse(url).map(|u| (u.scheme, u.host, u.port));
+        let first = origin(url);
         let mut hops = 0;
         let r = loop {
             let lower = at.to_ascii_lowercase();
@@ -6343,6 +6346,16 @@ fn http_op(
                 anyhow::bail!("http: {} is outside this session's --allow-domains", crate::domains::refusal_host(&at));
             }
             let mut hop = send.clone();
+            // A redirect to another origin gets none of the credentials
+            // the caller wrote for the first (as browsers and curl do):
+            // else whoever answers the first URL could have them sent on.
+            let elsewhere = origin(&at) != first;
+            if elsewhere {
+                hop.retain(|h| {
+                    let name = h.split(':').next().unwrap_or_default().trim().to_ascii_lowercase();
+                    !matches!(name.as_str(), "authorization" | "proxy-authorization" | "cookie")
+                });
+            }
             if !own_cookie {
                 let jar = s.cookies(false, Some(&at))?;
                 let pairs: Vec<String> = jar
@@ -6364,13 +6377,12 @@ fn http_op(
             // pages.
             for (set_cookie, from) in &r.cookies {
                 let Some((delete, name, params)) = http::cdp_cookie(set_cookie, from, now) else { continue };
-                if delete {
-                    s.delete_cookies(params)?;
-                } else {
-                    s.set_cookie(params)?;
-                }
-                if !stored.contains(&name) {
-                    stored.push(name);
+                // The request is made by now: a cookie the browser won't
+                // take is said, not an error that hides the answer.
+                let kept = if delete { s.delete_cookies(params) } else { s.set_cookie(params) };
+                let list = if kept.is_ok() { &mut stored } else { &mut refused };
+                if !list.contains(&name) {
+                    list.push(name);
                 }
             }
             let location = r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("location")).map(|(_, v)| v.clone());
@@ -6409,6 +6421,7 @@ fn http_op(
                 "more_bytes": rest,
                 "cookies_sent": sent_cookies,
                 "cookies_stored": stored,
+                "cookies_refused": refused,
             }));
         }
         let mut text = format!("HTTP {} · {:.0} ms", r.status, ms);
@@ -6423,6 +6436,9 @@ fn http_op(
         }
         if !stored.is_empty() {
             text.push_str(&format!(" · stored in the browser: {}", stored.join(", ")));
+        }
+        if !refused.is_empty() {
+            text.push_str(&format!(" · the browser refused: {}", refused.join(", ")));
         }
         text.push('\n');
         text.push_str(&r.body[..cut]);
