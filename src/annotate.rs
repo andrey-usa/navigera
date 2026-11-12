@@ -21,7 +21,7 @@ pub fn refs_in(tree: &str) -> Vec<u64> {
 }
 
 /// The script that draws the marks: `(ref, x, y, width, height)` in
-/// viewport CSS pixels.
+/// viewport CSS pixels. It answers once a frame with the marks was painted.
 pub fn draw(boxes: &[(u64, f64, f64, f64, f64)]) -> String {
     let marks = json!(boxes.iter().map(|&(id, x, y, w, h)| json!([id, x, y, w, h])).collect::<Vec<_>>());
     format!(
@@ -42,7 +42,12 @@ pub fn draw(boxes: &[(u64, f64, f64, f64, f64)]) -> String {
     root.append(b, l);
   }}
   document.documentElement.append(host);
-  return true;
+  // The capture is of what was painted: wait for a frame that has the marks
+  // (two animation frames; a tab that paints nothing gets 250 ms, not forever).
+  return new Promise((done) => {{
+    setTimeout(() => done(true), 250);
+    requestAnimationFrame(() => requestAnimationFrame(() => done(true)));
+  }});
 }})()"#
     )
 }

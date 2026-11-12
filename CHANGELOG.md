@@ -112,6 +112,10 @@ All notable changes to this project are documented here. The format follows
   `/devtools/page/…` URL, a relay answering in its place) failed with
   `createTarget: no targetId`; the error now says what the endpoint is
   not and which URL to give.
+- `screenshot --annotate` could come back without its labels: the capture
+  was asked for before the browser had painted them (seen once on a busy
+  macOS runner, ci 43302903354). The labels are now painted before the
+  capture is taken.
 
 ### Security
 
