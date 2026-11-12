@@ -157,7 +157,9 @@ fn a_click_whose_click_event_lands_off_the_element_says_so() {
 /// each candidate's `el.labels` used to scan the document on its first read,
 /// so the first call on 12000 buttons took about 9 s. Timed at two sizes so a
 /// slow runner can't fail it: linear is about 4x for 4x the buttons,
-/// quadratic about 16x.
+/// quadratic about 16x. Each size is built three times and its fastest run
+/// counts: the other tests' browsers share the runner's cores, and a stall
+/// during the large page alone read as 8.8x on macOS.
 #[test]
 fn a_locator_on_a_long_page_is_linear() {
     let (true, Some(site)) = (chrome(), site()) else { return };
@@ -174,7 +176,8 @@ fn a_locator_on_a_long_page_is_linear() {
         assert_eq!(s.text(&["get", "value", "--selector", "#last"]), "x");
         started.elapsed()
     };
-    let (small, large) = (timed(3000), timed(12000));
+    let best = |n: usize| (0..3).map(|_| timed(n)).min().unwrap();
+    let (small, large) = (best(3000), best(12000));
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.001);
     // The ratio alone swings with the small page's time (55-200 ms on one
     // runner); quadratic took about 9 s here, so a large page under 2 s
