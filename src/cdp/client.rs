@@ -13,7 +13,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -290,6 +290,7 @@ impl CdpClient {
     /// messages, one writer task and one reader task.
     #[cfg(unix)]
     pub async fn connect_pipe(from_browser: std::os::fd::OwnedFd, to_browser: std::os::fd::OwnedFd) -> Result<Self> {
+        use anyhow::Context;
         let reader =
             tokio::net::unix::pipe::Receiver::from_owned_fd(from_browser).context("CDP pipe (browser -> us)")?;
         let writer = tokio::net::unix::pipe::Sender::from_owned_fd(to_browser).context("CDP pipe (us -> browser)")?;
