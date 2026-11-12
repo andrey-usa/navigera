@@ -7,9 +7,9 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 
 fn tool_exe() -> std::path::PathBuf {
-    let exe = std::env::current_exe().expect("test binary path");
-    let name = if cfg!(windows) { "navigera.exe" } else { "navigera" };
-    exe.parent().and_then(|p| p.parent()).map(|p| p.join(name)).expect("tool binary path")
+    // Cargo's own word for where it built the binary: its place relative
+    // to the test's changed in cargo 1.100.
+    env!("CARGO_BIN_EXE_navigera").into()
 }
 
 fn chrome_available() -> bool {

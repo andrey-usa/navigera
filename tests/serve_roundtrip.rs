@@ -7,17 +7,9 @@ use std::process::{Child, Command, Stdio};
 use serde_json::Value;
 
 fn tool_exe() -> std::path::PathBuf {
-    let exe = std::env::current_exe().expect("test binary path");
-    let name = if cfg!(windows) { "navigera.exe" } else { "navigera" };
-    // Integration tests live in `target/<profile>/deps/`; the tool binary is
-    // two levels up in `target/<profile>/`.
-    let direct = exe.with_file_name(name);
-    if direct.exists() {
-        return direct;
-    }
-    let parent = exe.parent().and_then(|p| p.parent()).map(|p| p.join(name)).expect("tool binary path");
-    assert!(parent.exists(), "build the tool first: cargo build --bin navigera ({})", parent.display());
-    parent
+    // Cargo's own word for where it built the binary: its place relative
+    // to the test's changed in cargo 1.100.
+    env!("CARGO_BIN_EXE_navigera").into()
 }
 
 /// Spawn `navigera serve` with piped stdio for a scripted session.
