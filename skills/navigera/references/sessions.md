@@ -40,7 +40,7 @@ Its service hands out a `wss://` endpoint, usually with the key in the
 query. Have it in `$NAVIGERA_ATTACH` (the user's environment or the MCP
 config's `env`), then `navigera -s me start`: the key stays off command
 lines and out of your context (navigera prints it as `***`). Never echo the
-variable or paste the key into a command.
+variable or paste the key into a command. `$HTTPS_PROXY` is used, as by curl.
 
 ## Sessions
 

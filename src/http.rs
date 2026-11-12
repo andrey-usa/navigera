@@ -199,54 +199,11 @@ fn build_agent(insecure: bool) -> ureq::Agent {
         .new_agent()
 }
 
-/// The proxy for `url`, as curl picks one from the environment.
+/// The proxy for `url`, as curl picks one from the environment
+/// (`crate::proxy`).
 fn proxy_for(url: &Url) -> Option<ureq::Proxy> {
-    let var = |names: &[&str]| names.iter().find_map(|n| std::env::var(n).ok().filter(|v| !v.trim().is_empty()));
-    let proxy = match url.scheme.as_str() {
-        "https" => var(&["https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]),
-        // curl ignores HTTP_PROXY in capitals (a CGI server sets it from a header).
-        _ => var(&["http_proxy", "all_proxy", "ALL_PROXY"]),
-    }?;
-    let skip = var(&["no_proxy", "NO_PROXY"]).unwrap_or_default();
-    if no_proxy(&skip, &url.host) {
-        return None;
-    }
-    ureq::Proxy::new(proxy.trim()).ok()
-}
-
-/// Whether `host` is in a `no_proxy` list: `*`, a name (its subdomains
-/// too), `.suffix`, an address, or an address range (`10.0.0.0/8`).
-fn no_proxy(list: &str, host: &str) -> bool {
-    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
-    let ip: Option<std::net::IpAddr> = host.parse().ok();
-    list.split(',').map(|e| e.trim().to_ascii_lowercase()).filter(|e| !e.is_empty()).any(|e| {
-        if e == "*" {
-            return true;
-        }
-        if let (Some(ip), Some((net, bits))) = (ip, e.split_once('/')) {
-            let net = net.trim_start_matches('[').trim_end_matches(']');
-            let (Ok(net), Ok(bits)) = (net.parse::<std::net::IpAddr>(), bits.parse::<u32>()) else { return false };
-            return in_range(ip, net, bits);
-        }
-        let e = e.trim_start_matches("*.").trim_start_matches('.');
-        let e = e.trim_start_matches('[').trim_end_matches(']');
-        host == e || (host.ends_with(e) && host[..host.len() - e.len()].ends_with('.'))
-    })
-}
-
-fn in_range(ip: std::net::IpAddr, net: std::net::IpAddr, bits: u32) -> bool {
-    use std::net::IpAddr::{V4, V6};
-    match (ip, net) {
-        (V4(a), V4(n)) if bits <= 32 => {
-            let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
-            u32::from(a) & mask == u32::from(n) & mask
-        }
-        (V6(a), V6(n)) if bits <= 128 => {
-            let mask = if bits == 0 { 0 } else { u128::MAX << (128 - bits) };
-            u128::from(a) & mask == u128::from(n) & mask
-        }
-        _ => false,
-    }
+    let (_, proxy) = crate::proxy::configured(url.scheme == "https", &url.host)?;
+    ureq::Proxy::new(&proxy).ok()
 }
 
 /// A file's media type by its extension, for a multipart upload with no
@@ -879,15 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn no_proxy_matches_as_curl_does() {
-        let list = "localhost, .corp.test,api.example.com,10.0.0.0/8,::1,[fd00::]/8";
-        assert!(no_proxy(list, "localhost"));
-        assert!(no_proxy(list, "a.corp.test") && no_proxy(list, "corp.test"));
-        assert!(no_proxy(list, "api.example.com") && no_proxy(list, "v2.api.example.com"));
-        assert!(!no_proxy(list, "badapi.example.com") && !no_proxy(list, "example.com"));
-        assert!(no_proxy(list, "10.1.2.3") && !no_proxy(list, "11.0.0.1"));
-        assert!(no_proxy(list, "[::1]") && no_proxy(list, "fd12::1") && !no_proxy(list, "fe80::1"));
-        assert!(no_proxy("*", "anything.test") && !no_proxy("", "h"));
+    fn header_names_are_written_canonically() {
         assert_eq!(canonical("content-type"), "Content-Type");
         assert_eq!(canonical("x-request-id"), "X-Request-Id");
     }

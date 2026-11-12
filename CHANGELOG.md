@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `--attach wss://…` behind a proxy: the connection goes through
+  `$HTTPS_PROXY` (or `$ALL_PROXY`) as an HTTP CONNECT tunnel, by curl's
+  rules (`$NO_PROXY` skips it; credentials in the proxy's URL,
+  percent-encoded, sent as Basic auth and never shown). A proxy that
+  wants credentials, turns them down or refuses the tunnel says so; an
+  `https://` or SOCKS proxy is refused, not bypassed.
 - `click <target> --until-gone [--max <n>]` (JSON and MCP `until_gone`):
   a list behind a "Load more" button in one call. It clicks again while
   the element is there, shown and enabled and each click changes the

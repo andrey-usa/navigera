@@ -490,23 +490,56 @@ fn test_certs() -> Option<tempfile::TempDir> {
     Some(dir)
 }
 
-/// The TLS front of a cloud browser, before the test's local one.
+/// A fixture server (`tests/fixtures/<script>`) and the port it printed:
+/// the TLS front of a cloud browser, or a proxy.
 #[cfg(target_os = "linux")]
-struct Relay(Child, u16);
+struct Fixture(Child, u16);
 
 #[cfg(target_os = "linux")]
-impl Drop for Relay {
+impl Fixture {
+    fn start(script: &str, args: &[String]) -> Fixture {
+        let mut child = Command::new(python())
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(script))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("start {script}: {e}"));
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let port = line.trim().parse().unwrap_or_else(|_| panic!("{script} prints its port, got {line:?}"));
+        Fixture(child, port)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
 
-/// One navigera call; its stdout and stderr together, for what it shows.
+/// The test's Chrome behind a TLS front, as a cloud browser is reached:
+/// the front, and the `wss://` endpoint with `key` in its query.
+#[cfg(target_os = "linux")]
+fn cloud_browser(port: u16, path: &str, certs: &Path, key: &str) -> (Fixture, String) {
+    let pem = |f: &str| certs.join(f).display().to_string();
+    let relay = Fixture::start("tls_relay.py", &[port.to_string(), pem("leaf.pem"), pem("leaf.key")]);
+    let url = format!("wss://localhost:{}{path}?token={key}", relay.1);
+    (relay, url)
+}
+
+/// One navigera call, in an environment without the machine's proxy or CA
+/// settings, plus `env`; its stdout and stderr together, for what it shows.
 #[cfg(target_os = "linux")]
 fn shown(session: &str, args: &[&str], env: &[(&str, &str)]) -> (bool, String) {
     let mut cmd = Command::new(tool_exe());
     cmd.arg("--session").arg(session).args(args).stdin(Stdio::null()).env_remove("SSL_CERT_FILE");
+    for var in ["https_proxy", "HTTPS_PROXY", "http_proxy", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"] {
+        cmd.env_remove(var);
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -525,22 +558,8 @@ fn a_wss_endpoint_attaches_over_tls_and_its_key_is_never_shown() {
     let Some(certs) = test_certs() else { return };
     let (_user, profile, port, _mine) = users_browser(&exe);
     let (_, path) = active_port(profile.path(), Duration::from_secs(5)).expect("the browser endpoint's path");
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls_relay.py");
-    let mut child = Command::new(python())
-        .arg(&fixture)
-        .arg(port.to_string())
-        .arg(certs.path().join("leaf.pem"))
-        .arg(certs.path().join("leaf.key"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start the TLS relay");
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
-    let relay = Relay(child, line.trim().parse().expect("the relay prints its port"));
     let key = "k3y-n0t-to-be-shown";
-    let url = format!("wss://localhost:{}{path}?token={key}", relay.1);
+    let (relay, url) = cloud_browser(port, &path, certs.path(), key);
     let ca = certs.path().join("ca.pem").display().to_string();
     let s = session_name("wss");
 
@@ -576,5 +595,67 @@ fn a_wss_endpoint_attaches_over_tls_and_its_key_is_never_shown() {
     assert!(!seen.contains(key), "the key is shown: {seen}");
     let log = result["result"]["log"].as_str().or(result["log"].as_str()).expect("the session log");
     assert!(!std::fs::read_to_string(log).unwrap_or_default().contains(key), "the key is in the session log");
+    drop(relay);
+}
+
+/// Behind a corporate proxy a cloud browser is reached through it: a
+/// `wss://` endpoint goes through `$HTTPS_PROXY` as a CONNECT tunnel (curl's
+/// rules: `$NO_PROXY` skips it), with the credentials in its URL, and
+/// neither the proxy's password nor the endpoint's key is shown.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_wss_endpoint_is_reached_through_the_proxy_the_environment_names() {
+    let Some(exe) = chrome() else { return };
+    let Some(certs) = test_certs() else { return };
+    let (_user, profile, port, _mine) = users_browser(&exe);
+    let (_, path) = active_port(profile.path(), Duration::from_secs(5)).expect("the browser endpoint's path");
+    let key = "k3y-n0t-to-be-shown";
+    let (relay, url) = cloud_browser(port, &path, certs.path(), key);
+    let log = certs.path().join("tunnels.log");
+    let proxy = Fixture::start("connect_proxy.py", &[log.display().to_string(), "ann:p@ss".into()]);
+    let ca = certs.path().join("ca.pem").display().to_string();
+    let s = session_name("proxy");
+    let secrets = [key, "p%40ss", "p@ss", "ann:"];
+
+    // Without its credentials: the proxy says so, and the fix is named.
+    let bare = format!("http://127.0.0.1:{}", proxy.1);
+    let env = [("SSL_CERT_FILE", ca.as_str()), ("NAVIGERA_ATTACH", url.as_str()), ("HTTPS_PROXY", bare.as_str())];
+    let (ok_bare, text) = shown(&s, &["start"], &env);
+    assert!(!ok_bare, "{text}");
+    assert!(text.contains("wants credentials") && text.contains("from $HTTPS_PROXY"), "{text}");
+
+    // With them (percent-encoded): through the tunnel, the session works.
+    let with = format!("http://ann:p%40ss@127.0.0.1:{}", proxy.1);
+    let env = [("SSL_CERT_FILE", ca.as_str()), ("NAVIGERA_ATTACH", url.as_str()), ("HTTPS_PROXY", with.as_str())];
+    let mut seen = String::new();
+    let (started, text) = shown(&s, &["start"], &env);
+    assert!(started, "{text}");
+    seen.push_str(&text);
+    for args in [&["goto", "data:text/html,<title>Proxied</title><h1>through the proxy</h1>"][..], &["text"], &["quit"]]
+    {
+        let (ok_step, text) = shown(&s, args, &[]);
+        assert!(ok_step, "{args:?}: {text}");
+        seen.push_str(&text);
+    }
+    assert!(seen.contains("through the proxy"), "{seen}");
+    let tunnels = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(tunnels.contains(&format!("CONNECT localhost:{}", relay.1)), "the proxy opened no tunnel: {tunnels:?}");
+    for secret in secrets {
+        assert!(!seen.contains(secret), "{secret:?} is shown: {seen}");
+    }
+
+    // `$NO_PROXY` names the host: straight there, past a proxy that is down.
+    let dead = "http://127.0.0.1:9";
+    let env = [
+        ("SSL_CERT_FILE", ca.as_str()),
+        ("NAVIGERA_ATTACH", url.as_str()),
+        ("HTTPS_PROXY", dead),
+        ("NO_PROXY", "example.test,localhost"),
+    ];
+    let (started, text) = shown(&s, &["start"], &env);
+    assert!(started, "{text}");
+    let (ok_quit, text) = shown(&s, &["quit"], &[]);
+    assert!(ok_quit, "{text}");
+    drop(proxy);
     drop(relay);
 }

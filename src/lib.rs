@@ -21,6 +21,7 @@ pub mod mcp;
 pub mod passkey;
 pub mod proc;
 pub mod protocol;
+pub mod proxy;
 pub mod screencast;
 pub mod session;
 pub mod shared;

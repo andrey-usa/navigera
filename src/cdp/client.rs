@@ -199,21 +199,41 @@ impl CdpClient {
     /// [`CdpClient::connect`] with its own bound: attaching to a user's
     /// Chrome waits while Chrome asks them to allow the connection.
     pub async fn connect_within(ws_url: &str, bound: Duration) -> Result<Self> {
-        // `wss://`: a browser in the cloud, over TLS. Messages name the
-        // endpoint without its query, where such a service takes its key.
+        // `wss://`: a browser in the cloud, over TLS, through the proxy the
+        // environment names for https (curl's rules, `crate::proxy`).
+        // Messages name the endpoint without its query, where such a
+        // service takes its key, and the proxy without its credentials.
         let shown = crate::cdp::attach::shown(ws_url);
-        let tls = if ws_url.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("wss:")) {
-            Some(tokio_tungstenite::Connector::Rustls(crate::tls::client_config()?))
-        } else {
-            None
-        };
-        let (ws, _) =
-            tokio::time::timeout(bound, tokio_tungstenite::connect_async_tls_with_config(ws_url, None, false, tls))
+        let secure = ws_url.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("wss:"));
+        let tls = if secure { Some(tokio_tungstenite::Connector::Rustls(crate::tls::client_config()?)) } else { None };
+        let connect = async {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            if secure {
+                let request = ws_url
+                    .into_client_request()
+                    .map_err(|e| anyhow::anyhow!("connect to the browser at {shown}: {}", connect_error(&e)))?;
+                let host = request.uri().host().unwrap_or("").to_string();
+                if let Some(proxy) = crate::proxy::Proxy::for_secure(&host)? {
+                    let authority = format!("{host}:{}", request.uri().port_u16().unwrap_or(443));
+                    let stream = proxy.tunnel(&authority).await?;
+                    return tokio_tungstenite::client_async_tls_with_config(request, stream, None, tls).await.map_err(
+                        |e| {
+                            anyhow::anyhow!(
+                                "connect to the browser at {shown} through the proxy {}: {}",
+                                proxy.shown(),
+                                connect_error(&e)
+                            )
+                        },
+                    );
+                }
+            }
+            tokio_tungstenite::connect_async_tls_with_config(ws_url, None, false, tls)
                 .await
-                .map_err(|_| {
-                    anyhow::anyhow!("could not connect to the browser at {shown} within {} s", bound.as_secs())
-                })?
-                .map_err(|e| anyhow::anyhow!("connect to the browser at {shown}: {}", connect_error(&e)))?;
+                .map_err(|e| anyhow::anyhow!("connect to the browser at {shown}: {}", connect_error(&e)))
+        };
+        let (ws, _) = tokio::time::timeout(bound, connect).await.map_err(|_| {
+            anyhow::anyhow!("could not connect to the browser at {shown} within {} s", bound.as_secs())
+        })??;
         let (mut sink, mut stream) = ws.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, _) = broadcast::channel::<Value>(512);
