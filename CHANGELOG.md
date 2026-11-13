@@ -36,20 +36,21 @@ All notable changes to this project are documented here. The format follows
   global object is asked for once per document; one from a document
   since replaced is refused by Chrome before anything runs, and asked
   for again. `NAVIGERA_CONST_CALLS=0` writes the values into the text as
-  before, to compare against; Lightpanda is unchanged. Local release
-  build, Chrome 153, the 500-card page, interleaved against that
-  switch: the bench's fill, fill, click, read batch 46.9 to 41.3 ms
-  median (40 runs); single calls with a new value each time (30 runs):
-  `fill` 15.3 to 13.1 ms, `click` 35.8 to 33.6 ms, `ax` 34.9 to 32.2 ms.
+  before, to compare against; Lightpanda is unchanged. On CI's runner,
+  same run, against the commit before (bench run [43438627853](https://github.com/andrey-usa/navigera/actions/runs/43438627853)):
+  no gain there, inside the spread (`fill` 5.9 and 5.9 ms, `click` 11.1
+  and 12.1, the fill, fill, click, read batch 27.8 and 28.8): V8 parses
+  fast on that machine and the bench repeats one selector. The gain is
+  on a slower machine and for a caller whose selector or value is new
+  each call.
 - A page script a document calls a second time is kept there as a
   function object and called by its id from then on: no text is sent,
   hashed or looked up (a 40 KB function sent as text cost about 0.8 ms
   a call even when V8 had it compiled). A page acted on once pays
-  nothing for it. With the round trips below, local release build,
-  Chrome 153, the 500-card page, 30 interleaved runs against the commit
-  before them all: the fill, fill, click, read batch 44.2 to 31.7 ms,
-  `fill` 22.8 to 17.4, `click` 41.7 to 35.8, a submitting click 49.9 to
-  44.8 (same output).
+  nothing for it. With the round trips below, on CI's runner, same
+  run, against the commit before them all (bench run [43491069940](https://github.com/andrey-usa/navigera/actions/runs/43491069940)):
+  the fill, fill, click, read batch 39.4 to 26.3 ms, `fill` 7.1 to 6.9,
+  `click` 13.9 to 13.2, a submitting click 13.1 to 10.5 (same output).
 - An action makes fewer round trips to the browser; each cost about half
   a millisecond whatever it did. A click after a look: 20 commands to
   13; a fill: 6 to 5. The press's arrival, the navigation's verdict and
@@ -61,11 +62,8 @@ All notable changes to this project are documented here. The format follows
   changed roots behind the delta read and describes them all at once;
   object releases are not waited for; the turn of the page's event loop
   a change report waits for is asked for ahead of the state read and
-  shares its round trip. Local release build, Chrome 153, the 500-card
-  page, 30 interleaved runs against the commit before these: `fill`
-  24.2 to 19.7 ms, `click` 41.9 to 39.2, a submitting click 49.7 to
-  49.2, the fill, fill, click, read batch 46.6 to 42.6 (a slow moment
-  of the machine; the batch's output is the same).
+  shares its round trip. Measured with the kept functions above (bench
+  run [43491069940](https://github.com/andrey-usa/navigera/actions/runs/43491069940)); the batch's output is the same.
 - A browser navigera starts no longer asks Google for the time
   (`clients2.google.com/time`) nor opens a connection to the search
   engine (`www.google.com`) at every start, whatever page was asked
@@ -84,10 +82,10 @@ All notable changes to this project are documented here. The format follows
   needed. After an action that repainted (a field filled just before,
   in a `batch`) that frame was a whole refresh interval away. Any other
   page waits as before, and a press that lands on something else is
-  still held back and sent again. Local release build, Chrome 153, the
-  500-card page, 40 interleaved runs after the page rested 150 ms: the
-  bench's fill, fill, click, read batch 61.6 to 45.8 ms median; without
-  the rest (the page changed 5 ms earlier) 61.2 and 63.2 ms, unchanged.
+  still held back and sent again. On CI's runner, same run, against
+  the commit before, the page rested 150 ms (bench run [43393635223](https://github.com/andrey-usa/navigera/actions/runs/43393635223)):
+  the bench's fill, fill, click, read batch 60.6 to 44.1 ms median. A
+  page that changed 5 ms earlier is not still, and waits as before.
   Not on macOS, where a browser whose page has been still a while is
   slow to draw its next frame: the wait took that delay before the
   press, and without it the page's own INP counted it (a button with
@@ -96,8 +94,7 @@ All notable changes to this project are documented here. The format follows
   `--disable-search-engine-choice-screen` and
   `--hide-crash-restore-bubble`: a visible window no longer shows the
   search engine choice of a fresh profile or the "restore pages?"
-  bubble over the page. A headless start is as fast as before (start
-  and first page 322 ms, 12 runs each).
+  bubble over the page. A headless start is as fast as before.
 - The operations bench rests the page 150 ms after each state reset,
   for every tool, untimed: an agent's call comes a model turn after
   the page last changed, not 5 ms after.
@@ -108,17 +105,18 @@ All notable changes to this project are documented here. The format follows
   result the op already read; a click after a fill skips the journal
   prime the page would answer at once; and the crash record re-lists
   the browser's tabs only when a tab opened, closed, or navigated (a
-  `pushState` counts). The same four steps on the 500-card page (25
-  runs, local release build, chrome-headless-shell 157): 48 to 39 CDP
-  commands; the JSON batch 33 to 26 commands, median 39.6 to 29.0 ms.
+  `pushState` counts). The same four steps on the 500-card page: 48 to
+  39 CDP commands, the JSON batch 33 to 26; on CI's runner, same run,
+  against the commit before (bench run [43369682011](https://github.com/andrey-usa/navigera/actions/runs/43369682011)): 53.2 to 46.4 ms
+  median.
   The report, the history, and the crash record read the same.
 - `fill` checks that a field can be typed into and fills it in one call
   to the page instead of two, when the field is ready at once. A field
   that is not ready yet (hidden, disabled, read-only) is waited for as
   before and found again after the wait, since a page can replace a
-  field as it enables it. Local release build, Chrome 153, the 500-card
-  page, 30 interleaved runs: one `fill` 17.2 to 16.6 ms median; the
-  bench's fill, fill, click, read batch 66.1 to 61.4 ms.
+  field as it enables it. On CI's runner, same run, against the commit
+  before (bench run [43383430698](https://github.com/andrey-usa/navigera/actions/runs/43383430698)): one `fill` 7.3 to 6.2 ms; the
+  bench's fill, fill, click, read batch flat (58.7 and 59.3 ms).
 
 ### Fixed
 
@@ -130,7 +128,7 @@ All notable changes to this project are documented here. The format follows
   command that ran while a slow form POST was on its way kept the old
   URL for good. The stamp now also moves at the commit, and while the
   watcher is behind the tabs are listed again instead of trusted
-  (waiting for it cost a four-step batch 10 ms). The form POST crash
+  (waiting for it would slow every command). The form POST crash
   test, six copies at once: 3 of 48 failed before (the tab came back
   at the earlier page), 0 of 60 after. Not in a release: the record was renewed
   on every command up to 0.12.0.
