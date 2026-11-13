@@ -2886,3 +2886,42 @@ fn a_click_leaves_the_methods_the_page_put_in_meanwhile() {
     s.ok(&["click", "--selector", "#copy"]);
     assert_eq!(s.ok(&["eval", "Clipboard.prototype.writeText === window.mine"]), true);
 }
+
+/// navigera's own page functions are called with the target and the values
+/// as arguments, on the document's global object, which is kept between
+/// calls (their text is then the same every time, and compiled once). A
+/// document that replaced the one the object came from, by a `goto`, by
+/// the page's own reload or by going back, gets the next call all the
+/// same, and a value arrives as it was written: quotes, a backslash, a
+/// line break, a template placeholder, text outside the BMP.
+#[test]
+fn actions_follow_the_document_and_values_arrive_as_written() {
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("const-calls", &[]);
+    let value = "a \"b\" 'c' \\ `d` ${e}\nline two \u{1F980}";
+    let read = "(() => document.querySelector('[aria-label=\"it\\'s\"]').value)()";
+    for n in 0..3 {
+        let page = format!(
+            "<title>page {n}</title><textarea aria-label=\"it's\"></textarea>\
+             <button onclick=\"document.title='clicked {n}'\">Go {n}</button>"
+        );
+        s.ok(&["goto", &format!("data:text/html,{page}")]);
+        s.ok(&["fill", "--selector", "[aria-label=\"it's\"]", "--value", value]);
+        assert_eq!(s.ok(&["eval", read]), value);
+        s.ok(&["click", "--text", &format!("Go {n}")]);
+        assert_eq!(s.ok(&["title"]), format!("clicked {n}"));
+    }
+    // The page replaces its own document: nothing told navigera first.
+    s.ok(&["eval", "(() => { location.reload(); return 1 })()"]);
+    s.ok(&["click", "--text", "Go 2"]);
+    assert_eq!(s.ok(&["title"]), "clicked 2");
+    s.ok(&["back"]);
+    s.ok(&["click", "--text", "Go 1"]);
+    assert_eq!(s.ok(&["title"]), "clicked 1");
+    s.ok(&["ax"]);
+    s.ok(&["fill", "--selector", "textarea", "--value", "x"]);
+    s.ok(&["click", "--text", "Go 1"]);
+    assert_eq!(s.ok(&["eval", read]), "x");
+}

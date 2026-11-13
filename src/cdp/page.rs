@@ -3246,6 +3246,14 @@ fn navigated_away(e: &anyhow::Error) -> bool {
         .any(|s| m.contains(s))
 }
 
+/// Chrome refused a call on a kept global object (see [`Page::call_fn`])
+/// before running anything: its document was replaced, or the object was
+/// released.
+fn global_gone(e: &anyhow::Error) -> bool {
+    let m = format!("{e:#}");
+    ["Cannot find context with specified id", "Could not find object with given id"].iter().any(|s| m.contains(s))
+}
+
 /// The element wait the page runs: the wait asked for, unless the CDP
 /// command timeout is so close that the page's own "not found" (which
 /// names the element) could lose the race to the transport's timeout.
@@ -3337,6 +3345,10 @@ pub struct Page {
     /// The navigation generation whose document holds the settle arm, plus
     /// one (0: none known); see [`SETTLE_REARM`].
     armed_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// The top document's global object, to call navigera's own functions
+    /// on (see [`Page::call_fn`]): the navigation generation it was asked
+    /// for in, and its object id.
+    global: Arc<std::sync::Mutex<Option<(u64, String)>>>,
 }
 
 /// A tree read's snapshot, kept with the journal armed with it.
@@ -3352,20 +3364,35 @@ struct Kept {
 /// and whether it was primed with its arming.
 type Arming = Option<(u64, u64, bool)>;
 
-/// The arming expression for journal `id`: armed, and primed for the
+/// The arming function of a journal, `(id) => …`: armed, and primed for the
 /// next read, whose style rule watch then stays in the page between
 /// commands. Not with `--natural` (a page can see the watch), nor with
 /// `NAVIGERA_REST_PRIME=0` (to compare against).
-fn arm_expression(id: u64) -> String {
-    if rest_prime() {
-        format!("(() => {{ const a = ({JOURNAL_ARM})({id}); if (a && !a.broken) a.rest = ({JOURNAL_PRIME})({id}, false, true); return a; }})()")
-    } else {
-        format!("({JOURNAL_ARM})({id})")
-    }
+fn arm_fn() -> &'static str {
+    static FN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FN.get_or_init(|| {
+        if rest_prime() {
+            format!("(id) => {{ const a = ({JOURNAL_ARM})(id); if (a && !a.broken) a.rest = ({JOURNAL_PRIME})(id, false, true); return a; }}")
+        } else {
+            JOURNAL_ARM.to_string()
+        }
+    })
+}
+
+/// [`JOURNAL_DELTA`] for the journal `prior`, then the arming of `id`
+/// (see [`arm_fn`]), in one task: `(prior, max, id) => { d, a }`.
+fn delta_fn() -> &'static str {
+    static FN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FN.get_or_init(|| {
+        format!(
+            "(prior, max, id) => {{ const d = ({JOURNAL_DELTA})(prior, max); const a = ({})(id); return {{ d, a }}; }}",
+            arm_fn()
+        )
+    })
 }
 
 /// Whether a journal is primed for the next read as it is armed, and
-/// again after a check that answered an entry (see [`arm_expression`]).
+/// again after a check that answered an entry (see [`arm_fn`]).
 fn rest_prime() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -3373,20 +3400,24 @@ fn rest_prime() -> bool {
     })
 }
 
-/// The check of an entry against journal `id` (see [`JOURNAL_CHECK`]);
+/// The check of an entry against a journal, `(id, typed) => …` (see [`JOURNAL_CHECK`]);
 /// one that answers leaves the journal primed for the next read, which
 /// is then patched as after an arming.
-fn check_expression(id: u64, typed: &str) -> String {
-    if rest_prime() {
-        format!(
-            "(() => {{ const r = ({JOURNAL_CHECK})({id}, {typed});              if (r === '' || (r !== null && typeof r === 'object')) ({JOURNAL_PRIME})({id}, false, true); return r; }})()"
-        )
-    } else {
-        format!("({JOURNAL_CHECK})({id}, {typed})")
-    }
+fn check_fn() -> &'static str {
+    static FN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FN.get_or_init(|| {
+        if rest_prime() {
+            format!(
+                "(id, typed) => {{ const r = ({JOURNAL_CHECK})(id, typed); \
+                 if (r === '' || (r !== null && typeof r === 'object')) ({JOURNAL_PRIME})(id, false, true); return r; }}"
+            )
+        } else {
+            JOURNAL_CHECK.to_string()
+        }
+    })
 }
 
-/// What an arming evaluation returned (see [`arm_expression`]).
+/// What an arming evaluation returned (see [`arm_fn`]).
 fn arming_of(id: u64, a: &Value) -> Arming {
     match a.get("broken").and_then(Value::as_str) {
         Some("") => {
@@ -3446,6 +3477,7 @@ impl Page {
             worlds: Default::default(),
             pointer: Default::default(),
             stalled: Default::default(),
+            global: Default::default(),
             seen_refs: Default::default(),
             journal: Default::default(),
             kept: Default::default(),
@@ -3625,9 +3657,7 @@ impl Page {
     fn arm_journal(&self, timeout: Duration) -> Arming {
         let id = JOURNAL_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();
-        let r = self
-            .send("Runtime.evaluate", json!({ "expression": arm_expression(id), "returnByValue": true }), timeout)
-            .ok();
+        let r = self.call_fn(arm_fn(), &[json!(id)], false, timeout).ok();
         crate::timing::record("journal_arm", started);
         let v = r?.pointer("/result/value").cloned()?;
         let broken = v.get("broken").and_then(Value::as_str).unwrap_or("?");
@@ -3652,11 +3682,7 @@ impl Page {
             return true;
         }
         let started = std::time::Instant::now();
-        let r = self.send(
-            "Runtime.evaluate",
-            json!({ "expression": format!("({JOURNAL_PRIME})({id}, {entry})"), "returnByValue": true }),
-            timeout,
-        );
+        let r = self.call_fn(JOURNAL_PRIME, &[json!(id), json!(entry)], false, timeout);
         crate::timing::record("journal_prime", started);
         let verdict = r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_str).map(str::to_string));
         *self.primed.lock().unwrap() = verdict.as_deref().filter(|v| v.is_empty()).map(|_| id);
@@ -3679,14 +3705,7 @@ impl Page {
     /// [`JOURNAL_ARM`]). False when anything did, or can't be told.
     pub fn journal_unchanged(&self, id: u64, typed: &str, timeout: Duration) -> bool {
         let started = std::time::Instant::now();
-        let r = self.send(
-            "Runtime.evaluate",
-            json!({
-                "expression": check_expression(id, &serde_json::to_string(typed).unwrap_or_default()),
-                "returnByValue": true,
-            }),
-            timeout,
-        );
+        let r = self.call_fn(check_fn(), &[json!(id), json!(typed)], false, timeout);
         crate::timing::record("journal_check", started);
         let verdict = r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_str).map(str::to_string));
         match verdict.as_deref() {
@@ -3705,11 +3724,7 @@ impl Page {
     /// anything else changed, or can't be told.
     pub fn journal_restate(&self, id: u64, timeout: Duration) -> Option<Vec<(u64, Restated)>> {
         let started = std::time::Instant::now();
-        let r = self.send(
-            "Runtime.evaluate",
-            json!({ "expression": check_expression(id, "null"), "returnByValue": true }),
-            timeout,
-        );
+        let r = self.call_fn(check_fn(), &[json!(id), Value::Null], false, timeout);
         let verdict = r.ok().and_then(|r| r.pointer("/result/value").cloned());
         let changes = match verdict {
             Some(Value::String(s)) if s.is_empty() => Some(Vec::new()),
@@ -4124,6 +4139,77 @@ impl Page {
     /// result.
     pub fn evaluate_body(&self, source: &str, timeout: Duration) -> Result<Value> {
         self.evaluate_raw(&format!("(async () => {{\n{source}\n}})()"), timeout)
+    }
+
+    /// `(function)(args…)` in the top document, answered as
+    /// `Runtime.evaluate` answers (by value). The values go as call
+    /// arguments, on the document's global object, so the script text is
+    /// the same on every call and V8 compiles it once: text that carries a
+    /// journal id or a selector is new each time, and parsing 20-40 KB of
+    /// it again cost 2-4 ms a call. The global object is asked for once
+    /// per document; one from a document since replaced is refused by
+    /// Chrome before anything runs, and asked for again. Where it can't
+    /// be had, the call is written out as text, as before.
+    fn call_fn(&self, function: &str, args: &[Value], await_promise: bool, timeout: Duration) -> Result<Value> {
+        let written = |page: &Self| {
+            let list: Vec<String> = args.iter().map(Value::to_string).collect();
+            page.send(
+                "Runtime.evaluate",
+                json!({
+                    "expression": format!("({function})({})", list.join(", ")),
+                    "returnByValue": true,
+                    "awaitPromise": await_promise,
+                }),
+                timeout,
+            )
+        };
+        if !const_calls() || self.shared.is_single_target() {
+            return written(self);
+        }
+        let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
+        for _ in 0..2 {
+            let generation = self.nav_generation();
+            let kept = self.global.lock().unwrap().clone().filter(|(g, _)| *g == generation).map(|(_, id)| id);
+            let global = match kept {
+                Some(id) => id,
+                None => {
+                    let asked = self.send(
+                        "Runtime.evaluate",
+                        json!({ "expression": "globalThis", "objectGroup": "nv-global" }),
+                        timeout,
+                    )?;
+                    let Some(id) = asked.pointer("/result/objectId").and_then(Value::as_str) else { break };
+                    *self.global.lock().unwrap() = Some((generation, id.to_string()));
+                    id.to_string()
+                }
+            };
+            let answer = self.send(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": global,
+                    "functionDeclaration": function,
+                    "arguments": arguments,
+                    "returnByValue": true,
+                    "awaitPromise": await_promise,
+                }),
+                timeout,
+            );
+            match answer {
+                Err(e) if global_gone(&e) => *self.global.lock().unwrap() = None,
+                other => return other,
+            }
+        }
+        written(self)
+    }
+
+    /// [`Self::call_fn`], awaited, as [`Self::evaluate_raw`] answers: the
+    /// value, or the page's exception as the error.
+    fn call_value(&self, function: &str, args: &[Value], timeout: Duration) -> Result<Value> {
+        let res = self.call_fn(function, args, true, timeout)?;
+        if let Some(details) = res.get("exceptionDetails") {
+            bail!("{}", exception_message(details));
+        }
+        Ok(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null))
     }
 
     fn evaluate_raw(&self, expression: &str, timeout: Duration) -> Result<Value> {
@@ -4603,7 +4689,6 @@ impl Page {
                 finder_expr_in(target, ms, what, mode)
             )
         };
-        let expr = |ms: u128| expr_in(ms, TextMode::FlagInexact);
         if let Target::InFrame(chain, inner) = target {
             if matches!(**inner, Target::Ref(_) | Target::InFrame(..)) {
                 bail!("{what}: --frame scopes a --selector, --text or locator (a ref already names one element)");
@@ -4635,8 +4720,31 @@ impl Page {
             }
             return Ok(v);
         }
+        // The same in the page's own document, the target and the values
+        // as call arguments (see `call_fn`): the script text is then the
+        // same whatever is acted on.
+        let find = |ms: u128, mode: TextMode| -> Result<Value> {
+            let ms = json!(ms as u64);
+            let (found, mut values) = match target {
+                Target::Selector(sel) => (
+                    format!("async function (sel, ms, what, ...args) {{ const el = await ({WAIT_FOR})(sel, ms, what, () => {DEEP});"),
+                    vec![json!(sel), ms, json!(what)],
+                ),
+                Target::Text(text) => (
+                    format!("async function (text, ms, what, mode, ...args) {{ const el = await ({WAIT_TEXT})(text, ms, what, {DEEP}, mode);"),
+                    vec![json!(text), ms, json!(what), json!(mode as u8)],
+                ),
+                Target::Locator(loc) => (
+                    format!("async function (spec, ms, what, ...args) {{ const el = await ({WAIT_LOCATOR})(spec, ms, what, {DEEP});"),
+                    vec![json!(loc), ms, json!(what)],
+                ),
+                Target::InFrame(..) | Target::Ref(_) => return self.evaluate_raw(&expr_in(ms.as_u64().unwrap_or(0) as u128, mode), timeout),
+            };
+            values.extend(args.iter().cloned());
+            self.call_value(&format!("{found} return ({function})(el, ...args); }}"), &values, timeout)
+        };
         // Most often the element is there: one round trip.
-        match self.evaluate_raw(&expr(0), timeout) {
+        match find(0, TextMode::FlagInexact) {
             Err(e) if not_found(&e) || inexact(&e) => {}
             other => return other,
         }
@@ -4644,7 +4752,7 @@ impl Page {
         // reach; without any, wait in the page as always.
         let mut frames = self.foreign_frames(timeout);
         if frames.is_empty() {
-            return self.evaluate_raw(&expr_in(wait_ms, TextMode::Best), timeout);
+            return find(wait_ms, TextMode::Best);
         }
         // With some, look in the page and in each of them until the wait
         // runs out. A match in a frame says which (`__frame`), for ops that
@@ -4672,7 +4780,7 @@ impl Page {
             if let Some(found) = in_frames(&frames, TextMode::ExactOnly) {
                 return found;
             }
-            let last = match self.evaluate_raw(&expr(0), timeout) {
+            let last = match find(0, TextMode::FlagInexact) {
                 // Nothing in the page: a frame's match that only contains
                 // the text will do.
                 Err(e) if not_found(&e) => {
@@ -4682,7 +4790,7 @@ impl Page {
                     }
                 }
                 // No frame has it exactly: the page's own match it is.
-                Err(e) if inexact(&e) => return self.evaluate_raw(&expr_in(0, TextMode::Best), timeout),
+                Err(e) if inexact(&e) => return find(0, TextMode::Best),
                 other => return other,
             };
             if started.elapsed() >= wait {
@@ -6559,6 +6667,14 @@ fn delta_reads() -> bool {
     *ON.get_or_init(|| std::env::var("NAVIGERA_DELTA_READ").map_or(true, |v| v.trim() != "0"))
 }
 
+/// Whether navigera's own functions are called with their values as
+/// arguments (see [`Page::call_fn`]); `NAVIGERA_CONST_CALLS=0` writes the
+/// values into the script text every time, to compare against.
+fn const_calls() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NAVIGERA_CONST_CALLS").map_or(true, |v| v.trim() != "0"))
+}
+
 /// Whether a read from the DOM snapshot makes only the tree nodes its
 /// printer reaches (see [`domax::Lazy`]); `NAVIGERA_LAZY_BUILD=0` makes
 /// the whole tree first, to compare against.
@@ -7612,18 +7728,7 @@ impl Page {
         let max = (doc.parent.len() / 8).max(500);
         let id = JOURNAL_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();
-        let r = self.send(
-            "Runtime.evaluate",
-            json!({
-                "expression": format!(
-                    "(() => {{ const d = ({JOURNAL_DELTA})({}, {max}); const a = {}; return {{ d, a }}; }})()",
-                    prior.journal,
-                    arm_expression(id)
-                ),
-                "returnByValue": true,
-            }),
-            timeout,
-        );
+        let r = self.call_fn(delta_fn(), &[json!(prior.journal), json!(max), json!(id)], false, timeout);
         crate::timing::record("delta_read", started);
         let v = r.map_err(|e| (format!("{e:#}"), None))?;
         if let Some(details) = v.get("exceptionDetails") {

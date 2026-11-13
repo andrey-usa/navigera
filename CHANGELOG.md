@@ -17,6 +17,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- navigera's own page scripts (finding the element and clicking, filling
+  or hovering it; arming, checking and reading the change journal) are
+  called with the target and the values as arguments, not written into
+  the script text. Text that carried a selector, a value or a journal id
+  was new to V8 on every call, and parsing 20-40 KB of it again cost
+  2-4 ms each time; the same text is compiled once. The document's
+  global object is asked for once per document; one from a document
+  since replaced is refused by Chrome before anything runs, and asked
+  for again. `NAVIGERA_CONST_CALLS=0` writes the values into the text as
+  before, to compare against; Lightpanda is unchanged. Local release
+  build, Chrome 153, the 500-card page, interleaved against that
+  switch: the bench's fill, fill, click, read batch 46.9 to 41.3 ms
+  median (40 runs); single calls with a new value each time (30 runs):
+  `fill` 15.3 to 13.1 ms, `click` 35.8 to 33.6 ms, `ax` 34.9 to 32.2 ms.
 - A click on a page where nothing can move the element no longer waits
   a frame to see that its box holds still: the top document, loaded
   with its fonts and images, unchanged for 100 ms, no short timer
