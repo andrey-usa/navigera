@@ -422,21 +422,38 @@ fn vitals() {
             assert!(a.err(&["vitals"]).contains("no web vitals"), "[{engine}]");
             continue;
         }
-        a.ok(&["wait", "--text", "pushed"]);
-        a.ok(&["wait", "--js", "window.shifted === true"]);
-        let v = a.ok(&["vitals"]);
+        // The quick button's INP is the browser's own time from the press
+        // to the next frame it draws. A macOS CI runner now and then takes
+        // 300 to 400 ms over one frame (1 run in 6, with and without the
+        // click's frame wait), which reads as a slow button. A reading over
+        // the bound is taken again on a fresh page, twice at most: a stall
+        // of the machine does not come three times running, a delay
+        // navigera adds to every click does.
+        let mut slow_readings = Vec::new();
+        let v = loop {
+            a.ok(&["wait", "--text", "pushed"]);
+            a.ok(&["wait", "--js", "window.shifted === true"]);
+            let v = a.ok(&["vitals"]);
+            assert_eq!((v["interactions"].as_u64(), v["inp"].is_null()), (Some(0), true), "{v}");
+            a.ok(&["click", "--selector", "#quick"]);
+            let after = a.ok(&["vitals"]);
+            assert!(after["interactions"].as_u64() >= Some(1), "{after}");
+            // Quicker than the browser keeps (104 ms), unless the machine is slow.
+            if after["inp"].as_f64().is_some_and(|n| n < 250.0) || after["inp_under_ms"] == 104.0 {
+                break v;
+            }
+            slow_readings.push(after["inp"].clone());
+            assert!(slow_readings.len() < 3, "the quick button read slow three times: {slow_readings:?}, last {after}");
+            eprintln!("[{engine}] the quick button's INP read {}: measured again on a fresh page", after["inp"]);
+            a.ok(&["goto", "about:blank"]);
+            a.ok(&["goto", page]);
+        };
         assert!(v["lcp"].as_f64().is_some_and(|n| n > 0.0), "{v}");
         assert_eq!(v["lcp_element"], "#t", "{v}");
         assert!(v["fcp"].is_number() && v["ttfb"].is_number() && v["load"].is_number(), "{v}");
         assert!(v["cls"].as_f64().is_some_and(|n| n > 0.01), "the paragraph moved the page: {v}");
         assert!(v["cls_elements"].as_array().is_some_and(|m| m.contains(&"#t".into())), "{v}");
-        assert_eq!((v["interactions"].as_u64(), v["inp"].is_null()), (Some(0), true), "{v}");
         assert!(v["rating"].get("inp").is_none() && v["rating"]["lcp"] == "good", "{v}");
-        a.ok(&["click", "--selector", "#quick"]);
-        let v = a.ok(&["vitals"]);
-        assert!(v["interactions"].as_u64() >= Some(1), "{v}");
-        // Quicker than the browser keeps (104 ms), unless the machine is slow.
-        assert!(v["inp"].as_f64().is_some_and(|n| n < 250.0) || v["inp_under_ms"] == 104.0, "{v}");
         a.ok(&["click", "--selector", "#slow"]);
         let v = a.ok(&["vitals"]);
         // Event timings are rounded to 8 ms: a 250 ms handler reads 248 or 256.
