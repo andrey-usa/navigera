@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A compact `batch` spends fewer round trips on work it repeats per step:
+  a step whose report is owed to a later one no longer waits a turn of
+  the page's event loop for a request it may have started (the last
+  action settles once); the history entry takes the page's URL from the
+  result the op already read; a click after a fill skips the journal
+  prime the page would answer at once; and the crash record re-lists
+  the browser's tabs only when a tab opened, closed, or navigated (a
+  `pushState` counts). The same four steps on the 500-card page (25
+  runs, local release build, chrome-headless-shell 157): 48 to 39 CDP
+  commands; the JSON batch 33 to 26 commands, median 39.6 to 29.0 ms.
+  The report, the history, and the crash record read the same.
+
 ### Fixed
 
 - `webmcp-call` on Chrome 159 calls the tool by the id its registration

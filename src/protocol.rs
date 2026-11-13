@@ -3410,6 +3410,10 @@ mod crash_retry_transport_tests {
 struct Crash {
     headless: bool,
     tabs: Vec<(String, bool)>,
+    /// The tabs' fingerprint when `tabs` was taken: while it holds, the
+    /// record is fresh and no `Target.getTargets` is spent re-listing
+    /// them (see `remember`).
+    tabs_fingerprint: Vec<(String, u64)>,
     active: usize,
     storage: Option<Value>,
     /// When `storage` was taken.
@@ -3433,6 +3437,7 @@ impl Default for Crash {
         Crash {
             headless: true,
             tabs: Vec::new(),
+            tabs_fingerprint: Vec::new(),
             active: 0,
             storage: None,
             storage_at: None,
@@ -4076,6 +4081,23 @@ impl Driver {
             self.owed = None;
             return None;
         }
+        // A step of a batch with another action right behind it, which
+        // started no request the watcher has seen: the page is not read
+        // for it — and the turn that would let a request it just started
+        // show is not waited for either. The last action of the run
+        // settles once and reads what they all changed (a read per step
+        // cost a large page 15-20 ms each, and a change one step made and
+        // the next undid cost the agent two lines for nothing). A request
+        // already showing still reads now, as before.
+        if let Some(id) = self.defer.take() {
+            if !self.session.action_traffic_seen() {
+                look.typed.extend(typed.filter(|v| !v.is_empty()).map(str::to_string));
+                self.look = Some(look);
+                self.owed = Some((id, command.clone(), short.clone()));
+                return None;
+            }
+            self.defer = Some(id);
+        }
         // Read after what the action started, not before it: once its
         // requests show, the read waits for them as an `ax` after an action
         // does (else it would catch the page's "Loading…" in between).
@@ -4084,11 +4106,6 @@ impl Driver {
         // as the journal armed with the last read can prove: the report is
         // what a read would say (nothing beyond the entry), without reading
         // a large page again. The entry waits in `typed` for the next read.
-        // A step of a batch with another action right behind it, which
-        // started no request: the page is not read for it. The last action
-        // of the run reads it once and says what they all changed (a read
-        // per step cost a large page 15-20 ms each, and a change one step
-        // made and the next undid cost the agent two lines for nothing).
         if let (Some(id), false) = (self.defer.take(), traffic) {
             look.typed.extend(typed.filter(|v| !v.is_empty()).map(str::to_string));
             self.look = Some(look);
@@ -4306,10 +4323,21 @@ impl Driver {
         if !self.session.is_shared() || self.session.browser_gone() {
             return;
         }
-        if let Some(tabs) = self.session.tab_snapshot() {
-            if !tabs.is_empty() {
-                self.crash.tabs = tabs;
-                self.crash.active = self.session.active_page();
+        // The active tab is local state: always current, whatever the
+        // snapshot below does.
+        self.crash.active = self.session.active_page();
+        // The tabs' URLs only change on a navigation (or a tab opening or
+        // closing): while the fingerprint holds, the crash record's tabs
+        // are already right and no `Target.getTargets` is spent
+        // re-listing them. A failed listing leaves the old fingerprint,
+        // so the next op tries again.
+        let fingerprint = self.session.tabs_fingerprint();
+        if fingerprint != self.crash.tabs_fingerprint {
+            if let Some(tabs) = self.session.tab_snapshot() {
+                if !tabs.is_empty() {
+                    self.crash.tabs = tabs;
+                    self.crash.tabs_fingerprint = fingerprint;
+                }
             }
         }
         self.crash.storage_dirty = true;
@@ -4703,7 +4731,9 @@ impl Driver {
             r => r,
         };
         if let (Ok(r), Some(mut e)) = (&result, entry) {
-            e["url"] = json!(self.session.url());
+            // The state the op already read names the page: no second round
+            // trip for the same URL (a `click` or `fill` result carries it).
+            e["url"] = r.get("url").cloned().unwrap_or_else(|| json!(self.session.url()));
             // A click that changed nothing (the next one is usually the
             // same click again, once the page is ready for it).
             if r.get("no_effect").is_some() {

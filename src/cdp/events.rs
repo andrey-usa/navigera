@@ -58,6 +58,11 @@ pub struct NavState {
     pub requested_at: Option<std::time::Instant>,
     /// Bumped on every navigation request or load start.
     pub generation: u64,
+    /// Bumped on every navigation request, load start, or
+    /// within-document navigation (`pushState`): the tab's URL may have
+    /// changed. Unlike `generation` it is only a freshness stamp for the
+    /// crash record's tabs (see `remember`); nothing settles on it.
+    pub url_seq: u64,
     /// When the navigating document committed (main-frame
     /// `frameNavigated`): from then on the DOM is the new page, even if it
     /// is still being parsed.
@@ -1468,6 +1473,7 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                 "Page.frameRequestedNavigation" => {
                     state.requested_at = Some(std::time::Instant::now());
                     state.generation += 1;
+                    state.url_seq += 1;
                 }
                 "Page.frameStartedLoading" => {
                     // The old document's requests die with it.
@@ -1484,6 +1490,7 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                     state.requested_at = None;
                     state.committed_at = None;
                     state.generation += 1;
+                    state.url_seq += 1;
                 }
                 "Page.frameNavigated" => state.committed_at = Some(std::time::Instant::now()),
                 "Page.frameStoppedLoading" => {
@@ -1491,7 +1498,10 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                     state.dom_ready = true;
                     state.requested_at = None;
                 }
-                "Page.navigatedWithinDocument" => state.requested_at = None,
+                "Page.navigatedWithinDocument" => {
+                    state.requested_at = None;
+                    state.url_seq += 1;
+                }
                 _ => state.dom_ready = true,
             }
         }

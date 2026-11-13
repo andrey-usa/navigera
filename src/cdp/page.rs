@@ -3608,6 +3608,15 @@ impl Page {
     /// (`entry`), or to patch the read after another action (see
     /// [`JOURNAL_PRIME`]); false when it can't.
     pub fn journal_prime(&self, id: u64, entry: bool, timeout: Duration) -> bool {
+        // Already primed for this journal, and not an entry: the page's
+        // prime would answer '' at once (see JOURNAL_PRIME) — no round
+        // trip for it. An entry re-validates its matches, so it still goes
+        // to the page. The id match keeps the skip to the journal the
+        // prime was for; a stale priming (a navigation since, no read
+        // yet) only costs a delta attempt that falls back to a full read.
+        if !entry && *self.primed.lock().unwrap() == Some(id) && self.journal_id() == Some(id) {
+            return true;
+        }
         let started = std::time::Instant::now();
         let r = self.send(
             "Runtime.evaluate",

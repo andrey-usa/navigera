@@ -4115,6 +4115,14 @@ impl BrowserSession {
         self.timeout_ms
     }
 
+    /// (target id, URL sequence) per tab, from local state only: the
+    /// crash record's tabs are fresh while this is unchanged (see
+    /// `remember`), so no `Target.getTargets` is spent re-listing them.
+    pub fn tabs_fingerprint(&self) -> Vec<(String, u64)> {
+        let shared = self.browser.shared();
+        self.pages.iter().map(|p| (p.target_id().to_string(), shared.nav_state(p.session_id()).url_seq)).collect()
+    }
+
     /// Every tab's URL and whether its last document request was not a GET
     /// (a form POST), in tab order, from one `Target.getTargets` and the
     /// request log: what a crashed browser's tabs are reopened from. `None`
