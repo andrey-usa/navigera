@@ -3253,6 +3253,16 @@ impl BrowserSession {
         self.action_traffic_seen()
     }
 
+    /// [`cdp::Page::turn_start`] on the active tab.
+    pub fn turn_start(&self, max: Duration) {
+        self.active_tab().turn_start(max);
+    }
+
+    /// [`cdp::Page::turn_drop`] on the active tab.
+    pub fn turn_drop(&self) {
+        self.active_tab().turn_drop();
+    }
+
     /// [`cdp::Page::journal_id`] on the active tab.
     pub fn journal_id(&self) -> Option<u64> {
         self.active_tab().journal_id()

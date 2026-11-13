@@ -3002,6 +3002,10 @@ pub struct Driver {
     /// a recorded command's state, for its history entry: `None` inside
     /// while the command recorded asks for it and no state was read yet.
     said: std::cell::RefCell<Option<Option<Value>>>,
+    /// The command running is an action whose change report will wait one
+    /// turn of the page's event loop (see `page_change`): its state read
+    /// asks for the turn first, so the two share a round trip.
+    turn_wanted: std::cell::Cell<bool>,
     /// The last report was compact: an agent reads what actions change.
     compact: bool,
     /// Reads are an agent's that reads again (the MCP server's), whatever
@@ -3513,6 +3517,7 @@ impl Driver {
                 defer: None,
                 owed: None,
                 said: Default::default(),
+                turn_wanted: Default::default(),
                 compact: false,
                 agent_reads: false,
                 read_answer: None,
@@ -3535,6 +3540,7 @@ impl Driver {
                 defer: None,
                 owed: None,
                 said: Default::default(),
+                turn_wanted: Default::default(),
                 compact: false,
                 agent_reads: false,
                 read_answer: None,
@@ -3564,6 +3570,7 @@ impl Driver {
             defer: None,
             owed: None,
             said: Default::default(),
+            turn_wanted: Default::default(),
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -3595,6 +3602,7 @@ impl Driver {
             defer: None,
             owed: None,
             said: Default::default(),
+            turn_wanted: Default::default(),
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -3641,6 +3649,7 @@ impl Driver {
             defer: None,
             owed: None,
             said: Default::default(),
+            turn_wanted: Default::default(),
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -3682,6 +3691,9 @@ impl Driver {
         // A recorded command's history entry wants what the page says
         // after it: read here, with the URL and the title, in one round
         // trip instead of one more.
+        if self.turn_wanted.take() {
+            self.session.turn_start(ACTION_TRAFFIC_GRACE);
+        }
         let (url, title) = if self.said.borrow().is_some() {
             let (url, title, said) = self.session.url_title_and(PAGE_SAYS);
             *self.said.borrow_mut() = Some(said);
@@ -4027,6 +4039,7 @@ impl Driver {
     pub(crate) fn owed_report(&mut self) -> Option<(Value, Value)> {
         self.defer = None;
         let (id, command, short) = self.owed.clone()?;
+        self.session.turn_drop();
         let report = self.page_change(&command, &short);
         self.owed = None;
         Some((id, report?))
@@ -4046,6 +4059,7 @@ impl Driver {
         if compact {
             let short = compact_result(own, &state, before.as_ref());
             *result = Some(self.page_change(command, &short).unwrap_or(short));
+            self.session.turn_drop();
         }
     }
 
@@ -4630,6 +4644,13 @@ impl Driver {
             || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let mut entry = command.recorded().then(|| json!({ "command": command, "at": at() }));
         *self.said.borrow_mut() = entry.is_some().then_some(None);
+        self.session.turn_drop();
+        self.turn_wanted.set(
+            self.compact
+                && reports_page_change(command)
+                && self.defer.is_none()
+                && self.look.as_ref().is_some_and(|l| l.page == self.session.page_identity()),
+        );
         if let (Some(e), Some(r)) = (entry.as_mut(), command.clone().target_mut().and_then(|t| t.node_ref)) {
             let found = self.session.locate(&Target::Ref(r), Some(2000.0)).ok();
             if found.as_ref().is_some_and(|v| v["secret"] == true) {

@@ -40,11 +40,13 @@ All notable changes to this project are documented here. The format follows
   answer is wanted; a patched read asks for the document's listeners
   with the node count, keeps the document between reads, asks for the
   changed roots behind the delta read and describes them all at once;
-  object releases are not waited for. Local release build, Chrome 153,
-  the 500-card page, 30 interleaved runs against the commit before:
-  `fill` 25.9 to 21.8 ms, `click` 43.8 to 41.4, a submitting click 51.2
-  to 47.0, the fill, fill, click, read batch 46.3 to 44.4 (a slow
-  moment of the machine; the batch's output is the same).
+  object releases are not waited for; the turn of the page's event loop
+  a change report waits for is asked for ahead of the state read and
+  shares its round trip. Local release build, Chrome 153, the 500-card
+  page, 30 interleaved runs against the commit before these: `fill`
+  24.2 to 19.7 ms, `click` 41.9 to 39.2, a submitting click 49.7 to
+  49.2, the fill, fill, click, read batch 46.6 to 42.6 (a slow moment
+  of the machine; the batch's output is the same).
 - A browser navigera starts no longer asks Google for the time
   (`clients2.google.com/time`) nor opens a connection to the search
   engine (`www.google.com`) at every start, whatever page was asked

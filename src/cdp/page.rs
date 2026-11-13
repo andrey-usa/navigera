@@ -3253,6 +3253,14 @@ fn navigated_away(e: &anyhow::Error) -> bool {
         .any(|s| m.contains(s))
 }
 
+/// One turn of the page's event loop, awaited, `max` at most (see
+/// [`Page::event_loop_turn`]).
+fn turn_params(max: Duration) -> Value {
+    let ms = max.as_millis();
+    let js = format!("new Promise(r => {{ setTimeout(() => r(true), 0); setTimeout(() => r(false), {ms}); }})");
+    json!({ "expression": js, "awaitPromise": true, "returnByValue": true })
+}
+
 /// Chrome refused a call on a kept global object (see [`Page::call_fn`])
 /// before running anything: its document was replaced, or the object was
 /// released.
@@ -3365,6 +3373,8 @@ pub struct Page {
     /// The document's listeners, asked for ahead of the read that wants
     /// them (see [`Page::listeners`]).
     listeners_started: Arc<std::sync::Mutex<Option<Started>>>,
+    /// An event loop turn asked for ahead (see [`Page::turn_start`]).
+    turn_started: Arc<std::sync::Mutex<Option<Started>>>,
 }
 
 /// A command already written to the browser, its answer still to be read
@@ -3501,6 +3511,7 @@ impl Page {
             document: Default::default(),
             prime_started: Default::default(),
             listeners_started: Default::default(),
+            turn_started: Default::default(),
             seen_refs: Default::default(),
             journal: Default::default(),
             kept: Default::default(),
@@ -3661,16 +3672,26 @@ impl Page {
     /// answer on the same connection. False when no script could run (the
     /// page is gone or busy past `max`).
     pub fn event_loop_turn(&self, max: Duration) -> bool {
-        let ms = max.as_millis();
-        let js = format!("new Promise(r => {{ setTimeout(() => r(true), 0); setTimeout(() => r(false), {ms}); }})");
-        self.send(
-            "Runtime.evaluate",
-            json!({ "expression": js, "awaitPromise": true, "returnByValue": true }),
-            max + Duration::from_secs(1),
-        )
-        .ok()
-        .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
-        .unwrap_or(false)
+        let started = self.turn_started.lock().unwrap().take();
+        let answer = match started {
+            Some(started) => self.finish(started),
+            None => self.send("Runtime.evaluate", turn_params(max), max + Duration::from_secs(1)),
+        };
+        answer.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_bool)).unwrap_or(false)
+    }
+
+    /// Ask for [`Self::event_loop_turn`] now, right after an action, and
+    /// read it when the turn is wanted: what is read in between (the
+    /// action's state) shares its round trip. [`Self::turn_drop`] forgets
+    /// one nobody read.
+    pub fn turn_start(&self, max: Duration) {
+        let started = self.start("Runtime.evaluate", turn_params(max), max + Duration::from_secs(1));
+        *self.turn_started.lock().unwrap() = Some(started);
+    }
+
+    /// Forget a turn asked for ahead and never read (see [`Self::turn_start`]).
+    pub fn turn_drop(&self) {
+        *self.turn_started.lock().unwrap() = None;
     }
 
     /// Arm the change journal in the top document (see [`JOURNAL_ARM`]):
