@@ -294,3 +294,47 @@ fn a_long_session_directory_still_starts() {
     assert!(log.contains("too long for a socket address"), "{log}");
     assert_eq!(run(&["-s", "s", "quit"])["ok"], true);
 }
+
+/// A browser navigera starts asks nobody for anything the page did not:
+/// the requests Chrome made on its own account at every start and that a
+/// flag turns off stay off. Read from Chrome's own net log, which records
+/// a request when it is made, answered or not.
+#[test]
+fn a_started_browser_makes_none_of_the_requests_its_flags_turn_off() {
+    if !chrome() {
+        return;
+    }
+    let dir = Dir::new();
+    let log = dir.root.path().join("net.json");
+    let run = |args: &[&str]| {
+        let out = dir
+            .command()
+            .env("NAVIGERA_EXTRA_FLAGS", format!("--log-net-log={}", log.display()))
+            .args(args)
+            .output()
+            .expect("run navigera");
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stdout));
+    };
+    run(&["-s", "quiet", "start", "--own-browser"]);
+    run(&["-s", "quiet", "goto", "data:text/html,<title>quiet</title>"]);
+    // The requests left the browser within 200 ms of its start; the log is
+    // written as they are made.
+    std::thread::sleep(Duration::from_millis(1500));
+    run(&["-s", "quiet", "quit"]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("\"events\"") || Instant::now() > deadline {
+            break text;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(text.contains("\"events\""), "Chrome wrote no net log at {}", log.display());
+    for (url, what) in [
+        ("clients2.google.com/time", "the time (NetworkTimeServiceQuerying)"),
+        ("update.googleapis.com", "the on-device model list (OptimizationGuideManifestBroker)"),
+        ("/async/folae", "AI mode eligibility (AimEnabled)"),
+    ] {
+        assert!(!text.contains(url), "the browser asked for {what}: {url} is in its net log");
+    }
+}

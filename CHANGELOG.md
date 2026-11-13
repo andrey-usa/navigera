@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A browser navigera starts makes two fewer requests to Google at every
+  start, whatever page was asked for: the list of on-device AI models
+  from the update server (`update.googleapis.com`, sent although
+  component updates are off: `OptimizationGuideManifestBroker` is now
+  off, and no model was ever downloaded anyway) and, headless, whether
+  the user may use the address bar's AI mode
+  (`www.google.com/async/folae`, twice: `AimEnabled` is off, a visible
+  window keeps its address bar as it is). A test reads Chrome's own net
+  log for these and for the time request 0.13.0 turned off. Still sent,
+  and no feature of Chrome 153 turns either off (each of its feature
+  names was switched off in turn): the account list
+  (`accounts.google.com/ListAccounts`) and the messaging check-in and
+  registration (`android.clients.google.com`).
+
 ### Fixed
 
 - `sessions` on Windows could count another session's browser as a

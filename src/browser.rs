@@ -88,7 +88,12 @@ const CHROME_FLAGS: &[&str] = &[
     // NetworkTimeServiceQuerying, PreconnectToSearch: the browser asked
     // Google for the time and opened a connection to the search engine at
     // every start, whatever page was asked for.
-    "--disable-features=Translate,TranslateUI,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,site-per-process,NetworkTimeServiceQuerying,PreconnectToSearch",
+    // OptimizationGuideManifestBroker: at every start the browser asked
+    // Google's update server for the list of on-device AI models, a
+    // request `--disable-component-update` does not stop (it only tells
+    // the server not to answer with an update). Nothing is lost: with
+    // component updates off no model was ever downloaded.
+    "--disable-features=Translate,TranslateUI,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,site-per-process,NetworkTimeServiceQuerying,PreconnectToSearch,OptimizationGuideManifestBroker",
     // WebMCP: the tools a page registers on `document.modelContext`
     // (`webmcp-list`, `webmcp-call`); a Chrome without it ignores the name.
     "--enable-features=NetworkService,NetworkServiceInProcess,WebMCP",
@@ -124,7 +129,12 @@ pub(crate) fn chrome_flags() -> Vec<String> {
 /// through bitti (a context each) took 7.9 -> 6.8 s, 17.8 -> 11.3 s of CPU
 /// and a browser peak of 890 -> 750 MiB (medians of 5). A visible browser
 /// keeps them: its address bar is there for the user.
-const HEADLESS_DISABLED_FEATURES: &str = "--disable-features=WebUIOmniboxPopup,WebUIOmniboxAimPopup";
+///
+/// `AimEnabled` is the address bar's AI mode itself: with it on, the
+/// browser asked the search engine at every start, and again when its
+/// account list arrived, whether the user may use AI mode
+/// (`www.google.com/async/folae`).
+const HEADLESS_DISABLED_FEATURES: &str = "--disable-features=WebUIOmniboxPopup,WebUIOmniboxAimPopup,AimEnabled";
 
 /// [`chrome_flags`] for a launch of navigera's own, headless or not.
 pub(crate) fn launch_flags(headless: bool) -> Vec<String> {
