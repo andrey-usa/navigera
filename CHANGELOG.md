@@ -6,8 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A Claude Code plugin: `/plugin install navigera --marketplace andrey-usa/navigera`
+  adds the skill to every session. The plugin folder is `skills/` (its
+  manifest, a README and the skill; no hooks, no MCP server, no scripts)
+  and the repository is its own marketplace
+  (`.claude-plugin/marketplace.json`). A test keeps the two files in
+  agreement.
+
 ### Changed
 
+- A click on a page where nothing can move the element no longer waits
+  a frame to see that its box holds still: the top document, loaded
+  with its fonts and images, unchanged for 100 ms, no short timer
+  queued since the action was armed, nothing animating, and no scroll
+  needed. After an action that repainted (a field filled just before,
+  in a `batch`) that frame was a whole refresh interval away. Any other
+  page waits as before, and a press that lands on something else is
+  still held back and sent again. Local release build, Chrome 153, the
+  500-card page, 40 interleaved runs after the page rested 150 ms: the
+  bench's fill, fill, click, read batch 61.6 to 45.8 ms median; without
+  the rest (the page changed 5 ms earlier) 61.2 and 63.2 ms, unchanged.
+- A browser navigera starts gets two more flags,
+  `--disable-search-engine-choice-screen` and
+  `--hide-crash-restore-bubble`: a visible window no longer shows the
+  search engine choice of a fresh profile or the "restore pages?"
+  bubble over the page. A headless start is as fast as before (start
+  and first page 322 ms, 12 runs each).
+- The operations bench rests the page 150 ms after each state reset,
+  for every tool, untimed: an agent's call comes a model turn after
+  the page last changed, not 5 ms after.
 - A compact `batch` spends fewer round trips on work it repeats per step:
   a step whose report is owed to a later one no longer waits a turn of
   the page's event loop for a request it may have started (the last

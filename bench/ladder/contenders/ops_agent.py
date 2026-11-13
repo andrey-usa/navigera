@@ -263,6 +263,9 @@ def assert_snapshot_known_elements(text: str):
         raise RuntimeError("snapshot: button 'Search' not present")
 
 FIXTURES = HERE.parent / "fixtures"
+# How long the page rests after a state reset before the timed call.
+SETUP_REST_S = 0.15
+
 OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
        "screenshot", "form-batch")
 
@@ -691,6 +694,10 @@ class Tool:
             self._bu_exec(f'js("{code}")\n', "setup")
         else:
             self.eval_value(f"(() => {{ {code}; return 1 }})()")
+        # The reset changes the page. An agent's call comes a model turn
+        # after the page last changed, never 5 ms after: the page rests
+        # first, the same for every tool, untimed.
+        time.sleep(SETUP_REST_S)
 
     # -- the ops ---------------------------------------------------------------
     def op_goto(self, rep: int):

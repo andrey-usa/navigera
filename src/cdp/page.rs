@@ -628,6 +628,24 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         }
         return null;
     };
+    // Nothing in the page can move the element before the press, so the
+    // frame the stable-box read waits for would show the same box: the top
+    // document, outside any shadow tree, loaded with its fonts and images;
+    // no change to it for 100 ms (the observer the last action armed has
+    // watched at least that long); no timer of 100 ms or less queued since
+    // this action was armed; nothing animating. After an action that
+    // repainted (a field filled just before, in a batch) that frame is a
+    // whole refresh interval away: about 9 ms of every such click.
+    const still = () => {
+        const d = el.ownerDocument, w = d.defaultView;
+        if (!w || w !== w.top || el.getRootNode() !== d || d.hidden) return false;
+        const c = w.__nvMut;
+        if (!c || !(performance.now() - c.t >= 100) || !c.p || c.p.size) return false;
+        if (d.readyState !== 'complete' || (d.fonts && d.fonts.status !== 'loaded')) return false;
+        if (!d.getAnimations || d.getAnimations().some((a) => a.playState === 'running')) return false;
+        for (const i of d.images) if (!i.complete) return false;
+        return true;
+    };
     // An element whose position never holds still (a perpetual drift)
     // gets this long in all to stop, then is clicked where it was last
     // read, not after the whole element wait.
@@ -661,8 +679,10 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // be starting to slide in.
         await settle();
         const align = ALIGN[tries++ % ALIGN.length];
+        const r0 = el.getBoundingClientRect();
         el.scrollIntoView(Object.assign({ behavior: 'instant' }, align));
         let box = el, r = el.getBoundingClientRect();
+        const scrolled = Math.abs(r.left - r0.left) >= 0.5 || Math.abs(r.top - r0.top) >= 0.5;
         if (!(r.width > 0 && r.height > 0)) {
             const l = labels.find((l) => { const b = l.getBoundingClientRect(); return b.width > 0 && b.height > 0; });
             if (l) { box = l; l.scrollIntoView(Object.assign({ behavior: 'instant' }, align)); r = l.getBoundingClientRect(); }
@@ -677,7 +697,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         // A hidden page draws no frames, and one that drew none for 500 ms
         // isn't moving anything by frames either: the timer counts there.
         if (steadyBy === null) steadyBy = Date.now() + Math.min(1000, settleMs);
-        for (let idle = 0; ; ) {
+        for (let idle = 0; !(box === el && !scrolled && still()); ) {
             const framed = await frameOr100();
             idle = framed ? 0 : idle + 1;
             const r2 = box.getBoundingClientRect();
@@ -889,8 +909,8 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
 const SETTLE_ARM: &str = r#"(() => {
     let c = window.__nvMut;
     if (!c) {
-        c = { n: 0, w: null, w2: null };
-        c.o = new MutationObserver((r) => { c.n += r.length; const w = c.w; if (w) { c.w = null; w(); } const w2 = c.w2; if (w2) { c.w2 = null; w2(); } });
+        c = { n: 0, w: null, w2: null, t: performance.now() };
+        c.o = new MutationObserver((r) => { c.n += r.length; c.t = performance.now(); const w = c.w; if (w) { c.w = null; w(); } const w2 = c.w2; if (w2) { c.w2 = null; w2(); } });
         c.o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
         Object.defineProperty(window, '__nvMut', { value: c, configurable: true, enumerable: false });
     }
