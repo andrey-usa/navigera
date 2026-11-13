@@ -1,0 +1,16 @@
+{
+  "name": "navigera",
+  "description": "navigera: browser automation for agents from the shell",
+  "owner": {
+    "name": "andrey-usa",
+    "url": "https://github.com/andrey-usa"
+  },
+  "plugins": [
+    {
+      "name": "navigera",
+      "source": "./skills",
+      "description": "Drive Chrome and Electron apps from the shell: pages as a compact accessibility tree, one command per step, each action reports what changed.",
+      "category": "development"
+    }
+  ]
+}

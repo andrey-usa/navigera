@@ -74,6 +74,8 @@ A longer tour of the commands, targets and output: [A first session](https://and
 - **Skill:** `navigera install-skill` writes the guide that matches this
   version to `./.agents/skills` (`--claude` for `./.claude/skills`,
   `--continue` for `./.continue/skills`); `navigera skill` prints it.
+- **Claude Code plugin:** `/plugin install navigera --marketplace andrey-usa/navigera`
+  adds the skill to every session ([what it contains](skills/README.md)).
 - **MCP:** `navigera mcp` is a Model Context Protocol server: add
   `{"command": "navigera", "args": ["mcp"]}`, or
   `{"command": "npx", "args": ["-y", "navigera", "mcp"]}` with nothing

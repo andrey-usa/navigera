@@ -1,0 +1,16 @@
+{
+  "name": "navigera",
+  "displayName": "navigera",
+  "description": "Browser automation for agents from the shell: a native binary that drives Chrome and Electron apps, reads pages as a compact accessibility tree, and reports what each action changed.",
+  "author": {
+    "name": "andrey-usa",
+    "url": "https://github.com/andrey-usa"
+  },
+  "homepage": "https://andrey-usa.github.io/navigera/",
+  "repository": "https://github.com/andrey-usa/navigera",
+  "documentationUrl": "https://andrey-usa.github.io/navigera/agents/skill.html",
+  "supportUrl": "https://github.com/andrey-usa/navigera/issues",
+  "license": "MIT",
+  "keywords": ["browser", "chrome", "electron", "automation", "testing", "scraping", "accessibility", "cdp"],
+  "skills": ["./"]
+}
