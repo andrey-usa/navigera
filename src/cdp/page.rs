@@ -643,7 +643,13 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     // this action was armed; nothing animating. After an action that
     // repainted (a field filled just before, in a batch) that frame is a
     // whole refresh interval away: about 9 ms of every such click.
+    // Not on macOS: there a browser whose page has been still a while is
+    // slow to draw its next frame, and the frame wait took that delay
+    // before the press. Without it the delay came after the press and the
+    // page's own INP read it (a button with no handler: 304 and 328 ms in
+    // 2 of 7 macOS CI runs, never before the skip).
     const still = () => {
+        if (/^Mac/.test(navigator.platform)) return false;
         const d = el.ownerDocument, w = d.defaultView;
         if (!w || w !== w.top || el.getRootNode() !== d || d.hidden) return false;
         const c = w.__nvMut;

@@ -78,6 +78,10 @@ All notable changes to this project are documented here. The format follows
   500-card page, 40 interleaved runs after the page rested 150 ms: the
   bench's fill, fill, click, read batch 61.6 to 45.8 ms median; without
   the rest (the page changed 5 ms earlier) 61.2 and 63.2 ms, unchanged.
+  Not on macOS, where a browser whose page has been still a while is
+  slow to draw its next frame: the wait took that delay before the
+  press, and without it the page's own INP counted it (a button with
+  no handler read 304 and 328 ms in `vitals`, in 2 of 7 CI runs).
 - A browser navigera starts gets two more flags,
   `--disable-search-engine-choice-screen` and
   `--hide-crash-restore-bubble`: a visible window no longer shows the
