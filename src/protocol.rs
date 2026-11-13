@@ -4331,12 +4331,18 @@ impl Driver {
         // are already right and no `Target.getTargets` is spent
         // re-listing them. A failed listing leaves the old fingerprint,
         // so the next op tries again.
+        // The stamps are the event watcher's, which can trail what this
+        // op saw (a navigation that just committed): while it is behind
+        // they prove nothing, so the tabs are listed, and listed again by
+        // the next op (waiting for the watcher instead cost a four-step
+        // batch 10 ms).
+        let behind = self.session.watcher_behind();
         let fingerprint = self.session.tabs_fingerprint();
-        if fingerprint != self.crash.tabs_fingerprint {
+        if behind || fingerprint != self.crash.tabs_fingerprint {
             if let Some(tabs) = self.session.tab_snapshot() {
                 if !tabs.is_empty() {
                     self.crash.tabs = tabs;
-                    self.crash.tabs_fingerprint = fingerprint;
+                    self.crash.tabs_fingerprint = if behind { Vec::new() } else { fingerprint };
                 }
             }
         }

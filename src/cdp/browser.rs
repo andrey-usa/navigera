@@ -456,6 +456,11 @@ impl Browser {
         self.shared.caught_up(&self.client, Duration::from_millis(250))
     }
 
+    /// See [`Shared::behind`].
+    pub fn watcher_behind(&self) -> bool {
+        self.shared.behind(&self.client)
+    }
+
     /// Report downloads (`Browser.downloadWillBegin`/`downloadProgress`),
     /// saving them in `dir`, or where the browser would (no `dir`: a browser
     /// that is the user's own keeps its own setting).

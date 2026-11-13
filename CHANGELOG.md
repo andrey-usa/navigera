@@ -64,10 +64,11 @@ All notable changes to this project are documented here. The format follows
   committed, which is when the tab's URL changes, and it was read
   before the event watcher had caught up with the connection. A
   command that ran while a slow form POST was on its way kept the old
-  URL for good. The stamp now also moves at the commit and is read
-  after the watcher has caught up. The form POST crash test, six
-  copies at once, 48 runs: 3 failed before (the tab came back at the
-  earlier page), none after. Not in a release: the record was renewed
+  URL for good. The stamp now also moves at the commit, and while the
+  watcher is behind the tabs are listed again instead of trusted
+  (waiting for it cost a four-step batch 10 ms). The form POST crash
+  test, six copies at once: 3 of 48 failed before (the tab came back
+  at the earlier page), 0 of 60 after. Not in a release: the record was renewed
   on every command up to 0.12.0.
 - `webmcp-call` on Chrome 159 calls the tool by the id its registration
   has there, not by name: Chrome 159 deprecates the name, which calls

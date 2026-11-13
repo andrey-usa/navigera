@@ -1030,6 +1030,12 @@ impl Shared {
         true
     }
 
+    /// The watcher has not yet handled every event that arrived: no wait,
+    /// where [`Shared::caught_up`] sleeps until it has.
+    pub fn behind(&self, client: &CdpClient) -> bool {
+        self.processed.load(Ordering::SeqCst) < client.events_sent()
+    }
+
     pub fn is_single_target(&self) -> bool {
         self.single_target.load(Ordering::Relaxed)
     }
