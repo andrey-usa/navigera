@@ -181,17 +181,37 @@ pub fn process_table() -> std::collections::HashMap<u32, (u32, u64)> {
     }
     #[cfg(windows)]
     {
-        let script = "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $([math]::Round($_.WorkingSetSize / 1024))\" }";
+        let script = "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $([math]::Round($_.WorkingSetSize / 1024)) $(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 })\" }";
         if let Ok(out) = std::process::Command::new("powershell").args(["-NoProfile", "-Command", script]).output() {
+            let mut born = std::collections::HashMap::new();
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 let f: Vec<u64> = line.split_whitespace().filter_map(|s| s.parse().ok()).collect();
-                if let [pid, ppid, kb] = f[..] {
+                if let [pid, ppid, kb, created] = f[..] {
                     table.insert(pid as u32, (ppid as u32, kb));
+                    born.insert(pid as u32, created);
                 }
             }
+            orphan_reused_parents(&mut table, &born);
         }
     }
     table
+}
+
+/// Windows keeps a process's parent id after the parent exits, and gives
+/// that id to the next process it starts: a process younger than the one
+/// its parent id now names is not its child (a session would count another
+/// session's browser as its own memory). Such a process is cut loose.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn orphan_reused_parents(
+    table: &mut std::collections::HashMap<u32, (u32, u64)>,
+    born: &std::collections::HashMap<u32, u64>,
+) {
+    for (pid, (ppid, _)) in table.iter_mut() {
+        let (Some(child), Some(parent)) = (born.get(pid), born.get(ppid)) else { continue };
+        if *parent > *child {
+            *ppid = 0;
+        }
+    }
 }
 
 /// Memory (KiB) of `root` and every process below it, leaving out the
@@ -211,4 +231,22 @@ pub fn tree_kb(table: &std::collections::HashMap<u32, (u32, u64)>, root: u32, sk
         stack.extend(table.iter().filter(|(_, (ppid, _))| *ppid == pid).map(|(child, _)| *child));
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn a_parent_id_taken_by_a_younger_process_is_no_parent() {
+        // 10 is a session started at t=50; 20 is another session's
+        // browser, started at t=30 by a process 10 that has since exited.
+        let mut table: HashMap<u32, (u32, u64)> =
+            [(10, (1, 5_000)), (11, (10, 200_000)), (20, (10, 225_000))].into_iter().collect();
+        let born: HashMap<u32, u64> = [(1, 1), (10, 50), (11, 60), (20, 30)].into_iter().collect();
+        orphan_reused_parents(&mut table, &born);
+        assert_eq!(tree_kb(&table, 10, &[]), 205_000);
+        assert_eq!(table[&20].0, 0);
+    }
 }

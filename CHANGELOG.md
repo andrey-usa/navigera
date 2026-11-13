@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `sessions` on Windows could count another session's browser as a
+  session's own memory (225 MiB for a session on a shared browser, in a
+  CI run): Windows keeps a process's parent id after that parent exits
+  and gives the id to the next process it starts. A process younger
+  than the one its parent id now names is no longer counted below it.
+
 ## [0.13.0] - 2026-11-13
 
 ### Added
