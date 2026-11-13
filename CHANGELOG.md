@@ -31,6 +31,15 @@ All notable changes to this project are documented here. The format follows
   switch: the bench's fill, fill, click, read batch 46.9 to 41.3 ms
   median (40 runs); single calls with a new value each time (30 runs):
   `fill` 15.3 to 13.1 ms, `click` 35.8 to 33.6 ms, `ax` 34.9 to 32.2 ms.
+- A page script a document calls a second time is kept there as a
+  function object and called by its id from then on: no text is sent,
+  hashed or looked up (a 40 KB function sent as text cost about 0.8 ms
+  a call even when V8 had it compiled). A page acted on once pays
+  nothing for it. With the round trips below, local release build,
+  Chrome 153, the 500-card page, 30 interleaved runs against the commit
+  before them all: the fill, fill, click, read batch 44.2 to 31.7 ms,
+  `fill` 22.8 to 17.4, `click` 41.7 to 35.8, a submitting click 49.9 to
+  44.8 (same output).
 - An action makes fewer round trips to the browser; each cost about half
   a millisecond whatever it did. A click after a look: 20 commands to
   13; a fill: 6 to 5. The press's arrival, the navigation's verdict and

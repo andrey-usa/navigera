@@ -3253,6 +3253,14 @@ fn navigated_away(e: &anyhow::Error) -> bool {
         .any(|s| m.contains(s))
 }
 
+/// A script text's key among a document's kept functions.
+fn text_key(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// One turn of the page's event loop, awaited, `max` at most (see
 /// [`Page::event_loop_turn`]).
 fn turn_params(max: Duration) -> Value {
@@ -3375,7 +3383,24 @@ pub struct Page {
     listeners_started: Arc<std::sync::Mutex<Option<Started>>>,
     /// An event loop turn asked for ahead (see [`Page::turn_start`]).
     turn_started: Arc<std::sync::Mutex<Option<Started>>>,
+    /// navigera's own functions as objects in the top document, by their
+    /// text's hash (see [`Page::function_object`]), with the navigation
+    /// generation they belong to.
+    functions: Arc<std::sync::Mutex<(u64, std::collections::HashMap<u64, KeptFn>)>>,
 }
+
+/// One of navigera's functions in a document (see [`Page::function_object`]).
+enum KeptFn {
+    /// Called once there, as text.
+    Seen,
+    /// Called twice: asked for as an object.
+    Asked(Started),
+    /// The function's object id.
+    Have(String),
+}
+
+/// Calls the function object it is called on (see [`Page::function_object`]).
+const CALL_THIS: &str = "function (...a) { return this(...a); }";
 
 /// A command already written to the browser, its answer still to be read
 /// (see [`Page::start`]).
@@ -3512,6 +3537,7 @@ impl Page {
             prime_started: Default::default(),
             listeners_started: Default::default(),
             turn_started: Default::default(),
+            functions: Default::default(),
             seen_refs: Default::default(),
             journal: Default::default(),
             kept: Default::default(),
@@ -4236,6 +4262,24 @@ impl Page {
             return written(self);
         }
         let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
+        let key = text_key(function);
+        if let Some(object) = self.function_object(key) {
+            let answer = self.send(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object,
+                    "functionDeclaration": CALL_THIS,
+                    "arguments": arguments,
+                    "returnByValue": true,
+                    "awaitPromise": await_promise,
+                }),
+                timeout,
+            );
+            match answer {
+                Err(e) if global_gone(&e) => drop(self.functions.lock().unwrap().1.remove(&key)),
+                other => return other,
+            }
+        }
         for _ in 0..2 {
             let Some(global) = self.kept_object(&self.global, "globalThis", timeout)? else { break };
             let answer = self.send(
@@ -4251,10 +4295,83 @@ impl Page {
             );
             match answer {
                 Err(e) if global_gone(&e) => *self.global.lock().unwrap() = None,
-                other => return other,
+                other => {
+                    if other.is_ok() {
+                        self.function_used(key, function, timeout);
+                    }
+                    return other;
+                }
             }
         }
         written(self)
+    }
+
+    /// The object of the function whose text hashes to `key`, in the top
+    /// document: calling it there sends no text at all (a 40 KB function
+    /// sent as text costs about 0.8 ms a call even when V8 has it
+    /// compiled: the text is carried, hashed and looked up each time).
+    /// A function is asked for as an object the second time a document
+    /// calls it ([`Self::function_used`]), so a page acted on once pays
+    /// nothing for it. None while there is none.
+    fn function_object(&self, key: u64) -> Option<String> {
+        let generation = self.nav_generation();
+        let asked = {
+            let mut kept = self.functions.lock().unwrap();
+            if kept.0 != generation {
+                *kept = (generation, Default::default());
+            }
+            match kept.1.remove(&key)? {
+                KeptFn::Have(object) => {
+                    kept.1.insert(key, KeptFn::Have(object.clone()));
+                    return Some(object);
+                }
+                KeptFn::Seen => {
+                    kept.1.insert(key, KeptFn::Seen);
+                    return None;
+                }
+                KeptFn::Asked(asked) => asked,
+            }
+        };
+        let object = self
+            .finish(asked)
+            .ok()
+            .and_then(|r| r.pointer("/result/objectId").and_then(Value::as_str).map(str::to_string))?;
+        let mut kept = self.functions.lock().unwrap();
+        if kept.0 == generation {
+            kept.1.insert(key, KeptFn::Have(object.clone()));
+        }
+        Some(object)
+    }
+
+    /// `function` was called as text in this document: the second time,
+    /// it is asked for as an object (see [`Self::function_object`]).
+    fn function_used(&self, key: u64, function: &str, timeout: Duration) {
+        let generation = self.nav_generation();
+        let again = {
+            let mut kept = self.functions.lock().unwrap();
+            if kept.0 != generation {
+                *kept = (generation, Default::default());
+            }
+            match kept.1.get(&key) {
+                None => {
+                    kept.1.insert(key, KeptFn::Seen);
+                    false
+                }
+                Some(KeptFn::Seen) => true,
+                Some(_) => false,
+            }
+        };
+        if again {
+            let asked = self.start(
+                "Runtime.evaluate",
+                json!({ "expression": format!("({function})"), "objectGroup": "nv-global" }),
+                timeout,
+            );
+            let mut kept = self.functions.lock().unwrap();
+            if kept.0 == generation {
+                kept.1.insert(key, KeptFn::Asked(asked));
+            }
+        }
     }
 
     /// The object `expression` names in the top document (its global
@@ -4307,13 +4424,21 @@ impl Page {
             return None;
         }
         let generation = self.nav_generation();
-        let (_, global) = self.global.lock().unwrap().clone().filter(|(g, _)| *g == generation)?;
         let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
+        let key = text_key(function);
+        let (object, declaration) = match self.function_object(key) {
+            Some(object) => (object, CALL_THIS),
+            None => {
+                let (_, global) = self.global.lock().unwrap().clone().filter(|(g, _)| *g == generation)?;
+                self.function_used(key, function, timeout);
+                (global, function)
+            }
+        };
         Some(self.start(
             "Runtime.callFunctionOn",
             json!({
-                "objectId": global,
-                "functionDeclaration": function,
+                "objectId": object,
+                "functionDeclaration": declaration,
                 "arguments": arguments,
                 "returnByValue": true,
                 "awaitPromise": await_promise,
