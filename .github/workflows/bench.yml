@@ -189,6 +189,9 @@ jobs:
           CARGO_BUILD_WARNINGS=warn cargo build --release --bin navigera --target x86_64-unknown-linux-musl \
             --target-dir /tmp/nv-baseline-target
           echo "NAVIGERA_BASELINE=/tmp/nv-baseline-target/x86_64-unknown-linux-musl/release/navigera" >> "$GITHUB_ENV"
+          # Its version line can be the release it came after: the docs name
+          # the commit too.
+          echo "NAVIGERA_BASELINE_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "baseline: $(git rev-parse --short HEAD)"
 
       - name: Build chromiumoxide contender (release)

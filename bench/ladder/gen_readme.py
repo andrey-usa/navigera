@@ -1,7 +1,7 @@
 """Write the benchmark docs from a ladder publish.json.
 
 Usage: gen_readme.py README.md publish.json ["what the nv-baseline A/B changed"]
-                     [--run ID] [--page PATH [--losses PATH] [--ops PATH]]
+                     [--run ID] [--baseline NAME] [--page PATH [--losses PATH] [--ops PATH]]
 
 Numbers in the docs come from a run's publish.json, never retyped. Every
 generated page opens with a link to the run (all its tables are that run's):
@@ -21,7 +21,7 @@ import sys
 
 args = sys.argv[1:]
 opts = {}
-for flag in ("--run", "--page", "--losses", "--ops"):
+for flag in ("--run", "--baseline", "--page", "--losses", "--ops"):
     if flag in args:
         i = args.index(flag)
         opts[flag] = args[i + 1]
@@ -30,6 +30,10 @@ run_arg, page_path, losses_path, ops_path = opts.get("--run"), opts.get("--page"
 readme_path, pub_path = args[0], args[1]
 change_note = args[2].strip() if len(args) > 2 else ""
 doc = json.load(open(pub_path))
+# --baseline names the A/B's other build where the run did not record its
+# commit (its version line then says the release it came after).
+if opts.get("--baseline"):
+    doc.setdefault("versions", {})["nv-baseline"] = opts["--baseline"]
 run_id = run_arg or doc.get("run_id")
 if not run_id:
     sys.exit("publish.json records no run_id: pass --run <id> so each table can link its run")

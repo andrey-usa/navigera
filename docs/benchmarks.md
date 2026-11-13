@@ -61,9 +61,9 @@ navigera dies (EOF on its command pipe), so a killed agent leaks no browser
 (`tests/edge_cases.rs`; on Windows, which has no pipe transport here, a
 kill-on-close job object gives the same guarantee).
 
-**This build vs navigera 0.12.0, same machine and run** (`nv-baseline`,
+**This build vs navigera 0.12.0 at a4f596e, same machine and run** (`nv-baseline`,
 built the same way by the ladder's `baseline_ref` A/B):
-session 0.54s → 0.57s (+5%), cold start 0.27s → 0.26s median (-1%), warm eval 0.50 ms → 0.46 ms (-7%), browser CPU per session 0.79s → 0.74s. fewer round trips per action, page scripts with constant text and kept functions
+session 0.54s → 0.57s (+5%), cold start 0.27s → 0.26s median (-1%), warm eval 0.50 ms → 0.46 ms (-7%), browser CPU per session 0.79s → 0.74s. Between them: fewer round trips, page scripts kept as functions.
 
 Where navigera's cold start goes (`NAVIGERA_TIMINGS`, best run): browser up
 164 ms, first page 76 ms, close 4 ms.

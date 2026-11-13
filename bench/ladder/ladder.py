@@ -983,6 +983,9 @@ def collect_versions() -> dict[str, str]:
     v: dict[str, str] = {"navigera": first_line([os.environ["NAVIGERA"], "--version"])}
     if "nv-baseline" in NAVIGERA_ENGINE_ARGS:
         v["nv-baseline"] = first_line([NAVIGERA_BINARY["nv-baseline"], "--version"])
+        # A build between releases says the release before it: name its commit.
+        if os.environ.get("NAVIGERA_BASELINE_COMMIT"):
+            v["nv-baseline"] += f" at {os.environ['NAVIGERA_BASELINE_COMMIT']}"
     for label, env_var in (("chrome", "CHROME_BIN"), ("edge", "EDGE_BIN"), ("brave", "BRAVE_BIN"),
                            ("chrome-headless-shell", "SHELL_BIN")):
         binary = os.environ.get(env_var)
