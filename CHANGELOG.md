@@ -12,7 +12,8 @@ All notable changes to this project are documented here. The format follows
   start, whatever page was asked for: the list of on-device AI models
   from the update server (`update.googleapis.com`, sent although
   component updates are off: `OptimizationGuideManifestBroker` is now
-  off, and no model was ever downloaded anyway) and, headless, whether
+  off, and no model was ever downloaded anyway; Chrome 154 to 156 have
+  no switch for it and still ask) and, headless, whether
   the user may use the address bar's AI mode
   (`www.google.com/async/folae`, twice: `AimEnabled` is off, a visible
   window keeps its address bar as it is). A test reads Chrome's own net

@@ -92,7 +92,8 @@ const CHROME_FLAGS: &[&str] = &[
     // Google's update server for the list of on-device AI models, a
     // request `--disable-component-update` does not stop (it only tells
     // the server not to answer with an update). Nothing is lost: with
-    // component updates off no model was ever downloaded.
+    // component updates off no model was ever downloaded. Chrome 154 to
+    // 156 have no switch for it and still ask.
     "--disable-features=Translate,TranslateUI,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,site-per-process,NetworkTimeServiceQuerying,PreconnectToSearch,OptimizationGuideManifestBroker",
     // WebMCP: the tools a page registers on `document.modelContext`
     // (`webmcp-list`, `webmcp-call`); a Chrome without it ignores the name.
