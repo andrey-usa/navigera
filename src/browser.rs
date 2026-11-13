@@ -2182,11 +2182,15 @@ impl BrowserSession {
         timeout: Duration,
     ) -> Result<serde_json::Value> {
         let tab = self.active_tab();
-        let r = tab.send_cdp(
-            "WebMCP.invokeTool",
-            serde_json::json!({ "frameId": tool["frameId"], "toolName": tool["name"], "input": input }),
-            self.timeout(None),
-        )?;
+        // By the registration's id where the browser gives one (Chrome 159
+        // on, where the name is deprecated: it calls whichever tool has
+        // the name by then, which a page may have replaced since the list).
+        let mut params = serde_json::json!({ "frameId": tool["frameId"], "input": input });
+        match tool.get("toolId").filter(|id| !id.is_null()) {
+            Some(id) => params["toolId"] = id.clone(),
+            None => params["toolName"] = tool["name"].clone(),
+        }
+        let r = tab.send_cdp("WebMCP.invokeTool", params, self.timeout(None))?;
         let id = r.get("invocationId").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
         let deadline = Instant::now() + timeout;
         loop {

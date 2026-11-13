@@ -1244,7 +1244,16 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
             let mut w = shared.webmcp.lock().unwrap();
             let tools = w.tools.entry(session.to_string()).or_default();
             for t in params.get("tools").and_then(Value::as_array).into_iter().flatten() {
-                tools.retain(|old| !(old["name"] == t["name"] && old["frameId"] == t["frameId"]));
+                // Chrome 159 gives each registration an id: a removal names
+                // that one, not whichever tool has the name now.
+                let by_id = method == "WebMCP.toolsRemoved" && t.get("toolId").is_some();
+                tools.retain(|old| {
+                    if by_id && old.get("toolId").is_some() {
+                        old["toolId"] != t["toolId"]
+                    } else {
+                        !(old["name"] == t["name"] && old["frameId"] == t["frameId"])
+                    }
+                });
                 if method == "WebMCP.toolsAdded" {
                     tools.push(t.clone());
                 }

@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `webmcp-call` on Chrome 159 calls the tool by the id its registration
+  has there, not by name: Chrome 159 deprecates the name, which calls
+  whichever tool holds it when the command arrives, and a page may have
+  replaced the tool since `webmcp-list` showed it. A tool the page took
+  away is dropped from the list by that id too. Older Chrome, which has
+  no id, is called by name as before.
+
 ## [0.12.0] - 2026-11-12
 
 ### Added

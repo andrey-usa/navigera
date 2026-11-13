@@ -156,9 +156,18 @@ fn users_browser(exe: &str) -> (Browser, tempfile::TempDir, u16, String) {
                 let end = std::time::Instant::now() + Duration::from_secs(10);
                 let mut mine = None;
                 while mine.is_none() && std::time::Instant::now() < end {
-                    mine = page_targets(port)
-                        .and_then(|t| t.into_iter().find(|(_, url)| url.contains("Mine")))
-                        .map(|(id, _)| id);
+                    // Listed with its title, not only its url: the url is
+                    // there before the document is parsed, and a test that
+                    // attached in between read an empty title.
+                    mine = devtools_get(port, "/json/list")
+                        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                        .and_then(|list| {
+                            list.as_array()?.iter().find_map(|t| {
+                                let url = t["url"].as_str().unwrap_or("");
+                                (t["type"] == "page" && url.contains("Mine") && t["title"] == "Mine")
+                                    .then(|| t["id"].as_str().unwrap_or("").to_string())
+                            })
+                        });
                     if mine.is_none() {
                         std::thread::sleep(Duration::from_millis(100));
                     }
