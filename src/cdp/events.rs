@@ -58,7 +58,7 @@ pub struct NavState {
     pub requested_at: Option<std::time::Instant>,
     /// Bumped on every navigation request or load start.
     pub generation: u64,
-    /// Bumped on every navigation request, load start, or
+    /// Bumped on every navigation request, load start, commit, or
     /// within-document navigation (`pushState`): the tab's URL may have
     /// changed. Unlike `generation` it is only a freshness stamp for the
     /// crash record's tabs (see `remember`); nothing settles on it.
@@ -1492,7 +1492,14 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                     state.generation += 1;
                     state.url_seq += 1;
                 }
-                "Page.frameNavigated" => state.committed_at = Some(std::time::Instant::now()),
+                "Page.frameNavigated" => {
+                    state.committed_at = Some(std::time::Instant::now());
+                    // The tab's URL changes here, not at the request or
+                    // the load's start: a crash record taken in between
+                    // (a slow form POST) held the old URL, and nothing
+                    // after the commit said it was stale.
+                    state.url_seq += 1;
+                }
                 "Page.frameStoppedLoading" => {
                     state.loading = false;
                     state.dom_ready = true;

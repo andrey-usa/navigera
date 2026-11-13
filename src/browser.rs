@@ -4126,6 +4126,10 @@ impl BrowserSession {
     /// crash record's tabs are fresh while this is unchanged (see
     /// `remember`), so no `Target.getTargets` is spent re-listing them.
     pub fn tabs_fingerprint(&self) -> Vec<(String, u64)> {
+        // The watcher is a task of its own and trails the connection on a
+        // loaded machine: a navigation the op just saw commit must have
+        // reached it before the stamps are read.
+        self.browser.caught_up();
         let shared = self.browser.shared();
         self.pages.iter().map(|p| (p.target_id().to_string(), shared.nav_state(p.session_id()).url_seq)).collect()
     }
