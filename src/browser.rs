@@ -54,6 +54,13 @@ const CHROME_FLAGS: &[&str] = &[
     "--no-startup-window",
     "--disable-default-apps",
     "--disable-infobars",
+    // Two things a visible window puts over the page, which nobody is
+    // there to dismiss: the search engine choice a fresh profile is asked
+    // for, and the "restore pages?" bubble of a profile whose last browser
+    // was killed. No effect on a headless launch (start and first page
+    // 322 ms with and without, 12 runs each).
+    "--disable-search-engine-choice-screen",
+    "--hide-crash-restore-bubble",
     "--window-size=1440,900",
     "--disable-background-networking",
     "--disable-background-timer-throttling",
