@@ -31,6 +31,20 @@ All notable changes to this project are documented here. The format follows
   switch: the bench's fill, fill, click, read batch 46.9 to 41.3 ms
   median (40 runs); single calls with a new value each time (30 runs):
   `fill` 15.3 to 13.1 ms, `click` 35.8 to 33.6 ms, `ax` 34.9 to 32.2 ms.
+- An action makes fewer round trips to the browser; each cost about half
+  a millisecond whatever it did. A click after a look: 20 commands to
+  13; a fill: 6 to 5. The press's arrival, the navigation's verdict and
+  the first look at what changed come back together; the URL, the
+  title and what the page says for the history entry are one read; the
+  journal's prime is written ahead of the action and read when its
+  answer is wanted; a patched read asks for the document's listeners
+  with the node count, keeps the document between reads, asks for the
+  changed roots behind the delta read and describes them all at once;
+  object releases are not waited for. Local release build, Chrome 153,
+  the 500-card page, 30 interleaved runs against the commit before:
+  `fill` 25.9 to 21.8 ms, `click` 43.8 to 41.4, a submitting click 51.2
+  to 47.0, the fill, fill, click, read batch 46.3 to 44.4 (a slow
+  moment of the machine; the batch's output is the same).
 - A browser navigera starts no longer asks Google for the time
   (`clients2.google.com/time`) nor opens a connection to the search
   engine (`www.google.com`) at every start, whatever page was asked

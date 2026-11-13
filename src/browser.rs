@@ -3354,6 +3354,22 @@ impl BrowserSession {
         (get(0), get(1))
     }
 
+    /// [`Self::url_title`], and what the expression `also` gives there
+    /// (None when it throws), in the same round trip.
+    pub fn url_title_and(&self, also: &str) -> (String, String, Option<serde_json::Value>) {
+        let v = self
+            .active_tab()
+            .evaluate(
+                &format!(
+                    "(() => {{ let s = null; try {{ s = {also}; }} catch (_) {{}} return [location.href, document.title, s]; }})()"
+                ),
+                self.timeout(None),
+            )
+            .unwrap_or_default();
+        let get = |i: usize| v.get(i).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        (get(0), get(1), v.get(2).filter(|s| !s.is_null()).cloned())
+    }
+
     /// Current page URL.
     pub fn url(&self) -> String {
         self.active_tab().url(self.timeout(None)).unwrap_or_default()

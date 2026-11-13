@@ -92,6 +92,13 @@ struct Arrival {
     /// What the press's click event went to instead of the element, which
     /// the page moved or replaced during the press: the page saw that one.
     off: Option<String>,
+    /// Read in the same round trip, once the press had arrived on the
+    /// element: whether the page let the click's navigation go ahead (see
+    /// [`Page::nav_planned`]; the outer None: not asked, or not yet).
+    nav: Option<Option<bool>>,
+    /// And the first look at what the click changed (see
+    /// [`Page::click_effect`]).
+    effect: Option<Value>,
 }
 
 /// What an element op acts on.
@@ -3349,7 +3356,20 @@ pub struct Page {
     /// on (see [`Page::call_fn`]): the navigation generation it was asked
     /// for in, and its object id.
     global: Arc<std::sync::Mutex<Option<(u64, String)>>>,
+    /// The top document itself, kept the same way, to ask for its event
+    /// listeners (see [`Page::listeners`]).
+    document: Arc<std::sync::Mutex<Option<(u64, String)>>>,
+    /// A journal's prime written ahead of the action it is for, its
+    /// answer not read yet (see [`Page::journal_prime`]): the journal's id.
+    prime_started: Arc<std::sync::Mutex<Option<(u64, Started)>>>,
+    /// The document's listeners, asked for ahead of the read that wants
+    /// them (see [`Page::listeners`]).
+    listeners_started: Arc<std::sync::Mutex<Option<Started>>>,
 }
+
+/// A command already written to the browser, its answer still to be read
+/// (see [`Page::start`]).
+type Started = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>;
 
 /// A tree read's snapshot, kept with the journal armed with it.
 struct Kept {
@@ -3478,6 +3498,9 @@ impl Page {
             pointer: Default::default(),
             stalled: Default::default(),
             global: Default::default(),
+            document: Default::default(),
+            prime_started: Default::default(),
+            listeners_started: Default::default(),
             seen_refs: Default::default(),
             journal: Default::default(),
             kept: Default::default(),
@@ -3678,12 +3701,27 @@ impl Page {
         // to the page. The id match keeps the skip to the journal the
         // prime was for; a stale priming (a navigation since, no read
         // yet) only costs a delta attempt that falls back to a full read.
+        self.prime_settled();
         if !entry && *self.primed.lock().unwrap() == Some(id) && self.journal_id() == Some(id) {
+            return true;
+        }
+        // Written now, ahead of the action it is for, and read when the
+        // next read or prime asks ([`Self::prime_settled`]): the page runs
+        // it first all the same, and the action does not wait a round
+        // trip for an answer it never looks at.
+        if let Some(started) = self.call_fn_start(JOURNAL_PRIME, &[json!(id), json!(entry)], false, timeout) {
+            *self.primed.lock().unwrap() = None;
+            *self.prime_started.lock().unwrap() = Some((id, started));
             return true;
         }
         let started = std::time::Instant::now();
         let r = self.call_fn(JOURNAL_PRIME, &[json!(id), json!(entry)], false, timeout);
         crate::timing::record("journal_prime", started);
+        self.prime_answered(id, r)
+    }
+
+    /// What a prime answered, kept: the journal is primed, or why not.
+    fn prime_answered(&self, id: u64, r: Result<Value>) -> bool {
         let verdict = r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_str).map(str::to_string));
         *self.primed.lock().unwrap() = verdict.as_deref().filter(|v| v.is_empty()).map(|_| id);
         match verdict.as_deref() {
@@ -3692,6 +3730,16 @@ impl Page {
                 crate::timing::log(&format!("[journal] not primed: {}", other.unwrap_or("no answer")));
                 false
             }
+        }
+    }
+
+    /// The answer of a prime written ahead (see [`Self::journal_prime`]),
+    /// read now if it has not been.
+    fn prime_settled(&self) {
+        let started = self.prime_started.lock().unwrap().take();
+        if let Some((id, started)) = started {
+            let answer = self.finish(started);
+            self.prime_answered(id, answer);
         }
     }
 
@@ -4168,21 +4216,7 @@ impl Page {
         }
         let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
         for _ in 0..2 {
-            let generation = self.nav_generation();
-            let kept = self.global.lock().unwrap().clone().filter(|(g, _)| *g == generation).map(|(_, id)| id);
-            let global = match kept {
-                Some(id) => id,
-                None => {
-                    let asked = self.send(
-                        "Runtime.evaluate",
-                        json!({ "expression": "globalThis", "objectGroup": "nv-global" }),
-                        timeout,
-                    )?;
-                    let Some(id) = asked.pointer("/result/objectId").and_then(Value::as_str) else { break };
-                    *self.global.lock().unwrap() = Some((generation, id.to_string()));
-                    id.to_string()
-                }
-            };
+            let Some(global) = self.kept_object(&self.global, "globalThis", timeout)? else { break };
             let answer = self.send(
                 "Runtime.callFunctionOn",
                 json!({
@@ -4200,6 +4234,77 @@ impl Page {
             }
         }
         written(self)
+    }
+
+    /// The object `expression` names in the top document (its global
+    /// object, the document), asked for once per document and kept in
+    /// `slot` with the navigation generation it was asked for in. None
+    /// where the page gives no object for it.
+    fn kept_object(
+        &self,
+        slot: &std::sync::Mutex<Option<(u64, String)>>,
+        expression: &str,
+        timeout: Duration,
+    ) -> Result<Option<String>> {
+        let generation = self.nav_generation();
+        if let Some((_, id)) = slot.lock().unwrap().clone().filter(|(g, _)| *g == generation) {
+            return Ok(Some(id));
+        }
+        let asked =
+            self.send("Runtime.evaluate", json!({ "expression": expression, "objectGroup": "nv-global" }), timeout)?;
+        let id = asked.pointer("/result/objectId").and_then(Value::as_str).map(str::to_string);
+        if let Some(id) = &id {
+            *slot.lock().unwrap() = Some((generation, id.clone()));
+        }
+        Ok(id)
+    }
+
+    /// Write a command now and read its answer later ([`Self::finish`]):
+    /// what is written after it shares its round trip. The browser runs a
+    /// session's commands in the order they were written.
+    fn start(&self, method: &str, params: Value, timeout: Duration) -> Started {
+        let (client, session, method) = (self.client.clone(), self.session_id.clone(), method.to_string());
+        let mut sent: Started = Box::pin(async move { client.send(&method, params, Some(&session), timeout).await });
+        // Polled once: that writes it.
+        match self.block_on(async { futures_util::poll!(&mut sent) }) {
+            std::task::Poll::Ready(answer) => Box::pin(std::future::ready(answer)),
+            std::task::Poll::Pending => sent,
+        }
+    }
+
+    /// The answer of a command [`Self::start`] wrote.
+    fn finish(&self, started: Started) -> Result<Value> {
+        self.block_on(started)
+    }
+
+    /// [`Self::call_fn`] started, not awaited (see [`Self::start`]); None
+    /// where the document's global object is not at hand, and the caller
+    /// calls as usual. An answer that says the object is gone
+    /// ([`global_gone`]) ran nothing: the caller calls again.
+    fn call_fn_start(&self, function: &str, args: &[Value], await_promise: bool, timeout: Duration) -> Option<Started> {
+        if !const_calls() || self.shared.is_single_target() {
+            return None;
+        }
+        let generation = self.nav_generation();
+        let (_, global) = self.global.lock().unwrap().clone().filter(|(g, _)| *g == generation)?;
+        let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
+        Some(self.start(
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": global,
+                "functionDeclaration": function,
+                "arguments": arguments,
+                "returnByValue": true,
+                "awaitPromise": await_promise,
+            }),
+            timeout,
+        ))
+    }
+
+    /// Write a command whose answer nobody reads (a release of objects),
+    /// without waiting for it.
+    fn post(&self, method: &str, params: Value) {
+        self.client.post_harmless(method, params, Some(&self.session_id));
     }
 
     /// [`Self::call_fn`], awaited, as [`Self::evaluate_raw`] answers: the
@@ -5164,10 +5269,10 @@ impl Page {
         // added is, which only ever stops another click.
         let check = point.get("check").and_then(Value::as_bool) == Some(true)
             && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none(); // diagnostic knob
-        let Arrival { arrived, heard, missed, mut off } = if check {
-            self.press_arrived(young, timeout)
+        let Arrival { arrived, heard, missed, mut off, nav: nav_read, effect: first_effect } = if check {
+            self.press_arrived(young, nav, armed, timeout)
         } else {
-            Arrival { arrived: true, heard: None, missed: None, off: None }
+            Arrival { arrived: true, heard: None, missed: None, off: None, nav: None, effect: None }
         };
         if let Some(instead) = missed {
             // The element moved as it was pressed: the press reached
@@ -5202,7 +5307,7 @@ impl Page {
             // happened on the page, so sending it again can't double-click.
             self.wait_frame(Duration::from_millis(500));
             self.mouse_click(&point, &opts.button, timeout)?;
-            let resent = self.press_arrived(false, timeout);
+            let resent = self.press_arrived(false, false, false, timeout);
             off = resent.off;
             if !resent.arrived {
                 eprintln!("[click] still not delivered; dispatching DOM events");
@@ -5222,14 +5327,14 @@ impl Page {
             // The page has already reacted to this press: not pressed again.
             point["click_off"] = json!(on);
         }
-        if nav && self.nav_planned(timeout) == Some(false) {
+        if nav && nav_read.unwrap_or_else(|| self.nav_planned(timeout)) == Some(false) {
             // The page cancelled what the click would have loaded (a
             // router's link, a submit a script handles) or the form failed
             // validation: no navigation to wait for.
             point["nav"] = json!(false);
         }
         if armed {
-            let effect = self.click_effect(&before, timeout);
+            let effect = self.click_effect(&before, first_effect, timeout);
             if std::env::var_os("NAVIGERA_TRACE_EFFECT").is_some() {
                 point["effect_trace"] = json!(format!("{effect:?}")); // diagnostic knob
             }
@@ -5320,7 +5425,7 @@ impl Page {
     /// isn't an effect, and a first-party one that reads like reporting
     /// (`/event/…`) is waited for ([`REQUEST_WAIT`]), then judged by what
     /// the page does with the answer ([`AFTER_RESPONSE`]).
-    fn click_effect(&self, before: &([u64; 5], u64), timeout: Duration) -> Effect {
+    fn click_effect(&self, before: &([u64; 5], u64), mut first: Option<Value>, timeout: Duration) -> Effect {
         let started = Instant::now();
         let mut deadline = started + EFFECT_WINDOW;
         let mut settled: Option<(usize, Instant)> = None; // requests seen, all finished at
@@ -5348,14 +5453,24 @@ impl Page {
             }
             let gave_up = pending && now >= started + REQUEST_WAIT;
             let last = now >= deadline || gave_up;
-            let expr = format!("window.__nvFx ? window.__nvFx.check({last}) : null");
-            let answer = self.send("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true }), timeout);
-            if answer.as_ref().is_err_and(|e| format!("{e:#}").contains("Session with given id not found")) {
-                // The click closed its own tab (a Close button).
-                return Effect::Gone;
-            }
-            let Some(v) = answer.ok().and_then(|r| r.pointer("/result/value").cloned()).filter(Value::is_object) else {
-                return Effect::Unknown;
+            // The first look came with the press's arrival, a moment ago.
+            let v = match first.take().filter(|v| !last && v.is_object()) {
+                Some(v) => v,
+                None => {
+                    let expr = format!("window.__nvFx ? window.__nvFx.check({last}) : null");
+                    let answer =
+                        self.send("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true }), timeout);
+                    if answer.as_ref().is_err_and(|e| format!("{e:#}").contains("Session with given id not found")) {
+                        // The click closed its own tab (a Close button).
+                        return Effect::Gone;
+                    }
+                    let Some(v) =
+                        answer.ok().and_then(|r| r.pointer("/result/value").cloned()).filter(Value::is_object)
+                    else {
+                        return Effect::Unknown;
+                    };
+                    v
+                }
             };
             if let Some(what) = v.get("what").and_then(Value::as_str).filter(|w| !w.is_empty()) {
                 return Effect::Changed(what.to_string());
@@ -5435,23 +5550,36 @@ impl Page {
     /// click ([`PATH_LISTENERS`]). Then what the press landed on instead
     /// of the element when it moved before the press (`__nvMissed`), and
     /// where its click event went when not to the element (`__nvOff`).
-    fn press_arrived(&self, listeners: bool, timeout: Duration) -> Arrival {
+    fn press_arrived(&self, listeners: bool, nav: bool, effect: bool, timeout: Duration) -> Arrival {
         let deadline = std::time::Instant::now() + Duration::from_millis(300);
         let mut heard = None;
         let (mut missed, mut off) = (None, None);
+        let (mut nav_read, mut first_effect) = (None, None);
         let mut first = listeners;
+        // With the first look, what the click's next two reads would ask
+        // (`nav`: the navigation's verdict; `effect`: what changed so far),
+        // once the press is seen to have arrived on the element: one round
+        // trip for the three. A press not there yet, or one that landed on
+        // something else, leaves both for later, as before.
+        let mut more = nav || effect;
         loop {
-            let (expression, api) = if first {
-                (
-                    format!(
-                        "[window.__nvSeen, window.__nvMissed, window.__nvOff && window.__nvOff(), {}]",
-                        path_listeners(true)
-                    ),
-                    true,
+            let also = if more {
+                format!(
+                    ", (window.__nvSeen !== 0 && !window.__nvMissed) ? [{}, {}] : null",
+                    if nav {
+                        "(() => { const n = window.__nvNav; if (!n) return null; delete window.__nvNav; return n.verdict(); })()"
+                    } else {
+                        "0"
+                    },
+                    if effect { "(window.__nvFx ? window.__nvFx.check(false) : null)" } else { "0" },
                 )
             } else {
-                ("[window.__nvSeen, window.__nvMissed, window.__nvOff && window.__nvOff()]".to_string(), false)
+                String::new()
             };
+            let listened = if first { path_listeners(true) } else { "null".to_string() };
+            let api = first;
+            let expression =
+                format!("[window.__nvSeen, window.__nvMissed, window.__nvOff && window.__nvOff(), {listened}{also}]");
             let seen = self
                 .send(
                     "Runtime.evaluate",
@@ -5464,15 +5592,24 @@ impl Page {
                     if first {
                         heard = v.and_then(|v| v.get(3)).and_then(Value::as_u64);
                     }
+                    if let Some(read) = v.and_then(|v| v.get(4)).and_then(Value::as_array).filter(|_| more) {
+                        if nav {
+                            nav_read = Some(read.first().and_then(Value::as_bool));
+                        }
+                        if effect {
+                            first_effect = read.get(1).cloned();
+                        }
+                    }
                     missed = v.and_then(|v| v.get(1)).and_then(Value::as_str).map(str::to_string);
                     off = v.and_then(|v| v.get(2)).and_then(Value::as_str).map(str::to_string);
                     v.and_then(|v| v.get(0)).and_then(Value::as_u64)
                 });
             first = false;
+            more = false;
             match seen {
                 Some(Some(0)) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-                Some(Some(0)) => return Arrival { arrived: false, heard, missed, off },
-                _ => return Arrival { arrived: true, heard, missed, off },
+                Some(Some(0)) => return Arrival { arrived: false, heard, missed, off, nav: None, effect: None },
+                _ => return Arrival { arrived: true, heard, missed, off, nav: nav_read, effect: first_effect },
             }
         }
     }
@@ -6667,6 +6804,10 @@ fn delta_reads() -> bool {
     *ON.get_or_init(|| std::env::var("NAVIGERA_DELTA_READ").map_or(true, |v| v.trim() != "0"))
 }
 
+/// How many of a delta read's roots are asked for behind the read itself,
+/// before it has said how many there are (see [`Page::read_delta`]).
+const EARLY_ROOTS: usize = 2;
+
 /// Whether navigera's own functions are called with their values as
 /// arguments (see [`Page::call_fn`]); `NAVIGERA_CONST_CALLS=0` writes the
 /// values into the script text every time, to compare against.
@@ -7463,6 +7604,20 @@ impl Page {
         // path can't serve falls back to Chrome's tree below.
         // `NAVIGERA_AX_SOURCE=chrome|dom` picks one (for comparing them).
         let forced = std::env::var("NAVIGERA_AX_SOURCE").ok();
+        // A read that may be patched asks for the document's listeners in
+        // the same round trip as the node count (see `read_delta`).
+        *self.listeners_started.lock().unwrap() = None;
+        if tree_opts && forced.is_none() && prior.is_some() && opts.journal && delta_reads() {
+            let generation = self.nav_generation();
+            let document = self.document.lock().unwrap().clone().filter(|(g, _)| *g == generation);
+            if let Some((_, object)) = document {
+                *self.listeners_started.lock().unwrap() = Some(self.start(
+                    "DOMDebugger.getEventListeners",
+                    json!({ "objectId": object, "depth": -1, "pierce": true }),
+                    timeout,
+                ));
+            }
+        }
         let nodes = if tree_opts && forced.is_none() { self.dom_nodes(timeout) } else { None };
         // `both`: Chrome's tree, a separator line, then the snapshot's, of
         // the same page load (for checking one against the other).
@@ -7533,6 +7688,7 @@ impl Page {
         // since read again; else the page captured whole.
         let mut armed = None;
         let mut patched = None;
+        self.prime_settled();
         let primed = self.primed.lock().unwrap().take();
         // An action primed the journal, or its arming did: patched.
         let prior = prior
@@ -7649,18 +7805,35 @@ impl Page {
     /// text), in every document: one call, ~5 ms on a 10,000-row page.
     fn listeners(&self, timeout: Duration) -> Option<std::collections::HashSet<i64>> {
         let started = std::time::Instant::now();
-        let doc = self
-            .send("Runtime.evaluate", json!({ "expression": "document", "objectGroup": "nv-listen" }), timeout)
-            .ok()?;
-        let object = doc.pointer("/result/objectId").and_then(Value::as_str)?.to_string();
-        let got = self.send(
-            "DOMDebugger.getEventListeners",
-            json!({ "objectId": object, "depth": -1, "pierce": true }),
-            timeout,
-        );
-        let _ = self.send("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-listen" }), timeout);
+        // The document is kept between reads (see `kept_object`); one from
+        // a document since replaced is refused, and asked for again.
+        let mut got = None;
+        // Asked for ahead, with the read's first command: its answer is here.
+        if let Some(early) = self.listeners_started.lock().unwrap().take() {
+            match self.finish(early) {
+                Err(e) if global_gone(&e) => *self.document.lock().unwrap() = None,
+                other => got = other.ok(),
+            }
+        }
+        for _ in 0..2 {
+            if got.is_some() {
+                break;
+            }
+            let object = self.kept_object(&self.document, "document", timeout).ok()??;
+            match self.send(
+                "DOMDebugger.getEventListeners",
+                json!({ "objectId": object, "depth": -1, "pierce": true }),
+                timeout,
+            ) {
+                Err(e) if global_gone(&e) => *self.document.lock().unwrap() = None,
+                other => {
+                    got = other.ok();
+                    break;
+                }
+            }
+        }
         crate::timing::record("ax_listeners", started);
-        let got = got.ok()?;
+        let got = got?;
         Some(
             got.get("listeners")?
                 .as_array()?
@@ -7728,7 +7901,28 @@ impl Page {
         let max = (doc.parent.len() / 8).max(500);
         let id = JOURNAL_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();
-        let r = self.call_fn(delta_fn(), &[json!(prior.journal), json!(max), json!(id)], false, timeout);
+        // The first roots it leaves are asked for behind it, in its round
+        // trip (see `describe_roots`); most reads change one or two.
+        let delta_args = [json!(prior.journal), json!(max), json!(id)];
+        let mut early = Vec::new();
+        let r = match self.call_fn_start(delta_fn(), &delta_args, false, timeout) {
+            Some(started) => {
+                early = (0..EARLY_ROOTS).map(|i| self.root_start(i, timeout)).collect();
+                match self.finish(started) {
+                    Err(e) if global_gone(&e) => {
+                        *self.global.lock().unwrap() = None;
+                        early.clear();
+                        self.call_fn(delta_fn(), &delta_args, false, timeout)
+                    }
+                    other => other,
+                }
+            }
+            None => self.call_fn(delta_fn(), &delta_args, false, timeout),
+        };
+        if r.is_err() || early.is_empty() {
+            self.post("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-delta" }));
+            early.clear();
+        }
         crate::timing::record("delta_read", started);
         let v = r.map_err(|e| (format!("{e:#}"), None))?;
         if let Some(details) = v.get("exceptionDetails") {
@@ -7744,7 +7938,7 @@ impl Page {
         }
         let js_ops = d.get("ops").and_then(Value::as_array).ok_or_else(|| fail("no ops".into()))?;
         let started = std::time::Instant::now();
-        let described = self.describe_roots(js_ops, timeout).map_err(|e| fail(format!("{e:#}")))?;
+        let described = self.describe_roots(js_ops, early, timeout).map_err(|e| fail(format!("{e:#}")))?;
         crate::timing::record("delta_describe", started);
         let listened_now = |b: i64| listened.contains(&b);
         let mut index: Option<FxMap<i64, usize>> = None;
@@ -7874,7 +8068,12 @@ impl Page {
     /// `DOM.describeNode` of each root [`JOURNAL_DELTA`] left in
     /// `window.__nvDeltaRoots`, by its place there: a parent whose children
     /// changed one level deep, the rest whole.
-    fn describe_roots(&self, ops: &[Value], timeout: Duration) -> Result<std::collections::HashMap<usize, Value>> {
+    fn describe_roots(
+        &self,
+        ops: &[Value],
+        early: Vec<Started>,
+        timeout: Duration,
+    ) -> Result<std::collections::HashMap<usize, Value>> {
         let mut depth: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
         for op in ops {
             let Some(d) = op.get("d").and_then(Value::as_u64) else { continue };
@@ -7896,37 +8095,54 @@ impl Page {
                 }
             }
         }
-        let group = json!({ "objectGroup": "nv-delta" });
-        let result = (|| -> Result<std::collections::HashMap<usize, Value>> {
-            let list = self.send(
-                "Runtime.evaluate",
-                json!({ "expression": "window.__nvDeltaRoots", "objectGroup": "nv-delta" }),
-                timeout,
-            )?;
-            let list = list.pointer("/result/objectId").and_then(Value::as_str).context("no roots")?.to_string();
-            let props =
-                self.send("Runtime.getProperties", json!({ "objectId": list, "ownProperties": true }), timeout)?;
-            let mut out = std::collections::HashMap::new();
-            for p in props.get("result").and_then(Value::as_array).into_iter().flatten() {
-                let Some(i) = p.get("name").and_then(Value::as_str).and_then(|n| n.parse::<usize>().ok()) else {
-                    continue;
-                };
-                let Some(&depth) = depth.get(&i) else { continue };
-                let object = p.pointer("/value/objectId").and_then(Value::as_str).context("a root is gone")?;
-                let node = self.send(
+        if depth.is_empty() {
+            self.post("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-delta" }));
+            return Ok(std::collections::HashMap::new());
+        }
+        // Every root is asked for at once (the first ones were, behind the
+        // delta read itself), then every description: one or two round
+        // trips whatever their number (they were one each, after two more
+        // to list them).
+        let roots: Vec<(usize, i64)> = depth.into_iter().collect();
+        let session = Some(self.session_id.as_str());
+        let mut early: Vec<Option<Started>> = early.into_iter().map(Some).collect();
+        let asked: Vec<Started> = roots
+            .iter()
+            .map(|(i, _)| match early.get_mut(*i).and_then(Option::take) {
+                Some(started) => started,
+                None => self.root_start(*i, timeout),
+            })
+            .collect();
+        let result = self.block_on(async {
+            let objects = futures_util::future::join_all(asked).await;
+            let mut asked = Vec::new();
+            for (object, (_, depth)) in objects.into_iter().zip(&roots) {
+                let object = object?;
+                let object = object.pointer("/result/objectId").and_then(Value::as_str).context("a root is gone")?;
+                asked.push(self.client.send(
                     "DOM.describeNode",
                     json!({ "objectId": object, "depth": depth, "pierce": true }),
+                    session,
                     timeout,
-                )?;
-                out.insert(i, node.get("node").cloned().context("no node")?);
+                ));
             }
-            if out.len() != depth.len() {
-                bail!("a root not described");
+            let mut out = std::collections::HashMap::new();
+            for (node, (i, _)) in futures_util::future::join_all(asked).await.into_iter().zip(&roots) {
+                out.insert(*i, node?.get("node").cloned().context("no node")?);
             }
             Ok(out)
-        })();
-        let _ = self.send("Runtime.releaseObjectGroup", group, timeout);
+        });
+        self.post("Runtime.releaseObjectGroup", json!({ "objectGroup": "nv-delta" }));
         result
+    }
+
+    /// Root `i` of `window.__nvDeltaRoots`, asked for (see [`Self::start`]).
+    fn root_start(&self, i: usize, timeout: Duration) -> Started {
+        self.start(
+            "Runtime.evaluate",
+            json!({ "expression": format!("window.__nvDeltaRoots[{i}]"), "objectGroup": "nv-delta" }),
+            timeout,
+        )
     }
 
     /// The page's DOM node count (`Memory.getDOMCounters`), what one full

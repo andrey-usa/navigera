@@ -2998,6 +2998,10 @@ pub struct Driver {
     /// next report is read from the page (no shortcut through the change
     /// journal, which judges one entry at a time) and covers it too.
     owed: Option<(Value, Command, Value)>,
+    /// What the page says ([`PAGE_SAYS`]), read with the URL and title of
+    /// a recorded command's state, for its history entry: `None` inside
+    /// while the command recorded asks for it and no state was read yet.
+    said: std::cell::RefCell<Option<Option<Value>>>,
     /// The last report was compact: an agent reads what actions change.
     compact: bool,
     /// Reads are an agent's that reads again (the MCP server's), whatever
@@ -3508,6 +3512,7 @@ impl Driver {
                 look: None,
                 defer: None,
                 owed: None,
+                said: Default::default(),
                 compact: false,
                 agent_reads: false,
                 read_answer: None,
@@ -3529,6 +3534,7 @@ impl Driver {
                 look: None,
                 defer: None,
                 owed: None,
+                said: Default::default(),
                 compact: false,
                 agent_reads: false,
                 read_answer: None,
@@ -3557,6 +3563,7 @@ impl Driver {
             look: None,
             defer: None,
             owed: None,
+            said: Default::default(),
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -3587,6 +3594,7 @@ impl Driver {
             look: None,
             defer: None,
             owed: None,
+            said: Default::default(),
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -3632,6 +3640,7 @@ impl Driver {
             look: None,
             defer: None,
             owed: None,
+            said: Default::default(),
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -3670,7 +3679,16 @@ impl Driver {
     }
 
     fn state_json(&self) -> Value {
-        let (url, title) = self.session.url_title();
+        // A recorded command's history entry wants what the page says
+        // after it: read here, with the URL and the title, in one round
+        // trip instead of one more.
+        let (url, title) = if self.said.borrow().is_some() {
+            let (url, title, said) = self.session.url_title_and(PAGE_SAYS);
+            *self.said.borrow_mut() = Some(said);
+            (url, title)
+        } else {
+            self.session.url_title()
+        };
         let mut state = json!({
             "tab": self.session.active_page(),
             "tabs": self.session.page_count(),
@@ -4611,6 +4629,7 @@ impl Driver {
         let at =
             || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         let mut entry = command.recorded().then(|| json!({ "command": command, "at": at() }));
+        *self.said.borrow_mut() = entry.is_some().then_some(None);
         if let (Some(e), Some(r)) = (entry.as_mut(), command.clone().target_mut().and_then(|t| t.node_ref)) {
             let found = self.session.locate(&Target::Ref(r), Some(2000.0)).ok();
             if found.as_ref().is_some_and(|v| v["secret"] == true) {
@@ -4747,8 +4766,13 @@ impl Driver {
             }
             // What the page says after it: its heading, and messages it
             // announces (what a test would check next).
-            if let Ok(page) = self.session.evaluate_with_timeout::<Value>(PAGE_SAYS, Some(1000.0)) {
-                e["page"] = page;
+            match self.said.borrow_mut().take().flatten() {
+                Some(page) => e["page"] = page,
+                None => {
+                    if let Ok(page) = self.session.evaluate_with_timeout::<Value>(PAGE_SAYS, Some(1000.0)) {
+                        e["page"] = page;
+                    }
+                }
             }
             if self.history.len() >= HISTORY_MAX {
                 self.history.remove(0);
