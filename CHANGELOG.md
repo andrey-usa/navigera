@@ -19,6 +19,13 @@ All notable changes to this project are documented here. The format follows
   runs, local release build, chrome-headless-shell 157): 48 to 39 CDP
   commands; the JSON batch 33 to 26 commands, median 39.6 to 29.0 ms.
   The report, the history, and the crash record read the same.
+- `fill` checks that a field can be typed into and fills it in one call
+  to the page instead of two, when the field is ready at once. A field
+  that is not ready yet (hidden, disabled, read-only) is waited for as
+  before and found again after the wait, since a page can replace a
+  field as it enables it. Local release build, Chrome 153, the 500-card
+  page, 30 interleaved runs: one `fill` 17.2 to 16.6 ms median; the
+  bench's fill, fill, click, read batch 66.1 to 61.4 ms.
 
 ### Fixed
 

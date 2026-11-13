@@ -2257,6 +2257,20 @@ const FILL_EL: &str = r#"async function (el, value) {
     return true;
 }"#;
 
+/// What [`FILL_READY_EL`] answers for a field that is not ready yet.
+const NOT_READY: &str = "nv:not-ready";
+
+/// [`FIELD_READY`] without its wait, then [`FILL_EL`], in one call: fills a
+/// field that is ready now, else answers [`NOT_READY`] and changes nothing.
+static FILL_READY_EL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "async function (el, value, checkBox) {{ \
+         try {{ await ({FIELD_READY})(el, 0, checkBox); }} catch (_) {{ return {}; }} \
+         return await ({FILL_EL})(el, value); }}",
+        json!(NOT_READY)
+    )
+});
+
 /// Choose `<select>` options by value or visible label (exact first, then
 /// with whitespace collapsed -- non-breaking spaces count as spaces -- then
 /// case-insensitive), firing input/change like a user would. The chosen
@@ -6056,7 +6070,18 @@ impl Page {
     }
 
     /// Set an input/textarea/contenteditable's value (native setter + events).
+    /// One round trip when the field is ready at once (the usual case):
+    /// [`FILL_READY_EL`] checks and fills in the same call. A field that
+    /// is not ready yet takes the two-step path, which finds the element
+    /// again after the wait (a page can replace a field as it enables it).
     pub fn fill(&self, target: &Target, value: &str, force: bool, wait: Duration, timeout: Duration) -> Result<()> {
+        if !force {
+            let check_box = json!(!self.shared.is_single_target());
+            let done = self.on_element(target, "fill", &FILL_READY_EL, &[json!(value), check_box], wait, timeout)?;
+            if done != json!(NOT_READY) {
+                return Ok(());
+            }
+        }
         self.field_ready(target, force, wait, timeout)?;
         self.on_element(target, "fill", FILL_EL, &[json!(value)], wait, timeout)?;
         Ok(())
