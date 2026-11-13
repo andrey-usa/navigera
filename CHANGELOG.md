@@ -31,6 +31,17 @@ All notable changes to this project are documented here. The format follows
   switch: the bench's fill, fill, click, read batch 46.9 to 41.3 ms
   median (40 runs); single calls with a new value each time (30 runs):
   `fill` 15.3 to 13.1 ms, `click` 35.8 to 33.6 ms, `ax` 34.9 to 32.2 ms.
+- A browser navigera starts no longer asks Google for the time
+  (`clients2.google.com/time`) nor opens a connection to the search
+  engine (`www.google.com`) at every start, whatever page was asked
+  for: `NetworkTimeServiceQuerying` and `PreconnectToSearch` are off.
+  Read from Chrome's own net log (`--log-net-log`) on a local page,
+  Chrome 153. Still sent by the browser itself at a start, each to be
+  switched off once a flag that does it is found: the account list
+  (`accounts.google.com/ListAccounts`), a messaging check-in
+  (`android.clients.google.com/checkin`), a component update check
+  (`update.googleapis.com`) and the search engine's AI mode
+  eligibility (`www.google.com/async/folae`).
 - A click on a page where nothing can move the element no longer waits
   a frame to see that its box holds still: the top document, loaded
   with its fonts and images, unchanged for 100 ms, no short timer

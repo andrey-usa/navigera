@@ -85,7 +85,10 @@ const CHROME_FLAGS: &[&str] = &[
     // first page (bisected in chrome-bisect run 37464048004; every other
     // feature here is fine there). Its hint fetches are network work that
     // `--disable-background-networking` already stops.
-    "--disable-features=Translate,TranslateUI,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,site-per-process",
+    // NetworkTimeServiceQuerying, PreconnectToSearch: the browser asked
+    // Google for the time and opened a connection to the search engine at
+    // every start, whatever page was asked for.
+    "--disable-features=Translate,TranslateUI,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,site-per-process,NetworkTimeServiceQuerying,PreconnectToSearch",
     // WebMCP: the tools a page registers on `document.modelContext`
     // (`webmcp-list`, `webmcp-call`); a Chrome without it ignores the name.
     "--enable-features=NetworkService,NetworkServiceInProcess,WebMCP",
