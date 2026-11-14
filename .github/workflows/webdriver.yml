@@ -69,4 +69,4 @@ jobs:
           RUST_BACKTRACE: "1"
         run: cargo test --locked --test webdriver -- --nocapture --test-threads 1
       - name: Unit tests of the engines
-        run: cargo test --locked --lib wd::
+        run: cargo test --locked --lib "wd::"
