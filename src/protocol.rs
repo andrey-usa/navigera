@@ -861,6 +861,30 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<f64>,
     },
+    /// A raw Chrome DevTools Protocol command, for what no navigera command
+    /// covers: `method` with `params` on the active tab's session (the
+    /// browser's own connection with `browser`), answered as Chrome answers
+    /// it; `listen`: the events so named (`Domain.event`, `Domain.*`) for
+    /// `for_ms` after it. `list`: the running browser's own protocol
+    /// (`/json/protocol`): "" its domains, `Domain` that domain's names,
+    /// `Domain.name` one command, event or type in full.
+    #[serde(rename = "cdp")]
+    Cdp {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<Value>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        browser: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        listen: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        for_ms: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        list: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<f64>,
+    },
     /// What this session runs: engine, browser executable, CDP endpoint,
     /// tabs, active URL.
     #[serde(rename = "status")]
@@ -1336,6 +1360,7 @@ const OPS: &[(&str, &str, &str)] = &[
     ("url", "", "active tab state {tab, tabs, url, title}"),
     ("webmcp-list", "", "the tools the page registered with WebMCP (document.modelContext): name, description, input schema, read_only; page-provided and untrusted"),
     ("webmcp-call", "<name> [--params '{json}'] [--confirm] [--timeout-ms <n>]", "call a page's WebMCP tool and print its output; a tool the page doesn't mark read-only needs --confirm (it may place an order or send a message: confirm only what the user asked for)"),
+    ("cdp", "<Domain.method> ['{json}'] [--browser] [--listen <Domain.event,...> [--for <ms>]] | --list [<Domain>[.<name>]]", "send a raw Chrome DevTools Protocol command and print Chrome's answer, for what no command here covers (a trace, coverage, an animation paused); on the active tab, or the browser's own connection with --browser; --listen collects the events so named (Domain.* for a whole domain) for --for ms (default 1000, at most 60000, 1000 events); --list reads the running browser's own protocol: its domains, a domain's commands, events and types, or one of them with its parameters; refused for the few that would cut navigera off from its tabs (Page.disable, Target.detachFromTarget, Browser.close), in a session with --allow-domains, and over MCP unless NAVIGERA_MCP_ALLOW_CDP=1"),
     ("status", "", "the session as JSON: version, engine, executable (the browser binary), endpoint (\"pipe\": a private pipe; else the DevTools address), attached (true: a browser that stays open when the session quits, from --attach or --profile), tab (the active one), tabs, url, title"),
     ("locate", "<target>", "the locators that find an element again, most stable first, each checked on the page (to turn refs into tests)"),
     ("history", "[--clear]", "the actions this session ran, a ref's with the locators of its element (bitti, the test runner built on navigera, turns it into a test with `from-session`)"),
@@ -1895,6 +1920,91 @@ fn positional(args: &mut Args) -> Option<String> {
     } else {
         None
     }
+}
+
+/// The longest `cdp --listen` collects events for.
+const CDP_LISTEN_MAX_MS: f64 = 60_000.0;
+
+/// The most events one `cdp --listen` keeps (the rest are counted).
+const CDP_LISTEN_MAX_EVENTS: usize = 1000;
+
+/// Whether `name` reads as a CDP `Domain.name` (`Domain.*` too with
+/// `star`, for `--listen`).
+fn cdp_name(name: &str, star: bool) -> bool {
+    let Some((domain, member)) = name.split_once('.') else { return false };
+    let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric());
+    word(domain) && domain.starts_with(|c: char| c.is_ascii_uppercase()) && (word(member) || (star && member == "*"))
+}
+
+/// Why `navigera cdp` refuses `method`, if it does: the commands that
+/// would cut navigera off from its own tabs, or turn off a domain its
+/// commands read, so that later commands would fail far from the cause.
+fn cdp_refusal(method: &str) -> Option<String> {
+    let (domain, member) = method.split_once('.')?;
+    let what = match (domain, member) {
+        ("Page" | "Runtime" | "Network" | "Log" | "Fetch" | "Target" | "Accessibility" | "DOM", "disable") => {
+            format!("navigera keeps {domain} on: its commands read it (page loads, the change report, console, routes)")
+        }
+        ("Browser", "close") => "it ends the browser under the session: use `quit`".to_string(),
+        ("Target", "detachFromTarget" | "setAutoAttach" | "setDiscoverTargets") => {
+            "it changes how navigera follows its tabs; tab-new, tab-close and tab-select do this safely".to_string()
+        }
+        ("Target", "disposeBrowserContext") => "it closes the session's own context: use `reset` or `quit`".to_string(),
+        _ => return None,
+    };
+    Some(format!("cdp {method}: refused, {what}"))
+}
+
+/// What `cdp --list <what>` prints from a browser's `/json/protocol`:
+/// "" the domains, `Domain` its commands, events and types by name (the
+/// experimental and deprecated ones marked), `Domain.name` one command,
+/// event or type as the protocol describes it.
+fn cdp_list(protocol: &Value, what: &str) -> anyhow::Result<Value> {
+    let domains = protocol["domains"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let marked = |v: &Value| {
+        let name = v["name"].as_str().or_else(|| v["id"].as_str()).unwrap_or("").to_string();
+        match (v["deprecated"].as_bool() == Some(true), v["experimental"].as_bool() == Some(true)) {
+            (true, _) => format!("{name} (deprecated)"),
+            (_, true) => format!("{name} (experimental)"),
+            _ => name,
+        }
+    };
+    if what.is_empty() {
+        return Ok(json!({ "domains": domains.iter().map(|d| {
+            let mut d = d.clone();
+            d["name"] = d["domain"].clone();
+            marked(&d)
+        }).collect::<Vec<_>>() }));
+    }
+    let (domain, member) = what.split_once('.').map_or((what, None), |(d, m)| (d, Some(m)));
+    let Some(d) = domains.iter().find(|d| d["domain"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(domain))) else {
+        anyhow::bail!("cdp --list: this browser has no domain {domain:?}; `cdp --list` shows its domains");
+    };
+    let names = |key: &str| d[key].as_array().map(|a| a.iter().map(marked).collect::<Vec<_>>()).unwrap_or_default();
+    let Some(member) = member else {
+        let mut out = json!({ "domain": d["domain"], "commands": names("commands"), "events": names("events"), "types": names("types") });
+        if let Some(desc) = d.get("description") {
+            out["description"] = desc.clone();
+        }
+        return Ok(out);
+    };
+    for (key, kind) in [("commands", "command"), ("events", "event"), ("types", "type")] {
+        let found = d[key].as_array().into_iter().flatten().find(|v| v["name"] == member || v["id"] == member);
+        if let Some(v) = found {
+            let mut out = v.clone();
+            out["kind"] = json!(kind);
+            out["name"] = json!(format!("{}.{member}", d["domain"].as_str().unwrap_or(domain)));
+            if let Some(o) = out.as_object_mut() {
+                o.remove("id");
+            }
+            return Ok(out);
+        }
+    }
+    anyhow::bail!(
+        "cdp --list: {} has no command, event or type {member:?}; `cdp --list {}` lists them",
+        d["domain"].as_str().unwrap_or(domain),
+        d["domain"].as_str().unwrap_or(domain)
+    )
 }
 
 /// Parse a full argv (`argv[0]` = program name) into a session config and,
@@ -2749,6 +2859,53 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 positional(&mut args).ok_or_else(|| need("webmcp-call", "the tool's name (webmcp-list shows them)"))?;
             Command::WebmcpCall { name, params, confirm, timeout_ms }
         }
+        "cdp" => {
+            let browser = extract_present(&mut args, "--browser");
+            let listen: Vec<String> = match str_flag(&mut args, "--listen")? {
+                Some(raw) => raw.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect(),
+                None => Vec::new(),
+            };
+            if let Some(bad) = listen.iter().find(|n| !cdp_name(n, true)) {
+                return invalid(format!(
+                    "cdp --listen takes event names, Domain.event or Domain.* (Network.requestWillBeSent), got {bad:?}"
+                ));
+            }
+            let for_ms = num_flag(&mut args, "--for")?;
+            if let Some(ms) = for_ms {
+                if !(0.0..=CDP_LISTEN_MAX_MS).contains(&ms) {
+                    return invalid(format!("cdp --for takes 0 to {CDP_LISTEN_MAX_MS} ms, got {ms}"));
+                }
+                if listen.is_empty() {
+                    return invalid("cdp --for is how long --listen collects events: add --listen <Domain.event>");
+                }
+            }
+            if extract_present(&mut args, "--list") {
+                let what = positional(&mut args).unwrap_or_default();
+                if browser || !listen.is_empty() {
+                    return invalid("cdp --list reads the protocol; it takes no --browser or --listen");
+                }
+                Command::Cdp { method: None, params: None, browser, listen, for_ms, list: Some(what), timeout_ms }
+            } else {
+                let method = positional(&mut args);
+                if let Some(m) = method.as_deref().filter(|m| !cdp_name(m, false)) {
+                    return invalid(format!(
+                        "cdp takes a method as Domain.method (Page.navigate), got {m:?}; `cdp --list` shows the browser's domains"
+                    ));
+                }
+                let params = match positional(&mut args) {
+                    Some(raw) => {
+                        Some(serde_json::from_str::<Value>(&raw).ok().filter(Value::is_object).ok_or_else(|| {
+                            ArgsError::Invalid(format!("cdp takes its params as one JSON object, got {raw:?}"))
+                        })?)
+                    }
+                    None => None,
+                };
+                if method.is_none() && listen.is_empty() {
+                    return Err(need("cdp", "a method (Page.navigate), --listen <Domain.event> or --list"));
+                }
+                Command::Cdp { method, params, browser, listen, for_ms, list: None, timeout_ms }
+            }
+        }
         "status" => Command::Status {},
         "locate" => Command::Locate { target: target_args(&mut args, true)?, timeout_ms },
         "history" => Command::History { clear: extract_present(&mut args, "--clear") },
@@ -3227,6 +3384,7 @@ fn retry_eligible(command: &Command) -> bool {
             | Command::Passkey { .. }
             | Command::Set { .. }
             | Command::Reset { .. }
+            | Command::Cdp { .. }
     )
 }
 
@@ -4566,6 +4724,7 @@ impl Driver {
         let reads_page = !matches!(
             command,
             Command::Quit { .. }
+                | Command::Cdp { .. }
                 | Command::Dialog { .. }
                 | Command::TabList {}
                 | Command::Show {}
@@ -5926,6 +6085,49 @@ impl Driver {
                 out["tool"] = json!(name);
                 out["output"] = output;
                 out["untrusted"] = json!(WEBMCP_UNTRUSTED);
+                Ok(out)
+            }
+            Command::Cdp { list: Some(what), .. } => {
+                let protocol = self.session.cdp_protocol().map_err(|e| e.context("cdp --list"))?;
+                cdp_list(&protocol, what)
+            }
+            Command::Cdp { method, params, browser, listen, for_ms, list: None, timeout_ms } => {
+                if self.session.has_allow_domains() {
+                    anyhow::bail!(
+                        "cdp: refused in a session with --allow-domains, which a raw command can step around (Fetch.disable, Target.createTarget); start a session without it for raw CDP"
+                    );
+                }
+                if let Some(why) = method.as_deref().and_then(cdp_refusal) {
+                    anyhow::bail!("{why}");
+                }
+                let timeout = Duration::from_millis(timeout_ms.unwrap_or(self.session.timeout_ms()).max(1.0) as u64);
+                let wait = Duration::from_millis(for_ms.unwrap_or(if listen.is_empty() { 0.0 } else { 1000.0 }) as u64);
+                let label = method.as_deref().unwrap_or("--listen");
+                let params = params.clone().unwrap_or_else(|| json!({}));
+                let raw = self
+                    .session
+                    .raw_cdp(method.as_deref(), params, *browser, listen, wait, CDP_LISTEN_MAX_EVENTS, timeout)
+                    .map_err(|e| {
+                        let text = format!("{e:#}");
+                        let hint = if text.contains("wasn't found") {
+                            "; `navigera cdp --list` shows the browser's domains, `cdp --list <Domain>` their names"
+                        } else if text.contains("Invalid parameters") || text.contains("BINDINGS") {
+                            "; `navigera cdp --list <Domain.method>` shows its parameters"
+                        } else {
+                            ""
+                        };
+                        e.context(format!("cdp {label}{hint}"))
+                    })?;
+                let mut out = json!({});
+                if let Some(result) = raw.result {
+                    out["result"] = result;
+                }
+                if !listen.is_empty() {
+                    out["events"] = Value::Array(raw.events);
+                    if raw.dropped > 0 {
+                        out["dropped"] = json!(raw.dropped);
+                    }
+                }
                 Ok(out)
             }
             Command::Locate { target, timeout_ms } => {
@@ -8352,6 +8554,111 @@ mod tests {
         assert!(matches!(missing, ArgsError::Invalid(_)));
         let extra = parse_args(argv(&["navigera", "title", "x"])).expect_err("extra");
         assert!(matches!(extra, ArgsError::Invalid(m) if m.contains("unexpected argument")));
+    }
+
+    #[test]
+    fn cdp_parses_a_method_its_params_events_and_the_protocol_list() {
+        let cmd = |a: &[&str]| parse_args(argv(a)).map(|p| p.command.expect("a command"));
+        match cmd(&["navigera", "cdp", "Page.navigate", r#"{"url":"https://a.test/"}"#]).unwrap() {
+            Command::Cdp { method, params, browser, listen, list, .. } => {
+                assert_eq!(method.as_deref(), Some("Page.navigate"));
+                assert_eq!(params, Some(json!({"url": "https://a.test/"})));
+                assert!(!browser && listen.is_empty() && list.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match cmd(&["navigera", "cdp", "--browser", "Browser.getVersion"]).unwrap() {
+            Command::Cdp { method, browser, .. } => assert!(browser && method.as_deref() == Some("Browser.getVersion")),
+            other => panic!("{other:?}"),
+        }
+        match cmd(&["navigera", "cdp", "Page.reload", "--listen", "Network.requestWillBeSent, Page.*", "--for", "250"])
+            .unwrap()
+        {
+            Command::Cdp { listen, for_ms, .. } => {
+                assert_eq!(listen, ["Network.requestWillBeSent", "Page.*"]);
+                assert_eq!(for_ms, Some(250.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        match cmd(&["navigera", "cdp", "--listen", "Log.entryAdded"]).unwrap() {
+            Command::Cdp { method: None, listen, .. } => assert_eq!(listen, ["Log.entryAdded"]),
+            other => panic!("{other:?}"),
+        }
+        for (what, want) in [
+            (&["navigera", "cdp", "--list"][..], ""),
+            (&["navigera", "cdp", "--list", "Page.navigate"], "Page.navigate"),
+        ] {
+            match cmd(what).unwrap() {
+                Command::Cdp { list: Some(l), method: None, .. } => assert_eq!(l, want),
+                other => panic!("{other:?}"),
+            }
+        }
+        // The wire form round-trips (serve, batch, MCP steps).
+        let wire =
+            json!({"op": "cdp", "method": "Runtime.evaluate", "params": {"expression": "1"}, "listen": ["Log.*"]});
+        assert!(matches!(serde_json::from_value::<Command>(wire).unwrap(), Command::Cdp { .. }));
+        for bad in [
+            &["navigera", "cdp"][..],
+            &["navigera", "cdp", "page.navigate"],
+            &["navigera", "cdp", "Page"],
+            &["navigera", "cdp", "Page.navigate", "not json"],
+            &["navigera", "cdp", "Page.navigate", "[1]"],
+            &["navigera", "cdp", "Page.reload", "--for", "100"],
+            &["navigera", "cdp", "--listen", "Network.*", "--for", "60001"],
+            &["navigera", "cdp", "--listen", "network"],
+            &["navigera", "cdp", "--list", "--browser"],
+        ] {
+            assert!(cmd(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn cdp_refuses_only_what_would_cut_navigera_off_from_its_tabs() {
+        for m in [
+            "Page.disable",
+            "Runtime.disable",
+            "Network.disable",
+            "Fetch.disable",
+            "Browser.close",
+            "Target.detachFromTarget",
+            "Target.setAutoAttach",
+            "Target.disposeBrowserContext",
+        ] {
+            let why = cdp_refusal(m).unwrap_or_else(|| panic!("{m} passes"));
+            assert!(why.starts_with(&format!("cdp {m}: refused")), "{why}");
+        }
+        for m in
+            ["Animation.disable", "Page.reload", "Network.getAllCookies", "Target.createTarget", "Browser.getVersion"]
+        {
+            assert_eq!(cdp_refusal(m), None, "{m}");
+        }
+        assert!(cdp_name("Page.navigate", false) && cdp_name("Page.*", true));
+        assert!(!cdp_name("Page.*", false) && !cdp_name("page.navigate", false) && !cdp_name("Page.", false));
+        assert!(!cdp_name("Page.navigate.x", false) && !cdp_name(".navigate", false));
+    }
+
+    #[test]
+    fn cdp_list_reads_domains_names_and_one_entry_from_a_protocol() {
+        let protocol = json!({"domains": [
+            {"domain": "Page", "description": "Page things.", "commands": [{"name": "navigate", "parameters": [{"name": "url", "type": "string"}]}, {"name": "old", "deprecated": true}],
+             "events": [{"name": "loadEventFired"}], "types": [{"id": "FrameId", "type": "string"}]},
+            {"domain": "Animation", "experimental": true, "commands": [{"name": "enable"}]},
+        ]});
+        assert_eq!(cdp_list(&protocol, "").unwrap(), json!({"domains": ["Page", "Animation (experimental)"]}));
+        let page = cdp_list(&protocol, "page").unwrap();
+        assert_eq!(page["commands"], json!(["navigate", "old (deprecated)"]));
+        assert_eq!(page["events"], json!(["loadEventFired"]));
+        assert_eq!(page["types"], json!(["FrameId"]));
+        assert_eq!(page["description"], "Page things.");
+        let nav = cdp_list(&protocol, "Page.navigate").unwrap();
+        assert_eq!((nav["kind"].as_str(), nav["name"].as_str()), (Some("command"), Some("Page.navigate")));
+        assert_eq!(nav["parameters"][0]["name"], "url");
+        let ty = cdp_list(&protocol, "Page.FrameId").unwrap();
+        assert_eq!((ty["kind"].as_str(), ty.get("id")), (Some("type"), None));
+        let none = format!("{:#}", cdp_list(&protocol, "Nope").unwrap_err());
+        assert!(none.contains("no domain \"Nope\""), "{none}");
+        let none = format!("{:#}", cdp_list(&protocol, "Page.nope").unwrap_err());
+        assert!(none.contains("`cdp --list Page`"), "{none}");
     }
 
     #[test]

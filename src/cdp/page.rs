@@ -3343,6 +3343,17 @@ pub struct Pointer {
     pub buttons: u8,
 }
 
+/// What `navigera cdp` got: the command's answer, and the events it
+/// listened for (`dropped`: matching ones past the limit; `lagged`: any
+/// events, matching or not, a burst pushed out of the queue unread).
+#[derive(Debug, Default)]
+pub struct RawCdp {
+    pub result: Option<Value>,
+    pub events: Vec<Value>,
+    pub dropped: usize,
+    pub lagged: u64,
+}
+
 #[derive(Clone)]
 pub struct Page {
     handle: tokio::runtime::Handle,
@@ -4168,6 +4179,62 @@ impl Page {
                 }
             }
         })
+    }
+
+    /// `navigera cdp`: `method` (when given) with `params` on this tab's
+    /// session, or on the browser's own connection with `browser`; then
+    /// the events `listen` names (`Domain.event`, `Domain.*`) for `wait`:
+    /// this tab's, or every session's with `browser`. Listening starts
+    /// before the command is sent, so its own events are caught. At most
+    /// `max_events` are kept; the rest are counted in `dropped`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn raw_cdp(
+        &self,
+        method: Option<&str>,
+        params: Value,
+        browser: bool,
+        listen: &[String],
+        wait: Duration,
+        max_events: usize,
+        timeout: Duration,
+    ) -> Result<RawCdp> {
+        let mut rx = (!listen.is_empty()).then(|| self.client.subscribe());
+        let session = (!browser).then_some(self.session_id.as_str());
+        let result = match method {
+            Some(m) => Some(self.block_on(self.client.send(m, params, session, timeout))?),
+            None => None,
+        };
+        let (mut events, mut dropped, mut lagged) = (Vec::new(), 0usize, 0u64);
+        if let Some(rx) = rx.as_mut() {
+            let wanted = |name: &str| {
+                listen.iter().any(|l| match l.strip_suffix(".*") {
+                    Some(domain) => name.split_once('.').is_some_and(|(d, _)| d == domain),
+                    None => l == name,
+                })
+            };
+            let deadline = tokio::time::Instant::now() + wait;
+            self.block_on(async {
+                use tokio::sync::broadcast::error::RecvError;
+                loop {
+                    match tokio::time::timeout_at(deadline, rx.recv()).await {
+                        Ok(Ok(event)) => {
+                            let name = event["method"].as_str().unwrap_or("");
+                            let ours = browser || event["sessionId"].as_str() == session;
+                            if ours && wanted(name) {
+                                if events.len() < max_events {
+                                    events.push(event);
+                                } else {
+                                    dropped += 1;
+                                }
+                            }
+                        }
+                        Ok(Err(RecvError::Lagged(n))) => lagged += n,
+                        Ok(Err(RecvError::Closed)) | Err(_) => break,
+                    }
+                }
+            });
+        }
+        Ok(RawCdp { result, events, dropped, lagged })
     }
 
     /// Send one CDP command to this tab's session.

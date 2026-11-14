@@ -577,6 +577,25 @@ pub const EXAMPLES: &[Help] = &[
     ("url", &[("navigera -s s url", "")], &[]),
     ("webmcp-list", &[("navigera -s s webmcp-list", "the tools the page offers an agent")], &[]),
     (
+        "cdp",
+        &[
+            ("navigera -s s cdp Animation.setPlaybackRate '{\"playbackRate\":0}'", "pause every animation"),
+            ("navigera -s s cdp Performance.getMetrics", "after `cdp Performance.enable`"),
+            ("navigera -s s cdp Page.reload --listen Network.requestWillBeSent --for 2000", "a command and its events"),
+            ("navigera -s s cdp --browser Browser.getVersion", "on the browser's own connection"),
+            ("navigera -s s cdp --list Emulation", "a domain's commands, events and types"),
+            ("navigera -s s cdp --list Emulation.setCPUThrottlingRate", "one of them, with its parameters"),
+        ],
+        &[
+            ("<Domain.method>", "a command of the browser's protocol (cdp --list)"),
+            ("'{json}'", "its parameters, one JSON object (default {})"),
+            ("--browser", "the browser's connection, not the tab's session"),
+            ("--listen <names>", "events, comma-separated: Domain.event, Domain.*"),
+            ("--for <ms>", "how long --listen collects (default 1000)"),
+            ("--list [<name>]", "the running browser's protocol, from /json/protocol"),
+        ],
+    ),
+    (
         "webmcp-call",
         &[
             ("navigera -s s webmcp-call search_flights --params '{\"to\":\"LIS\"}'", "a read-only tool"),

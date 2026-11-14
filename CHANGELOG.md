@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `cdp`: any command of the Chrome DevTools Protocol, for what no
+  navigera command covers (a performance trace, coverage, animations
+  paused, an issue report): `navigera cdp Animation.setPlaybackRate
+  '{"playbackRate":0}'` sends it on the active tab (`--browser`: on the
+  browser's own connection) and prints Chrome's answer. `--listen
+  Network.*` collects the events so named for `--for` ms after it.
+  `--list` reads the running browser's own protocol: its domains, a
+  domain's commands, events and types, or one of them with its
+  parameters (Chrome 153: 58 domains, 664 commands, 233 events). A
+  shared browser runs over a pipe, which serves no protocol, so its
+  executable is started once more with a port to read it, once per
+  session, and the answer kept in memory. The few commands that would
+  cut navigera off from its tabs are refused with what to use instead
+  (`Page.disable`, `Browser.close`, `Target.detachFromTarget`), so are
+  all of them in a session with `--allow-domains`, and over MCP unless
+  the server runs with `NAVIGERA_MCP_ALLOW_CDP=1`.
+
 ## [0.13.1] - 2026-11-13
 
 ### Changed

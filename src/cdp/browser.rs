@@ -722,6 +722,20 @@ impl Browser {
         Ok(v.get("userAgent").and_then(Value::as_str).unwrap_or_default().to_string())
     }
 
+    /// The browser's product and full version (`Browser.getVersion`'s
+    /// `product`, `Chrome/153.0.8010.12`): the user agent's is cut to the
+    /// major version.
+    pub fn product(&self) -> Result<String> {
+        let v = self.block_on(self.client.send("Browser.getVersion", json!({}), None, CMD_TIMEOUT))?;
+        Ok(v.get("product").and_then(Value::as_str).unwrap_or_default().to_string())
+    }
+
+    /// The runtime this browser's connection runs on, for launching
+    /// another browser from the same thread (`cdp --list` over a pipe).
+    pub fn handle(&self) -> &tokio::runtime::Handle {
+        &self.handle
+    }
+
     /// A target's type now (`page`, `webview`, …): it can change after the
     /// target is created.
     pub fn target_type(&self, target_id: &str) -> Option<String> {

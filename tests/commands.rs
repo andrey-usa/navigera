@@ -946,6 +946,37 @@ fn webmcp_tools_are_listed_and_called() {
     assert!(a.err(&["webmcp-call", "nope"]).contains("it has: "));
 }
 
+/// `cdp`: any command of the protocol on the tab or the browser, its own
+/// events caught, the running browser's protocol read (a shared browser
+/// runs over a pipe: its executable is started once more with a port),
+/// and the few commands that would cut navigera off refused.
+#[test]
+fn raw_cdp_commands_their_events_and_the_browsers_own_protocol() {
+    let Some((engine, bin)) = engines().into_iter().find(|(e, _)| *e == "chrome") else { return };
+    let a = Agent::new("rawcdp", engine, bin);
+    a.ok(&["goto", "data:text/html,<title>Raw</title><p>x</p>"]);
+    let v = a.ok(&["cdp", "--browser", "Browser.getVersion"]);
+    assert!(v["result"]["product"].as_str().unwrap_or_default().contains('/'), "{v}");
+    let e = a.ok(&["cdp", "Runtime.evaluate", r#"{"expression":"document.title","returnByValue":true}"#]);
+    assert_eq!(e["result"]["result"]["value"], "Raw", "{e}");
+    let r = a.ok(&["cdp", "Page.reload", "--listen", "Page.*", "--for", "3000"]);
+    let names: Vec<&str> = r["events"].as_array().unwrap().iter().filter_map(|ev| ev["method"].as_str()).collect();
+    assert!(names.iter().all(|n| n.starts_with("Page.")) && names.contains(&"Page.loadEventFired"), "{r}");
+    // The session still works after it: navigera's own watcher saw the reload too.
+    assert_eq!(a.ok(&["title"]), "Raw");
+
+    let domains = a.ok(&["cdp", "--list"]);
+    assert!(domains["domains"].as_array().unwrap().iter().any(|d| d == "Page"), "{domains}");
+    let one = a.ok(&["cdp", "--list", "Page.navigate"]);
+    assert_eq!(one["kind"], "command", "{one}");
+    assert!(one["parameters"].as_array().unwrap().iter().any(|p| p["name"] == "url"), "{one}");
+
+    assert!(a.err(&["cdp", "Page.disable"]).contains("refused"));
+    assert!(a.err(&["cdp", "Nope.nothing"]).contains("cdp --list"));
+    assert!(a.err(&["cdp", "Page.navigate", "{}"]).contains("parameters"));
+    assert_eq!(a.ok(&["title"]), "Raw", "a refused or failed command leaves the session as it was");
+}
+
 /// `screencast`: what the tab showed, frame by frame with times, into a
 /// directory with a player; it follows the session to a new tab.
 #[test]

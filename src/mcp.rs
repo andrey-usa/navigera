@@ -680,6 +680,7 @@ impl<'a> Server<'a> {
         if !files_allowed() {
             check_file_access(step)?;
         }
+        check_cdp_access(step)?;
         let command: Command =
             serde_json::from_value(step.clone()).map_err(|e| format!("bad arguments for {}: {e}", step["op"]))?;
         if let Command::Quit { .. } = command {
@@ -790,6 +791,20 @@ impl<'a> Server<'a> {
 /// `NAVIGERA_MCP_ALLOW_FILES=1` lifts the file limits below.
 pub fn files_allowed() -> bool {
     std::env::var("NAVIGERA_MCP_ALLOW_FILES").is_ok_and(|v| v.trim() == "1")
+}
+
+/// A raw DevTools command (`cdp`) reaches what no page script can: every
+/// tab's cookies, HttpOnly ones too, other tabs, and the disk through
+/// download paths. A model reading untrusted pages is not handed that
+/// unless the person who set up the server says so with
+/// `NAVIGERA_MCP_ALLOW_CDP=1`. Reading the protocol (`cdp --list`) is
+/// always allowed.
+fn check_cdp_access(step: &Value) -> Result<(), String> {
+    let raw = step.get("op").and_then(Value::as_str) == Some("cdp") && step.get("list").is_none_or(Value::is_null);
+    if raw && !std::env::var("NAVIGERA_MCP_ALLOW_CDP").is_ok_and(|v| v.trim() == "1") {
+        return Err("cdp: raw DevTools commands reach every tab's cookies and the browser itself, so they are not run over MCP (set NAVIGERA_MCP_ALLOW_CDP=1 in the server's environment to allow)".into());
+    }
+    Ok(())
 }
 
 /// The fields of a step that name a file or directory here, by op
@@ -989,6 +1004,20 @@ pub fn serve<R: BufRead + Send + 'static>(config: &SessionConfig, input: R, outp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_raw_cdp_step_needs_the_servers_consent_and_reading_the_protocol_does_not() {
+        // The variable is read per call; this test is the only one that
+        // sets it, and it only ever checks the unset case.
+        if std::env::var_os("NAVIGERA_MCP_ALLOW_CDP").is_some() {
+            return;
+        }
+        let refused = check_cdp_access(&json!({"op": "cdp", "method": "Network.getAllCookies"})).unwrap_err();
+        assert!(refused.contains("NAVIGERA_MCP_ALLOW_CDP=1"), "{refused}");
+        assert!(check_cdp_access(&json!({"op": "cdp", "list": "Network"})).is_ok());
+        assert!(check_cdp_access(&json!({"op": "cdp", "list": ""})).is_ok());
+        assert!(check_cdp_access(&json!({"op": "eval", "expression": "1"})).is_ok());
+    }
 
     /// An agent reads the schema field by field: none is left unexplained.
     #[cfg(unix)]

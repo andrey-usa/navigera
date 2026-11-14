@@ -596,6 +596,28 @@ pub fn resolve_executable_for(cli_override: Option<&str>, headless: bool) -> Opt
         .or_else(|| crate::install::installed("chrome").into_iter().next())
 }
 
+/// The host and port of a DevTools HTTP server behind a `ws://` endpoint
+/// (`ws://127.0.0.1:9222/devtools/browser/<id>`); none for a pipe, a
+/// shared browser's socket or a `wss://` one.
+fn devtools_http(ws: &str) -> Option<(String, u16)> {
+    let rest = ws.strip_prefix("ws://")?;
+    let hostport = rest.split_once('/').map_or(rest, |(hp, _)| hp);
+    let (host, port) = hostport.rsplit_once(':')?;
+    Some((host.trim_start_matches('[').trim_end_matches(']').to_string(), port.parse().ok()?))
+}
+
+/// A browser's protocol, from its DevTools HTTP server (`/json/protocol`).
+fn read_protocol(host: &str, port: u16) -> Result<serde_json::Value> {
+    let body = cdp::transport::http_get_body(host, port, "/json/protocol")
+        .with_context(|| format!("reading /json/protocol from {host}:{port}"))?;
+    let protocol: serde_json::Value =
+        serde_json::from_str(&body).context("the browser's /json/protocol is not JSON")?;
+    if !protocol["domains"].is_array() {
+        bail!("the browser's /json/protocol lists no domains");
+    }
+    Ok(protocol)
+}
+
 /// True when `--engine` selects the Lightpanda CDP server instead of Chromium.
 pub fn is_lightpanda(engine: &str) -> bool {
     matches!(engine.trim().to_ascii_lowercase().as_str(), "lightpanda" | "panda")
@@ -3080,6 +3102,70 @@ impl BrowserSession {
                 }
             }
         }
+    }
+
+    /// `navigera cdp`: a raw command on the active tab (the browser's own
+    /// connection with `browser`), then the events `listen` names; see
+    /// [`Page::raw_cdp`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn raw_cdp(
+        &self,
+        method: Option<&str>,
+        params: serde_json::Value,
+        browser: bool,
+        listen: &[String],
+        wait: Duration,
+        max_events: usize,
+        timeout: Duration,
+    ) -> Result<cdp::RawCdp> {
+        self.active_tab().raw_cdp(method, params, browser, listen, wait, max_events, timeout)
+    }
+
+    /// The running browser's own protocol, as its DevTools HTTP server
+    /// serves it (`/json/protocol`): every domain, command, event and type
+    /// this very version has.
+    ///
+    /// A browser driven over a pipe (the shared headless browser) has no
+    /// such server: its executable is started once more, headless with a
+    /// port, for as long as reading the protocol takes (about half a
+    /// second), and the answer kept for this process, by executable and
+    /// version. Nothing is written to disk.
+    pub fn cdp_protocol(&self) -> Result<std::sync::Arc<serde_json::Value>> {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        static READ: OnceLock<Mutex<HashMap<String, Arc<serde_json::Value>>>> = OnceLock::new();
+        let ws = self.endpoint();
+        if let Some((host, port)) = devtools_http(&ws) {
+            return read_protocol(&host, port).map(Arc::new);
+        }
+        let exe = self.executable().to_string();
+        if exe.is_empty() || self.is_lightpanda() || self.is_electron() || self.is_attached() {
+            bail!(
+                "this session's browser serves no DevTools HTTP server to read the protocol from ({}); `cdp <Domain.method>` still works",
+                crate::cdp::attach::shown(&ws)
+            );
+        }
+        let key = format!("{exe}\n{}", self.browser.product().unwrap_or_default());
+        let read = READ.get_or_init(Mutex::default);
+        if let Some(p) = read.lock().unwrap().get(&key) {
+            return Ok(p.clone());
+        }
+        let opts =
+            cdp::LaunchOptions { exe, headless: true, chrome_flags: Vec::new(), debugging_port: None, pipe: false };
+        let probe = Browser::launch(self.browser.handle(), &opts)
+            .context("starting the session's browser once more, with a port, to read its protocol")?;
+        let answer = devtools_http(probe.ws_url())
+            .ok_or_else(|| anyhow::anyhow!("the second browser gave no DevTools port ({})", probe.ws_url()))
+            .and_then(|(host, port)| read_protocol(&host, port));
+        probe.close();
+        let protocol = Arc::new(answer?);
+        read.lock().unwrap().insert(key, protocol.clone());
+        Ok(protocol)
+    }
+
+    /// Whether this session has a domain allowlist (`--allow-domains`).
+    pub fn has_allow_domains(&self) -> bool {
+        self.browser.shared().allow_policy(&self.scope()).is_some()
     }
 
     /// Cookies the current page sends (`url`: that URL's), or every cookie.
