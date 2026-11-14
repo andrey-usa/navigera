@@ -1012,7 +1012,7 @@ mod tests {
         if std::env::var_os("NAVIGERA_MCP_ALLOW_CDP").is_some() {
             return;
         }
-        let refused = check_cdp_access(&json!({"op": "cdp", "method": "Network.getAllCookies"})).unwrap_err();
+        let refused = check_cdp_access(&json!({"op": "cdp", "method": "Storage.getCookies"})).unwrap_err();
         assert!(refused.contains("NAVIGERA_MCP_ALLOW_CDP=1"), "{refused}");
         assert!(check_cdp_access(&json!({"op": "cdp", "list": "Network"})).is_ok());
         assert!(check_cdp_access(&json!({"op": "cdp", "list": ""})).is_ok());

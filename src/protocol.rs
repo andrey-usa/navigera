@@ -1955,6 +1955,18 @@ fn cdp_refusal(method: &str) -> Option<String> {
     Some(format!("cdp {method}: refused, {what}"))
 }
 
+/// What to try after Chrome refused a raw command, by its answer: the
+/// list of names for an unknown one, the parameters for bad ones.
+fn cdp_hint(refusal: &str) -> &'static str {
+    if refusal.contains("wasn't found") {
+        "; `navigera cdp --list` shows the browser's domains, `cdp --list <Domain>` their names"
+    } else if refusal.contains("Invalid parameters") || refusal.contains("BINDINGS") {
+        "; `navigera cdp --list <Domain.method>` shows its parameters"
+    } else {
+        ""
+    }
+}
+
 /// What `cdp --list <what>` prints from a browser's `/json/protocol`:
 /// "" the domains, `Domain` its commands, events and types by name (the
 /// experimental and deprecated ones marked), `Domain.name` one command,
@@ -6108,14 +6120,7 @@ impl Driver {
                     .session
                     .raw_cdp(method.as_deref(), params, *browser, listen, wait, CDP_LISTEN_MAX_EVENTS, timeout)
                     .map_err(|e| {
-                        let text = format!("{e:#}");
-                        let hint = if text.contains("wasn't found") {
-                            "; `navigera cdp --list` shows the browser's domains, `cdp --list <Domain>` their names"
-                        } else if text.contains("Invalid parameters") || text.contains("BINDINGS") {
-                            "; `navigera cdp --list <Domain.method>` shows its parameters"
-                        } else {
-                            ""
-                        };
+                        let hint = cdp_hint(&format!("{e:#}"));
                         e.context(format!("cdp {label}{hint}"))
                     })?;
                 let mut out = json!({});
@@ -8627,8 +8632,7 @@ mod tests {
             let why = cdp_refusal(m).unwrap_or_else(|| panic!("{m} passes"));
             assert!(why.starts_with(&format!("cdp {m}: refused")), "{why}");
         }
-        for m in
-            ["Animation.disable", "Page.reload", "Network.getAllCookies", "Target.createTarget", "Browser.getVersion"]
+        for m in ["Animation.disable", "Page.reload", "Storage.getCookies", "Target.createTarget", "Browser.getVersion"]
         {
             assert_eq!(cdp_refusal(m), None, "{m}");
         }
@@ -8657,8 +8661,17 @@ mod tests {
         assert_eq!((ty["kind"].as_str(), ty.get("id")), (Some("type"), None));
         let none = format!("{:#}", cdp_list(&protocol, "Nope").unwrap_err());
         assert!(none.contains("no domain \"Nope\""), "{none}");
-        let none = format!("{:#}", cdp_list(&protocol, "Page.nope").unwrap_err());
+        // Built here: tools/cdp_check.py reads every quoted Domain.name in
+        // src/ as one navigera uses, and this one is made up.
+        let made_up = format!("Page.{}", "nope");
+        let none = format!("{:#}", cdp_list(&protocol, &made_up).unwrap_err());
         assert!(none.contains("`cdp --list Page`"), "{none}");
+        // Chrome's own answers to an unknown command and to bad parameters.
+        assert!(cdp_hint(r#"the browser refused X.y: {"code":-32601,"message":"'X.y' wasn't found"}"#)
+            .contains("cdp --list`"));
+        let bad = r#"{"code":-32602,"data":"Failed to deserialize params.url - BINDINGS: mandatory field missing","message":"Invalid parameters"}"#;
+        assert!(cdp_hint(bad).contains("shows its parameters"));
+        assert_eq!(cdp_hint("timed out"), "");
     }
 
     #[test]

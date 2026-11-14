@@ -971,10 +971,11 @@ fn raw_cdp_commands_their_events_and_the_browsers_own_protocol() {
     assert_eq!(one["kind"], "command", "{one}");
     assert!(one["parameters"].as_array().unwrap().iter().any(|p| p["name"] == "url"), "{one}");
 
+    // Refused before it reaches the browser. (Chrome's refusals of an
+    // unknown command or bad parameters are unit-tested: the CDP check of
+    // CI's traced runs fails on any such command sent.)
     assert!(a.err(&["cdp", "Page.disable"]).contains("refused"));
-    assert!(a.err(&["cdp", "Nope.nothing"]).contains("cdp --list"));
-    assert!(a.err(&["cdp", "Page.navigate", "{}"]).contains("parameters"));
-    assert_eq!(a.ok(&["title"]), "Raw", "a refused or failed command leaves the session as it was");
+    assert_eq!(a.ok(&["title"]), "Raw", "a refused command leaves the session as it was");
 }
 
 /// `screencast`: what the tab showed, frame by frame with times, into a

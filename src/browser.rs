@@ -3150,9 +3150,10 @@ impl BrowserSession {
         if let Some(p) = read.lock().unwrap().get(&key) {
             return Ok(p.clone());
         }
-        let opts =
-            cdp::LaunchOptions { exe, headless: true, chrome_flags: Vec::new(), debugging_port: None, pipe: false };
-        let probe = Browser::launch(self.browser.handle(), &opts)
+        // Launched as navigera launches any Chrome (its flags, and the
+        // `--no-sandbox` fallback where the sandbox cannot start: a bare
+        // launch dies there, as on Ubuntu runners), over a port.
+        let (probe, _) = launch_chrome(self.browser.handle(), true, Some(&exe), "port")
             .context("starting the session's browser once more, with a port, to read its protocol")?;
         let answer = devtools_http(probe.ws_url())
             .ok_or_else(|| anyhow::anyhow!("the second browser gave no DevTools port ({})", probe.ws_url()))
