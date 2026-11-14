@@ -156,9 +156,14 @@ impl Http {
 
 /// The URL as shown: any user and key in it masked.
 pub fn mask(url: &str) -> String {
+    // A query can carry a token (a cloud grid's endpoint): hidden whole.
+    let (url, query) = match url.split_once('?') {
+        Some((before, _)) => (before, "?***"),
+        None => (url, ""),
+    };
     match (url.find("://"), url.rfind('@')) {
-        (Some(s), Some(at)) if at > s => format!("{}://***@{}", &url[..s], &url[at + 1..]),
-        _ => url.to_string(),
+        (Some(s), Some(at)) if at > s => format!("{}://***@{}{query}", &url[..s], &url[at + 1..]),
+        _ => format!("{url}{query}"),
     }
 }
 
@@ -259,9 +264,26 @@ impl Session {
         mut http: Http,
         endpoint: String,
         mut caps: Value,
-        driver: Option<Child>,
+        mut driver: Option<Child>,
         timeout: Duration,
     ) -> Result<Self> {
+        // A driver navigera started ends with a session the server refused.
+        let opened = Self::open(&mut http, &mut caps, timeout);
+        let v = match opened {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(mut child) = driver.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(e);
+            }
+        };
+        Ok(Self { http, id: v.0, caps: v.1, endpoint, driver, ended: false })
+    }
+
+    /// A new session: its id and the capabilities the server answered with.
+    fn open(http: &mut Http, caps: &mut Value, timeout: Duration) -> Result<(String, Value)> {
         let bound = timeout.max(Duration::from_secs(60));
         let body = json!({ "capabilities": { "alwaysMatch": caps } });
         let v = match http.request("POST", "/session", Some(&body), bound) {
@@ -276,7 +298,7 @@ impl Session {
         }
         .context("the WebDriver server refused a session")?;
         let id = v["sessionId"].as_str().ok_or_else(|| anyhow!("the WebDriver server gave no session id"))?.to_string();
-        Ok(Self { http, id, caps: v["capabilities"].clone(), endpoint, driver, ended: false })
+        Ok((id, v["capabilities"].clone()))
     }
 
     fn cmd(&mut self, method: &str, path: &str, body: Option<Value>, timeout: Duration) -> Result<Value> {
@@ -677,6 +699,11 @@ mod tests {
         assert!(h.auth.is_some());
         assert_eq!(mask("http://user:key@grid.example:4444/wd/hub"), "http://***@grid.example:4444/wd/hub");
         assert_eq!(mask("http://127.0.0.1:9515"), "http://127.0.0.1:9515");
+        assert_eq!(
+            mask("ws://user:key@grid.example:4444/session/1?token=abc"),
+            "ws://***@grid.example:4444/session/1?***"
+        );
+        assert_eq!(mask("ws://grid.example/bidi?token=abc"), "ws://grid.example/bidi?***");
         let e = Http::new("https://user:key@grid.example/wd/hub").err().unwrap();
         assert!(!format!("{e}").contains("key@"), "{e}");
     }

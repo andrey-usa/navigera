@@ -6,7 +6,7 @@
 //! taken as they come, so nothing runs in the background and nothing locks.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
@@ -34,6 +34,9 @@ const NAV_START_WATCH: Duration = Duration::from_millis(30);
 
 /// Most console entries kept between reads.
 const CONSOLE_MAX: usize = 1000;
+
+/// The most of one console entry's text that is kept, in bytes.
+const CONSOLE_TEXT_MAX: usize = 16 << 10;
 
 pub struct Bidi {
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
@@ -137,18 +140,31 @@ fn kill_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// A session that failed half-way (a refused capability, say) still ends
+/// its Firefox and its driver.
+impl Drop for Bidi {
+    fn drop(&mut self) {
+        Wire::close(self);
+    }
+}
+
 impl Bidi {
     /// Start Firefox with a throwaway profile and connect to its BiDi
     /// endpoint.
     pub fn launch_firefox(exe: Option<&str>, headless: bool, caps: Value, timeout: Duration) -> Result<Self> {
         let exe = firefox_executable(exe).ok_or_else(|| {
-            anyhow!("no Firefox found: `navigera install-browser firefox`, or give its path with --executable (or $NAVIGERA_FIREFOX)")
+            anyhow!("no Firefox found: install Firefox, or give its path with --executable (or $NAVIGERA_FIREFOX)")
         })?;
         let profile = tempfile::Builder::new()
             .prefix("navigera-firefox-")
             .tempdir()
             .context("a profile directory for Firefox")?;
-        std::fs::write(profile.path().join("user.js"), PREFS).context("writing Firefox's profile preferences")?;
+        // Downloads a page starts stay in the profile, which goes with the session.
+        let downloads = serde_json::to_string(&profile.path().join("downloads").display().to_string())?;
+        let prefs = format!(
+            "{PREFS}user_pref(\"browser.download.folderList\", 2);\nuser_pref(\"browser.download.dir\", {downloads});\n"
+        );
+        std::fs::write(profile.path().join("user.js"), prefs).context("writing Firefox's profile preferences")?;
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("--remote-debugging-port=0")
             .arg("--profile")
@@ -173,7 +189,17 @@ impl Bidi {
         std::thread::spawn(move || {
             let mut sent = false;
             let mut tail = VecDeque::new();
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let mut r = BufReader::new(stderr);
+            let mut raw = Vec::new();
+            loop {
+                // A line in pieces of at most 64 KB, whatever its bytes: the
+                // pipe is read to its end so Firefox never blocks on it.
+                raw.clear();
+                match (&mut r).take(64 << 10).read_until(b'\n', &mut raw) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&raw).trim_end().to_string();
                 if !sent {
                     if let Some(at) = line.find("WebDriver BiDi listening on ") {
                         let _ = tx.send(line[at + "WebDriver BiDi listening on ".len()..].trim().to_string());
@@ -246,20 +272,25 @@ impl Bidi {
     }
 
     fn connect(url: &str, timeout: Duration) -> Result<Self> {
+        // The endpoint as shown: a grid's may carry a key.
+        let shown = super::classic::mask(url);
         let rest = url.strip_prefix("ws://").ok_or_else(|| {
-            anyhow!("BiDi endpoint {url}: only ws:// endpoints on this machine or a network are served (no wss:// yet)")
+            anyhow!(
+                "BiDi endpoint {shown}: only ws:// endpoints on this machine or a network are served (no wss:// yet)"
+            )
         })?;
-        let host = rest.split('/').next().unwrap_or(rest);
+        let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+        let host = authority.rsplit('@').next().unwrap_or(authority);
         let addr = std::net::ToSocketAddrs::to_socket_addrs(host)
             .with_context(|| format!("BiDi endpoint {host}"))?
             .next()
             .ok_or_else(|| anyhow!("BiDi endpoint {host}: no address"))?;
         let stream = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(10)))
-            .with_context(|| format!("could not connect to the BiDi endpoint {url}"))?;
+            .with_context(|| format!("could not connect to the BiDi endpoint {shown}"))?;
         stream.set_nodelay(true).ok();
         stream.set_read_timeout(Some(timeout)).ok();
         let (ws, _) = tungstenite::client::client(url, MaybeTlsStream::Plain(stream))
-            .map_err(|e| anyhow!("BiDi handshake with {url} failed: {e}"))?;
+            .map_err(|e| anyhow!("BiDi handshake with {shown} failed: {e}"))?;
         Ok(Self {
             ws,
             next_id: 1,
@@ -270,7 +301,7 @@ impl Bidi {
             prompt_text: None,
             nav: None,
             browser: Value::Null,
-            endpoint: url.to_string(),
+            endpoint: shown,
             child: None,
             _profile: None,
             classic: None,
@@ -367,7 +398,7 @@ impl Bidi {
                 };
                 self.console.push_back(json!({
                     "level": level,
-                    "text": params["text"].as_str().unwrap_or(""),
+                    "text": super::clip(params["text"].as_str().unwrap_or(""), CONSOLE_TEXT_MAX),
                     "type": params["type"],
                     "url": params["source"]["context"],
                     "ts": params["timestamp"],
@@ -695,9 +726,13 @@ impl Wire for Bidi {
 
     fn console(&mut self) -> Vec<Value> {
         // Entries logged since the last command are still on the socket.
-        while let Ok(Some(v)) = self.read_one(Duration::from_millis(1)) {
-            if v["type"] == "event" {
-                self.on_event(v);
+        // At most a buffer's worth: a page that never stops logging does
+        // not hold the command.
+        for _ in 0..CONSOLE_MAX {
+            match self.read_one(Duration::from_millis(1)) {
+                Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
+                Ok(Some(_)) => {}
+                _ => break,
             }
         }
         self.console.drain(..).collect()

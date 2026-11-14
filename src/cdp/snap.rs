@@ -114,6 +114,23 @@ impl Snap {
         Some(Self::unlocked(capture.strings, docs, words))
     }
 
+    /// [`Snap::from_json`] for a capture a page's own script made (the
+    /// WebDriver engines' snapshot): the page can change the built-ins that
+    /// script uses, so the columns are checked before anything indexes by
+    /// them. Chrome's own capture needs no check.
+    pub fn from_page_json(text: &str) -> Result<Snap, &'static str> {
+        let capture: wire::Capture = serde_json::from_str(text).map_err(|_| "is not a snapshot")?;
+        if capture.documents.is_empty() {
+            return Err("has no document");
+        }
+        if !capture.sound() {
+            return Err("does not hold together (its columns disagree)");
+        }
+        let words = Self::words(&capture.strings);
+        let docs = capture.documents.into_iter().map(|d| SnapDoc::from_wire(d, words[0])).collect();
+        Ok(Self::unlocked(capture.strings, docs, words))
+    }
+
     /// The string indices of "hidden", "DETAILS", "SUMMARY" and "open"
     /// (-1 for none).
     fn words(strings: &[String]) -> [i64; 4] {
@@ -844,6 +861,42 @@ mod wire {
         pub strings: Vec<String>,
     }
 
+    impl Capture {
+        /// Whether every index stays inside what it points into: one entry
+        /// per node in each column, a parent before its child, sparse and
+        /// layout entries on nodes that exist, frames on documents that
+        /// exist, attributes in pairs. String indices need no check
+        /// ([`super::Snap::at`] answers "" past the end).
+        pub fn sound(&self) -> bool {
+            let docs = self.documents.len() as i64;
+            self.documents.iter().all(|d| {
+                let n = &d.nodes;
+                let count = n.parent_index.len();
+                let on_node = |i: &i64| *i < count as i64;
+                [n.node_type.len(), n.node_name.len(), n.node_value.len(), n.backend_node_id.len()]
+                    .iter()
+                    .all(|len| *len == count)
+                    && n.attributes.len() <= count
+                    && n.attributes.iter().all(|a| a.len() % 2 == 0)
+                    && n.parent_index.iter().enumerate().all(|(i, p)| *p >= -1 && *p < i as i64)
+                    && [
+                        &n.shadow_root_type,
+                        &n.input_value,
+                        &n.text_value,
+                        &n.pseudo_type,
+                        &n.content_document_index,
+                        &n.input_checked,
+                        &n.option_selected,
+                        &n.is_clickable,
+                    ]
+                    .iter()
+                    .all(|r| r.index.iter().all(on_node))
+                    && n.content_document_index.value.iter().all(|v| *v >= 0 && *v < docs)
+                    && d.layout.node_index.iter().all(on_node)
+            })
+        }
+    }
+
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Doc {
@@ -974,6 +1027,42 @@ mod wire {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_page_made_capture_whose_columns_disagree_is_refused() {
+        use super::*;
+        let doc = |nodes: &str, layout: &str| {
+            format!(
+                r#"{{"documents":[{{"documentURL":0,"baseURL":0,"title":0,"nodes":{nodes},"layout":{layout}}}],"strings":["x","DETAILS"]}}"#
+            )
+        };
+        let nodes = r#"{"parentIndex":[-1,0],"nodeType":[9,1],"nodeName":[0,1],"nodeValue":[-1,-1],"backendNodeId":[1,2],"attributes":[[],[]]}"#;
+        let layout = r#"{"nodeIndex":[1],"styles":[[]],"bounds":[[0,0,1,1]],"text":[-1]}"#;
+        assert!(Snap::from_page_json(&doc(nodes, layout)).is_ok());
+        let bad = [
+            // A layout object on a node past the end (the page put DETAILS in the strings).
+            (nodes.to_string(), r#"{"nodeIndex":[9],"styles":[[]],"bounds":[[0,0,1,1]],"text":[-1]}"#.to_string()),
+            // A column shorter than the others.
+            (nodes.replace(r#""nodeName":[0,1]"#, r#""nodeName":[0]"#), layout.to_string()),
+            // A parent after its child, and one before the first node.
+            (nodes.replace(r#""parentIndex":[-1,0]"#, r#""parentIndex":[1,0]"#), layout.to_string()),
+            (nodes.replace(r#""parentIndex":[-1,0]"#, r#""parentIndex":[-1,-7]"#), layout.to_string()),
+            // An attribute name with no value.
+            (nodes.replace(r#""attributes":[[],[]]"#, r#""attributes":[[],[0]]"#), layout.to_string()),
+            // Sparse data on a node that isn't there, and a frame's document that isn't.
+            (nodes.replace(r#""attributes""#, r#""isClickable":{"index":[5]},"attributes""#), layout.to_string()),
+            (
+                nodes.replace(r#""attributes""#, r#""contentDocumentIndex":{"index":[1],"value":[3]},"attributes""#),
+                layout.to_string(),
+            ),
+        ];
+        for (n, l) in bad {
+            let e = Snap::from_page_json(&doc(&n, &l)).unwrap_err();
+            assert!(e.contains("hold together"), "{n} {l}: {e}");
+        }
+        assert_eq!(Snap::from_page_json(r#"{"documents":[],"strings":[]}"#).unwrap_err(), "has no document");
+        assert_eq!(Snap::from_page_json("[1]").unwrap_err(), "is not a snapshot");
+    }
+
     /// A patch copying untouched subtrees whole is node for node the one
     /// walking every node, errors included: random ops on every snapshot
     /// in `NAVIGERA_SNAP_DIR`.

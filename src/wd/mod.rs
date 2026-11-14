@@ -48,6 +48,9 @@ const SNAPSHOT: &str = include_str!("snapshot.js");
 /// says so.
 const SNAPSHOT_MAX_NODES: u64 = 400_000;
 
+/// The console entries a session keeps between `console --clear`s.
+const CONSOLE_KEPT: usize = 1000;
+
 /// Records the elements a page gives click-like listeners, for the
 /// snapshot's clickable column. A preload script where the protocol has
 /// them (BiDi); classic WebDriver installs it after each navigation, so it
@@ -456,8 +459,10 @@ impl Driver {
         // snapshot is named again below.
         let answer = self.wire.call(SNAPSHOT, &json!([SNAPSHOT_MAX_NODES]).to_string(), self.timeout)?;
         let text = ok_text(&answer).context("ax")?;
-        let snap = crate::cdp::snap::Snap::from_json(text)
-            .ok_or_else(|| anyhow!("ax: the page's snapshot has no document"))?;
+        // The page's own script made this: checked before it is indexed.
+        let snap = crate::cdp::snap::Snap::from_page_json(text).map_err(|why| {
+            anyhow!("ax: the page's snapshot {why}; the page may have changed the built-ins its reader uses: try `text`, or --engine chrome")
+        })?;
         crate::timing::record("ax_wd_snapshot", started);
         let root = match (scope, root) {
             (Some(t), None) => {
@@ -471,31 +476,43 @@ impl Driver {
             }
             (_, r) => r,
         };
-        let built = match root {
-            Some(r) => crate::cdp::domax::build_scoped(&snap, r),
-            None => crate::cdp::domax::build(&snap),
-        }
-        .ok_or_else(|| anyhow!("ax: the snapshot has no document"))?;
-        if opts.json_list {
-            return Ok(flat_list(&built, opts.limit));
-        }
-        let url = built.url.clone();
-        let origin = url
-            .find("://")
-            .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
-            .unwrap_or_default();
-        let header = format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default());
-        let render_opts = crate::cdp::ax::Options {
-            full_text: opts.full_text,
-            all_refs: opts.all_refs,
-            limit: opts.limit,
-            root_backend_id: root,
-            origin,
-            clicks: crate::cdp::page::clickables_of(&snap),
-            lazy_budget: None,
+        // Chrome's tree builder trusts Chrome's capture. This one is the
+        // page's: whatever the check above let through that it cannot
+        // print is an error here, not the end of the session.
+        let printed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Result<Value, String>> {
+            let built = match root {
+                Some(r) => crate::cdp::domax::build_scoped(&snap, r),
+                None => crate::cdp::domax::build(&snap),
+            }
+            .ok_or_else(|| anyhow!("ax: the snapshot has no document"))?;
+            if opts.json_list {
+                return Ok(Ok(flat_list(&built, opts.limit)));
+            }
+            let url = built.url.clone();
+            let origin = url
+                .find("://")
+                .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
+                .unwrap_or_default();
+            let header = format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default());
+            let render_opts = crate::cdp::ax::Options {
+                full_text: opts.full_text,
+                all_refs: opts.all_refs,
+                limit: opts.limit,
+                root_backend_id: root,
+                origin,
+                clicks: crate::cdp::page::clickables_of(&snap),
+                lazy_budget: None,
+            };
+            let rendered = crate::cdp::ax::render_nodes(&header, &built.nodes, &built.frames, &render_opts);
+            Ok(Err(rendered.text))
+        }))
+        .map_err(|_| {
+            anyhow!("ax: the page's snapshot could not be printed; the page may have changed the built-ins its reader uses: try `text`, or --engine chrome")
+        })??;
+        let mut text = match printed {
+            Ok(list) => return Ok(list),
+            Err(text) => text,
         };
-        let rendered = crate::cdp::ax::render_nodes(&header, &built.nodes, &built.frames, &render_opts);
-        let mut text = rendered.text;
         if text_says_truncated(&answer) {
             text.push_str(&format!("\n(the page has more than {SNAPSHOT_MAX_NODES} nodes: read in part)"));
         }
@@ -859,8 +876,7 @@ impl Driver {
                 other => bail!("cookies: list, set or clear, not {other:?}"),
             },
             Command::Console { level, limit, clear, format: _ } => {
-                let fresh = self.wire.console();
-                self.console.extend(fresh);
+                self.gather_console();
                 let keep = |e: &Value| match level.as_deref() {
                     None | Some("all") => true,
                     Some(l) => e.get("level").and_then(Value::as_str) == Some(l),
@@ -876,8 +892,7 @@ impl Driver {
                 Ok(json!(out))
             }
             Command::Errors { limit, clear, format: _ } => {
-                let fresh = self.wire.console();
-                self.console.extend(fresh);
+                self.gather_console();
                 let mut out: Vec<Value> = self
                     .console
                     .iter()
@@ -936,9 +951,32 @@ fn flat_list(built: &crate::cdp::domax::Built, limit: usize) -> Value {
     Value::Array(out)
 }
 
+/// `text` within `max` bytes, cut at a character, with a mark when cut.
+pub(crate) fn clip(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… (+{} bytes)", &text[..end], text.len() - end)
+}
+
 /// Whether the snapshot's answer says it stopped at its node limit.
 fn text_says_truncated(answer: &str) -> bool {
     answer.ends_with(",\"truncated\":true}}")
+}
+
+impl Driver {
+    /// The entries logged since the last look, added to the kept ones:
+    /// the newest [`CONSOLE_KEPT`], so a long session's log has a size.
+    fn gather_console(&mut self) {
+        let fresh = self.wire.console();
+        self.console.extend(fresh);
+        let over = self.console.len().saturating_sub(CONSOLE_KEPT);
+        self.console.drain(..over);
+    }
 }
 
 impl Drop for Driver {

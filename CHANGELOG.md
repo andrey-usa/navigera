@@ -42,6 +42,24 @@ All notable changes to this project are documented here. The format follows
   of memory that grows until the server stops sending. Found reading the
   new client before its first release; a unit test feeds it each shape.
 
+- The WebDriver engines, read once more before their first release:
+  - `ax` checks the snapshot the page's own script made before it
+    indexes by it (a page can change the built-ins that script uses): a
+    capture whose columns disagree is "the page's snapshot does not hold
+    together", with what to try, instead of a crash.
+  - A BiDi endpoint is shown without its user, key or query (`--bidi`
+    on a grid whose `webSocketUrl` carries a token), in errors and in
+    `status`; such an endpoint's host is now read past the key.
+  - Firefox and a driver navigera started end with a session that failed
+    half-way (a refused capability; Safari's Remote Automation off).
+  - Firefox's output is read to its end whatever its bytes, a line in
+    pieces of 64 KB; `console` reads at most 1000 waiting entries, keeps
+    the newest 1000 and 16 KB of each.
+  - Downloads a page starts in a Firefox navigera launched go into that
+    session's own profile directory, not the user's Downloads.
+  - "no Firefox found" no longer names an `install-browser firefox`
+    that does not exist yet.
+
 ## [0.13.1] - 2026-11-13
 
 ### Changed
