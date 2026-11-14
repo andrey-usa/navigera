@@ -70,6 +70,7 @@ const HOST_START: Duration = Duration::from_secs(60);
 pub fn wanted(config: &SessionConfig) -> bool {
     if config.own_browser
         || crate::browser::is_lightpanda(&config.engine)
+        || crate::wd::wanted(config)
         || config.attach.is_some()
         || config.profile.is_some()
         || config.electron.is_some()

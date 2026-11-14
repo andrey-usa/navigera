@@ -29,3 +29,4 @@ pub mod timing;
 pub mod tls;
 pub mod totp;
 pub mod vitals;
+pub mod wd;

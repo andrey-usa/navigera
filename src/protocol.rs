@@ -134,7 +134,7 @@ pub struct TargetArgs {
 }
 
 impl TargetArgs {
-    fn target(&self, op: &str) -> anyhow::Result<Target> {
+    pub(crate) fn target(&self, op: &str) -> anyhow::Result<Target> {
         self.optional(op)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "{op} needs a target: a ref from `ax` (`{op} 12`), --selector <css> or --text <visible text>"
@@ -150,7 +150,7 @@ impl TargetArgs {
             || self.testid.is_some()
     }
 
-    fn optional(&self, op: &str) -> anyhow::Result<Option<Target>> {
+    pub(crate) fn optional(&self, op: &str) -> anyhow::Result<Option<Target>> {
         let found = self.unframed(op)?;
         match (&self.frame, found) {
             (Some(f), Some(Target::Ref(_))) => {
@@ -1087,6 +1087,15 @@ pub struct SessionConfig {
     /// `--allow-domains-docs-only`: check top-level navigation only. A
     /// navigation restriction, not exfiltration protection.
     pub allow_domains_docs_only: bool,
+    /// `--webdriver <url>`: a W3C WebDriver server to drive (any browser
+    /// behind it); from `$NAVIGERA_WEBDRIVER` too, which keeps a grid's key
+    /// off the command line.
+    pub webdriver: Option<String>,
+    /// `--capabilities <json>`: WebDriver capabilities added to the session's
+    /// (`--webdriver`, `--engine safari|firefox`).
+    pub capabilities: Option<String>,
+    /// `--bidi`: a WebDriver server's session runs over its BiDi endpoint.
+    pub bidi: bool,
 }
 
 /// A snapshot's network-quiet wait runs at most this long (long polls,
@@ -1159,6 +1168,9 @@ impl Default for SessionConfig {
             parent_pid: None,
             allow_domains: None,
             allow_domains_docs_only: false,
+            webdriver: None,
+            capabilities: None,
+            bidi: false,
         }
     }
 }
@@ -1493,7 +1505,15 @@ pub fn usage_full(program: &str) -> String {
             "--wait-ms <ms>",
             "how long an element command waits for its element (default 5000): on `start`, for the session; on one command, for that command".into(),
         ),
-        ("--chromium <path>", "the browser binary ($CHROME_BIN); --engine lightpanda ($NAVIGERA_ENGINE); --headed".into()),
+        ("--chromium <path>", "the browser binary ($CHROME_BIN; --executable for any engine); --engine lightpanda ($NAVIGERA_ENGINE); --headed".into()),
+        (
+            "--engine firefox|safari|safari-preview",
+            "experimental WebDriver engines: Firefox over WebDriver BiDi ($NAVIGERA_FIREFOX), Safari through safaridriver on macOS (run `safaridriver --enable` once; safari-preview: Safari Technology Preview). They do the core ops (goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, tabs, cookies, console, dialogs); a Chrome-only op says to use --engine chrome".into(),
+        ),
+        (
+            "--webdriver <url>",
+            "drive the browser behind any W3C WebDriver server: geckodriver, chromedriver, msedgedriver, a Selenium Grid, a Mac's safaridriver ($NAVIGERA_WEBDRIVER keeps a key off the command line); --capabilities <json> adds to the session's capabilities (Safari on the iOS Simulator: '{\"platformName\":\"iOS\",\"safari:useSimulator\":true}'); --bidi runs the session over the driver's BiDi endpoint (console and dialogs as events)".into(),
+        ),
         ("--transport ws", "talk to the browser over a DevTools port instead of a private pipe (to open DevTools on it; the Windows default)".into()),
         ("--idle-timeout-s <s>", format!("the session server shuts down after this long idle (default {DEFAULT_IDLE_TIMEOUT_S}, 0 = never; `start --idle <s>` too)")),
         ("--parent <pid>", "with `start`: the session ends when that process exits ($NAVIGERA_PARENT_PID)".into()),
@@ -1767,6 +1787,18 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
     }
     if extract_present(args, "--headed") {
         config.headed = true;
+    }
+    if let Some(url) = extract_value(args, "--webdriver")? {
+        config.webdriver = Some(url);
+    }
+    if let Some(raw) = extract_value(args, "--capabilities")? {
+        config.capabilities = Some(raw);
+    }
+    if extract_present(args, "--bidi") {
+        config.bidi = true;
+    }
+    if let Some(path) = extract_value(args, "--executable")? {
+        config.chromium = Some(path);
     }
     if let Some(path) = extract_value(args, "--chromium")? {
         config.chromium = Some(path);
@@ -2065,6 +2097,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             "--engine" => config.engine = value("--engine")?,
             "--headed" => config.headed = true,
             "--chromium" => config.chromium = Some(value("--chromium")?),
+            "--executable" => config.chromium = Some(value("--executable")?),
+            "--webdriver" => config.webdriver = Some(value("--webdriver")?),
+            "--capabilities" => config.capabilities = Some(value("--capabilities")?),
+            "--bidi" => config.bidi = true,
             "--timeout-ms" => {
                 let raw = value("--timeout-ms")?;
                 config.timeout_ms = parse_f64(&raw, "--timeout-ms").map_err(ArgsError::Invalid)?;
@@ -2151,11 +2187,30 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
         && config.profile.is_none()
         && config.electron.is_none()
     {
-        if let Some(spec) = std::env::var("NAVIGERA_ATTACH").ok().filter(|v| !v.trim().is_empty()) {
+        if config.webdriver.is_none() && crate::wd::ENGINES.contains(&config.engine.as_str()) {
+            // A WebDriver engine: no Chrome to attach to.
+        } else if let Some(spec) = std::env::var("NAVIGERA_ATTACH").ok().filter(|v| !v.trim().is_empty()) {
             config.attach = Some(spec.trim().to_string());
         } else if auto_connect_env() {
             config.attach = Some(DEFAULT_ATTACH.to_string());
         }
+    }
+    if matches!(op.as_str(), "start" | "serve" | "mcp") && config.webdriver.is_none() {
+        config.webdriver =
+            std::env::var("NAVIGERA_WEBDRIVER").ok().filter(|v| !v.trim().is_empty()).map(|v| v.trim().to_string());
+    }
+    if config.capabilities.is_none() {
+        config.capabilities = std::env::var("NAVIGERA_CAPABILITIES").ok().filter(|v| !v.trim().is_empty());
+    }
+    if config.webdriver.is_some() && config.engine == "chrome" {
+        config.engine = "webdriver".into();
+    }
+    if crate::wd::wanted(&config) && (config.attach.is_some() || config.profile.is_some() || config.electron.is_some())
+    {
+        return invalid("--attach, --profile and --electron drive Chrome over CDP: drop them with --engine firefox, safari or --webdriver");
+    }
+    if config.bidi && !crate::wd::wanted(&config) {
+        return invalid("--bidi runs a WebDriver session over BiDi: add --webdriver <url> or --engine safari (Firefox always uses BiDi)");
     }
     if config.in_current_tab && config.attach.is_none() {
         return invalid("--tab current works in your own browser's tab: add --attach (or --auto-connect)");
@@ -3198,6 +3253,143 @@ pub struct Driver {
     refused_reads: std::collections::HashSet<u64>,
 }
 
+/// The engine a session runs: Chrome over CDP (and Lightpanda, Electron,
+/// an attached browser), or a WebDriver engine ([`crate::wd`]: Firefox over
+/// BiDi, Safari, any WebDriver server).
+pub enum Engine {
+    Chrome(Box<Driver>),
+    WebDriver(Box<crate::wd::Driver>),
+}
+
+impl Engine {
+    /// Launch the engine described by `config` (Chrome by default).
+    pub fn launch(config: &SessionConfig) -> anyhow::Result<Self> {
+        if crate::wd::wanted(config) {
+            return Ok(Self::WebDriver(Box::new(crate::wd::Driver::launch(config)?)));
+        }
+        Ok(Self::Chrome(Box::new(Driver::launch(config)?)))
+    }
+
+    /// A named session's or an MCP server's browser (see
+    /// [`Driver::launch_session`]).
+    pub fn launch_session(config: &SessionConfig) -> anyhow::Result<Self> {
+        if crate::wd::wanted(config) {
+            return Ok(Self::WebDriver(Box::new(crate::wd::Driver::launch(config)?)));
+        }
+        Ok(Self::Chrome(Box::new(Driver::launch_session(config)?)))
+    }
+
+    pub fn run_op(&mut self, command: &Command) -> anyhow::Result<Outcome> {
+        match self {
+            Self::Chrome(d) => d.run_op(command),
+            Self::WebDriver(d) => d.run_op(command),
+        }
+    }
+
+    pub fn run(&mut self, command: &Command) -> anyhow::Result<Value> {
+        self.run_op(command).map(|o| o.result)
+    }
+
+    /// The Chrome session, for what only Chrome's engine has.
+    pub fn chrome(&self) -> Option<&Driver> {
+        match self {
+            Self::Chrome(d) => Some(d),
+            Self::WebDriver(_) => None,
+        }
+    }
+
+    pub fn close(&mut self) {
+        match self {
+            Self::Chrome(d) => d.session().close(),
+            Self::WebDriver(d) => d.close(),
+        }
+    }
+
+    pub fn endpoint(&self) -> String {
+        match self {
+            Self::Chrome(d) => d.session().endpoint(),
+            Self::WebDriver(d) => d.endpoint(),
+        }
+    }
+
+    pub fn take_dialogs(&mut self) -> Vec<Value> {
+        match self {
+            Self::Chrome(d) => d.session().take_dialogs(),
+            Self::WebDriver(d) => d.take_dialogs(),
+        }
+    }
+
+    pub fn url(&mut self) -> String {
+        match self {
+            Self::Chrome(d) => d.session().url(),
+            Self::WebDriver(d) => d.url(),
+        }
+    }
+
+    pub fn shared_browser_gone(&self) -> bool {
+        matches!(self, Self::Chrome(d) if d.shared_browser_gone())
+    }
+
+    pub(crate) fn report_state(&mut self, command: &Command, result: &mut Option<Value>, compact: bool) {
+        if let Self::Chrome(d) = self {
+            d.report_state(command, result, compact);
+        }
+    }
+
+    pub(crate) fn defer_report(&mut self, id: Value) {
+        if let Self::Chrome(d) = self {
+            d.defer_report(id);
+        }
+    }
+
+    pub(crate) fn owed_report(&mut self) -> Option<(Value, Value)> {
+        match self {
+            Self::Chrome(d) => d.owed_report(),
+            Self::WebDriver(_) => None,
+        }
+    }
+
+    pub fn serving(&mut self) {
+        if let Self::Chrome(d) = self {
+            d.serving();
+        }
+    }
+
+    pub fn reads_for_an_agent(&mut self) {
+        if let Self::Chrome(d) = self {
+            d.reads_for_an_agent();
+        }
+    }
+
+    pub fn paused_before(&mut self, pause: Duration) {
+        if let Self::Chrome(d) = self {
+            d.paused_before(pause);
+        }
+    }
+
+    pub fn same_command(&mut self) {
+        if let Self::Chrome(d) = self {
+            d.same_command();
+        }
+    }
+
+    pub fn pre_read_due(&self) -> bool {
+        matches!(self, Self::Chrome(d) if d.pre_read_due())
+    }
+
+    pub fn pre_read_if_idle(&mut self) {
+        if let Self::Chrome(d) = self {
+            d.pre_read_if_idle();
+        }
+    }
+
+    pub fn snapshot_if_idle(&mut self) {
+        if let Self::Chrome(d) = self {
+            d.snapshot_if_idle();
+        }
+    }
+}
+
 /// How many refused `eval` sources a session remembers.
 const REFUSED_MAX: usize = 1024;
 
@@ -3673,6 +3865,12 @@ impl Driver {
 
     /// Launch the engine described by `config` (Chrome by default).
     pub fn launch(config: &SessionConfig) -> anyhow::Result<Self> {
+        if crate::wd::wanted(config) {
+            anyhow::bail!(
+                "--engine {} is a WebDriver engine: launch it with navigera::protocol::Engine (this Driver drives Chrome over CDP)",
+                config.engine
+            );
+        }
         Self::apply_settings(config);
         if let Some(app) = &config.electron {
             let mut session = BrowserSession::launch_electron(app, &config.electron_args, config.timeout_ms)
@@ -6518,7 +6716,7 @@ pub fn normalize_url(url: &str) -> String {
 /// A line holding a JSON array is a batch: each command runs in order and
 /// gets its own response line; a failure doesn't stop the rest, `quit` does.
 /// (One line per batch sidesteps shells that don't turn `\n` into newlines.)
-pub(crate) fn handle_line(driver: &mut Driver, raw: &str) -> Option<(Vec<Response>, bool)> {
+pub(crate) fn handle_line(driver: &mut Engine, raw: &str) -> Option<(Vec<Response>, bool)> {
     // PowerShell 5 pipes text to native programs with a UTF-8 BOM.
     let raw = raw.trim_start_matches('\u{feff}');
     if raw.trim().is_empty() {
@@ -6553,7 +6751,7 @@ pub(crate) fn handle_line(driver: &mut Driver, raw: &str) -> Option<(Vec<Respons
     }
 }
 
-fn handle_value(driver: &mut Driver, value: Value) -> (Response, bool) {
+fn handle_value(driver: &mut Engine, value: Value) -> (Response, bool) {
     let (id, command, compact) = match value {
         Value::Object(mut map) => {
             let id = map.remove("id").unwrap_or(Value::Null);
@@ -6580,7 +6778,7 @@ fn handle_value(driver: &mut Driver, value: Value) -> (Response, bool) {
         Ok(outcome) => outcome_response(id, outcome, started),
         Err(e) => {
             let mut r = err_response(id, format!("{e:#}"), started);
-            let dialogs = driver.session().take_dialogs();
+            let dialogs = driver.take_dialogs();
             if !dialogs.is_empty() {
                 r.dialogs = Some(dialogs);
             }
@@ -6966,7 +7164,7 @@ fn peak_rss_kb() -> Option<u64> {
 /// Returns the process exit code (`0` after `quit` or EOF, `1` on launch /
 /// IO failure). Logs go to stderr so stdout stays protocol-clean.
 pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn Write) -> ExitCode {
-    let mut driver = match Driver::launch(config) {
+    let mut driver = match Engine::launch(config) {
         Ok(driver) => driver,
         Err(e) => {
             eprintln!("navigera: {e:#}");
@@ -6975,7 +7173,7 @@ pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn W
     };
     eprintln!(
         "navigera: live session on {} (engine={}); send JSON lines, {{\"op\":\"quit\"}} to exit",
-        crate::cdp::attach::shown(&driver.session().endpoint()),
+        crate::cdp::attach::shown(&driver.endpoint()),
         config.engine,
     );
 
@@ -7000,7 +7198,7 @@ pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn W
             }
         }
         if is_quit {
-            driver.session().close();
+            driver.close();
             crate::timing::report();
             if std::env::var("NAVIGERA_RSS_REPORT").is_ok() {
                 eprintln!("[navigera] peak RSS at quit: {:?} KB", peak_rss_kb());
@@ -7009,7 +7207,7 @@ pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn W
         }
     }
     // EOF: shut the session down cleanly.
-    driver.session().close();
+    driver.close();
     crate::timing::report();
     eprintln!("navigera: stdin closed, session shut down");
     if std::env::var("NAVIGERA_RSS_REPORT").is_ok() {
@@ -7038,7 +7236,7 @@ pub fn oneshot(config: &SessionConfig, command: &Command, output: &mut dyn Write
         print_cli_response(output, &json!({ "id": null, "ok": false, "error": error }), config);
         return ExitCode::from(2);
     }
-    let mut driver = match Driver::launch(config) {
+    let mut driver = match Engine::launch(config) {
         Ok(driver) => driver,
         Err(e) => {
             eprintln!("navigera: {e:#}");
@@ -7050,7 +7248,7 @@ pub fn oneshot(config: &SessionConfig, command: &Command, output: &mut dyn Write
         Err(e) => err_response(Value::Null, format!("{e:#}"), started),
     };
     driver.report_state(command, &mut response.result, config.compact);
-    driver.session().close();
+    driver.close();
     crate::timing::report();
     let value = serde_json::to_value(&response).unwrap_or(Value::Null);
     if print_cli_response(output, &value, config) {
@@ -7745,7 +7943,7 @@ fn run_batch(source: Option<&str>, keep_going: bool, config: &SessionConfig, out
         return crate::session::batch(config, &name, &steps, keep_going, output);
     }
     let started = Instant::now();
-    let mut driver = match Driver::launch(config) {
+    let mut driver = match Engine::launch(config) {
         Ok(driver) => driver,
         Err(e) => return batch_fail(output, config, format!("{e:#}")),
     };
@@ -7775,7 +7973,7 @@ fn run_batch(source: Option<&str>, keep_going: bool, config: &SessionConfig, out
             break;
         }
     }
-    driver.session().close();
+    driver.close();
     let response = batch_response(&steps, &responses, started.elapsed().as_secs_f64() * 1000.0);
     if print_batch(output, &response, config) {
         ExitCode::SUCCESS

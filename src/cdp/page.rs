@@ -3128,6 +3128,21 @@ enum TextMode {
     Best = 2,
 }
 
+/// The page expression that finds `target` (a Promise of the element),
+/// for the WebDriver engines, which run the same finders.
+pub(crate) fn finder_js(target: &Target, wait_ms: u128, what: &str) -> String {
+    finder_expr(target, wait_ms, what)
+}
+
+/// [`FILL_EL`] and [`SELECT_EL`], for the WebDriver engines.
+pub(crate) const FILL_EL_JS: &str = FILL_EL;
+pub(crate) const SELECT_EL_JS: &str = SELECT_EL;
+
+/// The clickable elements of a snapshot, for the WebDriver engines.
+pub(crate) fn clickables_of(snap: &Snap) -> ax::Clickables {
+    clickables_from(snap)
+}
+
 fn finder_expr(target: &Target, wait_ms: u128, what: &str) -> String {
     finder_expr_in(target, wait_ms, what, TextMode::Best)
 }

@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Firefox, Safari and any WebDriver server, experimental: `--engine
+  firefox` (WebDriver BiDi), `--engine safari` or `safari-preview`
+  (safaridriver on macOS), and `--webdriver <url>` with `--capabilities
+  <json>` and `--bidi`. `ax` prints the same tree as on Chrome: the page
+  is read in its own JavaScript into the columns of Chrome's DOM
+  snapshot. The core ops work; an op only Chrome has names the engine to
+  use. A new `webdriver` workflow runs one scenario on Firefox, Safari
+  and chromedriver over both protocols.
+
 - `cdp`: any command of the Chrome DevTools Protocol, for what no
   navigera command covers (a performance trace, coverage, animations
   paused, an issue report): `navigera cdp Animation.setPlaybackRate

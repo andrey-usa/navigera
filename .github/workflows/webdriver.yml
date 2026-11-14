@@ -1,0 +1,72 @@
+name: webdriver
+
+# The WebDriver engines on the browsers GitHub's runners carry: Firefox over
+# WebDriver BiDi (Linux, macOS, Windows), Safari through safaridriver
+# (macOS), and chromedriver over classic WebDriver and over BiDi.
+on:
+  push:
+    branches: [master, next]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webdriver-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NAVIGERA_OUTPUT: json
+
+jobs:
+  engines:
+    name: engines (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          cache-on-failure: false
+      - name: The runner's browsers and drivers
+        run: |
+          case "$RUNNER_OS" in
+            Linux) ff="$(command -v firefox)" ;;
+            macOS)
+              ff="/Applications/Firefox.app/Contents/MacOS/firefox"
+              # Safari's driver works once enabled (it also allows remote automation).
+              sudo safaridriver --enable
+              echo "NAVIGERA_SAFARI=1" >> "$GITHUB_ENV"
+              echo "NAVIGERA_REQUIRE_SAFARI=1" >> "$GITHUB_ENV"
+              ;;
+            Windows) ff="C:/Program Files/Mozilla Firefox/firefox.exe" ;;
+          esac
+          cd_exe="$CHROMEWEBDRIVER/chromedriver"
+          if [ "$RUNNER_OS" = Windows ]; then cd_exe="$CHROMEWEBDRIVER/chromedriver.exe"; fi
+          echo "NAVIGERA_FIREFOX=$ff" >> "$GITHUB_ENV"
+          echo "CHROMEDRIVER=$cd_exe" >> "$GITHUB_ENV"
+          "$ff" --version || true
+          "$cd_exe" --version || true
+          if [ "$RUNNER_OS" = macOS ]; then defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString || true; fi
+      - name: Engines (each scenario on Firefox, Safari, chromedriver classic and BiDi)
+        timeout-minutes: 25
+        env:
+          NAVIGERA_REQUIRE_FIREFOX: "1"
+          NAVIGERA_REQUIRE_CHROMEDRIVER: "1"
+          RUST_BACKTRACE: "1"
+        run: cargo test --locked --test webdriver -- --nocapture --test-threads 1
+      - name: Unit tests of the engines
+        run: cargo test --locked --lib wd::

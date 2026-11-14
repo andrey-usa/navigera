@@ -91,7 +91,10 @@ page says, only on what the agent asks.
 ## Supported browsers
 
 Chrome and Chromium, Edge, Brave, chrome-headless-shell, Electron apps, and
-Lightpanda (`--engine lightpanda`, experimental). CI runs the end-to-end
+Lightpanda (`--engine lightpanda`, experimental). Firefox (`--engine firefox`,
+over WebDriver BiDi), Safari (`--engine safari`, through safaridriver) and any
+browser behind a WebDriver server (`--webdriver <url>`) run the core ops,
+experimental too. CI runs the end-to-end
 suite on the current Chrome Stable and the three milestones before it,
 chrome-headless-shell, Chrome Beta, the runner's Chrome on Linux and
 Windows, and Lightpanda; every CDP call navigera makes is checked against

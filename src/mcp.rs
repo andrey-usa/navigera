@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
-use crate::protocol::{Command, Driver, Outcome, SessionConfig};
+use crate::protocol::{Command, Engine, Outcome, SessionConfig};
 
 /// Protocol revisions this server speaks; the newest is offered when the
 /// client asks for one we don't know.
@@ -619,7 +619,7 @@ fn notes(outcome_dialogs: &[Value], new_tabs: &[usize], engine_notes: &[String])
 /// program with tools of its own (bitti's) serves these beside them.
 pub struct Server<'a> {
     config: &'a SessionConfig,
-    driver: Option<Driver>,
+    driver: Option<Engine>,
     /// How long the client took to send the call being served after the
     /// last reply: its first pause, for a driver this call makes.
     paused: Duration,
@@ -633,7 +633,7 @@ impl<'a> Server<'a> {
     /// How long to wait for the next call before [`Server::idle`]: often
     /// while a page a navigation loaded waits to be read ahead.
     fn tick(&self) -> Duration {
-        if self.driver.as_ref().is_some_and(Driver::pre_read_due) {
+        if self.driver.as_ref().is_some_and(Engine::pre_read_due) {
             Duration::from_millis(10)
         } else {
             Duration::from_millis(250)
@@ -660,15 +660,15 @@ impl<'a> Server<'a> {
 
     /// Close the browser, if one started.
     pub fn close(mut self) {
-        if let Some(driver) = self.driver.take() {
-            driver.session().close();
+        if let Some(mut driver) = self.driver.take() {
+            driver.close();
         }
     }
 
-    fn driver(&mut self) -> Result<&mut Driver, String> {
+    fn driver(&mut self) -> Result<&mut Engine, String> {
         if self.driver.is_none() {
             let mut driver =
-                Driver::launch_session(self.config).map_err(|e| format!("could not start the browser: {e:#}"))?;
+                Engine::launch_session(self.config).map_err(|e| format!("could not start the browser: {e:#}"))?;
             driver.reads_for_an_agent();
             driver.paused_before(self.paused);
             self.driver = Some(driver);
@@ -684,8 +684,8 @@ impl<'a> Server<'a> {
         let command: Command =
             serde_json::from_value(step.clone()).map_err(|e| format!("bad arguments for {}: {e}", step["op"]))?;
         if let Command::Quit { .. } = command {
-            if let Some(driver) = self.driver.take() {
-                driver.session().close();
+            if let Some(mut driver) = self.driver.take() {
+                driver.close();
             }
             return Ok(Outcome {
                 result: json!("browser closed"),

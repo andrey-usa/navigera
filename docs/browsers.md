@@ -23,6 +23,24 @@ and enum value against the `/json/protocol` that *that* browser serves.
 Deprecated or unknown usage fails the build. Edge and Brave are covered by
 the benchmark.
 
+**Firefox, Safari and WebDriver servers** (experimental) run through the
+two W3C WebDriver protocols: `--engine firefox` starts Firefox and drives it
+over WebDriver BiDi, `--engine safari` (or `safari-preview`) starts
+safaridriver on macOS, and `--webdriver <url>` drives whatever browser a
+WebDriver server serves: geckodriver, chromedriver, msedgedriver, a Selenium
+Grid, a Mac's safaridriver. `--capabilities <json>` adds to the session's
+capabilities (Safari on the iOS Simulator:
+`{"platformName":"iOS","safari:useSimulator":true}`), and `--bidi` runs a
+server's session over its BiDi endpoint. `ax` reads the page in the page's
+own JavaScript and prints the same tree as on Chrome; locators, `fill` and
+`select` run the same page code. The core ops work: goto, ax, click, fill,
+select, check, press, type, text, eval, wait, screenshot, tabs, cookies,
+console and dialogs. An op only Chrome has (`cdp`, `route`, `network`,
+`passkey`, throttling) says to use `--engine chrome`. Safari's driver has no
+headless mode, runs one session per machine and blocks user input while it
+runs (Apple's limits). The `webdriver` workflow runs one scenario on Firefox
+(Linux, macOS, Windows), Safari (macOS) and chromedriver over both protocols.
+
 **Lightpanda** 1.0 (`--engine lightpanda`) runs the same end-to-end suite in
 CI, on 1.0.1 and the nightly. It is a different engine (one tab, no layout),
 so navigera fills in what its CDP leaves out: shadow roots and password

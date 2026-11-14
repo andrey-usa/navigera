@@ -34,7 +34,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use crate::protocol::{self, Command, Driver, SessionConfig};
+use crate::protocol::{self, Command, Engine, SessionConfig};
 
 use endpoint::{connect, Listener, Stream};
 
@@ -295,7 +295,7 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     // A socket file nobody answers on is left over from a crashed server.
     let _ = std::fs::remove_file(&path);
 
-    let mut driver = match Driver::launch_session(config) {
+    let mut driver = match Engine::launch_session(config) {
         Ok(driver) => driver,
         Err(e) => {
             eprintln!("navigera: {e:#}");
@@ -306,15 +306,11 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
         Ok(listener) => listener,
         Err(e) => {
             eprintln!("navigera: bind {}: {e}", path.display());
-            driver.session().close();
+            driver.close();
             return ExitCode::from(1);
         }
     };
-    eprintln!(
-        "navigera: session listening on {} ({})",
-        path.display(),
-        crate::cdp::attach::shown(&driver.session().endpoint())
-    );
+    eprintln!("navigera: session listening on {} ({})", path.display(), crate::cdp::attach::shown(&driver.endpoint()));
 
     let last_activity = Arc::new(AtomicU64::new(now_s()));
     if config.idle_timeout_s > 0 {
@@ -324,7 +320,7 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
     match (config.parent_pid, &parent) {
         (Some(pid), None) => {
             eprintln!("navigera: process {pid} (--parent) is not running");
-            driver.session().close();
+            driver.close();
             let _ = std::fs::remove_file(&path);
             return ExitCode::from(1);
         }
@@ -388,7 +384,7 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
             break;
         }
     }
-    driver.session().close();
+    driver.close();
     crate::timing::report();
     // Log first: a client that finds the socket gone quotes this line.
     eprintln!("navigera: session {} shut down", path.display());
@@ -416,7 +412,7 @@ pub const SHARED_NAME_NOTE: &str = "another command was running on this session 
 /// connection's command was running.
 #[allow(clippy::too_many_arguments)]
 fn serve_connection(
-    driver: &mut Driver,
+    driver: &mut Engine,
     stream: Stream,
     last: &AtomicU64,
     server: &ServerInfo,
@@ -831,7 +827,13 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
         // The running session must be the browser this `start` asks for: a
         // Chrome command sent to a Lightpanda session left over from another
         // run would quietly test the wrong engine.
-        let wanted = if crate::browser::is_lightpanda(&config.engine) { "lightpanda" } else { "chrome" };
+        let wanted = if crate::wd::wanted(config) {
+            crate::wd::engine_name(config)
+        } else if crate::browser::is_lightpanda(&config.engine) {
+            "lightpanda"
+        } else {
+            "chrome"
+        };
         if let Some(running) = running.filter(|r| r != wanted) {
             return fail(
                 output,
@@ -883,6 +885,19 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
         Some(spec) => cmd.env("NAVIGERA_ATTACH", spec),
         None => cmd.env_remove("NAVIGERA_ATTACH"),
     };
+    // A WebDriver server's URL and capabilities can carry a grid's key: in
+    // the environment too.
+    match &config.webdriver {
+        Some(url) => cmd.env("NAVIGERA_WEBDRIVER", url),
+        None => cmd.env_remove("NAVIGERA_WEBDRIVER"),
+    };
+    match &config.capabilities {
+        Some(caps) => cmd.env("NAVIGERA_CAPABILITIES", caps),
+        None => cmd.env_remove("NAVIGERA_CAPABILITIES"),
+    };
+    if config.bidi {
+        cmd.arg("--bidi");
+    }
     if config.in_current_tab {
         cmd.arg("--tab").arg("current");
     }
@@ -1194,10 +1209,10 @@ struct Callers {
 impl Callers {
     /// The note for `caller`'s command, if another caller has used the
     /// session since its last one (or recently, for a caller new here).
-    fn before(&mut self, caller: &str, driver: &Driver) -> Option<String> {
+    fn before(&mut self, caller: &str, driver: &mut Engine) -> Option<String> {
         if self.overtaken.remove(caller) {
             let before = self.url_after.get(caller).cloned().unwrap_or_default();
-            let now = driver.session().url();
+            let now = driver.url();
             return Some(if !before.is_empty() && !now.is_empty() && before != now {
                 format!(
                     "another process used this session since your last command and moved its tab: {before} -> {now} \
