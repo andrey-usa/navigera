@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-14
+
 ### Added
 
 - Firefox, Safari and any WebDriver server, experimental: `--engine
@@ -37,10 +39,11 @@ All notable changes to this project are documented here. The format follows
 ### Security
 
 - `--webdriver <url>`: an answer whose status line or headers never end,
-  or whose chunk size overstates what follows, is an error ("the
-  answer's headers are over 64 KB", "the answer is over 256 MB") instead
-  of memory that grows until the server stops sending. Found reading the
-  new client before its first release; a unit test feeds it each shape.
+  or whose chunk size overstates what follows, is an error that names
+  the limit it passed (64 KB of headers, 256 MB of body). Before, such
+  an answer took memory until the server stopped sending. Found reading
+  the new client before its first release; a unit test feeds it each
+  shape.
 
 - The WebDriver engines, read once more before their first release:
   - `ax` checks the snapshot the page's own script made before it
