@@ -31,6 +31,15 @@ fn the_plugin_and_its_marketplace_entry_agree() {
     assert!(readme.split_whitespace().count() >= 40);
     assert_eq!(plugin["license"], env!("CARGO_PKG_LICENSE"));
 
+    // A plugin with a version stays at it until the version changes, and
+    // its skill must match the binary the skill installs (the latest
+    // release): the release commit bumps both.
+    assert_eq!(
+        plugin["version"],
+        env!("CARGO_PKG_VERSION"),
+        "bump `version` in skills/.claude-plugin/plugin.json with Cargo.toml"
+    );
+
     // Every skills path is inside the plugin folder and holds the skill.
     for path in plugin["skills"].as_array().expect("skills") {
         let path = path.as_str().unwrap();

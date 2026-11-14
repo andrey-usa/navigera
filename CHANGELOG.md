@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The Claude Code plugin carries a version, navigera's own, bumped with it
+  at each release: a plugin user stays on the skill of the release the
+  install script fetches until the next release (with no version, every
+  commit to the default branch was an update). `claude plugin validate
+  --strict` passes.
+
+### Fixed
+
+- `install.sh` in Git Bash, the shell Claude Code runs commands in on
+  Windows (and in MSYS2 or Cygwin), installs the Windows release binary,
+  into the directory `install.ps1` uses. It used to say there was no
+  prebuilt binary and ask for a Rust toolchain, so the skill's setup line
+  sent an agent on Windows to a source build. A CI job runs it there.
+- When the directory `install.sh` installed into is not on `PATH` (as
+  `~/.local/bin` is not on macOS), its note names the full path to run as
+  well: an agent's shell keeps no `export` from one command to the next,
+  so "run: export PATH=…" alone left its next `navigera` not found.
+
 ## [0.14.0] - 2026-11-14
 
 ### Added

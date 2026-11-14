@@ -131,7 +131,9 @@ python3 docs-site/build.py --mdbook mdbook            # and the HTML, with every
    the static musl build a release ships. Locally:
    `cargo build --release --target x86_64-unknown-linux-musl`, then
    `python3 bench/gate/gate.py --base <old navigera> --candidate target/x86_64-unknown-linux-musl/release/navigera`.
-2. Bump `version` in `Cargo.toml` and add a `CHANGELOG.md` entry on `master`,
+2. Bump `version` in `Cargo.toml` and in `skills/.claude-plugin/plugin.json`
+   (the Claude Code plugin; `tests/plugin.rs` fails until they match), and add a
+   `CHANGELOG.md` entry on `master`,
    with a "Behaviour changes" section for what a script or an agent relying
    on the old output or timing should know.
 3. Actions → release → Run workflow with that version. The run checks the

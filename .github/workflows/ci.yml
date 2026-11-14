@@ -394,6 +394,17 @@ jobs:
         if: runner.os == 'Windows'
         with:
           python-version: "3.12"
+      # Claude Code's shell on Windows is Git Bash: the skill's setup line
+      # (`curl install.sh | sh`) runs there, and must install the Windows
+      # binary rather than send the agent to a Rust toolchain.
+      - name: install.sh in Git Bash, as Claude Code runs it on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          NAVIGERA_INSTALL_DIR="$RUNNER_TEMP/bin-sh" sh "$GITHUB_WORKSPACE/install.sh" 2>&1 | tail -5 | tee "$RUNNER_TEMP/install-sh.log"
+          "$RUNNER_TEMP/bin-sh/navigera.exe" --version || { python "$GITHUB_WORKSPACE/bench/ladder/annotate.py" "$RUNNER_TEMP/install-sh.log" "install.sh (Git Bash) failure"; exit 1; }
+          grep -q "is not on PATH" "$RUNNER_TEMP/install-sh.log"
       - name: install.ps1 as an agent runs it
         if: runner.os == 'Windows'
         shell: pwsh
