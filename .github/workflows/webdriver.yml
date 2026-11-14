@@ -54,8 +54,10 @@ jobs:
               ;;
             Windows) ff="C:/Program Files/Mozilla Firefox/firefox.exe" ;;
           esac
-          cd_exe="$CHROMEWEBDRIVER/chromedriver"
-          if [ "$RUNNER_OS" = Windows ]; then cd_exe="$CHROMEWEBDRIVER/chromedriver.exe"; fi
+          # Git Bash on Windows keeps the variable's own case (ChromeWebDriver).
+          cd_dir="${CHROMEWEBDRIVER:-${ChromeWebDriver:-}}"
+          cd_exe="$cd_dir/chromedriver"
+          if [ "$RUNNER_OS" = Windows ]; then cd_exe="$cd_dir/chromedriver.exe"; fi
           echo "NAVIGERA_FIREFOX=$ff" >> "$GITHUB_ENV"
           echo "CHROMEDRIVER=$cd_exe" >> "$GITHUB_ENV"
           "$ff" --version || true

@@ -20,6 +20,22 @@ use super::{wrap, Wait, Wire, CONSOLE_HOOK, DIALOG_HOOK, LISTEN};
 /// The key WebDriver names an element reference by.
 const ELEMENT_KEY: &str = "element-6066-11e4-a52f-4f735466cecf";
 
+/// How long after an action a navigation it starts must have begun (the
+/// page's `beforeunload`) to be waited for.
+const NAV_WATCH: Duration = Duration::from_millis(50);
+
+/// Before an action: a flag the page's `beforeunload` sets, so a
+/// navigation the action starts can be told from none (Safari's driver
+/// answers before such a navigation is under way).
+const ARM_LEAVE: &str = "const K = Symbol.for('navigera.leaving'); window[K] = false; \
+    if (!window[Symbol.for('navigera.leaveHook')]) { window[Symbol.for('navigera.leaveHook')] = true; \
+    window.addEventListener('beforeunload', () => { window[K] = true; }, true); }";
+
+/// After it: whether the page is the same one (`same`), on its way out
+/// (`leaving`) or a new document (`new`), and its readyState.
+const LEAVE_STATE: &str = "const K = Symbol.for('navigera.leaving'); \
+    return [K in window ? (window[K] ? 'leaving' : 'same') : 'new', document.readyState];";
+
 /// The most an answer may hold (a full-page screenshot of a long page).
 const BODY_MAX: usize = 256 << 20;
 
@@ -475,6 +491,12 @@ impl Wire for Classic {
     }
 
     fn actions(&mut self, actions: Value) -> Result<()> {
+        let _ = self.s.cmd(
+            "POST",
+            "/execute/sync",
+            Some(json!({ "script": ARM_LEAVE, "args": [] })),
+            Duration::from_secs(10),
+        );
         let body = json!({ "actions": actions });
         self.with_dialogs(|s| s.cmd("POST", "/actions", Some(body.clone()), Duration::from_secs(30)))?;
         let _ = self.s.cmd("DELETE", "/actions", None, Duration::from_secs(10));
@@ -482,10 +504,33 @@ impl Wire for Classic {
     }
 
     fn settle(&mut self, timeout: Duration) {
-        // A driver answers once a navigation the action started has loaded.
-        if self.with_dialogs(|s| s.cmd("GET", "/url", None, timeout)).is_ok() {
-            self.hook();
+        // The page's own flag says whether the action started a navigation;
+        // if it did, the new document is waited for until it has loaded.
+        let started = Instant::now();
+        let deadline = started + timeout;
+        loop {
+            match self.s.cmd(
+                "POST",
+                "/execute/sync",
+                Some(json!({ "script": LEAVE_STATE, "args": [] })),
+                Duration::from_secs(5),
+            ) {
+                Ok(v) => match (v[0].as_str().unwrap_or(""), v[1].as_str().unwrap_or("")) {
+                    ("same", _) if started.elapsed() >= NAV_WATCH => break,
+                    ("new", "complete") => break,
+                    _ => {}
+                },
+                // A dialog the action opened: answered by the next command.
+                Err(e) if format!("{e:#}").contains("unexpected alert open") => break,
+                // The document is being replaced: asked again.
+                Err(_) => {}
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
         }
+        self.hook();
     }
 
     fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>> {
