@@ -39,6 +39,10 @@ const LEAVE_STATE: &str = "const K = Symbol.for('navigera.leaving'); \
 /// The most an answer may hold (a full-page screenshot of a long page).
 const BODY_MAX: usize = 256 << 20;
 
+/// The most an answer's status line and headers may hold together, and
+/// the most one chunk's size line and trailers may.
+const HEAD_MAX: usize = 64 << 10;
+
 /// A WebDriver server: where it is, and the connection to it.
 struct Http {
     host: String,
@@ -158,21 +162,34 @@ pub fn mask(url: &str) -> String {
     }
 }
 
+/// One line of an answer's head or chunk framing, within what is left of
+/// `budget`: a server that never ends a line, or never ends its headers,
+/// costs an error instead of memory.
+fn head_line(r: &mut impl BufRead, line: &mut String, budget: &mut usize) -> Result<usize> {
+    line.clear();
+    let n = r.by_ref().take(*budget as u64 + 1).read_line(line)?;
+    if n > *budget {
+        bail!("the answer's headers are over {} KB", HEAD_MAX >> 10);
+    }
+    *budget -= n;
+    Ok(n)
+}
+
 /// (status, body, keep-alive) of one HTTP/1.1 answer.
-fn read_response(r: &mut BufReader<TcpStream>) -> Result<(u16, String, bool)> {
+fn read_response(r: &mut impl BufRead) -> Result<(u16, String, bool)> {
     let mut line = String::new();
-    if r.read_line(&mut line)? == 0 {
+    let mut budget = HEAD_MAX;
+    if head_line(r, &mut line, &mut budget)? == 0 {
         bail!("the connection closed before an answer");
     }
     let status: u16 = line
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| anyhow!("not an HTTP answer: {line:?}"))?;
+        .ok_or_else(|| anyhow!("not an HTTP answer: {:?}", line.chars().take(200).collect::<String>()))?;
     let (mut length, mut chunked, mut keep) = (None, false, !line.starts_with("HTTP/1.0"));
     loop {
-        line.clear();
-        if r.read_line(&mut line)? == 0 {
+        if head_line(r, &mut line, &mut budget)? == 0 {
             bail!("the connection closed in the answer's headers");
         }
         let l = line.trim_end();
@@ -192,23 +209,26 @@ fn read_response(r: &mut BufReader<TcpStream>) -> Result<(u16, String, bool)> {
     let mut body = Vec::new();
     if chunked {
         loop {
-            line.clear();
-            r.read_line(&mut line)?;
+            // Each chunk's framing has its own budget: a large answer in
+            // small chunks is fine, an endless size line is not.
+            budget = HEAD_MAX;
+            if head_line(r, &mut line, &mut budget)? == 0 {
+                bail!("the connection closed in the answer's body");
+            }
             let size = usize::from_str_radix(line.trim().split(';').next().unwrap_or("0"), 16)
-                .map_err(|_| anyhow!("bad chunk size {line:?}"))?;
+                .map_err(|_| anyhow!("bad chunk size {:?}", line.chars().take(200).collect::<String>()))?;
             if size == 0 {
-                line.clear();
-                r.read_line(&mut line)?;
+                // Trailers, if any, up to the empty line.
+                while head_line(r, &mut line, &mut budget)? > 0 && !line.trim_end().is_empty() {}
                 break;
             }
-            if body.len() + size > BODY_MAX {
+            if size > BODY_MAX - body.len() {
                 bail!("the answer is over {} MB", BODY_MAX >> 20);
             }
             let at = body.len();
             body.resize(at + size, 0);
             r.read_exact(&mut body[at..])?;
-            line.clear();
-            r.read_line(&mut line)?;
+            head_line(r, &mut line, &mut budget)?;
         }
     } else if let Some(n) = length {
         if n > BODY_MAX {
@@ -680,5 +700,36 @@ mod tests {
         assert_eq!(h.request("GET", "/a", None, Duration::from_secs(5)).unwrap(), json!("one"));
         let e = h.request("GET", "/b", None, Duration::from_secs(5)).unwrap_err();
         assert!(format!("{e:#}").contains("no such window"), "{e:#}");
+    }
+
+    #[test]
+    fn an_answer_that_never_ends_its_head_or_overstates_a_chunk_is_an_error() {
+        let read = |bytes: Vec<u8>| read_response(&mut std::io::Cursor::new(bytes)).map_err(|e| format!("{e:#}"));
+        // A status line with no end, and headers with no end.
+        let e = read(vec![b'A'; HEAD_MAX * 4]).unwrap_err();
+        assert!(e.contains("headers are over 64 KB"), "{e}");
+        let mut endless = b"HTTP/1.1 200 OK\r\n".to_vec();
+        while endless.len() < HEAD_MAX * 2 {
+            endless.extend_from_slice(b"X-Pad: 0123456789abcdef0123456789abcdef\r\n");
+        }
+        let e = read(endless).unwrap_err();
+        assert!(e.contains("headers are over 64 KB"), "{e}");
+        // A chunk size that would overflow the running total, and one over the limit.
+        for size in ["ffffffffffffffff", "10000001"] {
+            let e =
+                read(format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n{size}\r\n").into_bytes())
+                    .unwrap_err();
+            assert!(e.contains("the answer is over 256 MB"), "{size}: {e}");
+        }
+        // A chunk size line with no end.
+        let mut long = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        long.extend(std::iter::repeat_n(b'1', HEAD_MAX * 2));
+        let e = read(long).unwrap_err();
+        assert!(e.contains("headers are over 64 KB"), "{e}");
+        // Trailers after the last chunk are read past; the next answer starts clean.
+        let two = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Sum: 1\r\n\r\nHTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+        let mut r = std::io::Cursor::new(two.to_vec());
+        assert_eq!(read_response(&mut r).unwrap(), (200, "ok".to_string(), true));
+        assert_eq!(read_response(&mut r).unwrap(), (204, String::new(), true));
     }
 }

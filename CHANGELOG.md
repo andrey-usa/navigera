@@ -34,6 +34,14 @@ All notable changes to this project are documented here. The format follows
   all of them in a session with `--allow-domains`, and over MCP unless
   the server runs with `NAVIGERA_MCP_ALLOW_CDP=1`.
 
+### Security
+
+- `--webdriver <url>`: an answer whose status line or headers never end,
+  or whose chunk size overstates what follows, is an error ("the
+  answer's headers are over 64 KB", "the answer is over 256 MB") instead
+  of memory that grows until the server stops sending. Found reading the
+  new client before its first release; a unit test feeds it each shape.
+
 ## [0.13.1] - 2026-11-13
 
 ### Changed
