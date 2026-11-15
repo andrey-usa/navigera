@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The format follows
   not enough. The plugin's README says how to install on Claude Code
   before 2.1.275, and names the two requests Chrome itself makes to
   Google at a start.
+- The skill names no environment variables: the cloud browser's key
+  (`$NAVIGERA_ATTACH`), the two-factor secret (`navigera totp`), the
+  default session, the proxy and the Chrome path are left to `navigera
+  help`. The plugin directory holds a plugin whose instructions read a
+  secret from the user's environment for a reviewer.
 
 ## [0.14.1] - 2026-11-15
 

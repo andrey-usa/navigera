@@ -77,3 +77,30 @@ fn the_plugin_icon_is_a_whole_square_png() {
     assert!((512..=2048).contains(&width), "the plugin directory takes 512 to 2048 px, this is {width}");
     assert_eq!(&bytes[bytes.len() - 8..bytes.len() - 4], b"IEND");
 }
+
+/// The plugin's text sends an agent to no environment variable: the
+/// directory holds a plugin whose instructions read a secret from the
+/// user's environment for a reviewer, and settings belong in flags.
+#[test]
+fn the_plugin_names_no_environment_variable() {
+    fn walk(dir: &Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else if path.extension().is_some_and(|e| e == "md" || e == "json") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                for word in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')) {
+                    let name = word.trim_start_matches('$');
+                    let upper = name.len() >= 3 && name.bytes().all(|b| b.is_ascii_uppercase() || b == b'_');
+                    if (word.starts_with('$') && upper) || name.starts_with("NAVIGERA_") {
+                        found.push(format!("{}: {word}", path.display()));
+                    }
+                }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("skills"), &mut found);
+    assert!(found.is_empty(), "environment variables in the plugin: {found:?}");
+}

@@ -17,7 +17,6 @@
 | `http POST <url> --json '{…}'` (also GET, PUT, `--form`, `--header`) | an API outside the page (another origin, or a POST a link can't make), signed in as the browser is: its cookies for that URL are sent (HttpOnly too) and never shown; cookies the answer sets go into the browser |
 | `eval "fetch('/api/me').then(r => r.json())"` | the site's own API, signed in as the page is, in one call: the browser sends its cookies (HttpOnly too) and you never see them. Don't copy cookies out into `curl`: that puts the session's secrets in your context and on a command line |
 | `state save auth.json` … `state load auth.json` | sign in once, reuse it later (cookies and localStorage in one file) |
-| `fill --label Code "$(navigera totp SHOP_TOTP)"` | a two-factor code from the authenticator secret in `$SHOP_TOTP` (base32 or otpauth:// URI) |
 | `passkey on` (before the page asks), `passkey list`, `passkey verify off` | passkey sign-up and sign-in with no person or phone; `state save` keeps the passkeys too |
 | `set device "iPhone 15"`, `set viewport 1280 720`, also `media dark`, `geo <lat> <lon>`, `offline on`, `credentials <user> <pass>` | emulate (`off` resets) |
 | `route "*/api/*" --body '{…}'`, `route "*.png"` (fail), `unroute` | mock or block requests |

@@ -34,20 +34,12 @@ differently. A step only the person can do (a login, 2FA, a CAPTCHA):
 sign-ins; tell them what to do, `wait --url /dashboard --timeout-ms
 300000`, then `hide` and carry on.
 
-## A browser in the cloud
-
-Its service hands out a `wss://` endpoint, usually with the key in the
-query. Have it in `$NAVIGERA_ATTACH` (the user's environment or the MCP
-config's `env`), then `navigera -s me start`: the key stays off command
-lines and out of your context (navigera prints it as `***`). Never echo the
-variable or paste the key into a command. `$HTTPS_PROXY` is used, as by curl.
-
 ## Sessions
 
 - The browser, its tabs and cookies persist between commands of a session.
-  `-s` is short for `--session`; `$NAVIGERA_SESSION` sets a default. An idle
-  session shuts down after 10 min (`start --idle <s>`); `start --parent <pid>`
-  ends it when that process (your agent) exits.
+  `-s` is short for `--session`. An idle session shuts down after 10 min
+  (`start --idle <s>`); `start --parent <pid>` ends it when that process
+  (your agent) exits.
 - Several agents at once: give each its own `-s` name. Sessions share one
   browser, each in its own context (cookies, storage, tabs apart); two
   agents on one name would drive one browser. `navigera sessions` lists them
