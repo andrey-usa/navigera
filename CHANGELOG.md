@@ -6,8 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The agent eval runs Claude Code too (`run.py --agent claude`): each tool
+  as a Claude Code user gets it (navigera's plugin, agent-browser's own
+  skill), with the same tasks, prompt and checks. See docs/agent-eval.md.
+
 ### Changed
 
+- `ax --grep` and `text --grep` read grep's own spellings, as agents write
+  them: `-i`, `-E`, `-F` and `-n` around the query (letter case never
+  mattered, and lines come numbered), `-A`, `-B`, `-C N` (the context of
+  `text --grep`; `ax --grep` shows containers instead), and alternation
+  (`a\|b`, `a|b`) when the query as written is nowhere. `--grep -i word`
+  searched for "-i" and failed on `word`. Seen in Claude Code runs of the
+  agent eval, one failed command each.
+- A `--selector` that is one ARIA role word the tree prints and no HTML
+  element's name (`banner`, `navigation`, `contentinfo`, `heading`,
+  `listitem`, …) is read as `--role`. `ax --selector banner`, after reading
+  `- banner:` in the tree, waited out the element wait (5 s) for CSS that
+  can match nothing, then failed.
+- An `eval` whose `fetch` fails says why and what to do: another origin's
+  CORS refused the page's request, or the network did (`network --failed`
+  says which), and `http <METHOD> <url>` sends it from outside the page,
+  signed in with the browser's cookies. Agents calling a site's API that
+  way used to read help pages until they found `http`.
+- A click held back by a cover names the cover's controls as commands to
+  run (`` `click --text "Accept all"` ``), not only by name: an agent told
+  just the name gave up instead of looking up its ref.
 - The Claude Code plugin carries a version, navigera's own, bumped with it
   at each release: a plugin user stays on the skill of the release the
   install script fetches until the next release (with no version, every

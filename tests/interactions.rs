@@ -2569,9 +2569,11 @@ fn a_cover_that_stays_is_said_quickly_and_a_loading_one_is_waited_for() {
     let err = s.fails(&["click", "--selector", "#buy"]);
     let ms = t.elapsed().as_millis();
     assert!(ms < 2500, "a banner that stays took {ms} ms to report");
-    assert!(err.contains("div#consent") && err.contains("\"Accept\", \"Reject\""), "{err}");
+    assert!(err.contains("div#consent"), "{err}");
+    assert!(err.contains("(`click --text \"Accept\"`, `click --text \"Reject\"`)"), "{err}");
     assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "waiting");
-    s.ok(&["click", "--role", "button", "--name", "Accept"]);
+    // The command the error names closes the banner.
+    s.ok(&["click", "--text", "Accept"]);
     s.ok(&["click", "--selector", "#buy"]);
     assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "bought");
 

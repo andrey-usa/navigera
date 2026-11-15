@@ -5437,7 +5437,10 @@ impl Page {
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-                .map(|c| serde_json::to_string(c).unwrap_or_default())
+                // As a command to run: an agent that was only told the
+                // control's name (Claude Haiku in the agent eval) gave up
+                // instead of looking its ref up.
+                .map(|c| format!("`click --text {}`", serde_json::to_string(c).unwrap_or_default()))
                 .collect();
             let persistent = point.get("persistent").and_then(Value::as_bool) == Some(true);
             bail!(

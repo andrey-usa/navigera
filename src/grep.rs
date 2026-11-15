@@ -57,6 +57,34 @@ fn window(line: &str, from: usize, len: usize) -> String {
     out
 }
 
+/// A query written as grep alternation (`a\\|b`, or `a|b`): its parts, when
+/// it has two or more. Read only when the query as written matches nothing.
+fn alternatives(phrase: &str) -> Vec<String> {
+    let parts: Vec<String> =
+        phrase.replace("\\|", "|").split('|').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
+    if parts.len() > 1 {
+        parts
+    } else {
+        Vec::new()
+    }
+}
+
+/// Where in a line (in characters) the first of `alts` is, if any is.
+fn first_of(line_lower: &str, alts: &[String]) -> Option<usize> {
+    alts.iter().filter_map(|a| line_lower.find(a.as_str())).min().map(|b| line_lower[..b].chars().count())
+}
+
+/// How the lines were found, as the reply says it.
+fn found_what(query: &str, by_words: bool, alts: &[String]) -> String {
+    if !alts.is_empty() {
+        format!("any of {}", alts.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(", "))
+    } else if by_words {
+        format!("all of {query:?}, in any order")
+    } else {
+        format!("{query:?}")
+    }
+}
+
 /// Where in a line (in characters) the search matched.
 fn match_at(line_lower: &str, phrase: &str, words: &[&str], by_words: bool) -> Option<usize> {
     let chars_before = |byte: usize| line_lower[..byte].chars().count();
@@ -74,8 +102,9 @@ fn match_at(line_lower: &str, phrase: &str, words: &[&str], by_words: bool) -> O
 ///
 /// A line matches when it has the query as written, letter case aside. When
 /// no line does and the query is several words, a line matches when it has
-/// all of them in any order. Matching lines closer than the context are one
-/// passage.
+/// all of them in any order; when none does either and the query is grep
+/// alternation (`a\\|b`), when it has any of its parts. Matching lines
+/// closer than the context are one passage.
 pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
     let phrase = lower(query.trim());
     if phrase.is_empty() {
@@ -98,6 +127,11 @@ pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
             .enumerate()
             .filter_map(|(i, l)| match_at(l, &phrase, &words, true).map(|at| (i, at)))
             .collect();
+    }
+    let mut alts = Vec::new();
+    if hits.is_empty() {
+        alts = alternatives(&phrase);
+        hits = lowered.iter().enumerate().filter_map(|(i, l)| first_of(l, &alts).map(|at| (i, at))).collect();
     }
     if hits.is_empty() {
         return format!(
@@ -150,7 +184,7 @@ pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
         body.push_str(&part);
         shown += 1;
     }
-    let what = if by_words { format!("all of {query:?}, in any order") } else { format!("{query:?}") };
+    let what = found_what(query, by_words, &alts);
     let head = if shown < total {
         format!("{shown} of {total} passages with {what} (--limit {total} for all; N: is the line of the text):")
     } else if total == 1 {
@@ -184,6 +218,11 @@ pub fn grep_tree(tree: &str, query: &str, limit: usize) -> String {
     if hits.is_empty() && words.len() > 1 {
         by_words = true;
         hits = (0..lines.len()).filter(|&i| words.iter().all(|w| lowered[i].contains(w))).collect();
+    }
+    let mut alts = Vec::new();
+    if hits.is_empty() {
+        alts = alternatives(&phrase);
+        hits = (0..lines.len()).filter(|&i| first_of(&lowered[i], &alts).is_some()).collect();
     }
     if hits.is_empty() {
         return format!(
@@ -220,7 +259,7 @@ pub fn grep_tree(tree: &str, query: &str, limit: usize) -> String {
             open.push((depth, i, false));
         }
     }
-    let what = if by_words { format!("all of {query:?}, in any order") } else { format!("{query:?}") };
+    let what = found_what(query, by_words, &alts);
     let count = if shown < hits.len() {
         format!("{shown} of {} lines with {what} (--limit {} for all)", hits.len(), hits.len())
     } else if hits.len() == 1 {
@@ -252,6 +291,24 @@ mod tests {
         assert!(out.contains("\n11: A second line.\n--\n14: Usage notes\n"), "{out}");
         // Letter case does not matter, and the original's case is printed.
         assert!(out.contains("15: The SHOWMODAL name"), "{out}");
+    }
+
+    #[test]
+    fn grep_alternation_finds_any_of_its_parts_when_the_whole_matches_nothing() {
+        // `a\\|b` as grep writes it, and `a|b` as grep -E does.
+        for query in ["closedby\\|usage notes", "closedby|Usage notes"] {
+            let out = grep(PAGE, query, 0, 5);
+            assert!(out.starts_with("2 passages with any of \"closedby\", \"usage notes\":\n"), "{out}");
+            assert!(out.contains("7: closedby") && out.contains("14: Usage notes"), "{out}");
+        }
+        let tree = "page \"Shop\" http://x.test/\n- banner:\n  - link \"Account\" [ref=3]\n  - link \"Sign in\" [ref=4]\n- main:\n  - heading \"Shop\"";
+        let out = grep_tree(tree, "account\\|sign", 30);
+        assert!(out.contains("2 lines with any of \"account\", \"sign\", under their containers:"), "{out}");
+        assert!(out.contains("[ref=3]") && out.contains("[ref=4]") && !out.contains("heading"), "{out}");
+        // A literal `|` that is in the text is found as written.
+        assert!(grep("a | b\nc", "a | b", 0, 5).starts_with("1 passage with \"a | b\":"));
+        // One part alone is no alternation.
+        assert!(grep(PAGE, "nothing here|", 0, 5).starts_with("no line of the text has"));
     }
 
     #[test]

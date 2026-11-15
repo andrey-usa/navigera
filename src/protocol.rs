@@ -1943,8 +1943,107 @@ fn target_args(args: &mut Args, positional_target: bool) -> Result<TargetArgs, A
             }
         }
     }
+    if t.role.is_none() && t.selector.as_deref().is_some_and(|s| ROLE_WORDS.contains(&s)) {
+        t.role = t.selector.take();
+    }
     Ok(t)
 }
+
+/// An `eval` error, with what to do instead when it is the page's `fetch`
+/// that failed: most often a request to another origin whose CORS refuses
+/// the page (an agent calling a site's API from the page), which `http`
+/// sends from outside it, signed in with the browser's cookies.
+fn eval_error(expression: &str, e: anyhow::Error) -> anyhow::Error {
+    let text = format!("{e:#}");
+    let fetch_failed = expression.contains("fetch(")
+        && ["Failed to fetch", "NetworkError when attempting to fetch", "Load failed"].iter().any(|m| text.contains(m));
+    if !fetch_failed {
+        return e.context("eval");
+    }
+    anyhow::anyhow!(
+        "{text} (the page's request did not get through: another origin's CORS refused it, or the network did; \
+         `network --failed` says which. `http <METHOD> <url> --json '{{…}}'` sends it from outside the page, \
+         signed in with the browser's cookies)"
+    )
+    .context("eval")
+}
+
+/// grep's own flags, as an agent used to grep writes them around `--grep`:
+/// `-i` (letter case never matters here), `-E`, `-F` and `-n` (alternation
+/// is read anyway, and lines come numbered), and context as `-A N`, `-B N`,
+/// `-C N` or `-C2`. Taken out of `args`; the widest context asked for is
+/// returned. `--grep -i word` read `-i` as the query and failed on `word`.
+fn grep_habits(args: &mut Args) -> Result<Option<usize>, ArgsError> {
+    if !args.iter().any(|a| a == "--grep") {
+        return Ok(None);
+    }
+    let mut context: Option<usize> = None;
+    let mut kept = Args::new();
+    while let Some(arg) = args.pop_front() {
+        let lines = |raw: &str| {
+            raw.parse::<usize>()
+                .map_err(|_| ArgsError::Invalid(format!("{} takes a number of lines, not {raw:?}", &arg[..2])))
+        };
+        match arg.as_str() {
+            "-i" | "--ignore-case" | "-E" | "-F" | "-n" => {}
+            "-A" | "-B" | "-C" => {
+                let raw = args.pop_front().unwrap_or_default();
+                context = context.max(Some(lines(&raw)?));
+            }
+            a if a.len() > 2 && ["-A", "-B", "-C"].contains(&&a[..2]) && a[2..].bytes().all(|b| b.is_ascii_digit()) => {
+                context = context.max(Some(lines(&a[2..])?));
+            }
+            _ => kept.push_back(arg),
+        }
+    }
+    *args = kept;
+    Ok(context)
+}
+
+/// ARIA roles the tree prints that are no HTML element's name: as a
+/// `--selector` (`ax --selector banner`, after reading `- banner:` in the
+/// tree) such a word can match nothing as CSS, so it is read as `--role`.
+const ROLE_WORDS: &[&str] = &[
+    "alert",
+    "alertdialog",
+    "banner",
+    "cell",
+    "checkbox",
+    "columnheader",
+    "combobox",
+    "complementary",
+    "contentinfo",
+    "grid",
+    "gridcell",
+    "group",
+    "heading",
+    "list",
+    "listbox",
+    "listitem",
+    "menubar",
+    "menuitem",
+    "navigation",
+    "paragraph",
+    "progressbar",
+    "radio",
+    "radiogroup",
+    "region",
+    "row",
+    "rowgroup",
+    "rowheader",
+    "searchbox",
+    "spinbutton",
+    "status",
+    "switch",
+    "tab",
+    "tablist",
+    "tabpanel",
+    "textbox",
+    "toolbar",
+    "tooltip",
+    "tree",
+    "treeitem",
+];
 
 fn positional(args: &mut Args) -> Option<String> {
     if args.front().is_some_and(|a| !a.starts_with("--")) {
@@ -2517,11 +2616,12 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             Command::Dialog { accept: Some(accept), prompt_text: str_flag(&mut args, "--prompt-text")? }
         }
         "text" => {
+            let habit_context = grep_habits(&mut args)?;
             let grep = str_flag(&mut args, "--grep")?;
             let count = |args: &mut Args, flag: &str| -> Result<Option<usize>, ArgsError> {
                 Ok(num_flag(args, flag)?.map(|n| n.max(0.0) as usize))
             };
-            let (context, limit) = (count(&mut args, "--context")?, count(&mut args, "--limit")?);
+            let (context, limit) = (count(&mut args, "--context")?.or(habit_context), count(&mut args, "--limit")?);
             if grep.is_none() && (context.is_some() || limit.is_some()) {
                 return Err(need("text", "--grep <words> with --context or --limit"));
             }
@@ -2649,6 +2749,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             timeout_ms,
         },
         "ax" | "snapshot" if args.iter().any(|a| a == "--grep") => {
+            // Context lines: the tree's containers stand in for them.
+            grep_habits(&mut args)?;
             let query = str_flag(&mut args, "--grep")?.unwrap_or_default();
             Command::Grep {
                 query,
@@ -5699,9 +5801,9 @@ impl Driver {
                     return Ok(value);
                 }
                 if let Some(e) = self.read_error.take() {
-                    return Err(e.context("eval"));
+                    return Err(eval_error(expression, e));
                 }
-                let value = s.evaluate_user(expression, *timeout_ms).map_err(|e| e.context("eval"))?;
+                let value = s.evaluate_user(expression, *timeout_ms).map_err(|e| eval_error(expression, e))?;
                 Ok(value)
             }
             Command::Title {} => {
@@ -8435,6 +8537,49 @@ mod tests {
         let mut all = vec!["navigera"];
         all.extend_from_slice(items);
         parse_args(argv(&all)).expect("valid invocation").command.expect("a command")
+    }
+
+    /// What agents wrote in Claude Code runs of the agent eval: grep's own
+    /// flags around `--grep`, and a role the tree printed as a selector.
+    #[test]
+    fn grep_habits_and_role_words_read_as_meant() {
+        for (args, want) in [
+            (&["ax", "--grep", "-i", "support"][..], "support"),
+            (&["ax", "--grep", "login\\|sign", "-i"], "login\\|sign"),
+            (&["ax", "--grep", "A-1042", "-A1"], "A-1042"),
+            (&["snapshot", "-E", "--grep", "a|b", "-C", "3"], "a|b"),
+        ] {
+            match cmd(args) {
+                Command::Grep { query, .. } => assert_eq!(query, want, "{args:?}"),
+                other => panic!("{args:?}: {other:?}"),
+            }
+        }
+        match cmd(&["text", "--grep", "-i", "fee", "-B", "2", "-A4"]) {
+            Command::Text { grep, context, .. } => assert_eq!((grep.as_deref(), context), (Some("fee"), Some(4))),
+            other => panic!("{other:?}"),
+        }
+        // --context, when given, wins over grep's spelling of it.
+        match cmd(&["text", "--grep", "fee", "-C", "5", "--context", "1"]) {
+            Command::Text { context, .. } => assert_eq!(context, Some(1)),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse_args(argv(&["navigera", "ax", "--grep", "x", "-A", "many"])).is_err());
+
+        let target = |args: &[&str]| match cmd(args) {
+            Command::Ax { scope, .. } => (scope.selector, scope.role),
+            Command::Click { target, .. } => (target.selector, target.role),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(target(&["ax", "--selector", "banner"]), (None, Some("banner".into())));
+        assert_eq!(target(&["click", "navigation"]), (None, Some("navigation".into())));
+        // HTML element names, and any CSS beyond one role word, stay CSS.
+        assert_eq!(target(&["ax", "--selector", "main"]), (Some("main".into()), None));
+        assert_eq!(target(&["ax", "--selector", "form"]), (Some("form".into()), None));
+        assert_eq!(target(&["ax", "--selector", "[role=banner]"]), (Some("[role=banner]".into()), None));
+        assert_eq!(
+            target(&["ax", "--selector", "banner", "--role", "region"]),
+            (Some("banner".into()), Some("region".into()))
+        );
     }
 
     #[test]
