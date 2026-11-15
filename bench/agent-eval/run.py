@@ -561,7 +561,13 @@ def claude_env(env: dict) -> dict:
         secret = config.parent / "claude-key"
         secret.write_text(key)
         secret.chmod(0o600)
-        (config / "settings.json").write_text(json.dumps({"apiKeyHelper": f"cat {shlex.quote(str(secret))}"}))
+        settings = {"apiKeyHelper": f"cat {shlex.quote(str(secret))}"}
+        # Another Anthropic-compatible endpoint (OpenRouter): the key above
+        # is that endpoint's.
+        base = os.environ.get("ANTHROPIC_BASE_URL")
+        if base:
+            settings["env"] = {"ANTHROPIC_BASE_URL": base}
+        (config / "settings.json").write_text(json.dumps(settings))
     return kept
 
 
