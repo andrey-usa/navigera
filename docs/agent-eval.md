@@ -36,6 +36,16 @@ any OpenAI-compatible model instead of Gemini CLI (DeepSeek-V4.1-Flash
 through SiliconFlow by default; `OPENAI_BASE_URL`, `SILICONFLOW_API_KEY`), so
 a result can be checked against a second model family.
 
+`--agent claude` runs Claude Code headless, fresh configuration per run,
+each tool as its users get it: navigera's plugin, agent-browser's own
+skill. Web tools are off; the cost is Claude Code's figure. The workflow
+has no Anthropic key, so run it where Claude Code is signed in:
+
+```sh
+CHROME_BIN=/path/to/chrome python3 bench/agent-eval/run.py --agent claude \
+  --model claude-sonnet-5-5 --tools navigera,agent-browser --reps 3 --out /tmp/eval-claude
+```
+
 The agent reads navigera's default output, as a user's agent does. Until
 2026-11-11 its shell inherited the harness's own `NAVIGERA_OUTPUT=json`, so
 the runs below that date measured navigera on JSON lines, without the

@@ -104,6 +104,17 @@ Task: {task}
 When you are done, end your reply with one line exactly in this form:
 FINAL ANSWER: <answer>"""
 
+# Claude Code finds skills itself (`.claude/skills/`, or a plugin's): the
+# same words as SKILLED_PROMPT without a file path, for every tool.
+CLAUDE_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}". Load that skill first, then use `{cmd}` (through shell commands) for every browser interaction. Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
+
+The website is running at {base}.
+
+Task: {task}
+
+When you are done, end your reply with one line exactly in this form:
+FINAL ANSWER: <answer>"""
+
 ONBOARD_PROMPT = """You are in {workdir}. Use the browser automation tool {name} ({repo}) to complete the task below. It is not installed yet: install it by following its own documentation, then use it (through shell commands) for every browser interaction. A Chrome binary is available at $CHROME_BIN. Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
 
 The website is running at {base}.
@@ -255,6 +266,23 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
         if args.nv_bin_dir:
             env["PATH"] = os.pathsep.join(p for p in env["PATH"].split(os.pathsep)
                                           if Path(p).resolve() != Path(args.nv_bin_dir).resolve())
+        return work, env
+
+    if args.agent == "claude":
+        # Each tool as a Claude Code user gets it: navigera's plugin folder
+        # (`--plugin-dir`, see run_claude), agent-browser's own skill in the
+        # project's `.claude/skills/`. Claude Code reads neither `.agents/`
+        # nor the shell's skills, so nothing else is offered.
+        if TOOLS[tool]["cmd"] == "navigera" and args.nv_bin_dir:
+            env["PATH"] = os.pathsep.join([args.nv_bin_dir, env.get("PATH", "")])
+        elif TOOLS[tool]["cmd"] == "agent-browser":
+            src = Path(npm_root()) / "agent-browser" / "skills" / "agent-browser"
+            if os.environ.get("AGENT_BROWSER_SKILL_DIR"):
+                src = Path(os.environ["AGENT_BROWSER_SKILL_DIR"])
+            shutil.copytree(src, work / ".claude" / "skills" / "agent-browser")
+        else:
+            raise RuntimeError(f"--agent claude: no Claude Code skill set up for {tool}")
+        env["CLAUDE_CONFIG_DIR"] = str(root / "claude")
         return work, env
 
     skills = work / ".agents" / "skills"
@@ -502,6 +530,104 @@ def run_openai(prompt: str, work: Path, env: dict, args) -> dict:
         "tokens_total": tokens_total or None, "tokens_cached": tokens_cached or None,
         "tool_calls": tool_calls,
         "errors": errors[-3:], "stderr_tail": errors[-1] if errors and exit_code else "",
+        "_context": "\n".join(context + texts),
+    }
+
+
+# --- Claude Code --------------------------------------------------------------
+# Claude Code headless (`claude -p`), a fresh config per run: no user
+# settings, plugins, skills or MCP servers but the tool's own. Its shell is
+# its Bash tool; web tools and subagents are off, as web_fetch is for Gemini.
+
+CLAUDE_TOOLS = "Bash Read Skill Glob Grep"
+CLAUDE_DENIED = "WebFetch WebSearch Task Agent"
+# What a nested Claude Code must not inherit: a parent session's ids,
+# sockets and sync settings (the run would report into it), and keys.
+CLAUDE_PARENT = re.compile(r"^(CLAUDE|CLAUDECODE$|ANTHROPIC_API_KEY$)")
+
+
+def claude_env(env: dict) -> dict:
+    kept = {k: v for k, v in env.items()
+            if not CLAUDE_PARENT.match(k) and (not SECRET_NAME.search(k) or k.startswith("ANTHROPIC_"))}
+    kept["CLAUDE_CONFIG_DIR"] = env["CLAUDE_CONFIG_DIR"]
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        kept["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+    return kept
+
+
+def run_claude(prompt: str, work: Path, env: dict, args, tool: str) -> dict:
+    """The run_gemini record shape, from Claude Code's stream-json."""
+    cmd = [exe(args.claude), "-p", prompt, "--model", args.model, "--output-format", "stream-json", "--verbose",
+           "--max-turns", str(GEMINI_SETTINGS["model"]["maxSessionTurns"]), "--strict-mcp-config",
+           "--allowedTools", CLAUDE_TOOLS, "--disallowedTools", CLAUDE_DENIED]
+    if TOOLS[tool]["cmd"] == "navigera":
+        cmd += ["--plugin-dir", str(REPO / "skills")]
+    started = time.time()
+    proc = subprocess.Popen(cmd, cwd=work, env=claude_env(env), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=args.run_timeout)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        out, err = proc.communicate()
+        timed_out = True
+    events = []
+    for line in out.splitlines():
+        if line.startswith("{"):
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    texts, shells, uses, results, message_ids, skills = [], [], {}, {}, set(), []
+    for e in events:
+        msg = e.get("message") or {}
+        for block in msg.get("content") or [] if isinstance(msg.get("content"), list) else []:
+            kind = block.get("type")
+            if e.get("type") == "assistant" and kind == "text":
+                texts.append(block.get("text", ""))
+            elif e.get("type") == "assistant" and kind == "tool_use":
+                uses[block.get("id")] = block
+                if block.get("name") == "Bash":
+                    shells.append((block.get("input") or {}).get("command", ""))
+                elif block.get("name") == "Skill":
+                    skills.append(str((block.get("input") or {}).get("skill", "")))
+            elif e.get("type") == "user" and kind == "tool_result":
+                content = block.get("content")
+                if isinstance(content, list):
+                    content = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+                results[block.get("tool_use_id")] = (str(content or ""), bool(block.get("is_error")))
+        if e.get("type") == "assistant" and msg.get("id"):
+            message_ids.add(msg["id"])
+    shell_steps, in_flight, context = [], [], []
+    for tid, use in uses.items():
+        command = (use.get("input") or {}).get("command", "") if use.get("name") == "Bash" else ""
+        if tid in results:
+            text, error = results[tid]
+            context.append(text)
+            if use.get("name") == "Bash":
+                shell_steps.append({"cmd": command[:200], "status": "error" if error else "success",
+                                    "tail": text[-300:]})
+        elif command:
+            in_flight.append(command[:300])
+    result = next((e for e in reversed(events) if e.get("type") == "result"), {})
+    usage = result.get("usage") or {}
+    fresh, written = usage.get("input_tokens"), usage.get("cache_creation_input_tokens") or 0
+    read = usage.get("cache_read_input_tokens") or 0
+    tokens_in = (fresh + written + read) if isinstance(fresh, int) else None
+    errors = [result.get("result", "")] if result.get("is_error") else []
+    if result.get("subtype") not in (None, "success"):
+        errors.append(str(result.get("subtype")))
+    return {
+        "exit": proc.returncode, "timed_out": timed_out, "wall_s": round(time.time() - started, 1),
+        "text": "".join(texts) or result.get("result", ""), "shell_commands": shells, "shell_steps": shell_steps,
+        "tools_used": [u.get("name") for u in uses.values()], "in_flight": in_flight,
+        "requests": len(message_ids) or result.get("num_turns"), "models": [args.model] if events else [],
+        "tokens_in": tokens_in, "tokens_out": usage.get("output_tokens"),
+        "tokens_total": (tokens_in or 0) + (usage.get("output_tokens") or 0) or None,
+        "tokens_cached": read or None, "tool_calls": len(uses),
+        "cost_usd": result.get("total_cost_usd"), "skills_loaded": skills,
+        "errors": errors[-3:], "stderr_tail": stderr_tail(err) if proc.returncode else "",
         "_context": "\n".join(context + texts),
     }
 
@@ -787,6 +913,8 @@ def cost(run: dict, model: str):
     """A run's estimated spend in USD at list prices, or None when a rate or
     a count is not known. Cached input is part of `tokens_in` and is charged
     at its own rate, once."""
+    if isinstance(run.get("cost_usd"), (int, float)):
+        return run["cost_usd"]
     rate = rates(model)
     t_in, t_out = run.get("tokens_in"), run.get("tokens_out")
     if rate is None or not isinstance(t_in, int) or not isinstance(t_out, int):
@@ -855,7 +983,8 @@ def render(mode: str, agent: str, model: str, runs: list, tools: list, tasks: li
                 if not rs:
                     continue
                 costs = [cost(r, model) for r in rs]
-                known = priced and all(c is not None for c in costs)
+                known = (priced or all(isinstance(r.get("cost_usd"), (int, float)) for r in rs)) \
+                    and all(c is not None for c in costs)
                 ok = sum(1 for r in rs if r["ok"])
                 fmt = lambda v, f="{:.0f}": "—" if v is None else f.format(v)
                 lines.append(
@@ -914,7 +1043,8 @@ def main() -> int:
     ap.add_argument("--tools", default="navigera,navigera-lightpanda,agent-browser,playwright-cli")
     ap.add_argument("--tasks", default="all")
     ap.add_argument("--mode", choices=["skilled", "onboard"], default="skilled")
-    ap.add_argument("--agent", choices=["gemini", "openai", "scripted"], default="gemini")
+    ap.add_argument("--agent", choices=["gemini", "openai", "claude", "scripted"], default="gemini")
+    ap.add_argument("--claude", default="claude", help="--agent claude: the Claude Code CLI")
     ap.add_argument("--model", default="gemini-3.5-flash-lite")
     ap.add_argument("--gemini", default="gemini")
     ap.add_argument("--base-url", default="",
@@ -965,11 +1095,13 @@ def main() -> int:
                     site = LiveSite(task["url"]) if task.get("live") else Site()
                     work, env = prepare(tool, args.mode, root, args)
                     spec = TOOLS[tool]
-                    template = SKILLED_PROMPT if args.mode == "skilled" else ONBOARD_PROMPT
+                    template = ONBOARD_PROMPT if args.mode == "onboard" \
+                        else CLAUDE_PROMPT if args.agent == "claude" else SKILLED_PROMPT
                     prompt = template.format(workdir=work, cmd=spec["cmd"], skill=spec["skill"], name=tool,
                                              repo=spec["repo"], base=site.base, task=task["prompt"])
                     res = run_gemini(prompt, work, env, args) if args.agent == "gemini" \
                         else run_openai(prompt, work, env, args) if args.agent == "openai" \
+                        else run_claude(prompt, work, env, args, tool) if args.agent == "claude" \
                         else run_scripted(tool, task["id"], site.base, work, env)
                     answer = final_answer(res["text"])
                     ok, why = check(task, answer, site, tool)
