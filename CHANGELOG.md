@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude Code plugin: `plugin.json` names its icon (`icon`), the key
+  Anthropic's directory reads the listing's icon from; the file alone was
+  not enough. The plugin's README says how to install on Claude Code
+  before 2.1.275, and names the two requests Chrome itself makes to
+  Google at a start.
+
 ## [0.14.1] - 2026-11-15
 
 ### Added

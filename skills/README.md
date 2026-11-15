@@ -52,6 +52,9 @@ In Claude Code:
 /plugin install navigera --marketplace andrey-usa/navigera
 ```
 
+Before Claude Code 2.1.275: `/plugin marketplace add andrey-usa/navigera`,
+then `/plugin install navigera@navigera`.
+
 The skill needs the `navigera` binary on the machine. Its first step
 checks for it and, when it is missing, installs the latest release from
 this repository:
@@ -71,7 +74,10 @@ Also on crates.io, npm and PyPI as `navigera`.
   its checksum.
 - navigera starts a Chrome it finds on the machine, or one fetched with
   `navigera install-browser` when asked. It sends nothing anywhere itself:
-  network traffic is the browser loading the pages the agent opens.
+  network traffic is the browser loading the pages the agent opens, plus
+  two requests Chrome makes to Google at each start that no setting turns
+  off (its account list and its messaging check-in; no page data in
+  either).
 
 ## More
 

@@ -12,6 +12,7 @@
   "documentationUrl": "https://andrey-usa.github.io/navigera/agents/skill.html",
   "supportUrl": "https://github.com/andrey-usa/navigera/issues",
   "license": "MIT",
+  "icon": "./.claude-plugin/icon.png",
   "keywords": ["browser", "chrome", "electron", "automation", "testing", "scraping", "accessibility", "cdp"],
   "skills": ["./"]
 }

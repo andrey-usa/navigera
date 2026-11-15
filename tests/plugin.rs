@@ -47,6 +47,12 @@ fn the_plugin_and_its_marketplace_entry_agree() {
         assert!(folder.join(path).join("navigera/SKILL.md").is_file(), "{path}");
     }
 
+    // The directory reads the listing's icon from this key, a path inside
+    // the plugin folder; without the key the listing has no icon.
+    let icon = plugin["icon"].as_str().expect("an `icon` path in plugin.json");
+    assert!(icon.starts_with("./") && !icon.contains(".."), "{icon}");
+    assert!(folder.join(icon).is_file(), "{icon} is not a file in the plugin folder");
+
     // No component that runs code: the plugin is text only (its README says so).
     for key in ["hooks", "mcpServers", "lspServers", "commands", "agents"] {
         assert!(plugin.get(key).is_none(), "{key} in plugin.json");
@@ -61,7 +67,9 @@ fn the_plugin_and_its_marketplace_entry_agree() {
 /// rewrote the bytes of a PNG.
 #[test]
 fn the_plugin_icon_is_a_whole_square_png() {
-    let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/.claude-plugin/icon.png")).unwrap();
+    let plugin = json("skills/.claude-plugin/plugin.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills").join(plugin["icon"].as_str().unwrap());
+    let bytes = std::fs::read(path).unwrap();
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG: was it stored as text?");
     let be = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
     let (width, height) = (be(16), be(20));
