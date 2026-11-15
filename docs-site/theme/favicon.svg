@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-246.5 -877 1176 1176" width="64" height="64" role="img" aria-label="navigera">
+  <title>navigera</title>
+  <g transform="scale(1 -1)">
+    <path d="M118 -59 V641 L583 56 V697" fill="none" stroke="#03787E" stroke-width="112" stroke-linejoin="round"/>
+    <circle cx="118" cy="-131" r="89" fill="none" stroke="#03787E" stroke-width="42"/>
+    <circle cx="583" cy="727" r="92" fill="#EE6C3E"/>
+  </g>
+</svg>

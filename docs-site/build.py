@@ -541,6 +541,23 @@ def splice_readme(text, section):
     return text[:m.start()] + section + ("\n" if rest else "") + text[end:]
 
 
+IMAGE_ONLY = re.compile(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)|!\[[^\]]*\]\([^)]*\)|<[^>]+>")
+
+
+def for_agents(text):
+    """The page as agents read it (llms-full.txt, each page's .md): without
+    lines that are only images (the logo, badges), which say nothing in text."""
+    out, fence = [], None
+    for line in text.split("\n"):
+        m = re.match(r"\s*(```+|~~~+)", line)
+        if m:
+            fence = None if fence and m.group(1)[0] == fence[0] else (fence or m.group(1))
+        elif not fence and ("![" in line or "<img" in line) and not IMAGE_ONLY.sub("", line).strip():
+            continue
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+
+
 def write_site(cfg, pages, linker, binary):
     if SRC.exists():
         shutil.rmtree(SRC)
@@ -562,7 +579,7 @@ def write_site(cfg, pages, linker, binary):
         out = SRC / page.path
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
-        written[page.path] = text
+        written[page.path] = for_agents(text)
     summary = ["# Summary", "", f"[{cfg['name']}](index.md)", ""]
     for part in cfg["part"]:
         summary += [f"# {part['title']}", ""] + [f"- [{p.title}]({p.path})" for p in pages if p.part == part["title"]] + [""]
@@ -664,7 +681,7 @@ def main():
             fail(f"mdbook build failed:\n{p.stderr[-3000:]}")
         for page in pages:
             (BOOK / page.path).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(SRC / page.path, BOOK / page.path)
+            (BOOK / page.path).write_text(for_agents((SRC / page.path).read_text(encoding="utf-8")), encoding="utf-8")
         built = f"; {check_html()} HTML pages, every internal link and id resolves"
     print(f"docs-site: {len(pages)} pages from {len(sources)} sources in {len(cfg['part'])} parts; "
           f"llms.txt {len(llms.encode())} B, llms-full.txt {full_bytes} B (about {full_bytes // 4} tokens){built}")

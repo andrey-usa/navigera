@@ -1,0 +1,4 @@
+/* The README's wordmark picks light or dark by the system's colour scheme;
+   here it follows the theme chosen in the book instead. */
+html:is(.light, .rust) img[src$="/brand/wordmark.svg"] { content: url("https://raw.githubusercontent.com/andrey-usa/navigera/master/assets/brand/wordmark.svg"); }
+html:is(.coal, .navy, .ayu) img[src$="/brand/wordmark.svg"] { content: url("https://raw.githubusercontent.com/andrey-usa/navigera/master/assets/brand/wordmark-dark.svg"); }

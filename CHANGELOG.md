@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The README and the documentation site show the navigera wordmark from
+  the brand sheet (`assets/brand/`, light and dark), and the site's
+  favicon is its N. The documentation as agents read it (llms-full.txt,
+  each page's markdown) leaves out lines that are only images: the
+  wordmark and the badges.
+
 ### Fixed
 
 - Claude Code plugin: `plugin.json` names its icon (`icon`), the key

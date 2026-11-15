@@ -1,5 +1,7 @@
 # navigera
 
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/andrey-usa/navigera/master/assets/brand/wordmark-dark.svg"><img alt="navigera" src="https://raw.githubusercontent.com/andrey-usa/navigera/master/assets/brand/wordmark.svg" width="360"></picture></p>
+
 [![CI](https://github.com/andrey-usa/navigera/actions/workflows/ci.yml/badge.svg)](https://github.com/andrey-usa/navigera/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/navigera.svg)](https://crates.io/crates/navigera)
 [![PyPI](https://img.shields.io/pypi/v/navigera.svg)](https://pypi.org/project/navigera/)
