@@ -1,7 +1,7 @@
 {
   "name": "navigera",
   "displayName": "navigera",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Browser automation for agents from the shell: a native binary that drives Chrome and Electron apps, reads pages as a compact accessibility tree, and reports what each action changed.",
   "author": {
     "name": "andrey-usa",

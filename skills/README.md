@@ -20,7 +20,17 @@ What an agent gets:
 
 ## Measured
 
-Six browser tasks, eight runs each, the same model (DeepSeek-V4.1-Flash)
+Seven browser tasks, three runs each, in Claude Code (Sonnet 5.5), each
+tool as its users get it: navigera as this plugin, agent-browser through
+its own skill
+([run 43674001255](https://github.com/andrey-usa/navigera/actions/runs/43674001255)):
+
+| tool | tasks solved | median turns | median tokens | median time |
+|---|---|---|---|---|
+| navigera | 21/21 | 7 | 146.3K | 12.9 s |
+| agent-browser 0.43.0 | 21/21 | 8 | 164.3K | 14 s |
+
+Six browser tasks, eight runs each, a smaller model (DeepSeek-V4.1-Flash)
 driving each tool through its own skill
 ([run 43061276529](https://github.com/andrey-usa/navigera/actions/runs/43061276529)):
 

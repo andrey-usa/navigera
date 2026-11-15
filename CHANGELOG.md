@@ -6,12 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-11-15
+
 ### Added
 
 - The agent eval runs Claude Code too (`run.py --agent claude`): each tool
   as a Claude Code user gets it (navigera's plugin, agent-browser's own
   skill), with the same tasks, prompt and checks; in the workflow as
-  `agent: claude` once the main environment has `ANTHROPIC_API_KEY`. The
+  `agent: claude` with the main environment's `ANTHROPIC_API_KEY`, or
+  through OpenRouter with `endpoint: openrouter` and its key. The
   eval workflows install agent-browser 0.43.0, its latest release (was
   0.42.0). See docs/agent-eval.md.
 
@@ -45,6 +48,7 @@ All notable changes to this project are documented here. The format follows
   install script fetches until the next release (with no version, every
   commit to the default branch was an update). `claude plugin validate
   --strict` passes.
+- The Claude Code plugin has an icon (`skills/.claude-plugin/icon.png`).
 
 ### Fixed
 
