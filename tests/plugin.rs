@@ -55,3 +55,17 @@ fn the_plugin_and_its_marketplace_entry_agree() {
         assert!(!folder.join(name).exists(), "{name} in the plugin folder");
     }
 }
+
+/// The icon is stored as the bytes it was drawn as: `skills/**` is text
+/// with LF endings for the files the binary embeds, and that rule once
+/// rewrote the bytes of a PNG.
+#[test]
+fn the_plugin_icon_is_a_whole_square_png() {
+    let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/.claude-plugin/icon.png")).unwrap();
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG: was it stored as text?");
+    let be = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+    let (width, height) = (be(16), be(20));
+    assert_eq!(width, height);
+    assert!((512..=2048).contains(&width), "the plugin directory takes 512 to 2048 px, this is {width}");
+    assert_eq!(&bytes[bytes.len() - 8..bytes.len() - 4], b"IEND");
+}
