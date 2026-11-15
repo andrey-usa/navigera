@@ -10,7 +10,10 @@ All notable changes to this project are documented here. The format follows
 
 - The agent eval runs Claude Code too (`run.py --agent claude`): each tool
   as a Claude Code user gets it (navigera's plugin, agent-browser's own
-  skill), with the same tasks, prompt and checks. See docs/agent-eval.md.
+  skill), with the same tasks, prompt and checks; in the workflow as
+  `agent: claude` once the main environment has `ANTHROPIC_API_KEY`. The
+  eval workflows install agent-browser 0.43.0, its latest release (was
+  0.42.0). See docs/agent-eval.md.
 
 ### Changed
 

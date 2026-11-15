@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import statistics
@@ -256,6 +257,8 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
         # task left running, with that task's tabs. One per run, as $HOME is.
         (root / "run").mkdir(mode=0o700)
         env["XDG_RUNTIME_DIR"] = str(root / "run")
+    if args.agent == "claude":
+        env["CLAUDE_CONFIG_DIR"] = str(root / "claude")
     if mode == "onboard":
         # Whatever the agent installs lands in this run's own prefix.
         prefix = home / ".npm-global"
@@ -282,7 +285,6 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
             shutil.copytree(src, work / ".claude" / "skills" / "agent-browser")
         else:
             raise RuntimeError(f"--agent claude: no Claude Code skill set up for {tool}")
-        env["CLAUDE_CONFIG_DIR"] = str(root / "claude")
         return work, env
 
     skills = work / ".agents" / "skills"
@@ -547,11 +549,19 @@ CLAUDE_PARENT = re.compile(r"^(CLAUDE|CLAUDECODE$|ANTHROPIC_API_KEY$)")
 
 
 def claude_env(env: dict) -> dict:
-    kept = {k: v for k, v in env.items()
-            if not CLAUDE_PARENT.match(k) and (not SECRET_NAME.search(k) or k.startswith("ANTHROPIC_"))}
-    kept["CLAUDE_CONFIG_DIR"] = env["CLAUDE_CONFIG_DIR"]
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        kept["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+    """Claude Code's environment, which its Bash tool (the agent's shell)
+    inherits: no keys. A key the job has ($ANTHROPIC_API_KEY, CI) reaches
+    Claude Code through `apiKeyHelper` from a private file instead."""
+    kept = {k: v for k, v in env.items() if not CLAUDE_PARENT.match(k) and not SECRET_NAME.search(k)}
+    config = Path(env["CLAUDE_CONFIG_DIR"])
+    kept["CLAUDE_CONFIG_DIR"] = str(config)
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        config.mkdir(parents=True, exist_ok=True)
+        secret = config.parent / "claude-key"
+        secret.write_text(key)
+        secret.chmod(0o600)
+        (config / "settings.json").write_text(json.dumps({"apiKeyHelper": f"cat {shlex.quote(str(secret))}"}))
     return kept
 
 
@@ -560,7 +570,7 @@ def run_claude(prompt: str, work: Path, env: dict, args, tool: str) -> dict:
     cmd = [exe(args.claude), "-p", prompt, "--model", args.model, "--output-format", "stream-json", "--verbose",
            "--max-turns", str(GEMINI_SETTINGS["model"]["maxSessionTurns"]), "--strict-mcp-config",
            "--allowedTools", CLAUDE_TOOLS, "--disallowedTools", CLAUDE_DENIED]
-    if TOOLS[tool]["cmd"] == "navigera":
+    if TOOLS[tool]["cmd"] == "navigera" and args.mode == "skilled":
         cmd += ["--plugin-dir", str(REPO / "skills")]
     started = time.time()
     proc = subprocess.Popen(cmd, cwd=work, env=claude_env(env), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -877,6 +887,7 @@ def smoke(args) -> int:
     root = Path(tempfile.mkdtemp(prefix="eval-smoke-"))
     work, env = prepare("navigera", "skilled", root, args)
     res = run_openai("Reply with the single word OK.", work, env, args) if args.agent == "openai" \
+        else run_claude("Reply with the single word OK.", work, env, args, "navigera") if args.agent == "claude" \
         else run_gemini("Reply with the single word OK.", work, env, args)
     print(json.dumps({"exit": res["exit"], "models": res["models"], "text": res["text"][:80],
                       "tokens_total": res["tokens_total"]}))

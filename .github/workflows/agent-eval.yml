@@ -48,7 +48,7 @@ on:
         description: "skilled (skill preinstalled), onboard (agent installs the tool from its docs), both, or scripted (no model: the scripted baseline only)"
         default: "both"
       agent:
-        description: "gemini (Gemini CLI) or openai (OpenAI-compatible endpoint, e.g. DeepSeek via SiliconFlow)"
+        description: "gemini (Gemini CLI), openai (OpenAI-compatible endpoint, e.g. DeepSeek via SiliconFlow) or claude (Claude Code, ANTHROPIC_API_KEY; model e.g. claude-sonnet-5-5)"
         default: "gemini"
       model:
         description: "model id for the chosen agent (Gemini free tier: a Flash-Lite model has the largest daily quota)"
@@ -160,9 +160,19 @@ jobs:
             python bench/agent-eval/annotate_runs.py out/scripted/summary-skilled.json "agent eval scripted json (${{ matrix.run.os }})"
           fi
           exit $rc
+      - name: Claude Code CLI (agent claude)
+        if: env.AGENT == 'claude'
+        run: npm install -g @anthropic-ai/claude-code@2.1.325 && claude --version
       - name: Key
         run: |
-          if [ "$AGENT" = openai ] && [ -z "$SILICONFLOW_API_KEY" ]; then
+          if [ "$AGENT" = claude ]; then
+            if [ -z "$ANTHROPIC_API_KEY" ]; then
+              echo "::notice title=agent eval::no ANTHROPIC_API_KEY in the main environment; only the scripted baseline ran."
+              echo "HAS_KEY=false" >> "$GITHUB_ENV"
+            else
+              echo "HAS_KEY=true" >> "$GITHUB_ENV"
+            fi
+          elif [ "$AGENT" = openai ] && [ -z "$SILICONFLOW_API_KEY" ]; then
             echo "::notice title=agent eval::no SILICONFLOW_API_KEY in the main environment; only the scripted baseline ran."
             echo "HAS_KEY=false" >> "$GITHUB_ENV"
           elif [ "$HAS_KEY" != true ]; then
@@ -172,6 +182,7 @@ jobs:
           fi
         env:
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       - name: Model smoke test
         id: smoke
         # Model steps still run when the scripted baseline failed (its own
@@ -183,6 +194,7 @@ jobs:
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
           OPENAI_API_KEY: ${{ inputs.endpoint == 'openrouter' && secrets.OPENROUTER_API_KEY || '' }}
           OPENAI_BASE_URL: ${{ inputs.endpoint == 'openrouter' && 'https://openrouter.ai/api/v1' || '' }}
+          ANTHROPIC_API_KEY: ${{ inputs.agent == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
         run: |
           log="$RUNNER_TEMP/smoke.txt"
           if ! python bench/agent-eval/run.py --smoke --agent "$AGENT" --run-timeout 300 --model "$MODEL" --gemini "$GEMINI_BIN" \
@@ -199,6 +211,7 @@ jobs:
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
           OPENAI_API_KEY: ${{ inputs.endpoint == 'openrouter' && secrets.OPENROUTER_API_KEY || '' }}
           OPENAI_BASE_URL: ${{ inputs.endpoint == 'openrouter' && 'https://openrouter.ai/api/v1' || '' }}
+          ANTHROPIC_API_KEY: ${{ inputs.agent == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
         run: |
           bash bench/agent-eval/logged.sh "agent run log (onboard, $TOOL, ${{ matrix.run.os }})" \
             python bench/agent-eval/run.py --mode onboard --agent "$AGENT" --tools "$TOOL" --model "$MODEL" \
@@ -207,7 +220,7 @@ jobs:
         if: "!cancelled() && env.HAS_KEY == 'true' && (env.MODE == 'skilled' || env.MODE == 'both') && !startsWith(env.TOOL, 'navigera') && steps.smoke.outcome == 'success'"
         run: |
           case "$TOOL" in
-            agent-browser*) npm install -g agent-browser@0.42.0 ;;
+            agent-browser*) npm install -g agent-browser@0.43.0 ;;
             playwright-cli) npm install -g @playwright/cli@0.1.24 ;;
           esac
           npm ls -g --depth=0
@@ -218,6 +231,7 @@ jobs:
           SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
           OPENAI_API_KEY: ${{ inputs.endpoint == 'openrouter' && secrets.OPENROUTER_API_KEY || '' }}
           OPENAI_BASE_URL: ${{ inputs.endpoint == 'openrouter' && 'https://openrouter.ai/api/v1' || '' }}
+          ANTHROPIC_API_KEY: ${{ inputs.agent == 'claude' && secrets.ANTHROPIC_API_KEY || '' }}
         run: |
           bash bench/agent-eval/logged.sh "agent run log (skilled, $TOOL, ${{ matrix.run.os }})" \
             python bench/agent-eval/run.py --mode skilled --agent "$AGENT" --tools "$TOOL" --tasks "$TASKS" \

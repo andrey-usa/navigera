@@ -38,8 +38,9 @@ a result can be checked against a second model family.
 
 `--agent claude` runs Claude Code headless, fresh configuration per run,
 each tool as its users get it: navigera's plugin, agent-browser's own
-skill. Web tools are off; the cost is Claude Code's figure. The workflow
-has no Anthropic key, so run it where Claude Code is signed in:
+skill. Web tools are off; the cost is Claude Code's figure. The workflow's
+`agent: claude` needs `ANTHROPIC_API_KEY` in the main environment (the
+agent's shell never sees it); locally, Claude Code's own sign-in works:
 
 ```sh
 CHROME_BIN=/path/to/chrome python3 bench/agent-eval/run.py --agent claude \
