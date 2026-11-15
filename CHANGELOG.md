@@ -8,11 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- The README and the documentation site show the navigera wordmark from
-  the brand sheet (`assets/brand/`, light and dark), and the site's
-  favicon is its N. The documentation as agents read it (llms-full.txt,
-  each page's markdown) leaves out lines that are only images: the
-  wordmark and the badges.
+- The README's title is the navigera wordmark from the brand sheet
+  (`assets/brand/`, light and dark), and so is the documentation site's
+  home page; every page of the site has the N beside its title and as its
+  favicon. The documentation as agents read it (llms-full.txt, each page's
+  markdown) keeps the title as text and leaves out lines that are only
+  images: the wordmark and the badges.
 
 ### Fixed
 

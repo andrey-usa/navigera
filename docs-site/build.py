@@ -47,6 +47,9 @@ LLMS_MAX = 6000
 PAGE_WORDS_MAX = 1500
 
 HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+# A title drawn as an image, as a README with a logo has it: `<h1 ...>...<img alt="name" ...>...</h1>` on one line.
+HTML_H1 = re.compile(r"^<h1\b[^>]*>.*</h1>\s*$")
+IMG_ALT = re.compile(r"<img\b[^>]*\balt=\"([^\"]*)\"")
 FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
 INLINE_LINK = re.compile(r"(!?)\[((?:[^\]\\]|\\.)*)\]\(<?([^)\s>]+)>?((?:\s+\"[^\"]*\")?)\)")
 REF_DEF = re.compile(r"^([ \t]{0,3}\[[^\]]+\]:[ \t]*)<?(\S+?)>?(\s.*)?$")
@@ -138,6 +141,10 @@ class Source:
             if m:
                 t = heading_text(m.group(2))
                 self.headings[i] = (len(m.group(1)), t, ids(t))
+            elif i == 0 and HTML_H1.match(line):
+                alt = IMG_ALT.search(line)
+                t = alt.group(1) if alt else heading_text(line)
+                self.headings[i] = (1, t, ids(t))
         self.ids = {h[2] for h in self.headings.values()}
         tops = [i for i, h in self.headings.items() if h[0] <= 2]
         self.sections, self.order = {}, []
@@ -182,6 +189,7 @@ class Page:
         self.tops = []  # (file, id) of headings the page title stands for
         self.ids = set()
         self.long = False
+        self.title_html = None  # the index: the README's title, when it is drawn
 
     @property
     def dir(self):
@@ -235,6 +243,8 @@ def build_pages(cfg, binary, sources):
     index = Page("index.md", cfg["name"], "", None)
     index.files.append("README.md")
     index.tops.append(("README.md", readme.headings[0][2]) if 0 in readme.headings else ("README.md", ""))
+    if HTML_H1.match(readme.lines[0]):
+        index.title_html = readme.lines[0]
     take(index, readme, *readme.preamble, False)
     used["README.md"] = {"_preamble"}
     pages = [index]
@@ -546,13 +556,17 @@ IMAGE_ONLY = re.compile(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)|!\[[^\]]*\]\([^)]*\)
 
 def for_agents(text):
     """The page as agents read it (llms-full.txt, each page's .md): without
-    lines that are only images (the logo, badges), which say nothing in text."""
+    lines that are only images (the logo, badges), which say nothing in text;
+    a title drawn as an image becomes its alt text."""
     out, fence = [], None
     for line in text.split("\n"):
         m = re.match(r"\s*(```+|~~~+)", line)
         if m:
             fence = None if fence and m.group(1)[0] == fence[0] else (fence or m.group(1))
         elif not fence and ("![" in line or "<img" in line) and not IMAGE_ONLY.sub("", line).strip():
+            alt = IMG_ALT.search(line) if HTML_H1.match(line) else None
+            if alt:
+                out.append(f"# {alt.group(1)}")
             continue
         out.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
@@ -566,7 +580,7 @@ def write_site(cfg, pages, linker, binary):
     for page in pages:
         body = re.sub(r"\n{3,}", "\n\n", linker.text(page))
         if page.path == "index.md":
-            text = (NOTE.format(src="README.md and docs-site/site.toml") + f"\n\n# {cfg['name']}\n\n{body}\n\n"
+            text = (NOTE.format(src="README.md and docs-site/site.toml") + f"\n\n{page.title_html or '# ' + cfg['name']}\n\n{body}\n\n"
                     + "\n".join(contents(cfg, pages[1:], "", ".md", True)) + f"\n{build_line(cfg, binary, pages)}\n")
         else:
             made_of = ", ".join(f if f.startswith("`") else
