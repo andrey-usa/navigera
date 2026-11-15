@@ -438,6 +438,9 @@ pub enum Command {
         /// Skip the network-quiet wait before reading (`--no-wait`).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_wait: bool,
+        /// Only this part of the page (`ax --selector form --grep x`).
+        #[serde(flatten)]
+        scope: TargetArgs,
     },
     /// Evaluate a JS expression; result must be JSON-serializable.
     #[serde(rename = "eval", alias = "evaluate")]
@@ -1327,7 +1330,7 @@ pub struct ParsedArgs {
 const OPS: &[(&str, &str, &str)] = &[
     ("start", "[--attach [<where>] [--tab current] | --auto-connect | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open (--auto-connect, a bare --attach: your running browser, whichever serves remote debugging; $NAVIGERA_AUTO_CONNECT=1 for every start; --attach wss://… a browser in the cloud, $NAVIGERA_ATTACH to keep its key off the command line; --tab current: in the tab you are on, not a window of its own); --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
-    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait] | --grep <words> [--limit <lines>]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …). --grep: only the lines that mention the words (letter case aside), under the containers they sit in, with their refs; the first 30"),
+    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait] | [--selector <css>] --grep <words> [--limit <lines>]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …). --grep: only the lines that mention the words (letter case aside; `a|b` for either), under the containers they sit in, with their refs, in the target's part when one is given; the first 30"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force] [--until-gone [--max <n>]]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts. --until-gone: clicks again (a \"Load more\" button) while the element is there and enabled and each click changes the page, letting what each click loads land, at most 50 clicks (--max); says how many and why it stopped"),
     ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys] [--force]", "set an input/textarea's value once the field is visible, enabled and editable (waits for it; the timeout error names which check failed; --force skips the checks); --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
     ("type", "<text> [--selector <css> | --ref <n>]", "type key by key into the target or the focused element"),
@@ -2757,6 +2760,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
                 limit: num_flag(&mut args, "--limit")?.map(|v| v.max(0.0) as usize),
                 timeout_ms,
                 no_wait: extract_present(&mut args, "--no-wait"),
+                // `ax --selector main --grep return`: both, as written.
+                scope: target_args(&mut args, false)?,
             }
         }
         "ax" | "snapshot" => Command::Ax {
@@ -5345,8 +5350,8 @@ impl Driver {
     }
 
     /// The page as `ax --grep` sees it: the whole text tree.
-    fn page_tree(&self, timeout_ms: Option<f64>) -> anyhow::Result<String> {
-        let opts = AxOptions { limit: 20_000, ..AxOptions::default() };
+    fn page_tree(&self, timeout_ms: Option<f64>, scope: Option<Target>) -> anyhow::Result<String> {
+        let opts = AxOptions { limit: 20_000, scope, ..AxOptions::default() };
         match self.session.ax(&opts, timeout_ms).map_err(|e| e.context("ax"))? {
             Value::String(tree) => Ok(tree),
             other => Ok(other.to_string()),
@@ -5452,8 +5457,8 @@ impl Driver {
     fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
         let s = &self.session;
         match command {
-            Command::Grep { query, limit, timeout_ms, .. } => {
-                let tree = self.page_tree(*timeout_ms)?;
+            Command::Grep { query, limit, timeout_ms, scope, .. } => {
+                let tree = self.page_tree(*timeout_ms, scope.optional("ax")?)?;
                 Ok(json!(crate::grep::grep_tree(&tree, query, limit.unwrap_or(crate::grep::DEFAULT_TREE_LINES))))
             }
             Command::Open { url } => {
@@ -8564,6 +8569,12 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(parse_args(argv(&["navigera", "ax", "--grep", "x", "-A", "many"])).is_err());
+        match cmd(&["ax", "--selector", "main", "--grep", "return"]) {
+            Command::Grep { query, scope, .. } => {
+                assert_eq!((query.as_str(), scope.selector.as_deref()), ("return", Some("main")))
+            }
+            other => panic!("{other:?}"),
+        }
 
         let target = |args: &[&str]| match cmd(args) {
             Command::Ax { scope, .. } => (scope.selector, scope.role),

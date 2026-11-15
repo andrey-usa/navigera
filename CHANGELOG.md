@@ -24,6 +24,9 @@ All notable changes to this project are documented here. The format follows
   (`a\|b`, `a|b`) when the query as written is nowhere. `--grep -i word`
   searched for "-i" and failed on `word`. Seen in Claude Code runs of the
   agent eval, one failed command each.
+- `ax --grep` takes a scope (`ax --selector main --grep return`): the
+  lines of that part of the page that mention it. The two together were
+  refused as a usage error, and in a `batch` nothing ran.
 - A `--selector` that is one ARIA role word the tree prints and no HTML
   element's name (`banner`, `navigation`, `contentinfo`, `heading`,
   `listitem`, …) is read as `--role`. `ax --selector banner`, after reading
