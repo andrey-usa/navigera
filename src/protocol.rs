@@ -1993,7 +1993,13 @@ fn grep_habits(args: &mut Args) -> Result<Option<usize>, ArgsError> {
                 let raw = args.pop_front().unwrap_or_default();
                 context = context.max(Some(lines(&raw)?));
             }
-            a if a.len() > 2 && ["-A", "-B", "-C"].contains(&&a[..2]) && a[2..].bytes().all(|b| b.is_ascii_digit()) => {
+            // Byte 2 must start a character before the word is cut there:
+            // `--grep 日本` is a query, and cutting it mid-character panics.
+            a if a.len() > 2
+                && a.is_char_boundary(2)
+                && ["-A", "-B", "-C"].contains(&&a[..2])
+                && a[2..].bytes().all(|b| b.is_ascii_digit()) =>
+            {
                 context = context.max(Some(lines(&a[2..])?));
             }
             _ => kept.push_back(arg),
@@ -8569,6 +8575,18 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(parse_args(argv(&["navigera", "ax", "--grep", "x", "-A", "many"])).is_err());
+        // A query whose first character is three or four bytes long (the
+        // fuzzer's find: this panicked on a cut inside the character).
+        for query in ["日本語", "\u{fffd}/", "😀 done", "é", "-A１"] {
+            match cmd(&["ax", "--grep", query]) {
+                Command::Grep { query: got, .. } => assert_eq!(got, query),
+                other => panic!("{query:?}: {other:?}"),
+            }
+            match cmd(&["text", "--grep", query]) {
+                Command::Text { grep, .. } => assert_eq!(grep.as_deref(), Some(query)),
+                other => panic!("{query:?}: {other:?}"),
+            }
+        }
         match cmd(&["ax", "--selector", "main", "--grep", "return"]) {
             Command::Grep { query, scope, .. } => {
                 assert_eq!((query.as_str(), scope.selector.as_deref()), ("return", Some("main")))
