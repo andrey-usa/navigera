@@ -92,6 +92,14 @@ jobs:
           echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
           "$CHROME_BIN" --version
 
+      - name: Install Firefox stable (BiDi operations)
+        run: |
+          curl -fsSL --retry 4 --retry-all-errors 'https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64&lang=en-US' -o /tmp/firefox.tar.xz
+          sudo mkdir -p /opt/bench-firefox
+          sudo tar -xJf /tmp/firefox.tar.xz -C /opt/bench-firefox --strip-components=1
+          echo "NAVIGERA_FIREFOX=/opt/bench-firefox/firefox" >> "$GITHUB_ENV"
+          /opt/bench-firefox/firefox --version
+
       - name: Install Microsoft Edge
         # Optional contender: a flaky vendor download must not kill the
         # ladder; a missing binary shows up under "Skipped" in the table.
@@ -217,8 +225,21 @@ jobs:
           go build -o ladder-gorod .
 
       - name: Install node contenders
-        run: npm install --no-audit --no-fund
         working-directory: bench/ladder
+        run: |
+          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund playwright@latest puppeteer-core@latest webdriverio@latest vibium@latest
+
+      - name: Install Playwright Firefox (patched build, Node and Bun API arms)
+        working-directory: bench/ladder
+        run: |
+          npx playwright install --with-deps firefox
+          npx vibium install --engine firefox
+
+      - name: Check Firefox ops harness
+        run: |
+          python3 bench/ladder/test_firefox_ops.py
+          node --check bench/ladder/contenders/firefox_library.mjs
 
       - name: Generate fixtures
         run: python3 bench/ladder/gen_fixtures.py

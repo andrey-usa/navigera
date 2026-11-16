@@ -48,7 +48,14 @@ Usage: ops_agent.py --tool {nv,ab,pw,pwmcp,cdmcp,bu} --reps 10 --out DIR
   --session NAME [--navigera PATH] [--chrome PATH] [--browser-use PATH]
   [--own-browser]
 
-Env: LADDER_BASE (fixture server base URL), CHROME_BIN, NAVIGERA.
+Firefox library arms (pwff-node, pwff-bun, ppff, wdioff, vibiumff) use a
+persistent Node/Bun endpoint. Wall time includes the JSON-line control pipe;
+setup and verification remain untimed. Their form-batch is four library calls
+in one control request, not four CLI starts. --tool nv --engine firefox uses
+the same navigera CLI checks as Chrome.
+
+Env: LADDER_BASE (fixture server base URL), CHROME_BIN, NAVIGERA,
+NAVIGERA_FIREFOX (runner Firefox; Playwright and Vibium use managed builds).
 """
 import argparse
 import json
@@ -322,6 +329,10 @@ class Tool:
 
     def __init__(self, args, base: str, expected: dict, out_dir: Path):
         self.name = args.tool
+        self.library = args.tool in ("pwff-node", "pwff-bun", "ppff", "wdioff", "vibiumff")
+        self.peer = None
+        self.browser_info = {}
+        self.peer_ready = False
         self.tag = args.tag or args.tool
         self.args = args
         self.base = base
@@ -352,12 +363,49 @@ class Tool:
         self.log("timed" if op in OPS else op, op, ms, True)
         return ms, out
 
+    def library_call(self, op: str, *, phase=None, **params):
+        import select
+        if not self.peer or self.peer.poll() is not None:
+            raise RuntimeError("Firefox library endpoint is not running")
+        t0 = time.perf_counter()
+        self.peer.stdin.write(json.dumps({"op": op, **params}) + "\n")
+        self.peer.stdin.flush()
+        if not select.select([self.peer.stdout], [], [], 120)[0]:
+            raise RuntimeError(f"Firefox library {op} timed out")
+        reply = json.loads(self.peer.stdout.readline())
+        ms = (time.perf_counter() - t0) * 1000
+        self.log(phase or ("timed" if op in OPS else "verify"), op, ms, reply.get("ok", False))
+        if not reply.get("ok"):
+            raise RuntimeError(reply.get("error", "library call failed"))
+        return ms, reply.get("value")
+
     # -- session lifecycle -------------------------------------------------
     def start(self):
-        if self.name in ("nv",):
+        if self.library:
+            import select
+            runtime = "bun" if self.name == "pwff-bun" else "node"
+            kind = {"pwff-node": "playwright", "pwff-bun": "playwright",
+                    "ppff": "puppeteer", "wdioff": "webdriverio", "vibiumff": "vibium"}[self.name]
+            self.peer = subprocess.Popen(
+                [runtime, str(Path(__file__).with_name("firefox_library.mjs")), kind],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
+                text=True, start_new_session=True)
+            if not select.select([self.peer.stdout], [], [], 120)[0]:
+                raise RuntimeError("Firefox library startup timed out")
+            reply = json.loads(self.peer.stdout.readline())
+            if not reply.get("ok"):
+                raise RuntimeError(reply.get("error", "library startup failed"))
+            self.browser_info = reply["info"]
+            self.peer_ready = True
+            self.library_call("goto", url=f"{self.base}/page_a.html", phase="setup")
+        elif self.name in ("nv",):
             exe = self.args.navigera or os.environ["NAVIGERA"]
-            chrome = self.args.chrome or os.environ["CHROME_BIN"]
-            argv = [exe, "--session", self.session, "start", "--chromium", chrome]
+            if self.args.engine == "firefox":
+                argv = [exe, "--session", self.session, "start", "--engine", "firefox",
+                        "--executable", os.environ["NAVIGERA_FIREFOX"]]
+            else:
+                chrome = self.args.chrome or os.environ["CHROME_BIN"]
+                argv = [exe, "--session", self.session, "start", "--chromium", chrome]
             if self.args.own_browser:
                 argv.append("--own-browser")
             ms, _ = self.cli(argv, dict(os.environ), "start")
@@ -419,7 +467,22 @@ class Tool:
 
     def close(self):
         try:
-            if self.name == "nv":
+            if self.library:
+                import signal
+                if self.peer:
+                    try:
+                        if self.peer_ready:
+                            self.library_call("close", phase="close")
+                            self.peer.stdin.close()
+                            self.peer.wait(timeout=15)
+                    finally:
+                        # This endpoint owns its process group, never another arm's browser.
+                        try:
+                            os.killpg(self.peer.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        self.peer.wait()
+            elif self.name == "nv":
                 exe = self.args.navigera or os.environ["NAVIGERA"]
                 ms, _ = self.cli([exe, "--session", self.session, "quit"],
                                  dict(os.environ), "close")
@@ -661,6 +724,8 @@ class Tool:
         navigera compact prints the bare value, agent-browser prints a JSON
         scalar, playwright-cli prints a "### Result" block.
         """
+        if self.library:
+            return self.library_call("eval", expr=expr)[1]
         if self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             _, out = self.cli([exe, "--session", self.session, "eval", expr],
@@ -702,7 +767,9 @@ class Tool:
     # -- the ops ---------------------------------------------------------------
     def op_goto(self, rep: int):
         url = f"{self.base}/page_a.html"
-        if self.name == "nv":
+        if self.library:
+            ms, _ = self.library_call("goto", url=url)
+        elif self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             ms, _ = self.cli([exe, "--session", self.session, "goto", url],
                              dict(os.environ), "goto")
@@ -734,7 +801,9 @@ class Tool:
     def op_fill(self, rep: int):
         # Same starting state every rep: clear the box first (untimed setup).
         self.setup("document.getElementById('q').value=''")
-        if self.name == "nv":
+        if self.library:
+            ms, _ = self.library_call("fill", selector="#q", value="widget")
+        elif self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             ms, _ = self.cli([exe, "--session", self.session, "fill",
                               "--selector", "#q", "--value", "widget"],
@@ -768,7 +837,9 @@ class Tool:
         self.setup("document.getElementById('q').value='widget';"
                    "for (const c of document.querySelectorAll('.card.hidden')) "
                    "c.classList.remove('hidden')")
-        if self.name == "nv":
+        if self.library:
+            ms, _ = self.library_call("click", selector="#search")
+        elif self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             ms, _ = self.cli([exe, "--session", self.session, "click",
                               "--selector", "#search"], dict(os.environ), "click")
@@ -795,7 +866,9 @@ class Tool:
     def op_click_submit(self, rep: int):
         # Same starting state every rep: clear the status + counter (untimed).
         self.setup("document.getElementById('status').textContent=''; window.__placed=0")
-        if self.name == "nv":
+        if self.library:
+            ms, _ = self.library_call("click", selector="#place")
+        elif self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             ms, _ = self.cli([exe, "--session", self.session, "click",
                               "--selector", "#place"], dict(os.environ), "click-submit")
@@ -827,7 +900,9 @@ class Tool:
 
     def op_read_text(self, rep: int):
         # The timed call's own output IS the value, in each tool's default mode.
-        if self.name == "nv":
+        if self.library:
+            ms, value = self.library_call("eval", expr=HEADING, phase="timed")
+        elif self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             ms, out = self.cli([exe, "--session", self.session, "eval", HEADING],
                                dict(os.environ), "read-text")
@@ -855,7 +930,10 @@ class Tool:
         return ms, 1, ""
 
     def op_snapshot(self, rep: int):
-        if self.name == "nv":
+        if self.library:
+            ms, out = self.library_call("snapshot")
+            nbytes = len(out.encode())
+        elif self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             # Default (compact) output: what an agent reads.
             snap_env = {k: v for k, v in os.environ.items() if k != "NAVIGERA_OUTPUT"}
@@ -892,12 +970,29 @@ class Tool:
         # MCP tools the text is the snapshot text; for the rest it is the
         # timed call's output.
         snap_text = text if self.name in ("pwmcp", "cdmcp") else out
-        assert_snapshot_known_elements(snap_text)
+        if self.name == "vibiumff":
+            # Inspect the library's actual AX data, never replace absent names
+            # with DOM text to manufacture an equivalent-looking snapshot.
+            tree = json.loads(snap_text)
+            def nodes(node):
+                yield node
+                for child in node.get("children", []):
+                    yield from nodes(child)
+            entries = list(nodes(tree))
+            if not any(n.get("role") == "heading" and n.get("name") == "Search results"
+                       for n in entries):
+                raise RuntimeError("snapshot: heading 'Search results' not present")
+            if not any(n.get("role") == "button" and n.get("name") == "Search" for n in entries):
+                raise RuntimeError("snapshot: button 'Search' not present")
+        else:
+            assert_snapshot_known_elements(snap_text)
         return ms, 1, f"{nbytes} bytes"
 
     def op_screenshot(self, rep: int):
         shot = self.out_dir / f"ops-shot-{self.tag}-r{rep}.png"
-        if self.name == "nv":
+        if self.library:
+            ms, _ = self.library_call("screenshot", path=str(shot.resolve()))
+        elif self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             ms, out = self.cli([exe, "--session", self.session, "screenshot",
                                 "--path", str(shot)], dict(os.environ), "screenshot")
@@ -948,7 +1043,10 @@ class Tool:
     def op_form_batch(self, rep: int):
         # Same starting state every rep: clear the status + counter (untimed).
         self.setup("document.getElementById('status').textContent=''; window.__placed=0")
-        if self.name == "nv":
+        if self.library:
+            ms, _ = self.library_call("form-batch")
+            calls = 4
+        elif self.name == "nv":
             exe = self.args.navigera or os.environ["NAVIGERA"]
             lines = "\n".join([
                 "fill --selector #cust --value ada",
@@ -1022,6 +1120,11 @@ class Tool:
     }
 
     def run_op(self, op: str, reps: int) -> dict:
+        if self.library and op == "snapshot" and self.name in ("ppff", "wdioff"):
+            reason = ("Puppeteer BiDi has no accessibility snapshot API" if self.name == "ppff"
+                      else "WebdriverIO has no Firefox accessibility snapshot API")
+            return {"runs_ms": [], "median_ms": None, "calls": 0, "ok": False,
+                    "not_run": reason}
         method = self.OP_METHODS[op]
         runs: list[float] = []
         errors: list[str] = []
@@ -1069,7 +1172,8 @@ def first_textbox_uid(snapshot: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tool", choices=["nv", "ab", "pw", "pwmcp", "cdmcp", "bu"],
+    ap.add_argument("--tool", choices=["nv", "ab", "pw", "pwmcp", "cdmcp", "bu",
+                                            "pwff-node", "pwff-bun", "ppff", "wdioff", "vibiumff"],
                     required=True)
     ap.add_argument("--reps", type=int, default=10)
     ap.add_argument("--out", required=True)
@@ -1080,6 +1184,7 @@ def main() -> int:
                          "a --tool code (navigera vs its baseline) do not "
                          "overwrite each other's transcript in one round dir.")
     ap.add_argument("--navigera", default="")
+    ap.add_argument("--engine", choices=["chrome", "firefox"], default="chrome")
     ap.add_argument("--chrome", default="")
     ap.add_argument("--browser-use", default="")
     ap.add_argument("--own-browser", action="store_true")
@@ -1105,7 +1210,7 @@ def main() -> int:
     finally:
         tool.close()
     doc = {"tool": args.tool, "tag": tool.tag, "reps": args.reps, "ops": results,
-           "calls": tool.calls, **({"error": error} if error else {})}
+           "calls": tool.calls, "browser_info": tool.browser_info, **({"error": error} if error else {})}
     (out_dir / f"ops-{tool.tag}.json").write_text(json.dumps(doc, indent=2) + "\n",
                                                 encoding="utf-8")
     print(json.dumps({"tool": args.tool, "reps": args.reps,

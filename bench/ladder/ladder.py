@@ -409,6 +409,24 @@ def run_once(argv, env, timeout_s, chrome_tag=None, detail=None) -> tuple[float,
         if info is not None and info.si_pid == proc.pid:
             break
         if time.perf_counter() - t0 > timeout_s:
+            # Persistent ops endpoints have their own process groups so they can
+            # clean up their browser without touching another arm. On a hard
+            # outer timeout, stop those groups before their parent disappears.
+            if len(argv) > 1 and Path(argv[1]).name == "ops_agent.py":
+                import signal
+                table = proc_table()
+                descendants, pending = [], [proc.pid]
+                while pending:
+                    parent = pending.pop()
+                    children = [pid for pid, (ppid, _) in table.items() if ppid == parent]
+                    descendants.extend(children)
+                    pending.extend(children)
+                for pid in descendants:
+                    try:
+                        if os.getpgid(pid) == pid:
+                            os.killpg(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             proc.kill()
             hwm.stop()
             browser.stop()
@@ -873,6 +891,17 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
             tools[label] = ["--tool", tool]
         else:
             SKIPPED[label] = f"not installed ({hint})"
+    if os.environ.get("NAVIGERA_FIREFOX"):
+        if "nv-serve" in contenders:
+            tools["navigera Firefox"] = ["--tool", "nv", "--engine", "firefox"]
+        for label, code in (("Playwright Firefox Node API", "pwff-node"),
+                            ("Playwright Firefox Bun API", "pwff-bun"),
+                            ("Puppeteer Firefox BiDi API", "ppff"),
+                            ("WebdriverIO Firefox BiDi API", "wdioff"),
+                            ("Vibium Firefox API", "vibiumff")):
+            tools[label] = ["--tool", code]
+    else:
+        SKIPPED["Firefox operations"] = "NAVIGERA_FIREFOX is not set"
     print("== matched operations: " + ", ".join(tools), flush=True)
     # Per-tool state, created up front so the round loop can fill it.
     # Per-label slug for the transcript tag: two tools can share one
@@ -925,8 +954,11 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
                 print(f"  [ops] {label} round {rnd + 1}/{OPS_ROUNDS}: FAILED "
                       f"(no transcript)", flush=True)
                 continue
+            st.setdefault("browser_info", []).append(tdoc.get("browser_info", {}))
             for op, cell in tdoc.get("ops", {}).items():
                 merged = cells[op]
+                if cell.get("not_run"):
+                    merged["not_run"] = cell["not_run"]
                 merged["runs_ms"].extend(cell.get("runs_ms") or [])
                 merged["calls"] = cell.get("calls", 1)
                 merged["errors"].extend(cell.get("errors") or [])
@@ -952,11 +984,12 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
             merged["complete"] = complete
             merged["incomplete"] = (not complete and bool(runs))
             merged["ok"] = complete
-            if not runs:
+            if not runs and not merged.get("not_run"):
                 merged["errors"].append("no passing reps in either round")
             if not merged["errors"]:
                 merged.pop("errors")
-        results[label] = {"cells": cells, "ok": all(c["ok"] for c in cells.values()),
+        results[label] = {"cells": cells, "browser_info": st.get("browser_info", []),
+                          "ok": not round_errors and all(c["ok"] or bool(c.get("not_run")) for c in cells.values()),
                           **({"round_errors": round_errors} if round_errors else {})}
     kill_stray_chrome(chrome_tag)
     kill_agent_daemons()
@@ -987,14 +1020,14 @@ def collect_versions() -> dict[str, str]:
         if os.environ.get("NAVIGERA_BASELINE_COMMIT"):
             v["nv-baseline"] += f" at {os.environ['NAVIGERA_BASELINE_COMMIT']}"
     for label, env_var in (("chrome", "CHROME_BIN"), ("edge", "EDGE_BIN"), ("brave", "BRAVE_BIN"),
-                           ("chrome-headless-shell", "SHELL_BIN")):
+                           ("chrome-headless-shell", "SHELL_BIN"), ("firefox", "NAVIGERA_FIREFOX")):
         binary = os.environ.get(env_var)
         if binary and Path(binary).exists():
             v[label] = first_line([binary, "--version"])
     lp = shutil.which("lightpanda")
     if lp:
         v["lightpanda"] = first_line([lp, "version"])
-    for pkg in ("playwright-core", "puppeteer-core"):
+    for pkg in ("playwright-core", "playwright", "puppeteer-core", "webdriverio", "vibium"):
         try:
             v[pkg] = json.loads((HERE / "node_modules" / pkg / "package.json").read_text())["version"]
         except (OSError, ValueError, KeyError):
@@ -1178,11 +1211,13 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
         "parallel": [{"name": name, "runs": rows} for name, rows in (parallel_results or {}).items()],
         "ops": [{"name": name,
                  "ok": bool(r.get("ok")),
+                 "browser_info": r.get("browser_info", []),
                  "cells": {op: {"median_ms": cell.get("median_ms"),
                                 "calls": cell.get("calls"),
                                 "reps": cell.get("reps"),
                                 "expected_reps": cell.get("expected_reps"),
                                 "complete": bool(cell.get("complete")),
+                                **({"not_run": cell["not_run"]} if cell.get("not_run") else {}),
                                 **({"incomplete": True} if cell.get("incomplete") else {}),
                                 # Partial samples stay in the JSON.
                                 "runs_ms": cell.get("runs_ms", []),
@@ -1707,7 +1742,9 @@ def main() -> int:
             row = [f"`{op}`"]
             for name in ops_cols:
                 cell = ops_results[name]["cells"][op]
-                if cell.get("median_ms") is None:
+                if cell.get("not_run"):
+                    row.append("not run: " + cell["not_run"])
+                elif cell.get("median_ms") is None:
                     row.append("failed")
                 elif cell.get("incomplete"):
                     n = cell.get("reps", 0)
@@ -1720,6 +1757,47 @@ def main() -> int:
                                f"{'s' if cell['calls'] != 1 else ''}"
                                + (f", n={n}" if n != 10 else "") + ")")
             lines.append("| " + " | ".join(row) + " |")
+        lines.append("")
+        lines.append("Firefox API arms use persistent library sessions, not a CLI per op. "
+                     "Their JSON-line control-pipe round-trip is included; launch and "
+                     "verification reads are not. Form-batch uses four sequential library "
+                     "calls in one control request. Playwright Node and Bun use its bundled "
+                     "patched Firefox; Puppeteer and WebdriverIO use NAVIGERA_FIREFOX, and Vibium uses its managed Firefox. "
+                     "Puppeteer disables its extra two-frame bounding-box stability wait "
+                     "on these static fixtures; visibility/enabled checks remain. "
+                     "These are different interfaces and browser builds, not an engine-only A/B.")
+        lines.append("")
+        for label in ops_cols:
+            info = ops_results[label].get("browser_info") or []
+            if info and info[0]:
+                lines.append(f"- `{label}`: {info[0].get('browser', 'unknown browser')} "
+                             f"({info[0].get('browser_build', '')})")
+        lines.append("")
+        for label in ops_cols:
+            for op, cell in ops_results[label]["cells"].items():
+                if cell.get("errors"):
+                    lines.append(f"- `{label}` `{op}` failed: "
+                                 + "; ".join(dict.fromkeys(cell["errors"])))
+        lines.append("")
+        for baseline in ("navigera", "navigera Firefox"):
+            if baseline not in ops_results:
+                continue
+            losses = []
+            for op in OPS:
+                own = ops_results[baseline]["cells"][op]
+                if not own.get("complete"):
+                    continue
+                for other in ops_cols:
+                    if other == baseline:
+                        continue
+                    cell = ops_results[other]["cells"][op]
+                    if cell.get("complete") and cell["median_ms"] < own["median_ms"]:
+                        losses.append(f"{op}: {other} {cell['median_ms']:.1f} ms "
+                                      f"vs {own['median_ms']:.1f} ms")
+            lines.append(f"Losses for `{baseline}` (complete cells only):")
+            lines.extend(f"- {loss}" for loss in losses)
+            if not losses:
+                lines.append("- None measured.")
         lines.append("")
         lines.append("Snapshot outputs differ in form (each tool's default tree), so "
                      "that row compares call latency, not equivalent work. The "
