@@ -49,7 +49,7 @@ struct Http {
     /// `/wd/hub` for a grid, empty for a driver.
     base: String,
     auth: Option<String>,
-    conn: Option<BufReader<TcpStream>>,
+    conn: Option<BufReader<Timed>>,
 }
 
 impl Http {
@@ -75,7 +75,7 @@ impl Http {
         Ok(Self { host: host.to_string(), base: path.to_string(), auth, conn: None })
     }
 
-    fn stream(&mut self, timeout: Duration) -> Result<&mut BufReader<TcpStream>> {
+    fn stream(&mut self, timeout: Duration) -> Result<&mut BufReader<Timed>> {
         if self.conn.is_none() {
             let addr = std::net::ToSocketAddrs::to_socket_addrs(&self.host)
                 .with_context(|| format!("WebDriver server {}", self.host))?
@@ -84,11 +84,12 @@ impl Http {
             let s = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(10)))
                 .with_context(|| format!("could not connect to the WebDriver server at {}", self.host))?;
             s.set_nodelay(true).ok();
-            self.conn = Some(BufReader::new(s));
+            self.conn = Some(BufReader::new(Timed { stream: s, until: Instant::now() }));
         }
         let conn = self.conn.as_mut().unwrap();
-        conn.get_ref().set_read_timeout(Some(timeout)).ok();
-        conn.get_ref().set_write_timeout(Some(timeout)).ok();
+        // The whole answer is due by then, however it is cut up.
+        conn.get_mut().until = Instant::now() + timeout;
+        conn.get_ref().stream.set_write_timeout(Some(timeout)).ok();
         Ok(conn)
     }
 
@@ -110,8 +111,8 @@ impl Http {
         }
         for attempt in 0..2 {
             let conn = self.stream(timeout)?;
-            let sent = conn.get_mut().write_all(head.as_bytes()).and_then(|_| match &body {
-                Some(b) => conn.get_mut().write_all(b.as_bytes()),
+            let sent = conn.get_mut().stream.write_all(head.as_bytes()).and_then(|_| match &body {
+                Some(b) => conn.get_mut().stream.write_all(b.as_bytes()),
                 None => Ok(()),
             });
             if sent.is_err() && attempt == 0 {
@@ -151,6 +152,25 @@ impl Http {
             }
         }
         bail!("{method} {path}: the WebDriver server closed the connection twice")
+    }
+}
+
+/// The server's side of the connection, read against one time for the
+/// whole answer: a server that sends a byte now and then cannot hold a
+/// request past its timeout (a timeout per read let it).
+struct Timed {
+    stream: TcpStream,
+    until: Instant,
+}
+
+impl Read for Timed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the answer did not end within the timeout"));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
     }
 }
 
@@ -727,6 +747,29 @@ mod tests {
         assert_eq!(h.request("GET", "/a", None, Duration::from_secs(5)).unwrap(), json!("one"));
         let e = h.request("GET", "/b", None, Duration::from_secs(5)).unwrap_err();
         assert!(format!("{e:#}").contains("no such window"), "{e:#}");
+    }
+
+    /// A server that sends its answer a byte at a time, each well inside
+    /// the timeout, is given up on when the timeout has passed.
+    #[test]
+    fn an_answer_sent_a_byte_at_a_time_ends_at_the_request_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut req = [0u8; 1024];
+            let _ = s.read(&mut req);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n");
+            while s.write_all(b"a").is_ok() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let mut h = Http::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let started = Instant::now();
+        let e = h.request("GET", "/status", None, Duration::from_millis(400)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}: {e:#}", started.elapsed());
+        drop(h);
+        server.join().unwrap();
     }
 
     #[test]

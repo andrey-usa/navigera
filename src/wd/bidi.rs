@@ -338,7 +338,9 @@ impl Bidi {
         };
         me.child = Some(child);
         me._profile = Some(profile);
-        let mut always = json!({ "acceptInsecureCerts": true, "unhandledPromptBehavior": { "default": "ignore" } });
+        // Certificates are checked, as on Chrome; `--capabilities
+        // '{"acceptInsecureCerts":true}'` is for a test site without one.
+        let mut always = json!({ "unhandledPromptBehavior": { "default": "ignore" } });
         if let (Some(a), Some(extra)) = (always.as_object_mut(), caps.as_object()) {
             for (k, v) in extra {
                 a.insert(k.clone(), v.clone());

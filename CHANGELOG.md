@@ -32,6 +32,14 @@ All notable changes to this project are documented here. The format follows
   markdown) keeps the title as text and leaves out lines that are only
   images: the wordmark and the badges.
 
+### Security
+
+- `--engine firefox` checks a site's certificate, as Chrome does. The
+  Firefox navigera starts was told to accept any certificate
+  (`acceptInsecureCerts`), so a page behind a forged or expired one
+  loaded without a word. For a test site without a valid certificate:
+  `--capabilities '{"acceptInsecureCerts":true}'`.
+
 ### Fixed
 
 - `ax --grep` and `text --grep` with a word that starts with a character
@@ -39,9 +47,19 @@ All notable changes to this project are documented here. The format follows
   before it reached the page: the reader of grep's own `-A2` style flags
   cut such a word in the middle of its first character. The nightly
   fuzzer found it; in every release since `--grep` learned those flags.
-- `screenshot --annotate` on a visible page waits up to 2 s for the frame
-  that has the labels (it gave up after 250 ms and took the image without
-  them), and the session log says when that frame was late or never came.
+- `screenshot --annotate` could hand back the page without its labels
+  on macOS: 1 capture in 100 there, with the labels' frame painted on
+  time (run 43971629669). Chrome on macOS cannot tell when a frame has
+  reached the screen and now and then captures the one before. navigera
+  now reads one pixel of an outline from the PNG and takes the capture
+  again when the outline is not there (0.2 ms for a viewport, measured
+  locally; the image is inflated only down to that pixel's row). It also
+  waits up to 2 s, not 250 ms, for the labels' frame on a visible page,
+  and the session log says when a frame was late or a capture retaken.
+- A WebDriver server (`--webdriver`, safaridriver) that sends its answer
+  a few bytes at a time is given up on when the request's timeout has
+  passed; the timeout counted each read, so such an answer could hold a
+  command for as long as it kept coming.
 - `--attach` to an address that is not a DevTools endpoint: an HTTP answer
   over 16 MB, or one still arriving after 30 s, is an error that says so.
   Before, navigera read whatever the server sent, for as long as it sent.

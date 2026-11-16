@@ -4114,14 +4114,43 @@ impl BrowserSession {
             .filter(|&(_, x, y, w, h)| full_page || (x + w > 0.0 && y + h > 0.0 && x < vw && y < vh))
             .collect();
         let drawn = tab.evaluate(&crate::annotate::draw(&shown), timeout)?;
-        // In the session log: a late frame is how an image comes out
-        // without its labels (seen on macOS runners).
+        // In the session log: a late frame is one way an image comes out
+        // without its labels.
         match (drawn[0].as_bool(), drawn[1].as_u64().unwrap_or(0)) {
             (Some(false), ms) => eprintln!("[screenshot] --annotate: the page painted no frame in {ms} ms"),
             (_, ms) if ms > 250 => eprintln!("[screenshot] --annotate: the labels' frame took {ms} ms"),
             _ => {}
         }
-        let shot = tab.screenshot_as(timeout, full_page, quality);
+        // The other way: the browser hands back the frame before. Chrome
+        // on macOS cannot tell when a frame has reached the screen and
+        // captures on a timer, so about 1 capture in 100 there showed the
+        // page without the marks, two frames after they were drawn. So
+        // the image is asked for proof: one pixel of the last outline, in
+        // the outline's colour. Without it the capture is taken again.
+        let n = |i: usize| drawn[i].as_f64().unwrap_or(0.0);
+        let (dpr, sx, sy) = (if n(2) > 0.0 { n(2) } else { 1.0 }, n(3), n(4));
+        let proof = match quality {
+            // A JPEG's pixels are not exact, and not read here.
+            Some(_) => None,
+            None if full_page => {
+                crate::annotate::proof_point(&shown, f64::MAX, f64::MAX).map(|(x, y)| (x + sx, y + sy))
+            }
+            None => crate::annotate::proof_point(&shown, vw, vh),
+        }
+        .filter(|&(x, y)| x >= 0.0 && y >= 0.0)
+        .map(|(x, y)| ((x * dpr) as u32, (y * dpr) as u32));
+        let mut shot = tab.screenshot_as(timeout, full_page, quality);
+        if let Some((x, y)) = proof {
+            for again in 1..=3 {
+                match shot.as_deref().ok().map(|image| crate::annotate::shows_mark(image, x, y)) {
+                    Some(Some(false)) => {}
+                    _ => break,
+                }
+                eprintln!("[screenshot] --annotate: the capture came without the labels; taking it again ({again})");
+                let _ = tab.evaluate(crate::annotate::NEXT_FRAME, timeout);
+                shot = tab.screenshot_as(timeout, full_page, quality);
+            }
+        }
         let _ = tab.evaluate(crate::annotate::REMOVE, timeout);
         Ok((shot?, shown.len()))
     }
