@@ -53,13 +53,17 @@ All notable changes to this project are documented here. The format follows
   fuzzer found it; in every release since `--grep` learned those flags.
 - `screenshot --annotate` could hand back the page without its labels
   on macOS: 1 capture in 100 there, with the labels' frame painted on
-  time (run 43971629669). Chrome on macOS cannot tell when a frame has
-  reached the screen and now and then captures the one before. navigera
-  now reads one pixel of an outline from the PNG and takes the capture
-  again when the outline is not there (0.2 ms for a viewport, measured
-  locally; the image is inflated only down to that pixel's row). It also
-  waits up to 2 s, not 250 ms, for the labels' frame on a visible page,
-  and the session log says when a frame was late or a capture retaken.
+  time (run 43971629669). navigera now reads one pixel of an outline
+  from the PNG (0.2 ms for a viewport, measured locally; the image is
+  inflated only down to that pixel's row), takes the capture again up to
+  three times when the outline is not there, and fails with an error
+  that says so when it still is not, instead of handing over an image
+  that claims labels it does not show. Not cured: in run 43973457667
+  (300 repeats) the one bad session stayed without labels through all
+  three retakes, so it is not a single late frame; the cause is open.
+  It also waits up to 2 s, not 250 ms, for the labels' frame on a
+  visible page, and the session log says when a frame was late or a
+  capture retaken.
 - A WebDriver server (`--webdriver`, safaridriver) that sends its answer
   a few bytes at a time is given up on when the request's timeout has
   passed; the timeout counted each read, so such an answer could hold a

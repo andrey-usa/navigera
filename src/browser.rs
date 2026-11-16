@@ -4152,7 +4152,16 @@ impl BrowserSession {
             }
         }
         let _ = tab.evaluate(crate::annotate::REMOVE, timeout);
-        Ok((shot?, shown.len()))
+        let shot = shot?;
+        // Still without them: an image that claims labels it does not
+        // show would have an agent act on the wrong thing.
+        if proof.and_then(|(x, y)| crate::annotate::shows_mark(&shot, x, y)) == Some(false) {
+            bail!(
+                "the browser's capture does not show the labels (4 captures). A dialog or popover shown on top of \
+                 the page hides them: close it first. Otherwise take it again, or act on the refs `ax` prints"
+            );
+        }
+        Ok((shot, shown.len()))
     }
 
     /// `a11y`: an accessibility audit of the active tab (see [`crate::a11y`]).
