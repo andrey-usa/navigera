@@ -23,6 +23,10 @@ All notable changes to this project are documented here. The format follows
   your tabs are not listed and stay as they are. When no Firefox serves
   BiDi the error says how to start one that does.
 
+- `pdf` on the WebDriver engines (experimental): the browser's own print,
+  over BiDi (`--engine firefox`) and over a WebDriver server's print
+  command. safaridriver has none, and the error says so.
+
 ### Changed
 
 - The README's title is the navigera wordmark from the brand sheet

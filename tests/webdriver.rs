@@ -153,7 +153,21 @@ fn scenario(args: &[&str], engine: &str) {
         json!({ "id": 19, "op": "status" }),
         json!({ "id": 20, "op": "quit" }),
     ];
+    // Printing is the browser's own: Firefox and Chrome have it, Safari's
+    // driver does not.
+    let pdf = std::env::temp_dir().join(format!("nv-wd-{}-{}.pdf", std::process::id(), args.len()));
+    let mut script = script;
+    if engine != "safari" {
+        script.insert(script.len() - 1, json!({ "id": 21, "op": "pdf", "path": pdf.display().to_string() }));
+    }
     let a = session(args, &script);
+    if engine != "safari" {
+        let bytes = std::fs::read(&pdf)
+            .unwrap_or_else(|e| panic!("{engine}: no PDF ({e}): {:?}", a.iter().find(|x| x["id"] == 21)));
+        assert!(bytes.starts_with(b"%PDF-") && bytes.len() > 500, "{engine}: {} bytes", bytes.len());
+        assert_eq!(ok(&a, 21)["bytes"], bytes.len(), "{engine}");
+        let _ = std::fs::remove_file(&pdf);
+    }
     assert_eq!(ok(&a, 1)["title"], "Fixture");
     let tree = ok(&a, 2).as_str().unwrap().to_string();
     for want in [

@@ -170,6 +170,8 @@ pub trait Wire: Send {
     /// Wait for a navigation an action started, if one did.
     fn settle(&mut self, _timeout: Duration) {}
     fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>>;
+    /// The page printed to PDF, by the browser's own print.
+    fn pdf(&mut self, landscape: bool, background: bool) -> Result<Vec<u8>>;
     fn history(&mut self, delta: i64) -> Result<()>;
     fn reload(&mut self, timeout: Duration) -> Result<()>;
     fn tabs(&mut self) -> Result<Vec<String>>;
@@ -436,7 +438,7 @@ impl Driver {
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, tabs, cookies, console)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console)",
             op_name(command),
             self.engine
         )
@@ -768,6 +770,22 @@ impl Driver {
                     poll(self, &f, json!([]), "the condition is still false")?;
                 }
                 Ok(json!({ "waited_ms": started.elapsed().as_millis() as u64 }))
+            }
+            Command::Pdf { path, landscape, background } => {
+                let bytes = self.wire.pdf(*landscape, *background).context("pdf")?;
+                let path = path.clone().unwrap_or_else(|| {
+                    format!(
+                        "page-{}.pdf",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)
+                    )
+                });
+                crate::protocol::write_own(&path, &bytes)
+                    .map_err(|e| anyhow::Error::from(e).context(format!("pdf: writing {path}")))?;
+                let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
+                Ok(json!({ "path": path, "bytes": bytes.len() }))
             }
             Command::Screenshot { path, full_page, target, annotate, quality, timeout_ms: _ } => {
                 if *annotate || quality.is_some() || target.optional("screenshot")?.is_some() {

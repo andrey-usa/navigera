@@ -815,6 +815,21 @@ impl Wire for Bidi {
         base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| anyhow!("the image is not base64 ({e})"))
     }
 
+    fn pdf(&mut self, landscape: bool, background: bool) -> Result<Vec<u8>> {
+        let r = self.send(
+            "browsingContext.print",
+            json!({
+                "context": self.context,
+                "orientation": if landscape { "landscape" } else { "portrait" },
+                "background": background,
+            }),
+            Duration::from_secs(60),
+        )?;
+        let data = r["data"].as_str().ok_or_else(|| anyhow!("the browser sent no PDF"))?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| anyhow!("the PDF is not base64 ({e})"))
+    }
+
     fn history(&mut self, delta: i64) -> Result<()> {
         self.nav = None;
         self.send(

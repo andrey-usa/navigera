@@ -605,6 +605,16 @@ impl Wire for Classic {
         base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| anyhow!("the image is not base64 ({e})"))
     }
 
+    fn pdf(&mut self, landscape: bool, background: bool) -> Result<Vec<u8>> {
+        let body = json!({ "orientation": if landscape { "landscape" } else { "portrait" }, "background": background });
+        let v = self
+            .with_dialogs(|s| s.cmd("POST", "/print", Some(body.clone()), Duration::from_secs(60)))
+            .context("the driver's print command (safaridriver has none)")?;
+        let data = v.as_str().ok_or_else(|| anyhow!("the driver sent no PDF"))?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| anyhow!("the PDF is not base64 ({e})"))
+    }
+
     fn history(&mut self, delta: i64) -> Result<()> {
         let path = if delta < 0 { "/back" } else { "/forward" };
         for _ in 0..delta.unsigned_abs() {
