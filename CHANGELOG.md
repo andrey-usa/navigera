@@ -25,6 +25,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `ax --grep` and `text --grep` with a word that starts with a character
+  of three or four bytes (`--grep 日本語`, an emoji) crashed navigera
+  before it reached the page: the reader of grep's own `-A2` style flags
+  cut such a word in the middle of its first character. The nightly
+  fuzzer found it; in every release since `--grep` learned those flags.
+- `screenshot --annotate` on a visible page waits up to 2 s for the frame
+  that has the labels (it gave up after 250 ms and took the image without
+  them), and the session log says when that frame was late or never came.
 - `--attach` to an address that is not a DevTools endpoint: an HTTP answer
   over 16 MB, or one still arriving after 30 s, is an error that says so.
   Before, navigera read whatever the server sent, for as long as it sent.

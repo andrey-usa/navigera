@@ -7,6 +7,10 @@ name: chrome-bisect
 #   gh workflow run chrome-bisect.yml --ref my-branch -f milestone=151 \
 #     -f variants="baseline;NAVIGERA_CDP_TRANSPORT=ws;NAVIGERA_NO_DISCOVER=1;NAVIGERA_DROP_FLAGS=--no-startup-window"
 #
+# A test that fails now and then on one runner image is repeated there the
+# same way: `-f os=macos-15 -f milestone=runner -f repeat=100`, and `count`
+# names a line of the session log to count beside the passes.
+#
 # A workflow_dispatch workflow must exist on the default branch, so on a new
 # branch commit `.github/bisect.env` instead (MILESTONE=, KIND=, TEST=,
 # VARIANTS=, REPEAT=); pushing it runs the bisect. Don't merge that file.
@@ -20,8 +24,14 @@ on:
   workflow_dispatch:
     inputs:
       milestone:
-        description: "Chrome milestone (Chrome for Testing), e.g. 151"
+        description: "Chrome milestone (Chrome for Testing), e.g. 151; 'runner' for the Chrome the runner has"
         required: true
+      os:
+        description: "runner image: ubuntu-24.04 or macos-15 (macOS takes milestone 'runner' only)"
+        default: "ubuntu-24.04"
+      count:
+        description: "a phrase to count in the session logs of each variant"
+        default: "did not deliver the mouse events"
       kind:
         description: "chrome or chrome-headless-shell"
         default: "chrome"
@@ -43,8 +53,11 @@ permissions:
 
 jobs:
   bisect:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.os || 'ubuntu-24.04' }}
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -59,16 +72,18 @@ jobs:
           IN_TEST: ${{ inputs.test || '--test serve_roundtrip' }}
           IN_VARIANTS: ${{ inputs.variants || 'baseline' }}
           IN_REPEAT: ${{ inputs.repeat || '3' }}
+          IN_COUNT: ${{ inputs.count || 'did not deliver the mouse events' }}
           EVENT: ${{ github.event_name }}
         run: |
           # Values are copied, not interpolated into the script, so an input
           # can't inject shell; a newline would add a variable, so drop them.
-          for v in MILESTONE KIND TEST VARIANTS REPEAT; do
+          for v in MILESTONE KIND TEST VARIANTS REPEAT COUNT; do
             name="IN_$v"
             printf '%s=%s\n' "$v" "$(printf '%s' "${!name}" | tr -d '\n\r')"
           done >> "$GITHUB_ENV"
           if [ "$EVENT" = push ]; then grep -E '^[A-Z]+=' .github/bisect.env >> "$GITHUB_ENV"; fi
       - name: Download Chrome
+        if: env.MILESTONE != 'runner'
         run: |
           python3 - "$MILESTONE" "$KIND" > /tmp/url <<'EOF'
           import json, sys, urllib.request
@@ -88,14 +103,16 @@ jobs:
         run: |
           set +e
           out=/tmp/bisect.md
-          echo "### Chrome M$MILESTONE ($KIND, $($CHROME_BIN --version)): \`cargo test $TEST\`" > $out
+          tmp="${TMPDIR:-/tmp}"; tmp="${tmp%/}"
+          if [ -n "${CHROME_BIN:-}" ]; then browser="$KIND, $("$CHROME_BIN" --version)"; else browser="the runner's Chrome on $RUNNER_OS"; fi
+          echo "### Chrome M$MILESTONE ($browser): \`cargo test $TEST\`" > $out
           echo "" >> $out
-          echo "| variant | passed | first failure | click resends (session logs) |" >> $out
+          echo "| variant | passed | first failure | session log lines with \"$COUNT\" |" >> $out
           echo "|---|---|---|---|" >> $out
           IFS=';' read -ra VARS <<< "$VARIANTS"
           for v in "${VARS[@]}"; do
             pass=0; first=""
-            rm -f /tmp/nv-*.log
+            rm -f /tmp/nv-*.log "$tmp"/nv-*.log
             for i in $(seq $REPEAT); do
               log=/tmp/run.log; rm -f /tmp/chrome.log
               if [ "$v" = "baseline" ]; then envs=(); else read -ra envs <<< "$v"; fi
@@ -107,7 +124,7 @@ jobs:
                 python3 bench/ladder/annotate.py /tmp/first-failure.md "bisect failure ($v)"
               fi
             done
-            resends=$(cat /tmp/nv-*.log 2>/dev/null | grep -c 'did not deliver the mouse events')
+            resends=$(cat /tmp/nv-*.log "$tmp"/nv-*.log 2>/dev/null | grep -c -F -- "$COUNT")
             echo "| \`$v\` | $pass/$REPEAT | $first | $resends |" >> $out
           done
           cat $out

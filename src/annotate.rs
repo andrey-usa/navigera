@@ -21,7 +21,8 @@ pub fn refs_in(tree: &str) -> Vec<u64> {
 }
 
 /// The script that draws the marks: `(ref, x, y, width, height)` in
-/// viewport CSS pixels. It answers once a frame with the marks was painted.
+/// viewport CSS pixels. It answers once a frame with the marks was painted,
+/// as `[painted, ms]`: `painted` is false when no frame came in time.
 pub fn draw(boxes: &[(u64, f64, f64, f64, f64)]) -> String {
     let marks = json!(boxes.iter().map(|&(id, x, y, w, h)| json!([id, x, y, w, h])).collect::<Vec<_>>());
     format!(
@@ -43,10 +44,13 @@ pub fn draw(boxes: &[(u64, f64, f64, f64, f64)]) -> String {
   }}
   document.documentElement.append(host);
   // The capture is of what was painted: wait for a frame that has the marks
-  // (two animation frames; a tab that paints nothing gets 250 ms, not forever).
+  // (two animation frames). A hidden tab paints nothing and gets 250 ms; a
+  // visible one whose frames are late gets 2 s, since an image without its
+  // labels is the wrong answer. Answers [the frames came, ms waited].
+  const t0 = performance.now(), cap = document.visibilityState === 'visible' ? 2000 : 250;
   return new Promise((done) => {{
-    setTimeout(() => done(true), 250);
-    requestAnimationFrame(() => requestAnimationFrame(() => done(true)));
+    setTimeout(() => done([false, Math.round(performance.now() - t0)]), cap);
+    requestAnimationFrame(() => requestAnimationFrame(() => done([true, Math.round(performance.now() - t0)])));
   }});
 }})()"#
     )

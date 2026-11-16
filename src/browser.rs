@@ -4113,7 +4113,14 @@ impl BrowserSession {
             .into_iter()
             .filter(|&(_, x, y, w, h)| full_page || (x + w > 0.0 && y + h > 0.0 && x < vw && y < vh))
             .collect();
-        tab.evaluate(&crate::annotate::draw(&shown), timeout)?;
+        let drawn = tab.evaluate(&crate::annotate::draw(&shown), timeout)?;
+        // In the session log: a late frame is how an image comes out
+        // without its labels (seen on macOS runners).
+        match (drawn[0].as_bool(), drawn[1].as_u64().unwrap_or(0)) {
+            (Some(false), ms) => eprintln!("[screenshot] --annotate: the page painted no frame in {ms} ms"),
+            (_, ms) if ms > 250 => eprintln!("[screenshot] --annotate: the labels' frame took {ms} ms"),
+            _ => {}
+        }
         let shot = tab.screenshot_as(timeout, full_page, quality);
         let _ = tab.evaluate(crate::annotate::REMOVE, timeout);
         Ok((shot?, shown.len()))
