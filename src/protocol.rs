@@ -1522,7 +1522,7 @@ pub fn usage_full(program: &str) -> String {
         ("--parent <pid>", "with `start`: the session ends when that process exits ($NAVIGERA_PARENT_PID)".into()),
         (
             "--attach [chrome|edge|<dir>|<port>]",
-            "with `start`: use your running browser and never close it (bare, or --auto-connect: whichever of Chrome, Edge, Brave, Chromium or ports 9222/9229 serves remote debugging). Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there; --tab current works in the tab you are on".into(),
+            "with `start`: use your running browser and never close it (bare, or --auto-connect: whichever of Chrome, Chromium, Edge, Brave, Vivaldi, Opera, Arc or ports 9222/9229 serves remote debugging). Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there; --tab current works in the tab you are on".into(),
         ),
         ("--profile <name>", "with `start`: a persistent visible navigera browser, kept open between sessions (--headless to hide it)".into()),
         (

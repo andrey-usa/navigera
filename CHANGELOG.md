@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `--attach` and `--auto-connect` find Vivaldi, Opera and, on macOS, Arc
+  by their default profiles, after Chrome, Chromium, Edge and Brave:
+  `--attach vivaldi`, `--attach opera`, `--attach arc`. `--from` and
+  `navigera profiles` take the same names. The MCP server refuses their
+  own pages (`vivaldi:`, `opera:`, `arc:`) as it does `chrome:`.
+
 ### Changed
 
 - The README's title is the navigera wordmark from the brand sheet
@@ -17,6 +25,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `--attach` to an address that is not a DevTools endpoint: an HTTP answer
+  over 16 MB, or one still arriving after 30 s, is an error that says so.
+  Before, navigera read whatever the server sent, for as long as it sent.
+- `navigera profiles` on Linux lists Chrome Dev once: `dev` and `canary`
+  share a directory there and were listed as two browsers.
 - Claude Code plugin: `plugin.json` names its icon (`icon`), the key
   Anthropic's directory reads the listing's icon from; the file alone was
   not enough. The plugin's README says how to install on Claude Code

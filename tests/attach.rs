@@ -225,6 +225,67 @@ fn attach_never_closes_the_users_browser() {
     assert!(user.0.try_wait().unwrap().is_none(), "still running after the second session");
 }
 
+/// Where Vivaldi keeps its user data under a home directory at `home`,
+/// and the environment that puts the user's home there.
+fn vivaldi_home(home: &Path) -> (std::path::PathBuf, Vec<(&'static str, String)>) {
+    let at = home.display().to_string();
+    if cfg!(windows) {
+        (home.join("Vivaldi").join("User Data"), vec![("LOCALAPPDATA", at.clone()), ("APPDATA", at)])
+    } else if cfg!(target_os = "macos") {
+        (home.join("Library/Application Support/Vivaldi"), vec![("HOME", at)])
+    } else {
+        (home.join(".config/vivaldi"), vec![("HOME", at), ("XDG_CONFIG_HOME", format!("{}/.config", home.display()))])
+    }
+}
+
+#[test]
+fn a_chromium_browser_is_found_by_its_name_and_by_auto_connect() {
+    let Some(exe) = chrome() else { return };
+    let home = tempfile::tempdir().unwrap();
+    let (data, env) = vivaldi_home(home.path());
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let s = session_name("named");
+
+    // Not running: the message names the browser asked for and the fix.
+    let (success, r) = run(&s, &["start", "--attach", "vivaldi"], &env);
+    let error = r["error"].as_str().unwrap_or("").to_string();
+    assert!(!success && error.contains("vivaldi") && error.contains("remote debugging"), "{r}");
+    let (success, r) = run(&s, &["start", "--auto-connect"], &env);
+    // A browser of the machine's own on 9222 or 9229 would be found instead.
+    if !success {
+        let error = r["error"].as_str().unwrap_or("");
+        assert!(error.contains("Vivaldi") && error.contains("Opera"), "{r}");
+    } else {
+        run(&s, &["quit"], &env);
+    }
+
+    std::fs::create_dir_all(&data).unwrap();
+    let mut user = Browser(
+        Command::new(&exe)
+            .args(["--headless=new", "--no-sandbox", "--no-first-run", "--remote-debugging-port=0"])
+            .arg(format!("--user-data-dir={}", data.display()))
+            .arg("data:text/html,<title>Mine</title>users%20own%20tab")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start the user's browser"),
+    );
+    let (port, _) = active_port(&data, Duration::from_secs(20)).expect("DevToolsActivePort");
+
+    for how in [&["start", "--attach", "vivaldi"][..], &["start", "--auto-connect"][..]] {
+        let (success, r) = run(&s, how, &env);
+        assert!(success && r["ok"] == true, "{how:?}: {r}");
+        let (_, r) = run(&s, &["goto", "data:text/html,<title>Agent</title>"], &env);
+        assert_eq!(r["result"]["title"], "Agent", "{how:?}: {r}");
+        let urls = page_urls(port).expect("the browser serves DevTools");
+        assert!(urls.iter().any(|u| u.contains("Agent")), "{how:?} worked in that browser: {urls:?}");
+        let (_, r) = run(&s, &["quit"], &env);
+        assert_eq!(r["result"]["browser"], "left open", "{how:?}: {r}");
+    }
+    assert!(user.0.try_wait().unwrap().is_none(), "the user's browser must still run");
+}
+
 #[test]
 fn an_attached_session_works_in_the_users_tab_and_leaves_it_open() {
     let Some(exe) = chrome() else { return };

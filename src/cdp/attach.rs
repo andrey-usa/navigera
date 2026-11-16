@@ -4,10 +4,11 @@
 //!
 //! * `auto` (a bare `--attach`, or `--auto-connect`): the first browser
 //!   below that serves remote debugging: Chrome, its Beta, Dev and Canary,
-//!   Chromium, Edge and Brave by their default profiles, then a browser
-//!   started with `--remote-debugging-port` 9222 or 9229;
-//! * `chrome` (also `beta`, `dev`, `canary`, `chromium`, `edge`, `brave`): the
-//!   user's everyday browser. Chrome 144+ serves remote debugging for its
+//!   Chromium, Edge, Brave, Vivaldi, Opera and Arc by their default
+//!   profiles, then a browser started with `--remote-debugging-port` 9222
+//!   or 9229;
+//! * `chrome` (also `beta`, `dev`, `canary`, `chromium`, `edge`, `brave`,
+//!   `vivaldi`, `opera`, `arc`): the user's everyday browser. Chrome 144+ serves remote debugging for its
 //!   default profile once the user turns it on at
 //!   `chrome://inspect/#remote-debugging`; it then writes the endpoint to
 //!   `DevToolsActivePort` in its user data directory and asks the user to
@@ -39,10 +40,16 @@ const ENABLE_HINT: &str = "turn on remote debugging at chrome://inspect/#remote-
      (Chrome 144+; Chrome asks you to Allow each connection), or use `--profile <name>` for \
      a separate persistent browser";
 
-/// Default user data directory of a Chrome-family browser channel.
+/// Default user data directory of a Chrome-family browser channel. Arc is
+/// named on macOS only: where its Windows package keeps its data is not
+/// something this was checked against.
 pub fn default_user_data_dir(channel: &str) -> Option<PathBuf> {
     let channel = channel.to_ascii_lowercase();
     if cfg!(windows) {
+        // Opera alone keeps its profile in the roaming directory.
+        if channel == "opera" {
+            return Some(PathBuf::from(std::env::var_os("APPDATA")?).join("Opera Software\\Opera Stable"));
+        }
         let base = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
         let rel = match channel.as_str() {
             "chrome" | "stable" => "Google\\Chrome\\User Data",
@@ -52,6 +59,7 @@ pub fn default_user_data_dir(channel: &str) -> Option<PathBuf> {
             "chromium" => "Chromium\\User Data",
             "edge" => "Microsoft\\Edge\\User Data",
             "brave" => "BraveSoftware\\Brave-Browser\\User Data",
+            "vivaldi" => "Vivaldi\\User Data",
             _ => return None,
         };
         Some(base.join(rel))
@@ -65,6 +73,9 @@ pub fn default_user_data_dir(channel: &str) -> Option<PathBuf> {
             "chromium" => "Chromium",
             "edge" => "Microsoft Edge",
             "brave" => "BraveSoftware/Brave-Browser",
+            "vivaldi" => "Vivaldi",
+            "opera" => "com.operasoftware.Opera",
+            "arc" => "Arc/User Data",
             _ => return None,
         };
         Some(base.join(rel))
@@ -79,6 +90,8 @@ pub fn default_user_data_dir(channel: &str) -> Option<PathBuf> {
             "chromium" => "chromium",
             "edge" => "microsoft-edge",
             "brave" => "BraveSoftware/Brave-Browser",
+            "vivaldi" => "vivaldi",
+            "opera" => "opera",
             _ => return None,
         };
         Some(base.join(rel))
@@ -148,8 +161,9 @@ pub fn page_endpoint(spec: &str) -> Option<(String, String)> {
 /// `--attach` with no value, `--attach auto` and `--auto-connect`.
 pub const AUTO: &str = "auto";
 
-/// The browsers `auto` looks for, in order, by their default profiles.
-const AUTO_CHANNELS: &[(&str, &str)] = &[
+/// The browsers `auto` looks for, in order, by their default profiles: the
+/// channel `--attach` and `--from` take, and the name messages use.
+pub(crate) const AUTO_CHANNELS: &[(&str, &str)] = &[
     ("chrome", "Chrome"),
     ("beta", "Chrome Beta"),
     ("dev", "Chrome Dev"),
@@ -157,6 +171,9 @@ const AUTO_CHANNELS: &[(&str, &str)] = &[
     ("chromium", "Chromium"),
     ("edge", "Edge"),
     ("brave", "Brave"),
+    ("vivaldi", "Vivaldi"),
+    ("opera", "Opera"),
+    ("arc", "Arc"),
 ];
 
 /// The ports a browser started by hand with `--remote-debugging-port`
@@ -445,6 +462,11 @@ mod tests {
         let s = chrome.display().to_string();
         assert!(s.contains("Chrome") || s.contains("google-chrome"), "{s}");
         assert!(default_user_data_dir("edge").is_some());
+        for (channel, part) in [("vivaldi", "ivaldi"), ("opera", "pera")] {
+            let dir = default_user_data_dir(channel).unwrap_or_else(|| panic!("{channel} has a default dir"));
+            assert!(dir.display().to_string().contains(part), "{channel}: {}", dir.display());
+        }
+        assert_eq!(default_user_data_dir("arc").is_some(), cfg!(target_os = "macos"));
         assert!(default_user_data_dir("/some/dir").is_none());
     }
 
