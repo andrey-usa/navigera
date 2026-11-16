@@ -58,7 +58,106 @@ pub struct Bidi {
     /// The classic session this BiDi connection belongs to (`--bidi`):
     /// ended with it.
     classic: Option<super::classic::Session>,
+    /// `--attach`: the user's own Firefox. Only the windows and tabs this
+    /// session opened (`own`) are acted on, listened to and closed; the
+    /// browser itself is left running.
+    attached: bool,
+    own: Vec<String>,
     closed: bool,
+}
+
+/// How to get a Firefox that `--attach firefox` can find.
+const ATTACH_HINT: &str = "start Firefox with `firefox --remote-debugging-port` (quit it first: a running Firefox \
+     ignores the flag), then `--attach firefox`; or `--engine firefox` starts a separate one";
+
+/// The directories that hold Firefox's profiles, for this user.
+pub fn firefox_profile_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if cfg!(windows) {
+        if let Some(d) = std::env::var_os("APPDATA") {
+            roots.push(std::path::PathBuf::from(d).join("Mozilla").join("Firefox").join("Profiles"));
+        }
+    } else if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        if cfg!(target_os = "macos") {
+            roots.push(home.join("Library/Application Support/Firefox/Profiles"));
+        } else {
+            roots.push(home.join(".mozilla/firefox"));
+            // The snap and the flatpak keep a home of their own.
+            roots.push(home.join("snap/firefox/common/.mozilla/firefox"));
+            roots.push(home.join(".var/app/org.mozilla.firefox/.mozilla/firefox"));
+        }
+    }
+    roots
+}
+
+/// The BiDi endpoints running Firefoxes wrote into their profiles
+/// (`WebDriverBiDiServer.json`, there while the remote agent listens),
+/// the most recently started first.
+pub fn firefox_endpoints_in(roots: &[std::path::PathBuf]) -> Vec<String> {
+    let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+    for root in roots {
+        let Ok(profiles) = std::fs::read_dir(root) else { continue };
+        // A user has a handful of profiles; a directory of thousands is not one.
+        for profile in profiles.flatten().take(256) {
+            let file = profile.path().join("WebDriverBiDiServer.json");
+            let Ok(meta) = std::fs::metadata(&file) else { continue };
+            if meta.len() > 4096 {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+            let (Some(host), Some(port)) = (v["ws_host"].as_str(), v["ws_port"].as_u64()) else { continue };
+            // The file is the user's, but only a loopback listener is
+            // their own browser.
+            let local = matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]");
+            if !local || port == 0 || port > 65535 {
+                continue;
+            }
+            let host =
+                if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host.to_string() };
+            let at = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            found.push((at, format!("ws://{host}:{port}/session")));
+        }
+    }
+    found.sort_by_key(|f| std::cmp::Reverse(f.0));
+    let mut out: Vec<String> = Vec::new();
+    for (_, url) in found {
+        if !out.contains(&url) {
+            out.push(url);
+        }
+    }
+    out
+}
+
+/// The endpoints `--attach <spec>` means on the Firefox engine: `firefox`
+/// or `auto` (what running Firefoxes wrote, then the usual port), a port,
+/// `host:port`, or a `ws://` URL.
+fn attach_candidates(spec: &str) -> Result<Vec<String>> {
+    let spec = spec.trim();
+    if spec.eq_ignore_ascii_case("firefox") || spec == crate::cdp::attach::AUTO {
+        let mut all = firefox_endpoints_in(&firefox_profile_roots());
+        let usual = "ws://127.0.0.1:9222/session".to_string();
+        if !all.contains(&usual) {
+            all.push(usual);
+        }
+        return Ok(all);
+    }
+    if let Some(rest) = spec.strip_prefix("ws://") {
+        // Firefox serves new sessions at /session.
+        return Ok(vec![if rest.contains('/') { spec.to_string() } else { format!("{spec}/session") }]);
+    }
+    if spec.starts_with("wss://") || spec.contains("://") {
+        bail!("--attach {}: Firefox is reached at a ws:// endpoint, a port, or `firefox`", super::classic::mask(spec));
+    }
+    if spec.parse::<u16>().is_ok_and(|p| p > 0) {
+        return Ok(vec![format!("ws://127.0.0.1:{spec}/session")]);
+    }
+    match spec.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p > 0) => {
+            Ok(vec![format!("ws://{spec}/session")])
+        }
+        _ => bail!("--attach {spec:?} with --engine firefox: `firefox`, a port, host:port or a ws:// endpoint"),
+    }
 }
 
 /// Where Firefox is: the path given, `$NAVIGERA_FIREFOX`, the one navigera
@@ -261,6 +360,75 @@ impl Bidi {
         Ok(me)
     }
 
+    /// The user's running Firefox (`--attach firefox`): a session on its
+    /// BiDi endpoint, working in a window this session opens. Firefox
+    /// serves BiDi only when started with `--remote-debugging-port`, and
+    /// one session at a time.
+    pub fn attach_firefox(spec: &str, caps: Value, timeout: Duration) -> Result<Self> {
+        let started = Instant::now();
+        let candidates = attach_candidates(spec)?;
+        let named = candidates.len() == 1;
+        let mut refused: Option<anyhow::Error> = None;
+        for url in &candidates {
+            let mut me = match Self::connect(url, timeout) {
+                Ok(me) => me,
+                Err(e) if named => return Err(e.context(format!("no Firefox answers there; {ATTACH_HINT}"))),
+                Err(_) => continue,
+            };
+            me.attached = true;
+            // Dialogs in the user's own tabs are theirs to answer.
+            let mut always = json!({ "unhandledPromptBehavior": { "default": "ignore" } });
+            if let (Some(a), Some(extra)) = (always.as_object_mut(), caps.as_object()) {
+                for (k, v) in extra {
+                    a.insert(k.clone(), v.clone());
+                }
+            }
+            let session = match me.send("session.new", json!({ "capabilities": { "alwaysMatch": always } }), timeout) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Nothing of this session exists there: just hang up.
+                    me.closed = true;
+                    let _ = me.ws.close(None);
+                    let shown = super::classic::mask(url);
+                    let e = if e.to_string().contains("session not created") {
+                        anyhow!(
+                            "the browser at {shown} already has an automation session (Firefox serves one at a \
+                             time): end the other client, then start again ({e})"
+                        )
+                    } else {
+                        anyhow!("the browser at {shown} refused a BiDi session: {e}")
+                    };
+                    if named {
+                        return Err(e);
+                    }
+                    refused.get_or_insert(e);
+                    continue;
+                }
+            };
+            let caps = &session["capabilities"];
+            me.browser = json!({
+                "name": caps["browserName"].as_str().unwrap_or("firefox"),
+                "version": caps["browserVersion"].as_str().unwrap_or(""),
+                "executable": "attach Firefox",
+                "headless": false,
+                "attached": true,
+                "startup_ms": started.elapsed().as_millis() as u64,
+            });
+            me.start(timeout)?;
+            return Ok(me);
+        }
+        match refused {
+            Some(e) => Err(e),
+            None => bail!("no running Firefox serves remote debugging: {ATTACH_HINT}"),
+        }
+    }
+
+    /// Whether an event about `context` is this session's to act on: in
+    /// the user's browser, only what it opened.
+    fn ours(&self, context: Option<&str>) -> bool {
+        !self.attached || context.is_some_and(|c| self.own.iter().any(|o| o == c))
+    }
+
     /// The BiDi side of a classic session that asked for `webSocketUrl`.
     pub fn over(session: super::classic::Session, ws_url: &str, timeout: Duration) -> Result<Self> {
         let mut me = Self::connect(ws_url, timeout)?;
@@ -305,6 +473,8 @@ impl Bidi {
             child: None,
             _profile: None,
             classic: None,
+            attached: false,
+            own: Vec::new(),
             closed: false,
         })
     }
@@ -313,6 +483,19 @@ impl Bidi {
     /// pick the first tab.
     fn start(&mut self, timeout: Duration) -> Result<()> {
         self.send("session.subscribe", json!({ "events": EVENTS }), timeout)?;
+        if self.attached {
+            // A window of its own, as in the user's Chrome: their tabs are
+            // not navigated, read or scripted. (A background tab would not
+            // do: it paints no frames and its timers are slowed.)
+            let made = match self.send("browsingContext.create", json!({ "type": "window" }), timeout) {
+                Ok(made) => made,
+                Err(_) => self.send("browsingContext.create", json!({ "type": "tab" }), timeout)?,
+            };
+            self.context = made["context"].as_str().ok_or_else(|| anyhow!("the browser opened no window"))?.to_string();
+            self.own.push(self.context.clone());
+            self.listen_in(&self.context.clone(), timeout);
+            return Ok(());
+        }
         self.send("script.addPreloadScript", json!({ "functionDeclaration": LISTEN }), timeout)?;
         let tree = self.send("browsingContext.getTree", json!({ "maxDepth": 0 }), timeout)?;
         self.context = tree["contexts"]
@@ -325,6 +508,19 @@ impl Bidi {
         // from its next document on, and in it from now.
         let _ = self.call(LISTEN, "[]", timeout);
         Ok(())
+    }
+
+    /// Record listeners in one tab of the user's browser: its documents
+    /// from the next on, and the one it shows now. A Firefox that cannot
+    /// scope a preload script to a tab goes without (clicks still work;
+    /// the tree marks fewer elements clickable).
+    fn listen_in(&mut self, context: &str, timeout: Duration) {
+        let _ = self.send(
+            "script.addPreloadScript",
+            json!({ "functionDeclaration": LISTEN, "contexts": [context] }),
+            timeout,
+        );
+        let _ = self.call(LISTEN, "[]", timeout);
     }
 
     fn write(&mut self, method: &str, params: Value) -> Result<u64> {
@@ -391,7 +587,7 @@ impl Bidi {
     fn on_event(&mut self, v: Value) {
         let params = &v["params"];
         match v["method"].as_str().unwrap_or("") {
-            "log.entryAdded" => {
+            "log.entryAdded" if self.ours(params["source"]["context"].as_str()) => {
                 let level = match params["level"].as_str().unwrap_or("info") {
                     "warn" => "warning",
                     l => l,
@@ -407,7 +603,7 @@ impl Bidi {
                     self.console.pop_front();
                 }
             }
-            "browsingContext.userPromptOpened" => {
+            "browsingContext.userPromptOpened" if self.ours(params["context"].as_str()) => {
                 let context = params["context"].as_str().unwrap_or(&self.context).to_string();
                 let kind = params["type"].as_str().unwrap_or("alert").to_string();
                 let accept = self.accept_dialogs || kind == "alert";
@@ -634,7 +830,14 @@ impl Wire for Bidi {
     }
 
     fn tabs(&mut self) -> Result<Vec<String>> {
-        self.top_contexts()
+        let all = self.top_contexts()?;
+        if !self.attached {
+            return Ok(all);
+        }
+        // In the user's browser: the tabs this session opened and that
+        // are still there.
+        self.own.retain(|o| all.contains(o));
+        Ok(self.own.clone())
     }
 
     fn current_tab(&self) -> String {
@@ -642,11 +845,26 @@ impl Wire for Bidi {
     }
 
     fn tab_new(&mut self) -> Result<String> {
-        let r = self.send("browsingContext.create", json!({ "type": "tab" }), Duration::from_secs(30))?;
-        r["context"].as_str().map(str::to_string).ok_or_else(|| anyhow!("the browser made no tab"))
+        let mut params = json!({ "type": "tab" });
+        if self.attached {
+            // Beside this session's tab, in its window, not the user's.
+            params["referenceContext"] = json!(self.context);
+        }
+        let r = self.send("browsingContext.create", params, Duration::from_secs(30))?;
+        let id = r["context"].as_str().map(str::to_string).ok_or_else(|| anyhow!("the browser made no tab"))?;
+        if self.attached {
+            self.own.push(id.clone());
+            let was = std::mem::replace(&mut self.context, id.clone());
+            self.listen_in(&id, Duration::from_secs(10));
+            self.context = was;
+        }
+        Ok(id)
     }
 
     fn tab_select(&mut self, id: &str) -> Result<()> {
+        if !self.ours(Some(id)) {
+            bail!("tab {id} is not one this session opened: in your own Firefox it works in its own tabs only");
+        }
         // `activate` brings a headed tab to the front; headless it may refuse.
         let _ = self.send("browsingContext.activate", json!({ "context": id }), Duration::from_secs(10));
         self.context = id.to_string();
@@ -654,6 +872,10 @@ impl Wire for Bidi {
     }
 
     fn tab_close(&mut self, id: &str) -> Result<()> {
+        if !self.ours(Some(id)) {
+            bail!("tab {id} is not one this session opened: your own tabs are yours to close");
+        }
+        self.own.retain(|o| o != id);
         self.send("browsingContext.close", json!({ "context": id }), Duration::from_secs(10))?;
         Ok(())
     }
@@ -753,7 +975,14 @@ impl Wire for Bidi {
 
     fn close(&mut self) {
         if !self.closed {
-            if self.classic.is_none() {
+            if self.attached {
+                // The user's browser stays: this session's tabs go, and
+                // the session ends so the next client can have one.
+                for id in std::mem::take(&mut self.own) {
+                    let _ = self.send("browsingContext.close", json!({ "context": id }), Duration::from_secs(5));
+                }
+                let _ = self.send("session.end", json!({}), Duration::from_secs(5));
+            } else if self.classic.is_none() {
                 let _ = self.send("browser.close", json!({}), Duration::from_secs(5));
             }
             let _ = self.ws.close(None);
@@ -805,5 +1034,59 @@ mod tests {
             json!({ "a": 1, "b": ["x", null], "c": null, "d": "/a+/g", "e": "[function]" })
         );
         assert_eq!(Bidi::remote_to_json(&json!({ "type": "undefined" })), Value::Null);
+    }
+
+    /// A running Firefox is found by the file its remote agent keeps in
+    /// the profile: the newest first, loopback only, nothing else read.
+    #[test]
+    fn a_running_firefox_is_found_by_its_profile_file() {
+        let root = tempfile::tempdir().unwrap();
+        let put = |profile: &str, text: &str| {
+            let dir = root.path().join(profile);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("WebDriverBiDiServer.json"), text).unwrap();
+        };
+        put("a.default", r#"{"ws_host":"127.0.0.1","ws_port":9222}"#);
+        std::thread::sleep(Duration::from_millis(20));
+        put("b.work", r#"{"ws_host":"localhost","ws_port":41234}"#);
+        put("c.elsewhere", r#"{"ws_host":"203.0.113.9","ws_port":9222}"#);
+        put("d.broken", "not json");
+        put("e.noport", r#"{"ws_host":"127.0.0.1","ws_port":0}"#);
+        put("f.huge", &format!(r#"{{"ws_host":"127.0.0.1","ws_port":1,"pad":"{}"}}"#, "x".repeat(5000)));
+        std::fs::create_dir_all(root.path().join("g.stopped")).unwrap();
+        let roots = [root.path().to_path_buf(), root.path().join("no-such-dir")];
+        assert_eq!(
+            firefox_endpoints_in(&roots),
+            vec!["ws://localhost:41234/session".to_string(), "ws://127.0.0.1:9222/session".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_attach_spec_names_firefox_endpoints() {
+        let one = |spec: &str| attach_candidates(spec).unwrap();
+        assert_eq!(one("9333"), vec!["ws://127.0.0.1:9333/session"]);
+        assert_eq!(one("localhost:9333"), vec!["ws://localhost:9333/session"]);
+        assert_eq!(one("ws://127.0.0.1:9333"), vec!["ws://127.0.0.1:9333/session"]);
+        assert_eq!(one("ws://127.0.0.1:9333/session"), vec!["ws://127.0.0.1:9333/session"]);
+        // By name: whatever is running, then the usual port, once.
+        let by_name = one("firefox");
+        assert_eq!(by_name.last().map(String::as_str), Some("ws://127.0.0.1:9222/session"));
+        assert_eq!(by_name.iter().filter(|u| u.as_str() == "ws://127.0.0.1:9222/session").count(), 1);
+        for bad in ["wss://x.test/session?key=secret", "http://127.0.0.1:9222", "chrome", "host:0", ":9222"] {
+            let err = attach_candidates(bad).unwrap_err().to_string();
+            assert!(!err.contains("secret"), "{err}");
+        }
+    }
+
+    /// Nothing listening: the error says how to start a Firefox that can
+    /// be attached to.
+    #[test]
+    fn attaching_to_no_firefox_says_how_to_start_one() {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let err = match Bidi::attach_firefox(&free.to_string(), json!({}), Duration::from_secs(2)) {
+            Ok(_) => panic!("nothing listens there"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("--remote-debugging-port") && err.contains("--engine firefox"), "{err}");
     }
 }

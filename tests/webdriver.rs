@@ -84,7 +84,13 @@ fn serve() -> String {
 
 /// Run `script` (JSON lines) through `navigera <args> serve`; the answers.
 fn session(args: &[&str], script: &[Value]) -> Vec<Value> {
+    session_in(args, &[], script)
+}
+
+/// [`session`] with environment variables set for navigera.
+fn session_in(args: &[&str], env: &[(&str, &std::path::Path)], script: &[Value]) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_navigera"))
+        .envs(env.iter().copied())
         .args(args)
         .arg("serve")
         .stdin(Stdio::piped())
@@ -194,6 +200,99 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
         return;
     };
     scenario(&["--engine", "firefox", "--executable", &firefox], "firefox");
+}
+
+/// A Firefox the user started with remote debugging is found by name and
+/// by its port, worked in through a window of navigera's own, and left
+/// running with the user's tab as it was.
+#[test]
+fn a_running_firefox_is_attached_to_and_left_running() {
+    let Some(firefox) = found("NAVIGERA_FIREFOX") else {
+        assert!(!required("NAVIGERA_REQUIRE_FIREFOX"), "NAVIGERA_REQUIRE_FIREFOX is set but no Firefox was found");
+        eprintln!("skipped: no Firefox");
+        return;
+    };
+    let site = serve();
+    // A home of the user's, with the profile where Firefox keeps profiles.
+    let home = std::env::temp_dir().join(format!("nv-ff-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let (var, profiles) = if cfg!(windows) {
+        ("APPDATA", home.join("Mozilla").join("Firefox").join("Profiles"))
+    } else if cfg!(target_os = "macos") {
+        ("HOME", home.join("Library/Application Support/Firefox/Profiles"))
+    } else {
+        ("HOME", home.join(".mozilla/firefox"))
+    };
+    let profile = profiles.join("u1.default");
+    std::fs::create_dir_all(&profile).unwrap();
+    let mut browser = Command::new(&firefox)
+        .arg("--remote-debugging-port=0")
+        .arg("--profile")
+        .arg(&profile)
+        .args(["--no-remote", "--new-instance", "--headless"])
+        .arg(format!("{site}/next.html"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Firefox starts");
+    // The file navigera finds it by, written once the endpoint is up.
+    let file = profile.join("WebDriverBiDiServer.json");
+    let started = Instant::now();
+    let port = loop {
+        let port = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| v["ws_port"].as_u64());
+        if let Some(port) = port {
+            break port.to_string();
+        }
+        if started.elapsed() > Duration::from_secs(90) || browser.try_wait().unwrap().is_some() {
+            let _ = browser.kill();
+            panic!("Firefox wrote no {} in {:?}", file.display(), started.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "status" }),
+        json!({ "id": 2, "op": "goto", "url": format!("{site}/") }),
+        json!({ "id": 3, "op": "fill", "label": "Name", "value": "Ada" }),
+        json!({ "id": 4, "op": "click", "role": "button", "name": "Send" }),
+        json!({ "id": 5, "op": "text", "selector": "#out" }),
+        json!({ "id": 6, "op": "tab-list" }),
+        json!({ "id": 7, "op": "tab-new" }),
+        json!({ "id": 8, "op": "tab-list" }),
+        json!({ "id": 9, "op": "quit" }),
+    ];
+    let home_env: [(&str, &std::path::Path); 1] = [(var, &home)];
+    // By name (the profile's file), then by port: the second works only
+    // if the first ended its session, since Firefox serves one at a time.
+    for (how, args, env) in [
+        ("by name", vec!["--attach", "firefox"], &home_env[..]),
+        ("by port", vec!["--engine", "firefox", "--attach", port.as_str()], &[][..]),
+    ] {
+        let a = session_in(&args, env, &script);
+        let status = ok(&a, 1);
+        assert_eq!(status["engine"], "firefox", "{how}: {status}");
+        assert_eq!(ok(&a, 2)["title"], "Fixture", "{how}");
+        assert_eq!(ok(&a, 5), "sent Ada s false", "{how}");
+        // Only what it opened counts: its window, not the user's tab.
+        let tabs = |id: u64| ok(&a, id).as_array().map(Vec::len);
+        assert_eq!((tabs(6), tabs(8)), (Some(1), Some(2)), "{how}: tabs {} then {}", ok(&a, 6), ok(&a, 8));
+        assert_eq!(ok(&a, 9)["bye"], true, "{how}");
+        assert!(browser.try_wait().unwrap().is_none(), "{how}: the user's Firefox was closed");
+    }
+    // The user's tab is where they left it; navigera's windows are gone.
+    let after = [
+        json!({ "id": 1, "op": "tab-new" }),
+        json!({ "id": 2, "op": "eval", "expression": "1 + 1" }),
+        json!({ "id": 3, "op": "quit" }),
+    ];
+    let a = session_in(&["--engine", "firefox", "--attach", &port], &[], &after);
+    assert_eq!(ok(&a, 2), 2);
+    let _ = browser.kill();
+    let _ = browser.wait();
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]

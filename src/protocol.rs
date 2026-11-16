@@ -1522,7 +1522,7 @@ pub fn usage_full(program: &str) -> String {
         ("--parent <pid>", "with `start`: the session ends when that process exits ($NAVIGERA_PARENT_PID)".into()),
         (
             "--attach [chrome|edge|<dir>|<port>]",
-            "with `start`: use your running browser and never close it (bare, or --auto-connect: whichever of Chrome, Chromium, Edge, Brave, Vivaldi, Opera, Arc or ports 9222/9229 serves remote debugging). Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there; --tab current works in the tab you are on".into(),
+            "with `start`: use your running browser and never close it (bare, or --auto-connect: whichever of Chrome, Chromium, Edge, Brave, Vivaldi, Opera, Arc or ports 9222/9229 serves remote debugging). Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there; --tab current works in the tab you are on; --attach firefox: a Firefox started with --remote-debugging-port (experimental)".into(),
         ),
         ("--profile <name>", "with `start`: a persistent visible navigera browser, kept open between sessions (--headless to hide it)".into()),
         (
@@ -2313,9 +2313,20 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     if config.webdriver.is_some() && config.engine == "chrome" {
         config.engine = "webdriver".into();
     }
-    if crate::wd::wanted(&config) && (config.attach.is_some() || config.profile.is_some() || config.electron.is_some())
+    // `--attach firefox` names the engine as well as the browser.
+    if config.engine == "chrome" && config.attach.as_deref().is_some_and(|a| a.trim().eq_ignore_ascii_case("firefox")) {
+        config.engine = "firefox".into();
+    }
+    // Firefox is attached to over BiDi; the other WebDriver engines start
+    // a browser of their own.
+    let firefox_attach = config.engine == "firefox" && config.webdriver.is_none() && config.attach.is_some();
+    if crate::wd::wanted(&config)
+        && ((config.attach.is_some() && !firefox_attach) || config.profile.is_some() || config.electron.is_some())
     {
-        return invalid("--attach, --profile and --electron drive Chrome over CDP: drop them with --engine firefox, safari or --webdriver");
+        return invalid("--attach, --profile and --electron drive Chrome over CDP (--attach also a running Firefox, with --engine firefox): drop them with --engine safari or --webdriver");
+    }
+    if firefox_attach && config.in_current_tab {
+        return invalid("--tab current works in Chrome's tab: in your own Firefox navigera works in a window it opens");
     }
     if config.bidi && !crate::wd::wanted(&config) {
         return invalid("--bidi runs a WebDriver session over BiDi: add --webdriver <url> or --engine safari (Firefox always uses BiDi)");

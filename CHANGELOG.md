@@ -14,6 +14,15 @@ All notable changes to this project are documented here. The format follows
   `navigera profiles` take the same names. The MCP server refuses their
   own pages (`vivaldi:`, `opera:`, `arc:`) as it does `chrome:`.
 
+- `--attach firefox` (experimental): a running Firefox started with
+  `firefox --remote-debugging-port` is worked in over WebDriver BiDi and
+  left running. navigera finds it by the file its remote agent keeps in
+  the profile (`WebDriverBiDiServer.json`), then on port 9222; `--engine
+  firefox --attach <port>`, `host:port` or `ws://…` names one. It opens
+  a window of its own and acts, listens and answers dialogs only there:
+  your tabs are not listed and stay as they are. When no Firefox serves
+  BiDi the error says how to start one that does.
+
 ### Changed
 
 - The README's title is the navigera wordmark from the brand sheet

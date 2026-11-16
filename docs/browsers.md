@@ -25,7 +25,9 @@ the benchmark.
 
 **Firefox, Safari and WebDriver servers** (experimental) run through the
 two W3C WebDriver protocols: `--engine firefox` starts Firefox and drives it
-over WebDriver BiDi, `--engine safari` (or `safari-preview`) starts
+over WebDriver BiDi (`--attach firefox` works in one you started yourself
+with `firefox --remote-debugging-port`, in a window of its own, and leaves
+it running), `--engine safari` (or `safari-preview`) starts
 safaridriver on macOS, and `--webdriver <url>` drives whatever browser a
 WebDriver server serves: geckodriver, chromedriver, msedgedriver, a Selenium
 Grid, a Mac's safaridriver. `--capabilities <json>` adds to the session's

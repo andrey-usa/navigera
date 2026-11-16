@@ -337,6 +337,11 @@ impl Driver {
         let engine = engine_name(config);
         let wire: Box<dyn Wire> = match (&config.webdriver, config.engine.as_str()) {
             (Some(url), _) => classic::connect(url, caps, config.bidi, timeout)?,
+            (None, "firefox") if config.attach.is_some() => Box::new(bidi::Bidi::attach_firefox(
+                config.attach.as_deref().unwrap_or(crate::cdp::attach::AUTO),
+                caps,
+                timeout,
+            )?),
             (None, "firefox") => {
                 Box::new(bidi::Bidi::launch_firefox(config.chromium.as_deref(), !config.headed, caps, timeout)?)
             }
