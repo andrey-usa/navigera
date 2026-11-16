@@ -276,6 +276,13 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         json!({ "id": 6, "op": "tab-list" }),
         json!({ "id": 7, "op": "tab-new" }),
         json!({ "id": 8, "op": "tab-list" }),
+        // A tab its page opens is its own too: listed, and switched to.
+        json!({ "id": 10, "op": "tab-select", "index": 0 }),
+        json!({ "id": 11, "op": "eval", "expression": "(document.body.insertAdjacentHTML('beforeend', '<button onclick=\"window.w = window.open(\\'/next.html\\')\">Pop</button>'), 1)" }),
+        json!({ "id": 12, "op": "click", "role": "button", "name": "Pop" }),
+        json!({ "id": 13, "op": "wait", "js": "!!window.w && window.w.document.title === 'Next'" }),
+        json!({ "id": 14, "op": "tab-list" }),
+        json!({ "id": 15, "op": "tab-select", "index": 2 }),
         json!({ "id": 9, "op": "quit" }),
     ];
     let home_env: [(&str, &std::path::Path); 1] = [(var, &home)];
@@ -293,6 +300,8 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         // Only what it opened counts: its window, not the user's tab.
         let tabs = |id: u64| ok(&a, id).as_array().map(Vec::len);
         assert_eq!((tabs(6), tabs(8)), (Some(1), Some(2)), "{how}: tabs {} then {}", ok(&a, 6), ok(&a, 8));
+        assert_eq!(tabs(14), Some(3), "{how}: a tab the page opened is not listed: {}", ok(&a, 14));
+        assert_eq!(ok(&a, 15)["title"], "Next", "{how}");
         assert_eq!(ok(&a, 9)["bye"], true, "{how}");
         assert!(browser.try_wait().unwrap().is_none(), "{how}: the user's Firefox was closed");
     }

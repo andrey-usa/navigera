@@ -129,6 +129,29 @@ pub fn firefox_endpoints_in(roots: &[std::path::PathBuf]) -> Vec<String> {
     out
 }
 
+/// In the user's browser, a tab one of this session's pages opened (a
+/// link with a target, `window.open`) is this session's too: `tree` is
+/// `browsingContext.getTree`'s answer, where each tab names the tab that
+/// opened it, also when the link said `noopener`.
+fn adopt_opened(own: &mut Vec<String>, tree: &Value) {
+    let Some(tabs) = tree["contexts"].as_array() else { return };
+    // A tab opened by an adopted tab is found on the next pass.
+    loop {
+        let before = own.len();
+        for tab in tabs {
+            let (Some(id), Some(opener)) = (tab["context"].as_str(), tab["originalOpener"].as_str()) else {
+                continue;
+            };
+            if own.iter().any(|o| o == opener) && !own.iter().any(|o| o == id) {
+                own.push(id.to_string());
+            }
+        }
+        if own.len() == before {
+            return;
+        }
+    }
+}
+
 /// The endpoints `--attach <spec>` means on the Firefox engine: `firefox`
 /// or `auto` (what running Firefoxes wrote, then the usual port), a port,
 /// `host:port`, or a `ws://` URL.
@@ -673,6 +696,9 @@ impl Bidi {
 
     fn top_contexts(&mut self) -> Result<Vec<String>> {
         let tree = self.send("browsingContext.getTree", json!({ "maxDepth": 0 }), Duration::from_secs(10))?;
+        if self.attached {
+            adopt_opened(&mut self.own, &tree);
+        }
         Ok(tree["contexts"]
             .as_array()
             .map(|c| c.iter().filter_map(|c| c["context"].as_str().map(str::to_string)).collect())
@@ -851,8 +877,8 @@ impl Wire for Bidi {
         if !self.attached {
             return Ok(all);
         }
-        // In the user's browser: the tabs this session opened and that
-        // are still there.
+        // In the user's browser: the tabs this session opened, or its
+        // pages did, and that are still there.
         self.own.retain(|o| all.contains(o));
         Ok(self.own.clone())
     }
@@ -994,7 +1020,9 @@ impl Wire for Bidi {
         if !self.closed {
             if self.attached {
                 // The user's browser stays: this session's tabs go, and
-                // the session ends so the next client can have one.
+                // the session ends so the next client can have one. The
+                // tabs its pages opened since the last look go with them.
+                let _ = self.top_contexts();
                 for id in std::mem::take(&mut self.own) {
                     let _ = self.send("browsingContext.close", json!({ "context": id }), Duration::from_secs(5));
                 }
@@ -1076,6 +1104,28 @@ mod tests {
             firefox_endpoints_in(&roots),
             vec!["ws://localhost:41234/session".to_string(), "ws://127.0.0.1:9222/session".to_string()]
         );
+    }
+
+    /// A tab this session's page opened is its own, and so is a tab that
+    /// one opened; the user's tabs and what they open stay theirs.
+    #[test]
+    fn a_tab_opened_by_an_own_tab_is_adopted() {
+        let tree = json!({ "contexts": [
+            { "context": "user", "originalOpener": null },
+            { "context": "second", "originalOpener": "first" },
+            { "context": "ours", "originalOpener": null },
+            { "context": "first", "originalOpener": "ours" },
+            { "context": "theirs", "originalOpener": "user" },
+            { "context": "old", "originalOpener": "closed" },
+        ] });
+        let mut own = vec!["ours".to_string()];
+        adopt_opened(&mut own, &tree);
+        assert_eq!(own, ["ours", "first", "second"]);
+        adopt_opened(&mut own, &tree);
+        assert_eq!(own.len(), 3);
+        // An answer with no tabs changes nothing.
+        adopt_opened(&mut own, &json!({}));
+        assert_eq!(own.len(), 3);
     }
 
     #[test]
