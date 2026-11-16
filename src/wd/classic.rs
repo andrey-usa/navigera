@@ -39,6 +39,10 @@ const LEAVE_STATE: &str = "const K = Symbol.for('navigera.leaving'); \
 /// The most an answer may hold (a full-page screenshot of a long page).
 const BODY_MAX: usize = 256 << 20;
 
+/// In safaridriver's "session not created" when Safari did not answer it
+/// in time: "The session timed out while connecting to a Safari instance."
+const SAFARI_SLOW_START: &str = "timed out while connecting to a Safari instance";
+
 /// The most an answer's status line and headers may hold together, and
 /// the most one chunk's size line and trailers may.
 const HEAD_MAX: usize = 64 << 10;
@@ -313,6 +317,12 @@ impl Session {
                     c.remove("unhandledPromptBehavior");
                 }
                 http.request("POST", "/session", Some(&json!({ "capabilities": { "alwaysMatch": caps } })), bound)
+            }
+            // safaridriver gives up on a Safari that is slow to start (a
+            // cold one on a busy Mac); by then Safari is up, and asking
+            // again gets the session.
+            Err(e) if format!("{e:#}").contains(SAFARI_SLOW_START) => {
+                http.request("POST", "/session", Some(&body), bound)
             }
             other => other,
         }
@@ -757,6 +767,49 @@ mod tests {
         assert_eq!(h.request("GET", "/a", None, Duration::from_secs(5)).unwrap(), json!("one"));
         let e = h.request("GET", "/b", None, Duration::from_secs(5)).unwrap_err();
         assert!(format!("{e:#}").contains("no such window"), "{e:#}");
+    }
+
+    /// safaridriver's refusal when Safari was slow to start is asked
+    /// again once; any other refusal, and a second one, is the answer.
+    #[test]
+    fn a_session_safari_was_too_slow_for_is_asked_for_again_once() {
+        let slow = r#"{"value":{"error":"session not created","message":"Could not create a session: The session timed out while connecting to a Safari instance."}}"#;
+        let other = r#"{"value":{"error":"session not created","message":"Could not create a session: no"}}"#;
+        let made = r#"{"value":{"sessionId":"s1","capabilities":{"browserName":"safari"}}}"#;
+        // What the server answers, in order; how many requests it saw.
+        let run = |answers: Vec<&'static str>| {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut s, _) = l.accept().unwrap();
+                s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+                let mut seen = 0;
+                for a in answers {
+                    let mut buf = [0u8; 4096];
+                    if s.read(&mut buf).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    seen += 1;
+                    let status = if a.contains("sessionId") { "200 OK" } else { "500 Internal Server Error" };
+                    s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{a}", a.len()).as_bytes())
+                        .unwrap();
+                }
+                seen
+            });
+            let mut h = Http::new(&format!("http://127.0.0.1:{port}")).unwrap();
+            let got = Session::open(&mut h, &mut json!({ "browserName": "safari" }), Duration::from_secs(5))
+                .map(|(id, _)| id)
+                .map_err(|e| format!("{e:#}"));
+            drop(h);
+            (got, server.join().unwrap())
+        };
+        assert_eq!(run(vec![slow, made]), (Ok("s1".to_string()), 2));
+        let (got, seen) = run(vec![slow, slow, made]);
+        assert!(got.as_ref().is_err_and(|e| e.contains(SAFARI_SLOW_START)), "{got:?}");
+        assert_eq!(seen, 2);
+        let (got, seen) = run(vec![other, made]);
+        assert!(got.as_ref().is_err_and(|e| e.contains("Could not create a session: no")), "{got:?}");
+        assert_eq!(seen, 1);
     }
 
     /// A server that sends its answer a byte at a time, each well inside

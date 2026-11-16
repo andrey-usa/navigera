@@ -31,6 +31,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `--engine safari`: when safaridriver gives up on a Safari that was slow
+  to start ("timed out while connecting to a Safari instance"), the
+  session is asked for once more instead of failing the start.
+
 - The README's title is the navigera wordmark from the brand sheet
   (`assets/brand/`, light and dark), and so is the documentation site's
   home page; every page of the site has the N beside its title and as its
