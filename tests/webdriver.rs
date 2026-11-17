@@ -40,7 +40,27 @@ const NEXT: &str = r#"<!doctype html><html><head><title>Next</title></head><body
 
 const FRAME: &str = r#"<!doctype html><html><head><title>Inner</title></head><body><button onclick="this.textContent = 'pressed'">In frame</button></body></html>"#;
 
-/// A server for the three pages, on a thread (not Python's `http.server`:
+const MORE: &str = r#"<!doctype html><html><head><title>More</title></head><body style="margin:0;user-select:none;-webkit-user-select:none">
+<input type="file" id="one"> <input type="file" id="many" multiple>
+<div id="card" draggable="true" style="width:80px;height:30px;background:#cde">Card</div>
+<div id="zone" style="width:120px;height:40px;background:#eee">Drop here</div>
+<div id="pad" style="width:300px;height:100px;background:#ddd"></div>
+<div id="knob" style="width:30px;height:30px;background:#888"></div>
+<script>
+window.seen = [];
+const card = document.getElementById('card'), zone = document.getElementById('zone'), pad = document.getElementById('pad'), knob = document.getElementById('knob');
+card.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', 'card'));
+zone.addEventListener('dragover', (e) => e.preventDefault());
+zone.addEventListener('drop', (e) => { e.preventDefault(); zone.textContent = 'got ' + e.dataTransfer.getData('text/plain'); });
+for (const type of ['mousedown', 'mouseup', 'click']) pad.addEventListener(type, (e) => window.seen.push(type + (e.shiftKey ? '+shift' : '') + '@' + e.offsetX + ',' + e.offsetY));
+pad.addEventListener('mousemove', (e) => { if (e.buttons === 1) window.heldMoves = (window.heldMoves || 0) + 1; });
+knob.addEventListener('mousedown', () => { window.knob = 'down'; });
+document.addEventListener('mouseup', (e) => { if (window.knob === 'down') window.knob = 'dropped on ' + e.target.id; });
+document.addEventListener('keydown', (e) => window.seen.push('down ' + e.key));
+document.addEventListener('keyup', (e) => window.seen.push('up ' + e.key));
+</script></body></html>"#;
+
+/// A server for the pages, on a thread (not Python's `http.server`:
 /// on macOS runners it spends ~35 s per start resolving the host name).
 fn serve() -> String {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -66,6 +86,7 @@ fn serve() -> String {
                         "/" => ("200 OK", INDEX),
                         "/next.html" => ("200 OK", NEXT),
                         "/frame.html" => ("200 OK", FRAME),
+                        "/more.html" => ("200 OK", MORE),
                         _ => ("404 Not Found", "not found"),
                     };
                     let head = format!(
@@ -198,6 +219,99 @@ fn scenario(args: &[&str], engine: &str) {
     assert_eq!(ok(&a, 20)["bye"], true);
 }
 
+/// The ops past the core set, on every engine: files for a file input, a
+/// drag of a `draggable` and of a plain element, the raw mouse and held
+/// keys, storage, the viewport, and a script that runs before the page's.
+/// `bidi`: the engine speaks WebDriver BiDi (it has preload scripts).
+fn more_ops(args: &[&str], engine: &str, bidi: bool) {
+    let site = serve();
+    let dir = std::env::temp_dir().join(format!("nv-wd-up-{}-{}-{bidi}", std::process::id(), args.len()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a_txt, b_txt) = (dir.join("a.txt"), dir.join("b.txt"));
+    std::fs::write(&a_txt, "alpha").unwrap();
+    std::fs::write(&b_txt, "be").unwrap();
+    let (fa, fb) = (a_txt.display().to_string(), b_txt.display().to_string());
+    let files = "[...document.querySelectorAll('input[type=file]')].map((i) => [...i.files].map((f) => f.name + ':' + f.size).join(','))";
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        json!({ "id": 2, "op": "upload", "selector": "#one", "files": [fa] }),
+        json!({ "id": 3, "op": "upload", "selector": "#many", "files": [fa, fb] }),
+        json!({ "id": 4, "op": "eval", "expression": files }),
+        json!({ "id": 5, "op": "upload", "selector": "#one", "files": [fa, fb] }),
+        json!({ "id": 6, "op": "upload", "selector": "#pad", "files": [fa] }),
+        json!({ "id": 7, "op": "drag", "from": { "selector": "#card" }, "to": { "selector": "#zone" } }),
+        json!({ "id": 8, "op": "text", "selector": "#zone" }),
+        json!({ "id": 9, "op": "drag", "from": { "selector": "#knob" }, "to": { "selector": "#pad" } }),
+        json!({ "id": 10, "op": "eval", "expression": "[window.knob, window.heldMoves > 0]" }),
+        json!({ "id": 11, "op": "eval", "expression": "window.seen.length = 0" }),
+        json!({ "id": 12, "op": "keydown", "key": "Shift" }),
+        json!({ "id": 13, "op": "mouse", "action": "click", "x": 10, "y": 20, "selector": "#pad" }),
+        json!({ "id": 14, "op": "keyup", "key": "Shift" }),
+        json!({ "id": 15, "op": "mouse", "action": "down", "selector": "#pad" }),
+        json!({ "id": 16, "op": "mouse", "action": "move", "x": 200, "y": 60, "selector": "#pad", "steps": 4 }),
+        json!({ "id": 17, "op": "mouse", "action": "up" }),
+        json!({ "id": 18, "op": "eval", "expression": "window.seen" }),
+        json!({ "id": 19, "op": "storage", "action": "set", "key": "k", "value": "v 1" }),
+        json!({ "id": 20, "op": "storage", "key": "k" }),
+        json!({ "id": 21, "op": "storage" }),
+        json!({ "id": 22, "op": "storage", "action": "clear" }),
+        json!({ "id": 23, "op": "storage" }),
+        json!({ "id": 24, "op": "set", "what": "viewport", "values": ["800", "600"] }),
+        json!({ "id": 25, "op": "eval", "expression": "[window.innerWidth, window.innerHeight]" }),
+        json!({ "id": 26, "op": "init-script", "source": "window.early = 'before the page';" }),
+        json!({ "id": 27, "op": "reload" }),
+        json!({ "id": 28, "op": "eval", "expression": "String(window.early)" }),
+        json!({ "id": 29, "op": "init-script", "clear": true }),
+        json!({ "id": 30, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    let _ = std::fs::remove_dir_all(&dir);
+    let failed = |id: u64| {
+        let x = a.iter().find(|x| x["id"] == id).unwrap();
+        assert_eq!(x["ok"], false, "{engine}: step {id} should fail: {x}");
+        x["error"].to_string()
+    };
+    assert_eq!(ok(&a, 2)["files"], 1, "{engine}");
+    assert_eq!(ok(&a, 3)["files"], 2, "{engine}");
+    assert_eq!(ok(&a, 4), &json!(["a.txt:5", "a.txt:5,b.txt:2"]), "{engine}: the inputs' files");
+    assert!(failed(5).contains("takes one file"), "{engine}: {}", failed(5));
+    assert!(failed(6).contains("not an <input type=file>"), "{engine}: {}", failed(6));
+    assert_eq!(ok(&a, 7)["drag"]["dropped"], true, "{engine}: {}", ok(&a, 7));
+    assert_eq!(ok(&a, 8), "got card", "{engine}: the drop's data");
+    assert_eq!(ok(&a, 9)["drag"]["path"], "mouse", "{engine}: {}", ok(&a, 9));
+    assert_eq!(ok(&a, 10), &json!(["dropped on pad", true]), "{engine}: a held mouse from the knob to the pad");
+    assert_eq!(ok(&a, 12)["down"], "Shift", "{engine}");
+    assert_eq!(ok(&a, 15)["mouse"]["held"], json!(["left"]), "{engine}");
+    assert_eq!(ok(&a, 17)["mouse"]["held"], json!([]), "{engine}");
+    let seen: Vec<String> = ok(&a, 18).as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect();
+    let want = [
+        "down Shift",
+        "mousedown+shift@10,20",
+        "mouseup+shift@10,20",
+        "click+shift@10,20",
+        "up Shift",
+        "mousedown@150,50",
+        "mouseup@200,60",
+        "click@200,60",
+    ];
+    assert_eq!(seen, want, "{engine}: keys held over a click, then a press, a move and a release");
+    assert_eq!(ok(&a, 19), true, "{engine}");
+    assert_eq!(ok(&a, 20), "v 1", "{engine}");
+    assert_eq!(ok(&a, 21), &json!({ "k": "v 1" }), "{engine}");
+    assert_eq!(ok(&a, 23), &json!({}), "{engine}");
+    assert_eq!(ok(&a, 24)["viewport"], json!([800, 600]), "{engine}: {}", ok(&a, 24));
+    assert_eq!(ok(&a, 25), &json!([800, 600]), "{engine}");
+    if bidi {
+        assert_eq!(ok(&a, 26)["init_scripts"], 1, "{engine}");
+        assert_eq!(ok(&a, 28), "before the page", "{engine}: the script ran in the reloaded page");
+        assert_eq!(ok(&a, 29)["removed"], 1, "{engine}");
+    } else {
+        assert!(failed(26).contains("classic WebDriver has no script"), "{engine}: {}", failed(26));
+        assert_eq!(ok(&a, 28), "undefined", "{engine}");
+    }
+    assert_eq!(ok(&a, 30)["bye"], true);
+}
+
 fn found(env: &str) -> Option<String> {
     std::env::var_os(env).map(std::path::PathBuf::from).filter(|p| p.is_file()).map(|p| p.display().to_string())
 }
@@ -214,6 +328,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
         return;
     };
     scenario(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    more_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
 }
 
 /// A Firefox the user started with remote debugging is found by name and
@@ -334,6 +449,7 @@ fn safari_over_safaridriver_reads_acts_and_navigates() {
         return;
     }
     scenario(&["--engine", "safari"], "safari");
+    more_ops(&["--engine", "safari"], "safari", false);
 }
 
 /// chromedriver on a free port, for the `--webdriver` scenarios.
@@ -373,6 +489,8 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     let caps = caps.to_string();
     scenario(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     scenario(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
+    more_ops(&["--webdriver", &url, "--capabilities", &caps], "webdriver", false);
+    more_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver", true);
     #[cfg(unix)]
     {
         extern "C" {

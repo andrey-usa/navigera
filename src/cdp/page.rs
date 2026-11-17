@@ -2421,10 +2421,10 @@ const SCROLL_EL: &str = r#"async function (el, dy, to, grow) {
 
 /// The element itself (for ops that need its remote object, like upload).
 /// Is the element (or an ancestor) an HTML5 drag source?
-const DRAG_IS_HTML5: &str = "function (el) { return !!el.closest('[draggable=true]'); }";
+pub(crate) const DRAG_IS_HTML5: &str = "function (el) { return !!el.closest('[draggable=true]'); }";
 
 /// dragstart on the drag source, with a DataTransfer kept for the drop.
-const DRAG_START: &str = r#"function (el) {
+pub(crate) const DRAG_START: &str = r#"function (el) {
   const fire = (t, type, dt) => {
     const r = t.getBoundingClientRect();
     const o = { bubbles: true, cancelable: true, composed: true, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };
@@ -2453,7 +2453,7 @@ const DRAG_START: &str = r#"function (el) {
 
 /// dragenter, dragover and (when the page allows it) drop on the target,
 /// then dragend on the source. True when the drop happened.
-const DRAG_DROP: &str = r#"function (el) {
+pub(crate) const DRAG_DROP: &str = r#"function (el) {
   const fire = (t, type, dt) => {
     const r = t.getBoundingClientRect();
     const o = { bubbles: true, cancelable: true, composed: true, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 };

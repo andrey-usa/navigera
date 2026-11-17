@@ -143,6 +143,54 @@ const POINT_EL: &str = r#"function (el, force) {
     return { x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)) };
 }"#;
 
+/// The page expression for the element an op kept for the protocol's own
+/// element command (`upload`).
+pub const PICKED: &str = "window[Symbol.for('navigera.picked')]";
+
+/// Keep a file input for [`PICKED`], after checking it can take `count`
+/// files.
+const PICK_FILE_INPUT: &str = r#"function (el, count) {
+    if (!(el instanceof el.ownerDocument.defaultView.HTMLInputElement) || el.type !== 'file') throw new Error('the element is not an <input type=file> (it is <' + el.localName + '>); `ax` shows the file input, or click what opens the chooser');
+    if (count > 1 && !el.multiple) throw new Error('the file input takes one file (no `multiple`), got ' + count);
+    window[Symbol.for('navigera.picked')] = el;
+    return true;
+}"#;
+
+/// A point `mouse` aims at: the element scrolled into view, then (dx, dy)
+/// from its top-left corner, or its middle, in the top window's viewport.
+const MOUSE_POINT_EL: &str = r#"function (el, dx, dy) {
+    let r = el.getBoundingClientRect();
+    if (r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth || el.ownerDocument !== document) {
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        r = el.getBoundingClientRect();
+    }
+    let x = r.left + (dx == null ? r.width / 2 : dx), y = r.top + (dy == null ? r.height / 2 : dy);
+    for (let w = el.ownerDocument.defaultView; w && w.frameElement; w = w.parent) {
+        const f = w.frameElement.getBoundingClientRect();
+        x += f.left + w.frameElement.clientLeft;
+        y += f.top + w.frameElement.clientTop;
+    }
+    return { x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)) };
+}"#;
+
+/// The viewport's size.
+const VIEWPORT_SIZE: &str = "() => [window.innerWidth, window.innerHeight]";
+
+/// Mouse moves from the press to the target of a `drag`, as on Chrome.
+const DRAG_STEPS: i64 = 8;
+
+/// The first moves of a held mouse: past any drag threshold.
+const DRAG_START_STEPS: [i64; 5] = [3, 6, 10, 15, 20];
+
+/// One pointer source's actions.
+fn pointer(acts: Vec<Value>) -> Value {
+    json!([{ "type": "pointer", "id": "mouse", "parameters": { "pointerType": "mouse" }, "actions": acts }])
+}
+
+fn move_to(x: i64, y: i64) -> Value {
+    json!({ "type": "pointerMove", "x": x, "y": y, "origin": "viewport", "duration": 0 })
+}
+
 /// The page's location and title.
 const URL_TITLE: &str = "() => [location.href, document.title]";
 
@@ -167,6 +215,21 @@ pub trait Wire: Send {
     fn evaluate(&mut self, source: &str, timeout: Duration) -> Result<Value>;
     /// W3C input actions (the same shape in both protocols).
     fn actions(&mut self, actions: Value) -> Result<()>;
+    /// Input actions after which a button or a key stays held, for the
+    /// calls that follow (`mouse down`, `keydown`).
+    fn actions_keep(&mut self, actions: Value) -> Result<()> {
+        self.actions(actions)
+    }
+    /// Give the file input the page keeps under [`PICKED`] these files
+    /// (absolute paths on the browser's machine).
+    fn set_files(&mut self, files: &[String], timeout: Duration) -> Result<()>;
+    /// The viewport's size in CSS pixels and its pixel ratio; `None` is the
+    /// browser's own again.
+    fn set_viewport(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()>;
+    /// A script every new document runs before its own.
+    fn add_init_script(&mut self, source: &str) -> Result<()>;
+    /// Take the init scripts away again; how many there were.
+    fn clear_init_scripts(&mut self) -> Result<usize>;
     /// Wait for a navigation an action started, if one did.
     fn settle(&mut self, _timeout: Duration) {}
     fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>>;
@@ -324,6 +387,13 @@ pub struct Driver {
     timeout: Duration,
     /// Console entries read from the wire and not yet returned.
     console: Vec<Value>,
+    /// Where `mouse` left the pointer, and the buttons it holds (bit 1
+    /// left, 2 right, 4 middle).
+    pointer: (i64, i64),
+    buttons: u8,
+    /// Keys `keydown` holds.
+    keys: Vec<String>,
+    init_scripts: Vec<String>,
 }
 
 impl Driver {
@@ -358,7 +428,16 @@ impl Driver {
                 bail!("--engine {other}: not a WebDriver engine (firefox, safari, safari-preview, webdriver)")
             }
         };
-        Ok(Self { wire, engine, timeout, console: Vec::new() })
+        Ok(Self {
+            wire,
+            engine,
+            timeout,
+            console: Vec::new(),
+            pointer: (0, 0),
+            buttons: 0,
+            keys: Vec::new(),
+            init_scripts: Vec::new(),
+        })
     }
 
     pub fn engine(&self) -> &'static str {
@@ -431,14 +510,20 @@ impl Driver {
     }
 
     fn act(&mut self, actions: Value) -> Result<()> {
-        self.wire.actions(actions)?;
+        // While `mouse down` or `keydown` holds something, nothing lets go
+        // of it but its own `up`.
+        if self.buttons != 0 || !self.keys.is_empty() {
+            self.wire.actions_keep(actions)?;
+        } else {
+            self.wire.actions(actions)?;
+        }
         self.wire.settle(self.timeout);
         Ok(())
     }
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport)",
             op_name(command),
             self.engine
         )
@@ -934,6 +1019,246 @@ impl Driver {
             Command::Dialog { accept, prompt_text } => {
                 self.wire.set_dialog_policy(accept.unwrap_or(true), prompt_text.clone());
                 Ok(json!({ "dialogs": if accept.unwrap_or(true) { "accept" } else { "dismiss" } }))
+            }
+            Command::Upload { target, files, timeout_ms: _ } => {
+                let t = target.target("upload")?;
+                let files: Vec<String> = files
+                    .iter()
+                    .map(|f| {
+                        std::fs::canonicalize(f)
+                            .map(|p| p.display().to_string())
+                            .map_err(|e| anyhow!("upload: {f}: {e}"))
+                    })
+                    .collect::<Result<_>>()?;
+                self.on(&t, "upload", PICK_FILE_INPUT, json!([files.len()]))?;
+                self.wire.set_files(&files, self.timeout).map_err(|e| e.context("upload"))?;
+                Ok(json!({ "files": files.len() }))
+            }
+            Command::Drag { from, to, from_at, to_at, timeout_ms: _ } => {
+                let (f, t) = (from.target("drag")?, to.target("drag")?);
+                let what = format!("drag {} to {}", f.label(), t.label());
+                let html5 = self
+                    .on(&f, "drag", crate::cdp::page::DRAG_IS_HTML5, json!([]))
+                    .map_err(|e| e.context(what.clone()))?;
+                let r = if html5 == Value::Bool(true) {
+                    // A `draggable` source: the events a browser fires,
+                    // dragstart through dragend, in the page (no driver
+                    // starts a real drag from input actions on every
+                    // browser).
+                    self.on(&f, "drag", crate::cdp::page::DRAG_START, json!([]))
+                        .map_err(|e| e.context(what.clone()))?;
+                    let dropped = self
+                        .on(&t, "drag", crate::cdp::page::DRAG_DROP, json!([]))
+                        .map_err(|e| e.context(what.clone()))?;
+                    json!({ "html5": true, "dropped": dropped, "path": "synthetic" })
+                } else {
+                    let at = |p: &Option<Box<[f64; 2]>>| match p.as_deref() {
+                        Some([x, y]) => json!([x, y]),
+                        None => json!([null, null]),
+                    };
+                    let a = self.on(&f, "drag", MOUSE_POINT_EL, at(from_at)).map_err(|e| e.context(what.clone()))?;
+                    let (ax, ay) = (a["x"].as_i64().unwrap_or(0), a["y"].as_i64().unwrap_or(0));
+                    let mut acts = vec![move_to(ax, ay), json!({ "type": "pointerDown", "button": 0 })];
+                    acts.extend(DRAG_START_STEPS.iter().map(|d| move_to(ax + d, ay + d)));
+                    self.wire.actions_keep(pointer(acts)).map_err(|e| e.context(what.clone()))?;
+                    // The target is found with the mouse held: a drop zone
+                    // may only be there once the drag began.
+                    let b = self.on(&t, "drag", MOUSE_POINT_EL, at(to_at));
+                    let (sx, sy) = (ax + 20, ay + 20);
+                    let mut acts = Vec::new();
+                    let end = match &b {
+                        Ok(b) => {
+                            let (bx, by) = (b["x"].as_i64().unwrap_or(0), b["y"].as_i64().unwrap_or(0));
+                            acts.extend(
+                                (1..=DRAG_STEPS)
+                                    .map(|i| move_to(sx + (bx - sx) * i / DRAG_STEPS, sy + (by - sy) * i / DRAG_STEPS)),
+                            );
+                            (bx, by)
+                        }
+                        Err(_) => (sx, sy),
+                    };
+                    acts.push(json!({ "type": "pointerUp", "button": 0 }));
+                    self.buttons &= !1;
+                    self.pointer = end;
+                    self.act(pointer(acts)).map_err(|e| e.context(what.clone()))?;
+                    b.map_err(|e| e.context(what.clone()))?;
+                    json!({ "from": { "x": ax, "y": ay }, "to": { "x": end.0, "y": end.1 }, "path": "mouse" })
+                };
+                let mut out = self.state()?;
+                out["drag"] = r;
+                Ok(out)
+            }
+            Command::Mouse { action, x, y, button, count, steps, target, timeout_ms: _ } => {
+                let (number, bit) = match button.as_deref().unwrap_or("left") {
+                    "left" | "" => (0u8, 1u8),
+                    "middle" => (1, 4),
+                    "right" => (2, 2),
+                    other => bail!("mouse --button takes left, right or middle, not {other:?}"),
+                };
+                let offset = match (action.as_str(), x, y) {
+                    ("move" | "click", Some(x), Some(y)) => Some((*x, *y)),
+                    _ => None,
+                };
+                let at = match target.optional("mouse")? {
+                    Some(t) => {
+                        let args = match offset {
+                            Some((dx, dy)) => json!([dx, dy]),
+                            None => json!([null, null]),
+                        };
+                        let p = self.on(&t, &format!("mouse {action}"), MOUSE_POINT_EL, args)?;
+                        Some((p["x"].as_i64().unwrap_or(0), p["y"].as_i64().unwrap_or(0)))
+                    }
+                    None => {
+                        if let (Some((px, py)), "click") = (offset, action.as_str()) {
+                            let v = self.call(VIEWPORT_SIZE, json!([]))?;
+                            let (w, h) =
+                                (v[0].as_f64().unwrap_or(f64::INFINITY), v[1].as_f64().unwrap_or(f64::INFINITY));
+                            if px < 0.0 || py < 0.0 || px >= w || py >= h {
+                                bail!("mouse click: ({px}, {py}) is outside the viewport ({w}x{h}): scroll first, or aim from an element (`mouse click <x> <y> --selector <css>` scrolls it into view)");
+                            }
+                        }
+                        offset.map(|(x, y)| (x.round() as i64, y.round() as i64))
+                    }
+                };
+                if matches!(action.as_str(), "move" | "click") && at.is_none() {
+                    bail!("mouse {action} needs x and y");
+                }
+                let mut acts = Vec::new();
+                if let Some((x, y)) = at {
+                    let (px, py) = self.pointer;
+                    let n = i64::from(steps.unwrap_or(1).clamp(1, 1000));
+                    acts.extend((1..=n).map(|i| move_to(px + (x - px) * i / n, py + (y - py) * i / n)));
+                    self.pointer = (x, y);
+                }
+                let mut wheel = None;
+                match action.as_str() {
+                    "move" => {}
+                    "down" => {
+                        acts.push(json!({ "type": "pointerDown", "button": number }));
+                        self.buttons |= bit;
+                    }
+                    "up" => acts.push(json!({ "type": "pointerUp", "button": number })),
+                    "click" => {
+                        for _ in 0..count.unwrap_or(1).clamp(1, 10) {
+                            acts.push(json!({ "type": "pointerDown", "button": number }));
+                            acts.push(json!({ "type": "pointerUp", "button": number }));
+                        }
+                    }
+                    "wheel" => {
+                        let (dx, dy) = (x.unwrap_or(0.0).round() as i64, y.unwrap_or(0.0).round() as i64);
+                        wheel = Some(json!({ "type": "wheel", "id": "wheel", "actions": [{ "type": "scroll",
+                            "x": self.pointer.0, "y": self.pointer.1, "deltaX": dx, "deltaY": dy, "origin": "viewport", "duration": 0 }] }));
+                    }
+                    other => bail!("mouse takes move, down, up, click or wheel, not {other:?}"),
+                }
+                let mut sources = Vec::new();
+                if !acts.is_empty() {
+                    sources.push(pointer(acts)[0].clone());
+                }
+                sources.extend(wheel);
+                // An `up` lets go after its own actions ran held.
+                let sent = if sources.is_empty() { Ok(()) } else { self.act(Value::Array(sources)) };
+                if action == "up" {
+                    self.buttons &= !bit;
+                    if self.buttons == 0 && self.keys.is_empty() {
+                        // Nothing held any more: the driver's input state
+                        // goes back to rest (the pointer stays put).
+                        let _ = self.wire.actions(pointer(vec![move_to(self.pointer.0, self.pointer.1)]));
+                    }
+                }
+                sent.map_err(|e| e.context(format!("mouse {action}")))?;
+                let held: Vec<&str> = [(1u8, "left"), (2, "right"), (4, "middle")]
+                    .iter()
+                    .filter(|(b, _)| self.buttons & b != 0)
+                    .map(|(_, n)| *n)
+                    .collect();
+                let mut state = self.state()?;
+                state["mouse"] = json!({ "x": self.pointer.0, "y": self.pointer.1, "held": held });
+                Ok(state)
+            }
+            Command::KeyDown { key } => {
+                let value = key_value(key).map_err(|e| e.context("keydown"))?;
+                if !self.keys.contains(&value) {
+                    self.keys.push(value.clone());
+                }
+                self.act(
+                    json!([{ "type": "key", "id": "keyboard", "actions": [{ "type": "keyDown", "value": value }] }]),
+                )
+                .map_err(|e| e.context("keydown"))?;
+                Ok(json!({ "down": key }))
+            }
+            Command::KeyUp { key } => {
+                let value = key_value(key).map_err(|e| e.context("keyup"))?;
+                let sent = self.act(
+                    json!([{ "type": "key", "id": "keyboard", "actions": [{ "type": "keyUp", "value": value }] }]),
+                );
+                self.keys.retain(|k| *k != value);
+                if self.buttons == 0 && self.keys.is_empty() {
+                    let _ = self.wire.actions(
+                        json!([{ "type": "key", "id": "keyboard", "actions": [{ "type": "pause", "duration": 0 }] }]),
+                    );
+                }
+                sent.map_err(|e| e.context("keyup"))?;
+                Ok(json!({ "up": key }))
+            }
+            Command::Storage { area, action, key, value } => {
+                let area = match area.as_deref().unwrap_or("local") {
+                    "local" => "localStorage",
+                    "session" => "sessionStorage",
+                    other => bail!("storage takes local|session, got {other:?}"),
+                };
+                let js = match (action.as_deref().unwrap_or("get"), key, value) {
+                    ("get", Some(_), _) => "(k) => A.getItem(k)",
+                    ("get", None, _) => "() => Object.fromEntries(Object.entries(A))",
+                    ("set", Some(_), Some(_)) => "(k, v) => (A.setItem(k, v), true)",
+                    ("remove", Some(_), _) => "(k) => (A.removeItem(k), true)",
+                    ("clear", _, _) => "() => (A.clear(), true)",
+                    (other, ..) => bail!("storage: {other} needs a key (set: and a value)"),
+                };
+                self.call(&js.replace('A', area), json!([key, value])).map_err(|e| e.context("storage"))
+            }
+            Command::InitScript { source: Some(source), .. } => {
+                self.wire.add_init_script(source).map_err(|e| e.context("init-script"))?;
+                self.init_scripts.push(source.clone());
+                Ok(json!({ "init_scripts": self.init_scripts.len() }))
+            }
+            Command::InitScript { source: None, clear: true } => {
+                self.wire.clear_init_scripts().map_err(|e| e.context("init-script"))?;
+                Ok(json!({ "removed": std::mem::take(&mut self.init_scripts).len() }))
+            }
+            Command::InitScript { source: None, clear: false } => {
+                if self.init_scripts.is_empty() {
+                    return Ok(json!("(no init scripts)"));
+                }
+                Ok(json!(self
+                    .init_scripts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, src)| format!(
+                        "{}: {}",
+                        i + 1,
+                        src.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect::<String>()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n")))
+            }
+            Command::Set { what, values, scale, mobile, accuracy } if what == "viewport" => {
+                if *mobile {
+                    bail!("set viewport --mobile: not on the {} engine (a mobile viewport is Chrome's emulation); drop --mobile, or run it with --engine chrome", self.engine);
+                }
+                let plan = crate::emulate::plan("viewport", values, *scale, false, *accuracy, false)?;
+                let size = match &plan.result["viewport"] {
+                    Value::Array(wh) => {
+                        Some((wh[0].as_f64().unwrap_or(0.0) as u32, wh[1].as_f64().unwrap_or(0.0) as u32))
+                    }
+                    _ => None,
+                };
+                self.wire.set_viewport(size, *scale).map_err(|e| e.context("set viewport"))?;
+                let v = self.call(VIEWPORT_SIZE, json!([]))?;
+                Ok(match size {
+                    Some(_) => json!({ "viewport": v, "scale": scale }),
+                    None => json!({ "viewport": "default" }),
+                })
             }
             Command::Quit { .. } => {
                 self.wire.close();

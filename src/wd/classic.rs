@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use super::{wrap, Wait, Wire, CONSOLE_HOOK, DIALOG_HOOK, LISTEN};
 
 /// The key WebDriver names an element reference by.
-const ELEMENT_KEY: &str = "element-6066-11e4-a52f-4f735466cecf";
+const ELEMENT_KEY: &str = "element-6066-11e4-a52e-4f735466cecf";
 
 /// How long after an action a navigation it starts must have begun (the
 /// page's `beforeunload`) to be waited for.
@@ -624,6 +624,63 @@ impl Wire for Classic {
         self.with_dialogs(|s| s.cmd("POST", "/actions", Some(body.clone()), Duration::from_secs(30)))?;
         let _ = self.s.cmd("DELETE", "/actions", None, Duration::from_secs(10));
         Ok(())
+    }
+
+    fn actions_keep(&mut self, actions: Value) -> Result<()> {
+        let body = json!({ "actions": actions });
+        self.with_dialogs(|s| s.cmd("POST", "/actions", Some(body.clone()), Duration::from_secs(30)))?;
+        Ok(())
+    }
+
+    fn set_files(&mut self, files: &[String], timeout: Duration) -> Result<()> {
+        let body = json!({ "script": format!("return {};", super::PICKED), "args": [] });
+        let v = self.s.cmd("POST", "/execute/sync", Some(body), timeout)?;
+        let element = v[ELEMENT_KEY]
+            .as_str()
+            .ok_or_else(|| anyhow!("the file input is gone from the page; run `ax` again"))?
+            .to_string();
+        // WebDriver's way to choose files: their paths "typed" into the
+        // input, one per line.
+        let body = json!({ "text": files.join("\n") });
+        self.s.cmd("POST", &format!("/element/{element}/value"), Some(body), timeout)?;
+        Ok(())
+    }
+
+    fn set_viewport(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()> {
+        if scale.is_some_and(|s| s != 1.0) {
+            bail!("--scale: classic WebDriver sizes the window and has no pixel-ratio override; drop --scale, or use --engine firefox or chrome");
+        }
+        let Some((width, height)) = size else {
+            self.s.cmd("POST", "/window/maximize", Some(json!({})), Duration::from_secs(30))?;
+            return Ok(());
+        };
+        // The command sizes the window; the viewport is that less the
+        // browser's own bars, so the difference is measured and added.
+        let inner = |s: &mut Session| -> Result<(i64, i64)> {
+            let body = json!({ "script": "return [window.innerWidth, window.innerHeight];", "args": [] });
+            let v = s.cmd("POST", "/execute/sync", Some(body), Duration::from_secs(10))?;
+            Ok((v[0].as_i64().unwrap_or(0), v[1].as_i64().unwrap_or(0)))
+        };
+        let (mut w, mut h) = (i64::from(width), i64::from(height));
+        for _ in 0..3 {
+            self.s.cmd("POST", "/window/rect", Some(json!({ "width": w, "height": h })), Duration::from_secs(30))?;
+            let (iw, ih) = inner(&mut self.s)?;
+            if (iw, ih) == (i64::from(width), i64::from(height)) {
+                return Ok(());
+            }
+            w += i64::from(width) - iw;
+            h += i64::from(height) - ih;
+        }
+        let (iw, ih) = inner(&mut self.s)?;
+        bail!("the browser's window gave a viewport of {iw}x{ih}, not {width}x{height} (a headed window has a smallest and a largest size)")
+    }
+
+    fn add_init_script(&mut self, _source: &str) -> Result<()> {
+        bail!("classic WebDriver has no script that runs before a page's own; use --engine firefox or chrome (or --bidi with a server that has it)")
+    }
+
+    fn clear_init_scripts(&mut self) -> Result<usize> {
+        Ok(0)
     }
 
     fn settle(&mut self, timeout: Duration) {

@@ -72,6 +72,10 @@ pub struct Bidi {
     /// browser itself is left running.
     attached: bool,
     own: Vec<String>,
+    /// `init-script`: the preload scripts this session added.
+    preloads: Vec<String>,
+    /// `set viewport`, for the tabs this session opens after it.
+    viewport: Option<Value>,
     /// The frames inside `own` tabs, each with its tab.
     frames: Vec<(String, String)>,
     closed: bool,
@@ -566,6 +570,8 @@ impl Bidi {
             nav: None,
             browser: Value::Null,
             endpoint: shown,
+            preloads: Vec::new(),
+            viewport: None,
             child: None,
             _profile: None,
             classic: None,
@@ -874,6 +880,63 @@ impl Wire for Bidi {
         Ok(())
     }
 
+    fn set_files(&mut self, files: &[String], timeout: Duration) -> Result<()> {
+        let r = self.send(
+            "script.callFunction",
+            json!({
+                "functionDeclaration": format!("() => {}", super::PICKED),
+                "awaitPromise": false,
+                "target": { "context": self.context },
+                "resultOwnership": "none",
+            }),
+            timeout,
+        )?;
+        let node = r["result"]["sharedId"]
+            .as_str()
+            .ok_or_else(|| anyhow!("the file input is gone from the page; run `ax` again"))?
+            .to_string();
+        self.send(
+            "input.setFiles",
+            json!({ "context": self.context, "element": { "sharedId": node }, "files": files }),
+            timeout,
+        )?;
+        Ok(())
+    }
+
+    fn set_viewport(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()> {
+        let mut params = match size {
+            Some((width, height)) => json!({ "viewport": { "width": width, "height": height } }),
+            None => json!({ "viewport": null, "devicePixelRatio": null }),
+        };
+        if let (Some(_), Some(scale)) = (size, scale) {
+            params["devicePixelRatio"] = json!(scale);
+        }
+        self.viewport = size.map(|_| params.clone());
+        params["context"] = json!(self.context);
+        self.send("browsingContext.setViewport", params, Duration::from_secs(30))?;
+        Ok(())
+    }
+
+    fn add_init_script(&mut self, source: &str) -> Result<()> {
+        let mut params = json!({ "functionDeclaration": format!("() => {{\n{source}\n}}") });
+        if self.attached {
+            // In the user's own Firefox: this session's tabs only.
+            params["contexts"] = json!(self.own);
+        }
+        let r = self.send("script.addPreloadScript", params, Duration::from_secs(30))?;
+        let id = r["script"].as_str().ok_or_else(|| anyhow!("the browser named no script"))?;
+        self.preloads.push(id.to_string());
+        Ok(())
+    }
+
+    fn clear_init_scripts(&mut self) -> Result<usize> {
+        let ids = std::mem::take(&mut self.preloads);
+        for id in &ids {
+            self.send("script.removePreloadScript", json!({ "script": id }), Duration::from_secs(30))?;
+        }
+        Ok(ids.len())
+    }
+
     fn settle(&mut self, timeout: Duration) {
         // A navigation the action started announces itself within a few
         // milliseconds; then its load is waited for.
@@ -982,6 +1045,10 @@ impl Wire for Bidi {
         }
         let r = self.send("browsingContext.create", params, Duration::from_secs(30))?;
         let id = r["context"].as_str().map(str::to_string).ok_or_else(|| anyhow!("the browser made no tab"))?;
+        if let Some(mut viewport) = self.viewport.clone() {
+            viewport["context"] = json!(id);
+            let _ = self.send("browsingContext.setViewport", viewport, Duration::from_secs(30));
+        }
         if self.attached {
             self.own.push(id.clone());
             let was = std::mem::replace(&mut self.context, id.clone());

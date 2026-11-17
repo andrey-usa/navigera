@@ -37,8 +37,10 @@ server's session over its BiDi endpoint. `ax` reads the page in the page's
 own JavaScript and prints the same tree as on Chrome; locators, `fill` and
 `select` run the same page code. The core ops work: goto, ax, click, fill,
 select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies,
-console and dialogs. An op only Chrome has (`cdp`, `route`, `network`,
-`passkey`, throttling) says to use `--engine chrome`. Safari's driver has no
+console and dialogs, and upload, drag, mouse, keydown, keyup, storage and
+`set viewport` (`init-script` over BiDi only). An op only Chrome has
+(`cdp`, `route`, `network`, `passkey`, throttling) says to use
+`--engine chrome`. Safari's driver has no
 headless mode, runs one session per machine and blocks user input while it
 runs (Apple's limits). The `webdriver` workflow runs one scenario on Firefox
 (Linux, macOS, Windows), Safari (macOS) and chromedriver over both protocols.
