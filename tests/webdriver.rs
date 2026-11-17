@@ -38,6 +38,18 @@ const INDEX: &str = r#"<!doctype html><html><head><title>Fixture</title></head><
 const NEXT: &str = r#"<!doctype html><html><head><title>Next</title></head><body><p>Second page</p>
 <button onclick="document.body.dataset.answer = String(confirm('sure?'))">Confirm</button></body></html>"#;
 
+/// Clicks that load a new document, and clicks that look as if they would.
+const NAV: &str = r##"<!doctype html><html><head><title>Nav</title></head><body>
+<form action="/next.html"><button id="submit">Go</button></form>
+<form action="/next.html"><input required name="q"><button id="invalid">Needs a value</button></form>
+<form id="scripted" action="/next.html"></form>
+<button type="button" id="by-form" onclick="document.getElementById('scripted').submit()">Submits by script</button>
+<div id="by-script" onclick="location.href = '/next.html'">Leaves by script</div>
+<a id="routed" href="/next.html" onclick="event.preventDefault(); document.title = 'Routed'">Router link</a>
+<a id="hash" href="#here">Same page</a>
+<button type="button" id="plain" onclick="document.title = 'Pressed'">Plain</button>
+</body></html>"##;
+
 const FRAME: &str = r#"<!doctype html><html><head><title>Inner</title></head><body><button onclick="this.textContent = 'pressed'">In frame</button></body></html>"#;
 
 const MORE: &str = r#"<!doctype html><html><head><title>More</title></head><body style="margin:0;user-select:none;-webkit-user-select:none">
@@ -82,11 +94,13 @@ fn serve() -> String {
                             break;
                         }
                     }
-                    let (status, body) = match path.as_str() {
+                    // A form's GET adds a query.
+                    let (status, body) = match path.split('?').next().unwrap_or("/") {
                         "/" => ("200 OK", INDEX),
                         "/next.html" => ("200 OK", NEXT),
                         "/frame.html" => ("200 OK", FRAME),
                         "/more.html" => ("200 OK", MORE),
+                        "/nav.html" => ("200 OK", NAV),
                         _ => ("404 Not Found", "not found"),
                     };
                     let head = format!(
@@ -217,6 +231,36 @@ fn scenario(args: &[&str], engine: &str) {
     assert_eq!(ok(&a, 18)["title"], "Fixture", "{engine}");
     assert_eq!(ok(&a, 19)["engine"], engine);
     assert_eq!(ok(&a, 20)["bye"], true);
+}
+
+/// A click answers with the page it leads to, and with the page it is on
+/// when it leads nowhere: a submit, a script that submits a form or sets
+/// `location`; a form that fails validation, a link a router handles, a
+/// link into the same page, a plain button.
+fn nav_clicks(args: &[&str], engine: &str) {
+    let site = serve();
+    let cases = [
+        ("#submit", "Next"),
+        ("#by-form", "Next"),
+        ("#by-script", "Next"),
+        ("#invalid", "Nav"),
+        ("#routed", "Routed"),
+        ("#hash", "Nav"),
+        ("#plain", "Pressed"),
+    ];
+    let mut script = Vec::new();
+    for (i, (selector, _)) in cases.iter().enumerate() {
+        let id = i as u64 * 2;
+        script.push(json!({ "id": id + 1, "op": "goto", "url": format!("{site}/nav.html") }));
+        script.push(json!({ "id": id + 2, "op": "click", "selector": selector }));
+    }
+    script.push(json!({ "id": 100, "op": "quit" }));
+    let a = session(args, &script);
+    for (i, (selector, title)) in cases.iter().enumerate() {
+        let id = i as u64 * 2;
+        assert_eq!(ok(&a, id + 1)["title"], "Nav", "{engine}");
+        assert_eq!(ok(&a, id + 2)["title"], *title, "{engine}: the click on {selector}: {}", ok(&a, id + 2));
+    }
 }
 
 /// The ops past the core set, on every engine: files for a file input, a
@@ -384,6 +428,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     };
     scenario(&["--engine", "firefox", "--executable", &firefox], "firefox");
     more_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
+    nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
 
 /// A Firefox the user started with remote debugging is found by name and
@@ -505,6 +550,7 @@ fn safari_over_safaridriver_reads_acts_and_navigates() {
     }
     scenario(&["--engine", "safari"], "safari");
     more_ops(&["--engine", "safari"], "safari", false);
+    nav_clicks(&["--engine", "safari"], "safari");
 }
 
 /// chromedriver on a free port, for the `--webdriver` scenarios.
@@ -546,6 +592,8 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     scenario(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
     more_ops(&["--webdriver", &url, "--capabilities", &caps], "webdriver", false);
     more_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver", true);
+    nav_clicks(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
+    nav_clicks(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
     #[cfg(unix)]
     {
         extern "C" {

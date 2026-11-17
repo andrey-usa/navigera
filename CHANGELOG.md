@@ -55,6 +55,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `click` and `dblclick` on the WebDriver engines (experimental) wait
+  for a navigation only when the click planned one, as on Chrome. The
+  page is asked what it made of the click: a link or a submit button
+  loads a new document unless the page cancels it (a router's link, a
+  form a script sends, a form that fails validation), and a script that
+  navigates is seen through the Navigation API. Every click waited a
+  fixed 30 ms over BiDi and 50 ms over classic WebDriver for a
+  navigation to announce itself. With chromedriver on one machine, a
+  click that stays on the page: 44 to 10 ms over BiDi, 83 to 20-26 ms
+  over classic WebDriver (medians of 40, two rounds). Where the page cannot
+  say (no Navigation API, or a listener that hides the click), the
+  click waits as before. `fill` and `select` there read the page's URL
+  and title in the call that sets the value: one round trip fewer.
+
 - `ax --grep` prints a match with what it belongs to: a match inside a
   table row or a list item of up to 12 lines comes with all of it (the
   other cells of the row; a search result's title above the snippet that

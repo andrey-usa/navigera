@@ -957,7 +957,7 @@ impl Wire for Bidi {
                     } =>
                 {
                     tried = true;
-                    self.settle(timeout);
+                    self.settle(timeout, true);
                 }
                 Err(e) => return Err(e),
             }
@@ -1088,10 +1088,10 @@ impl Wire for Bidi {
         }
     }
 
-    fn settle(&mut self, timeout: Duration) {
+    fn settle(&mut self, timeout: Duration, watch: bool) {
         // A navigation the action started announces itself within a few
         // milliseconds; then its load is waited for.
-        let watch_until = Instant::now() + NAV_START_WATCH;
+        let watch_until = Instant::now() + if watch { NAV_START_WATCH } else { Duration::ZERO };
         while self.nav.is_none() && Instant::now() < watch_until {
             match self.read_one(watch_until.saturating_duration_since(Instant::now())) {
                 Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
@@ -1164,7 +1164,7 @@ impl Wire for Bidi {
             json!({ "context": self.context, "delta": delta }),
             Duration::from_secs(30),
         )?;
-        self.settle(Duration::from_secs(30));
+        self.settle(Duration::from_secs(30), true);
         Ok(())
     }
 

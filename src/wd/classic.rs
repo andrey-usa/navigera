@@ -692,7 +692,10 @@ impl Wire for Classic {
         Ok(0)
     }
 
-    fn settle(&mut self, timeout: Duration) {
+    fn settle(&mut self, timeout: Duration, watch: bool) {
+        if !watch {
+            return;
+        }
         // The page's own flag says whether the action started a navigation;
         // if it did, the new document is waited for until it has loaded.
         let started = Instant::now();

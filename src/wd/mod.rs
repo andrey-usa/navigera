@@ -143,6 +143,82 @@ const POINT_EL: &str = r#"function (el, force) {
     return { x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)) };
 }"#;
 
+/// Before a click: watch what the page makes of it, so the click waits
+/// for a navigation only when one was planned (as Chrome's engine does,
+/// `armNav` there). A link's or a submit button's click loads a new
+/// document unless the page cancels it (a router's link, a form a script
+/// sends itself, a form that fails validation); anything else navigates
+/// only by script, which the Navigation API reports as it happens.
+const ARM_NAV: &str = r#"function (el) {
+    const K = Symbol.for('navigera.nav');
+    if (window[K]) window[K].off();
+    const w = el.ownerDocument.defaultView;
+    // Only a navigation of the tab's own document is waited for.
+    const here = (target) => {
+        const t = (target || '').toLowerCase();
+        if (t === '_top' || t === '_parent') return true;
+        if (t && t !== '_self') return false;
+        return w === w.top;
+    };
+    const a = el.closest('a[href], area[href]');
+    const c = a ? null : el.closest('button, input');
+    const form = c && c.form && (c.type === 'submit' || c.type === 'image') ? c.form : null;
+    let may = false;
+    if (a) {
+        const h = a.getAttribute('href') || '';
+        may = !(h.startsWith('#') || h.startsWith('javascript:') || a.hasAttribute('download')) && here(a.getAttribute('target'));
+    } else if (form) {
+        may = here(c.getAttribute('formtarget') || form.getAttribute('target'));
+    }
+    const n = { click: null, submit: null, invalid: false, planned: false, offs: [] };
+    const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
+    on(w, 'click', (e) => { if (!n.click && e.isTrusted) n.click = e; });
+    on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
+    on(w, 'invalid', () => { n.invalid = true; });
+    // A handler that navigates by script (`location`, `form.submit()`),
+    // this window or the tab's.
+    let told = 0;
+    for (const v of w === window ? [w] : [w, window]) {
+        const api = v.navigation;
+        if (api && api.addEventListener) {
+            told++;
+            on(api, 'navigate', (e) => { if (!(e.destination && e.destination.sameDocument)) n.planned = true; });
+        }
+    }
+    const F = w.HTMLFormElement && w.HTMLFormElement.prototype, submit = F && F.submit;
+    if (typeof submit === 'function') {
+        // Put back only while ours is there: a method the page put in
+        // meanwhile stays.
+        const mine = function () { n.planned = true; return submit.apply(this, arguments); };
+        F.submit = mine;
+        n.offs.push(() => { if (F.submit === mine) F.submit = submit; });
+    }
+    n.off = () => { for (const off of n.offs.splice(0)) off(); };
+    // Never left behind, whatever happens to the click.
+    setTimeout(n.off, 10000);
+    // true: a navigation is on its way; false: none is; null: can't be
+    // told (a listener ahead of these hid the click, or the browser has
+    // no Navigation API to report a script's navigation).
+    n.verdict = () => {
+        n.off();
+        if (n.planned) return true;
+        if (!n.click) return null;
+        if (may) {
+            if (n.click.defaultPrevented) return false;
+            if (a) return true;
+            if (n.submit) return !n.submit.defaultPrevented;
+            return n.invalid ? false : null;
+        }
+        return told ? false : null;
+    };
+    Object.defineProperty(window, K, { value: n, configurable: true, enumerable: false, writable: true });
+}"#;
+
+/// After the click: the verdict of [`ARM_NAV`], and the page's URL and
+/// title (the page's state when no navigation follows).
+const NAV_VERDICT: &str = "() => { const K = Symbol.for('navigera.nav'); const n = window[K]; delete window[K]; \
+    return [n ? n.verdict() : null, location.href, document.title]; }";
+
 /// The page expression for the element an op kept for the protocol's own
 /// element command (`upload`).
 pub const PICKED: &str = "window[Symbol.for('navigera.picked')]";
@@ -245,8 +321,10 @@ pub trait Wire: Send {
     /// Between commands: take what the browser sent meanwhile (a request
     /// waiting for its rule, a dialog).
     fn idle(&mut self) {}
-    /// Wait for a navigation an action started, if one did.
-    fn settle(&mut self, _timeout: Duration) {}
+    /// Wait for a navigation an action started, if one did. `watch`: the
+    /// page could not say whether one did, so the action is watched for a
+    /// moment; without it only a navigation already seen is waited for.
+    fn settle(&mut self, _timeout: Duration, _watch: bool) {}
     fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>>;
     /// The page printed to PDF, by the browser's own print.
     fn pdf(&mut self, landscape: bool, background: bool) -> Result<Vec<u8>>;
@@ -507,6 +585,10 @@ impl Driver {
 
     fn state(&mut self) -> Result<Value> {
         let (url, title) = self.url_title()?;
+        self.state_of(url, title)
+    }
+
+    fn state_of(&mut self, url: String, title: String) -> Result<Value> {
         let tabs = self.wire.tabs()?;
         let current = self.wire.current_tab();
         let tab = tabs.iter().position(|t| *t == current).unwrap_or(0);
@@ -530,6 +612,16 @@ impl Driver {
         self.call(&function, args).map_err(|e| e.context(what.to_string()))
     }
 
+    /// [`Driver::on`] for an op that leaves the page where it is: what
+    /// `then` gave, and the page's state read in the same call.
+    fn on_here(&mut self, target: &Target, what: &str, then: &str, args: Value) -> Result<(Value, Value)> {
+        let read = format!("async (el, ...args) => [await ({then})(el, ...args), location.href, document.title]");
+        let mut v = self.on(target, what, &read, args)?;
+        let text = |v: &Value, i: usize| v.get(i).and_then(Value::as_str).unwrap_or("").to_string();
+        let (url, title) = (text(&v, 1), text(&v, 2));
+        Ok((v.get_mut(0).map(Value::take).unwrap_or(Value::Null), self.state_of(url, title)?))
+    }
+
     fn point(&mut self, target: &Target, what: &str, force: bool) -> Result<(i64, i64)> {
         let p = self.on(target, what, POINT_EL, json!([force]))?;
         let at = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0) as i64;
@@ -544,8 +636,36 @@ impl Driver {
         } else {
             self.wire.actions(actions)?;
         }
-        self.wire.settle(self.timeout);
+        self.wire.settle(self.timeout, true);
         Ok(())
+    }
+
+    /// A click on `target`, then the page's state. The page is asked what
+    /// it made of the click: one that planned no navigation is not watched
+    /// for one.
+    fn press(&mut self, target: &Target, what: &str, force: bool, button: u8, count: u32) -> Result<Value> {
+        let armed = format!("function (el, force) {{ const p = ({POINT_EL})(el, force); ({ARM_NAV})(el); return p; }}");
+        let p = self.on(target, what, &armed, json!([force]))?;
+        let at = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0) as i64;
+        let actions = click_actions(at("x"), at("y"), button, count);
+        if self.buttons != 0 || !self.keys.is_empty() {
+            self.wire.actions_keep(actions)?;
+        } else {
+            self.wire.actions(actions)?;
+        }
+        // A document already replaced answers without a verdict.
+        let read = self.call(NAV_VERDICT, json!([])).ok();
+        let text = |i: usize| read.as_ref().and_then(|v| v.get(i)).and_then(Value::as_str).map(str::to_string);
+        match (read.as_ref().and_then(|v| v.get(0)).and_then(Value::as_bool), text(1), text(2)) {
+            (Some(false), Some(url), Some(title)) => {
+                self.wire.settle(self.timeout, false);
+                self.state_of(url, title)
+            }
+            _ => {
+                self.wire.settle(self.timeout, true);
+                self.state()
+            }
+        }
     }
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
@@ -704,15 +824,11 @@ impl Driver {
                     return Err(self.not_here(command));
                 }
                 let t = target.target("click")?;
-                let (x, y) = self.point(&t, "click", *force)?;
-                self.act(click_actions(x, y, button_number(button.as_deref())?, 1))?;
-                self.state()
+                self.press(&t, "click", *force, button_number(button.as_deref())?, 1)
             }
             Command::Dblclick { target, timeout_ms: _ } => {
                 let t = target.target("dblclick")?;
-                let (x, y) = self.point(&t, "dblclick", false)?;
-                self.act(click_actions(x, y, 0, 2))?;
-                self.state()
+                self.press(&t, "dblclick", false, 0, 2)
             }
             Command::Hover { target, timeout_ms: _ } => {
                 let t = target.target("hover")?;
@@ -726,10 +842,10 @@ impl Driver {
                 if *keys {
                     self.on(&t, "fill", crate::cdp::page::FOCUS_SELECT_ALL, json!([]))?;
                     self.act(type_actions(value))?;
+                    self.state()
                 } else {
-                    self.on(&t, "fill", crate::cdp::page::FILL_EL_JS, json!([value]))?;
+                    Ok(self.on_here(&t, "fill", crate::cdp::page::FILL_EL_JS, json!([value]))?.1)
                 }
-                self.state()
             }
             Command::InsertText { value, target, timeout_ms: _ } => {
                 if let Some(t) = target.optional("insert-text")? {
@@ -740,8 +856,8 @@ impl Driver {
             }
             Command::Select { target, value, timeout_ms: _, add } => {
                 let t = target.target("select")?;
-                let chosen = self.on(&t, "select", crate::cdp::page::SELECT_EL_JS, json!([value, add]))?;
-                let mut state = self.state()?;
+                let (chosen, mut state) =
+                    self.on_here(&t, "select", crate::cdp::page::SELECT_EL_JS, json!([value, add]))?;
                 state["selected"] = chosen;
                 Ok(state)
             }
