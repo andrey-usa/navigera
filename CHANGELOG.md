@@ -30,6 +30,18 @@ All notable changes to this project are documented here. The format follows
   over BiDi (`--engine firefox`) and over a WebDriver server's print
   command. safaridriver has none, and the error says so.
 
+- More ops on the WebDriver engines (experimental; `--engine firefox`,
+  `--engine safari`, `--webdriver`): `upload` (BiDi's `input.setFiles`,
+  or the file paths sent to the input over classic WebDriver), `drag`
+  (a `draggable` source gets the drag events in the page, any other a
+  held mouse), `mouse` (move, down, up, click, wheel), `keydown` and
+  `keyup` (a button or key stays held between commands), `storage`, and
+  `set viewport` (BiDi sets the viewport; classic WebDriver sizes the
+  window until the viewport fits). `init-script` runs over BiDi, as a
+  preload script; classic WebDriver has none, and the error says so.
+  The `webdriver` workflow runs them on Firefox, Safari and chromedriver
+  over both protocols.
+
 ### Changed
 
 - `--engine safari`: when safaridriver gives up on a Safari that was slow
@@ -71,7 +83,9 @@ All notable changes to this project are documented here. The format follows
   running on this session" when none was: the one before it had its
   answer, and its process had not yet been seen to hang up. Seen on a
   busy machine, with one process run right after another. A session
-  now counts as free from the moment a command is answered.
+  now counts as free from the moment a command is over, a moment taken
+  before its answer is sent (taken after, a caller that read the answer
+  could still connect "before" it).
 
 - `ax --grep` and `text --grep` with a word that starts with a character
   of three or four bytes (`--grep 日本語`, an emoji) crashed navigera

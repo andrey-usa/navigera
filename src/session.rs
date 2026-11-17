@@ -480,11 +480,16 @@ fn serve_connection(
             let _ = std::fs::remove_file(path);
             *retired = true;
         }
+        // The command is over before its answer leaves: a client that
+        // reads the answer and starts the next process at once would
+        // otherwise connect before a time taken after the write (this
+        // thread can lose the CPU between the two), and be told it waited.
+        let done = Instant::now();
         let written = responses.iter().try_for_each(|response| protocol::write_response(&mut writer, response, false));
         // A `sessions` probe is no one's command.
         if !probe {
             last.store(now_s(), Ordering::Relaxed);
-            ran = Some(Instant::now());
+            ran = Some(done);
         }
         if is_quit {
             return (true, ran);
