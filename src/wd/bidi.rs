@@ -951,7 +951,16 @@ impl Bidi {
             timeout,
         )?;
         if r["type"] == "exception" {
-            bail!("{}", r["exceptionDetails"]["text"].as_str().unwrap_or("the script threw"));
+            let details = &r["exceptionDetails"];
+            let text = details["text"].as_str().unwrap_or("the script threw").to_string();
+            // Only code that ran has a stack: a SyntaxError without one is
+            // the source not parsing (see `DidNotParse`).
+            let ran =
+                details.pointer("/stackTrace/callFrames").and_then(Value::as_array).is_some_and(|f| !f.is_empty());
+            if !ran && text.contains("SyntaxError") {
+                return Err(crate::cdp::page::DidNotParse(text).into());
+            }
+            bail!("{text}");
         }
         Ok(Self::remote_to_json(&r["result"]))
     }
@@ -1056,17 +1065,17 @@ impl Wire for Bidi {
             source.to_string(),
             format!("(async () => {{\n{source}\n}})()"),
         ];
-        let mut first = None;
+        // Only source that did not parse goes on to the next form (see
+        // `DidNotParse`); when none parses, the error of the source as
+        // written, which points into the user's own text.
+        let mut unparsed = Vec::new();
         for form in forms {
             match self.evaluate_once(&form, timeout) {
-                Err(e) if format!("{e:#}").contains("SyntaxError") => {
-                    first.get_or_insert(e);
-                }
+                Err(e) if crate::cdp::page::did_not_parse(&e) => unparsed.push(e),
                 other => return other,
             }
         }
-        // No form parses: the expression's error says more.
-        Err(first.unwrap_or_else(|| anyhow!("the script did not parse")))
+        Err(unparsed.into_iter().nth(1).unwrap_or_else(|| anyhow!("the script did not parse")))
     }
 
     fn call_and_tabs(&mut self, function: &str, args_json: &str, timeout: Duration) -> Result<(String, Vec<String>)> {

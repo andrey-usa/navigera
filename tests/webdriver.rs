@@ -201,6 +201,17 @@ fn scenario(args: &[&str], engine: &str) {
         script.len() - 1,
         json!({ "id": 23, "op": "eval", "expression": "const n = await Promise.resolve(6); return n * 7" }),
     );
+    // A SyntaxError the code throws as it runs is its answer, and the code
+    // runs once: it is not taken for source that did not parse.
+    script.insert(
+        script.len() - 1,
+        json!({ "id": 24, "op": "eval", "expression": "() => document.querySelector('a[')" }),
+    );
+    script.insert(
+        script.len() - 1,
+        json!({ "id": 25, "op": "eval", "expression": "window.__runs = (window.__runs || 0) + 1; JSON.parse('{bad')" }),
+    );
+    script.insert(script.len() - 1, json!({ "id": 26, "op": "eval", "expression": "window.__runs" }));
     if engine != "safari" {
         script.insert(script.len() - 1, json!({ "id": 21, "op": "pdf", "path": pdf.display().to_string() }));
     }
@@ -215,6 +226,11 @@ fn scenario(args: &[&str], engine: &str) {
     assert_eq!(ok(&a, 1)["title"], "Fixture");
     assert_eq!(ok(&a, 22), 42, "{engine}: an arrow function is called");
     assert_eq!(ok(&a, 23), 42, "{engine}: await and return at the top");
+    for id in [24, 25] {
+        let step = a.iter().find(|x| x["id"] == id).unwrap();
+        assert_eq!(step["ok"], false, "{engine}: step {id} throws: {step}");
+    }
+    assert_eq!(ok(&a, 26), 1, "{engine}: the statements ran once");
     let tree = ok(&a, 2).as_str().unwrap().to_string();
     for want in [
         "heading \"Shop\"",

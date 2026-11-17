@@ -417,6 +417,25 @@ impl Drop for Session {
     }
 }
 
+/// What [`PICK_FORM`] throws on a page that may not make a function from
+/// text (its CSP), so the caller tries the forms one by one.
+const NO_FUNCTION: &str = "navigera: no Function here";
+
+/// `eval`'s forms (function bodies) parsed in the page without running,
+/// and the first that parses run, once. When none parses: the error of the
+/// source as written (the second form), which names the user's own text.
+const PICK_FORM: &str = r#"const forms = arguments[0];
+const errors = [];
+for (const form of forms) {
+    let fn;
+    try { fn = new Function(form); } catch (e) {
+        if (e instanceof SyntaxError) { errors.push(e); continue; }
+        throw new Error('navigera: no Function here (' + e + ')');
+    }
+    return fn.call(this);
+}
+throw errors[1] || errors[0];"#;
+
 /// A free port on this machine, for a driver navigera starts.
 fn free_port() -> Result<u16> {
     let l = std::net::TcpListener::bind("127.0.0.1:0").context("no free port for the driver")?;
@@ -614,6 +633,27 @@ pub struct Classic {
 }
 
 impl Classic {
+    /// [`Wire::evaluate`] where the page may not parse a script itself: each
+    /// form run in turn while the driver says it did not parse. (chromedriver
+    /// words it "Unexpected token", the others "SyntaxError".)
+    fn evaluate_by_words(&mut self, forms: &[String], timeout: Duration) -> Result<Value> {
+        let unparsed = |e: &anyhow::Error| {
+            let said = format!("{e:#}").to_ascii_lowercase();
+            said.contains("syntax") || said.contains("unexpected token") || said.contains("unexpected identifier")
+        };
+        let mut first = None;
+        for form in forms {
+            let body = json!({ "script": form, "args": [] });
+            match self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(body.clone()), timeout)) {
+                Err(e) if unparsed(&e) => {
+                    first.get_or_insert(e);
+                }
+                other => return other,
+            }
+        }
+        Err(first.unwrap_or_else(|| anyhow!("the script did not parse")))
+    }
+
     /// Run `body` with this session's dialog policy: a dialog that blocks
     /// the command is answered, and the command sent again once.
     fn with_dialogs<T>(&mut self, mut body: impl FnMut(&mut Session) -> Result<T>) -> Result<T> {
@@ -675,35 +715,27 @@ impl Wire for Classic {
 
     fn evaluate(&mut self, source: &str, timeout: Duration) -> Result<Value> {
         // As on Chrome: an expression first (an arrow function is called);
-        // statements (a syntax error as an expression) as a function body,
-        // `return` giving the answer; then as an async one, for `await`. A
-        // promise the script returns is waited for (WebDriver's own rule).
+        // statements as a function body, `return` giving the answer; then
+        // as an async one, for `await`. A promise the script returns is
+        // waited for (WebDriver's own rule).
         let forms = [
             format!("return {};", crate::cdp::page::call_if_function(source)),
             source.to_string(),
             format!("return (async () => {{\n{source}\n}})();"),
         ];
-        // (chromedriver words it "Unexpected token", the others "SyntaxError".)
-        let unparsed = |e: &anyhow::Error| {
-            let said = format!("{e:#}").to_ascii_lowercase();
-            said.contains("syntax") || said.contains("unexpected token") || said.contains("unexpected identifier")
+        // The page parses each form without running it and runs the first
+        // that parses, once: a SyntaxError the code throws as it runs
+        // (`JSON.parse`, an invalid selector) is its answer, not a reason
+        // to run it again in the next form. The driver's error has nothing
+        // to tell the two apart by.
+        let pick = json!({ "script": PICK_FORM, "args": [forms] });
+        let answer = match self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(pick.clone()), timeout)) {
+            // A page whose policy forbids `Function`: each form is tried
+            // in turn, told apart by the driver's words.
+            Err(e) if format!("{e:#}").contains(NO_FUNCTION) => self.evaluate_by_words(&forms, timeout),
+            other => other,
         };
-        let mut first = None;
-        let mut answer = None;
-        for form in forms {
-            let body = json!({ "script": form, "args": [] });
-            match self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(body.clone()), timeout)) {
-                Err(e) if unparsed(&e) => {
-                    first.get_or_insert(e);
-                }
-                other => {
-                    answer = Some(other);
-                    break;
-                }
-            }
-        }
-        // No form parses: the expression's error says more.
-        answer.unwrap_or_else(|| Err(first.unwrap_or_else(|| anyhow!("the script did not parse")))).map(|v| match v {
+        answer.map(|v| match v {
             Value::Object(ref o) if o.contains_key(ELEMENT_KEY) => json!("<element>"),
             v => v,
         })

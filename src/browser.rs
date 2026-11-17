@@ -3625,20 +3625,24 @@ impl BrowserSession {
         // Marked, so a `clock` counts it as the page's own code.
         let marked = format!("{source}\n//# sourceURL={}\n", crate::clock::USER_EVAL_URL);
         let source = marked.as_str();
-        let first = match tab.evaluate(source, timeout) {
-            Err(e) if is_syntax_error(&format!("{e:#}")) => e,
+        // Only source that did not parse goes on to the next form: a
+        // SyntaxError the code threw as it ran is its answer, and running
+        // it again as the next form would repeat what it did.
+        match tab.evaluate(source, timeout) {
+            Err(e) if cdp::page::did_not_parse(&e) => {}
+            other => return other,
+        }
+        let unparsed = match tab.evaluate_script(source, timeout) {
+            Err(e) if cdp::page::did_not_parse(&e) => e,
             other => return other,
         };
-        match tab.evaluate_script(source, timeout) {
-            Err(e) if is_syntax_error(&format!("{e:#}")) => {}
-            other => return other,
-        }
         match tab.evaluate_body(source, timeout) {
-            Err(e) if is_syntax_error(&format!("{e:#}")) => {}
+            Err(e) if cdp::page::did_not_parse(&e) => {}
             other => return other,
         }
-        // No form parses: the expression's error says more.
-        Err(first)
+        // No form parses: the error of the source as written, which points
+        // into the user's own text, not the expression form's wrapper.
+        Err(unparsed)
     }
 
     /// `eval` as a read (see [`cdp::Page::evaluate_read`]): its answer when
@@ -4382,10 +4386,6 @@ fn tab_range(count: usize) -> String {
 }
 
 /// A parse error, as V8 words it: the source isn't one expression.
-fn is_syntax_error(message: &str) -> bool {
-    message.contains("SyntaxError")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

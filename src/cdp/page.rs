@@ -3311,6 +3311,38 @@ fn wait_budget_ms(wait: Duration, timeout: Duration) -> u128 {
 
 /// Readable message from a CDP `exceptionDetails` (first lines of the
 /// exception description, not the whole JSON blob).
+/// A script that did not parse, so nothing of it ran: `eval` may try the
+/// source in its next form. A SyntaxError the code threw as it ran
+/// (`JSON.parse`, an invalid selector) is the code's answer and is not
+/// one: the protocol tells them apart by the stack, which only code that
+/// ran has. Carried as a type, not matched by text, which the page writes.
+#[derive(Debug)]
+pub struct DidNotParse(pub String);
+
+impl std::fmt::Display for DidNotParse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DidNotParse {}
+
+/// Whether `e` says its script did not parse (see [`DidNotParse`]).
+pub fn did_not_parse(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<DidNotParse>().is_some())
+}
+
+/// The error a `Runtime.evaluate` exception makes: [`DidNotParse`] for a
+/// SyntaxError with no stack (the script never ran), else its message.
+fn script_error(details: &Value) -> anyhow::Error {
+    let message = exception_message(details);
+    let ran = details.pointer("/stackTrace/callFrames").and_then(Value::as_array).is_some_and(|f| !f.is_empty());
+    if !ran && details.pointer("/exception/className").and_then(Value::as_str) == Some("SyntaxError") {
+        return DidNotParse(message).into();
+    }
+    anyhow::anyhow!("{message}")
+}
+
 fn exception_message(details: &Value) -> String {
     let description = details
         .get("exception")
@@ -4312,7 +4344,7 @@ impl Page {
             timeout,
         )?;
         if let Some(details) = res.get("exceptionDetails") {
-            bail!("{}", exception_message(details));
+            return Err(script_error(details));
         }
         let value = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null);
         Ok(value)
@@ -4562,7 +4594,7 @@ impl Page {
             timeout,
         )?;
         if let Some(details) = res.get("exceptionDetails") {
-            bail!("{}", exception_message(details));
+            return Err(script_error(details));
         }
         // returnByValue => result.result.value holds the JSON value.
         Ok(res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(Value::Null))

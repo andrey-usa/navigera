@@ -398,6 +398,14 @@ fn eval_takes_statements_await_and_a_body() {
     assert_eq!(s.ok(&["eval", "const r = await fetch(location.href); r.status"]), 200);
     assert_eq!(s.ok(&["eval", "const n = 6 * 7; return n"]), 42);
     assert!(s.fails(&["eval", "((("]).contains("SyntaxError"));
+    // A SyntaxError the code throws as it runs is its answer: the function
+    // was called (not answered as `{}`), and statements ran once, not
+    // again as the next form.
+    let m = s.fails(&["eval", "() => document.querySelector('a[')"]);
+    assert!(m.contains("not a valid selector"), "{m}");
+    let m = s.fails(&["eval", "window.__runs = (window.__runs || 0) + 1; JSON.parse('{bad')"]);
+    assert!(m.contains("JSON"), "{m}");
+    assert_eq!(s.ok(&["eval", "window.__runs"]), 1);
     // Text where CSS goes is said at once, with what to write instead.
     let started = std::time::Instant::now();
     let m = s.fails(&["click", "--selector", "35.75"]);

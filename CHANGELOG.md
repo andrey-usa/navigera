@@ -139,6 +139,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `eval` took a SyntaxError that the code threw as it ran for source
+  that did not parse, and tried the next form: `eval "() =>
+  document.querySelector('a[')"` answered `{}` instead of the invalid
+  selector's error, and statements that threw one (`JSON.parse` of bad
+  text) ran a second time before their error was reported, which was
+  then the wrong one. Only source that does not parse goes on to the
+  next form now, on every engine (Chrome and Firefox tell them apart by
+  the stack only code that ran has; over classic WebDriver the page
+  parses the forms first and runs one). Source that parses in no form
+  is reported with the error of the text as written.
+
 - On the WebDriver engines (experimental), `eval` takes the forms it
   takes on Chrome: an arrow function is called (`eval "() =>
   document.title"` answered `[function]`), and statements with `await`
