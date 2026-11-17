@@ -953,7 +953,8 @@ impl Wire for Bidi {
                 Err(e)
                     if !tried && {
                         let m = format!("{e:#}");
-                        m.contains("no such frame") || m.contains("discarded")
+                        // (Chromium's BiDi words it "Cannot find context".)
+                        m.contains("no such frame") || m.contains("discarded") || m.contains("Cannot find context")
                     } =>
                 {
                     tried = true;
@@ -1186,6 +1187,11 @@ impl Wire for Bidi {
 
     fn current_tab(&self) -> String {
         self.context.clone()
+    }
+
+    fn front(&mut self) {
+        // Headless it may refuse.
+        let _ = self.send("browsingContext.activate", json!({ "context": self.context }), Duration::from_secs(10));
     }
 
     fn tab_new(&mut self) -> Result<String> {

@@ -127,6 +127,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- On the WebDriver engines (experimental), a click after the page had
+  opened a tab (a link with `target=_blank`, `window.open`) took 5
+  seconds with chromedriver, classic and BiDi: the new tab came to the
+  front, and the driver waited for a frame the session's tab, now
+  behind it, never drew. The session's tab is brought back to the front
+  when its page opens another (`browsingContext.activate` over BiDi,
+  the browser's own command through a Chromium driver): 5.1 s to 0.1 s.
+  A click that opens a tab is watched as before, so the answer counts
+  the new tab.
+
 - `ax --grep` searches names and texts whole. It searched the tree as
   `ax` prints it, so words past a name's 150th character or a text's
   300th were never found, and a matching name came back cut. A long

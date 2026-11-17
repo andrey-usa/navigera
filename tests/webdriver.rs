@@ -48,6 +48,8 @@ const NAV: &str = r##"<!doctype html><html><head><title>Nav</title></head><body>
 <a id="routed" href="/next.html" onclick="event.preventDefault(); document.title = 'Routed'">Router link</a>
 <a id="hash" href="#here">Same page</a>
 <button type="button" id="plain" onclick="document.title = 'Pressed'">Plain</button>
+<a id="blank" href="/next.html" target="_blank">Other tab</a>
+<button type="button" id="opens" onclick="window.open('/next.html')">Opens a tab</button>
 </body></html>"##;
 
 const FRAME: &str = r#"<!doctype html><html><head><title>Inner</title></head><body><button onclick="this.textContent = 'pressed'">In frame</button></body></html>"#;
@@ -261,6 +263,27 @@ fn nav_clicks(args: &[&str], engine: &str) {
         assert_eq!(ok(&a, id + 1)["title"], "Nav", "{engine}");
         assert_eq!(ok(&a, id + 2)["title"], *title, "{engine}: the click on {selector}: {}", ok(&a, id + 2));
     }
+    // A click that opens a tab says so.
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/nav.html") }),
+        json!({ "id": 2, "op": "click", "selector": "#blank" }),
+        json!({ "id": 3, "op": "click", "selector": "#opens" }),
+        json!({ "id": 4, "op": "click", "selector": "#plain" }),
+        json!({ "id": 5, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    assert_eq!(ok(&a, 2)["tabs"], 2, "{engine}: a link with target=_blank: {}", ok(&a, 2));
+    assert_eq!(ok(&a, 3)["tabs"], 3, "{engine}: window.open in a click handler: {}", ok(&a, 3));
+    // The session's tab is still the one in front: behind the new one a
+    // driver waited 5 s for a frame at every press.
+    assert_eq!(ok(&a, 4)["title"], "Pressed", "{engine}");
+    let took = |id: u64| a.iter().find(|x| x["id"] == id).and_then(|x| x["elapsed_ms"].as_f64()).unwrap_or(f64::MAX);
+    assert!(
+        took(3) < 3000.0 && took(4) < 3000.0,
+        "{engine}: a click behind an opened tab took {} and {} ms",
+        took(3),
+        took(4)
+    );
 }
 
 /// The ops past the core set, on every engine: files for a file input, a

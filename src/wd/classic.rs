@@ -774,6 +774,15 @@ impl Wire for Classic {
         v["handle"].as_str().map(str::to_string).ok_or_else(|| anyhow!("the driver made no tab"))
     }
 
+    fn front(&mut self) {
+        // Classic WebDriver has no command for it; a Chromium driver takes
+        // the browser's own.
+        if matches!(self.s.describe()["name"].as_str(), Some("chrome" | "msedge" | "chrome-headless-shell")) {
+            let body = json!({ "cmd": "Page.bringToFront", "params": {} });
+            let _ = self.s.cmd("POST", "/goog/cdp/execute", Some(body), Duration::from_secs(10));
+        }
+    }
+
     fn tab_select(&mut self, id: &str) -> Result<()> {
         self.s.cmd("POST", "/window", Some(json!({ "handle": id })), Duration::from_secs(10))?;
         self.window = id.to_string();

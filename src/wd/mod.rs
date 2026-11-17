@@ -163,14 +163,19 @@ const ARM_NAV: &str = r#"function (el) {
     const a = el.closest('a[href], area[href]');
     const c = a ? null : el.closest('button, input');
     const form = c && c.form && (c.type === 'submit' || c.type === 'image') ? c.form : null;
-    let may = false;
+    // `may`: the click loads a document here; `opens`: in another tab,
+    // which the browser takes a moment to list.
+    let may = false, opens = false;
     if (a) {
         const h = a.getAttribute('href') || '';
-        may = !(h.startsWith('#') || h.startsWith('javascript:') || a.hasAttribute('download')) && here(a.getAttribute('target'));
+        const loads = !(h.startsWith('#') || h.startsWith('javascript:') || a.hasAttribute('download'));
+        may = loads && here(a.getAttribute('target'));
+        opens = loads && !may;
     } else if (form) {
         may = here(c.getAttribute('formtarget') || form.getAttribute('target'));
+        opens = !may;
     }
-    const n = { click: null, submit: null, invalid: false, planned: false, offs: [] };
+    const n = { click: null, submit: null, invalid: false, planned: false, opened: false, offs: [] };
     const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
     on(w, 'click', (e) => { if (!n.click && e.isTrusted) n.click = e; });
     on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
@@ -193,16 +198,24 @@ const ARM_NAV: &str = r#"function (el) {
         F.submit = mine;
         n.offs.push(() => { if (F.submit === mine) F.submit = submit; });
     }
+    const open = w.open;
+    if (typeof open === 'function') {
+        const mine = function () { n.opened = true; return open.apply(this, arguments); };
+        w.open = mine;
+        n.offs.push(() => { if (w.open === mine) w.open = open; });
+    }
     n.off = () => { for (const off of n.offs.splice(0)) off(); };
     // Never left behind, whatever happens to the click.
     setTimeout(n.off, 10000);
     // true: a navigation is on its way; false: none is; null: can't be
-    // told (a listener ahead of these hid the click, or the browser has
-    // no Navigation API to report a script's navigation).
+    // told (a listener ahead of these hid the click, the browser has no
+    // Navigation API to report a script's navigation, or the click opens
+    // a tab).
     n.verdict = () => {
         n.off();
         if (n.planned) return true;
         if (!n.click) return null;
+        if (n.opened || (opens && !n.click.defaultPrevented)) return null;
         if (may) {
             if (n.click.defaultPrevented) return false;
             if (a) return true;
@@ -321,6 +334,10 @@ pub trait Wire: Send {
     /// Between commands: take what the browser sent meanwhile (a request
     /// waiting for its rule, a dialog).
     fn idle(&mut self) {}
+    /// The session's tab to the front again, after its page opened
+    /// another: a tab behind another gets no frames, and a driver waits
+    /// seconds for one at every press there.
+    fn front(&mut self) {}
     /// Wait for a navigation an action started, if one did. `watch`: the
     /// page could not say whether one did, so the action is watched for a
     /// moment; without it only a navigation already seen is waited for.
@@ -487,6 +504,8 @@ pub struct Driver {
     /// Keys `keydown` holds.
     keys: Vec<String>,
     init_scripts: Vec<String>,
+    /// How many tabs the last look found.
+    tabs_seen: usize,
 }
 
 impl Driver {
@@ -536,6 +555,7 @@ impl Driver {
             buttons: 0,
             keys: Vec::new(),
             init_scripts: Vec::new(),
+            tabs_seen: usize::MAX,
         })
     }
 
@@ -590,6 +610,10 @@ impl Driver {
 
     fn state_of(&mut self, url: String, title: String) -> Result<Value> {
         let tabs = self.wire.tabs()?;
+        if tabs.len() > self.tabs_seen {
+            self.wire.front();
+        }
+        self.tabs_seen = tabs.len();
         let current = self.wire.current_tab();
         let tab = tabs.iter().position(|t| *t == current).unwrap_or(0);
         Ok(json!({ "tab": tab, "tabs": tabs.len(), "url": url, "title": title }))
