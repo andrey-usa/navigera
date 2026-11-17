@@ -65,6 +65,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- `--allow-domains` with `--engine firefox`, `--engine safari` or
+  `--webdriver` (experimental since 0.14.0) started a session that no
+  list held: the list is kept by Chrome's request interception, and the
+  WebDriver engines never read it. They now refuse to start with one,
+  and say to use `--engine chrome`.
+
 - `--engine firefox` checks a site's certificate, as Chrome does. The
   Firefox navigera starts was told to accept any certificate
   (`acceptInsecureCerts`), so a page behind a forged or expired one

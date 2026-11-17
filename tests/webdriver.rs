@@ -314,6 +314,23 @@ fn more_ops(args: &[&str], engine: &str, bidi: bool) {
     assert_eq!(ok(&a, 30)["bye"], true);
 }
 
+/// A list of allowed hosts is held by Chrome's engine only: a WebDriver
+/// engine refuses to start with one, rather than run unrestricted.
+#[test]
+fn an_allowlist_is_refused_on_a_webdriver_engine() {
+    for engine in [&["--engine", "firefox"][..], &["--engine", "safari"], &["--webdriver", "http://127.0.0.1:9"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_navigera"))
+            .args(engine)
+            .args(["--allow-domains", "example.com", "goto", "https://example.com/"])
+            .env_remove("NAVIGERA_SESSION")
+            .output()
+            .expect("navigera starts");
+        let said = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+        assert!(!out.status.success(), "{engine:?}: {said}");
+        assert!(said.contains("--allow-domains is not on the"), "{engine:?}: {said}");
+    }
+}
+
 fn found(env: &str) -> Option<String> {
     std::env::var_os(env).map(std::path::PathBuf::from).filter(|p| p.is_file()).map(|p| p.display().to_string())
 }

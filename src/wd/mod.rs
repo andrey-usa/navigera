@@ -407,6 +407,12 @@ impl Driver {
             bail!("--capabilities must be a JSON object, like '{{\"platformName\":\"iOS\"}}'");
         }
         let engine = engine_name(config);
+        // The list of hosts is held by Chrome's request interception. Here
+        // nothing would hold it, and a session that looks restricted and
+        // is not is worse than none.
+        if config.allow_domains.is_some() {
+            bail!("--allow-domains is not on the {engine} engine yet: nothing would keep its pages to the list. Run it with --engine chrome, or drop the list");
+        }
         let wire: Box<dyn Wire> = match (&config.webdriver, config.engine.as_str()) {
             (Some(url), _) => classic::connect(url, caps, config.bidi, timeout)?,
             (None, "firefox") if config.attach.is_some() => Box::new(bidi::Bidi::attach_firefox(
