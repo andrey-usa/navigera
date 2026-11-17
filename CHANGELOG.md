@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-17
+
+### Behaviour changes
+
+- On the WebDriver engines (experimental), `wait` for text, an element,
+  a URL or a condition that never comes gives up after the element wait
+  (5 s, or `--timeout-ms`), as on Chrome; it waited the navigation
+  timeout (35 s on Firefox), and its error now says how to wait longer.
+
+- `scroll` on the WebDriver engines (experimental) answers where the
+  page is, `scrollY`, `scrollHeight` and `viewport`, as on Chrome and as
+  the reference says, and scrolls 800 px unless told (it was 600).
+
+- `eval` took a SyntaxError that the code threw as it ran for source
+  that did not parse, and tried the next form: `eval "() =>
+  document.querySelector('a[')"` answered `{}` instead of the invalid
+  selector's error, and statements that threw one (`JSON.parse` of bad
+  text) ran a second time before their error was reported, which was
+  then the wrong one. Only source that does not parse goes on to the
+  next form now, on every engine (Chrome and Firefox tell them apart by
+  the stack only code that ran has; over classic WebDriver the page
+  parses the forms first and runs one). Source that parses in no form
+  is reported with the error of the text as written.
+
 ### Added
 
 - A privacy policy and terms of use for navigera and its Claude Code
@@ -162,26 +186,6 @@ All notable changes to this project are documented here. The format follows
   sixteen times its size in memory.
 
 ### Fixed
-
-- `scroll` on the WebDriver engines (experimental) answers where the
-  page is, `scrollY`, `scrollHeight` and `viewport`, as on Chrome and as
-  the reference says, and scrolls 800 px unless told (it was 600).
-
-- On the WebDriver engines (experimental), `wait` for text, an element,
-  a URL or a condition that never comes gives up after the element wait
-  (5 s, or `--timeout-ms`), as on Chrome; it waited the navigation
-  timeout (35 s on Firefox), and its error now says how to wait longer.
-
-- `eval` took a SyntaxError that the code threw as it ran for source
-  that did not parse, and tried the next form: `eval "() =>
-  document.querySelector('a[')"` answered `{}` instead of the invalid
-  selector's error, and statements that threw one (`JSON.parse` of bad
-  text) ran a second time before their error was reported, which was
-  then the wrong one. Only source that does not parse goes on to the
-  next form now, on every engine (Chrome and Firefox tell them apart by
-  the stack only code that ran has; over classic WebDriver the page
-  parses the forms first and runs one). Source that parses in no form
-  is reported with the error of the text as written.
 
 - On the WebDriver engines (experimental), `eval` takes the forms it
   takes on Chrome: an arrow function is called (`eval "() =>
