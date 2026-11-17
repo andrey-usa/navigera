@@ -1036,21 +1036,33 @@ impl Driver {
                 self.state()
             }
             Command::Scroll { target, by, to, timeout_ms: _ } => {
-                match target.optional("scroll")? {
-                    Some(t) => {
-                        self.on(
-                            &t,
-                            "scroll",
-                            "(el) => el.scrollIntoView({ block: 'center', behavior: 'instant' })",
-                            json!([]),
-                        )?;
-                    }
+                // Where the page is after, as Chrome's engine answers.
+                const AT: &str = "[Math.round(scrollY), document.documentElement.scrollHeight, innerHeight]";
+                let at = match target.optional("scroll")? {
+                    Some(t) => self.on(
+                        &t,
+                        "scroll",
+                        &format!(
+                            "(el) => {{ el.scrollIntoView({{ block: 'center', behavior: 'instant' }}); return {AT}; }}"
+                        ),
+                        json!([]),
+                    )?,
                     None => {
-                        let js = "(by, to) => { if (to === 'top') scrollTo(0, 0); else if (to === 'bottom') scrollTo(0, document.documentElement.scrollHeight); else scrollBy(0, by); }";
-                        self.call(js, json!([by.unwrap_or(600.0), to]))?;
+                        // 800 px unless given, as on Chrome.
+                        let js = format!(
+                            "(by, to) => {{ if (to === 'top') scrollTo(0, 0); else if (to === 'bottom') \
+                             scrollTo(0, document.documentElement.scrollHeight); else scrollBy(0, by); return {AT}; }}"
+                        );
+                        self.call(&js, json!([by.unwrap_or(800.0), to]))?
+                    }
+                };
+                let mut state = self.state()?;
+                if let (Some(o), Some(a)) = (state.as_object_mut(), at.as_array()) {
+                    for (i, key) in ["scrollY", "scrollHeight", "viewport"].into_iter().enumerate() {
+                        o.insert(key.into(), a.get(i).cloned().unwrap_or(Value::Null));
                     }
                 }
-                self.state()
+                Ok(state)
             }
             Command::Text { selector, grep, context, limit, timeout_ms: _ } => {
                 let text = if selector.is_empty() {

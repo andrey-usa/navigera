@@ -216,6 +216,7 @@ fn scenario(args: &[&str], engine: &str) {
     // wait (5 s), as on Chrome, not the navigation timeout.
     script.insert(script.len() - 1, json!({ "id": 27, "op": "grep", "query": "Send" }));
     script.insert(script.len() - 1, json!({ "id": 28, "op": "wait", "text": "Not on this page" }));
+    script.insert(script.len() - 1, json!({ "id": 29, "op": "scroll", "to": "top" }));
     if engine != "safari" {
         script.insert(script.len() - 1, json!({ "id": 21, "op": "pdf", "path": pdf.display().to_string() }));
     }
@@ -239,6 +240,8 @@ fn scenario(args: &[&str], engine: &str) {
     assert!(grep.contains("line with \"Send\"") && grep.contains("button \"Send\" [ref="), "{engine}: {grep}");
     let waited = a.iter().find(|x| x["id"] == 28).unwrap();
     assert!(waited["error"].as_str().unwrap_or("").contains("within 5000 ms"), "{engine}: {waited}");
+    let at = ok(&a, 29);
+    assert!(at["scrollY"] == 0 && at["scrollHeight"].is_number() && at["viewport"].is_number(), "{engine}: {at}");
     let tree = ok(&a, 2).as_str().unwrap().to_string();
     for want in [
         "heading \"Shop\"",

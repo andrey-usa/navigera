@@ -159,6 +159,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `scroll` on the WebDriver engines (experimental) answers where the
+  page is, `scrollY`, `scrollHeight` and `viewport`, as on Chrome and as
+  the reference says, and scrolls 800 px unless told (it was 600).
+
 - On the WebDriver engines (experimental), `wait` for text, an element,
   a URL or a condition that never comes gives up after the element wait
   (5 s, or `--timeout-ms`), as on Chrome; it waited the navigation
