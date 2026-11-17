@@ -781,18 +781,62 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = l.local_addr().unwrap().port();
             let server = std::thread::spawn(move || {
-                let (mut s, _) = l.accept().unwrap();
-                s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+                // One whole request (head and body, however they arrive)
+                // per answer, on the connection or on a new one.
+                l.set_nonblocking(true).unwrap();
+                let mut conn: Option<TcpStream> = None;
                 let mut seen = 0;
                 for a in answers {
-                    let mut buf = [0u8; 4096];
-                    if s.read(&mut buf).unwrap_or(0) == 0 {
+                    // The first request takes a connect; one asked again follows at once.
+                    let until = Instant::now() + Duration::from_millis(if seen == 0 { 5000 } else { 500 });
+                    let mut req: Vec<u8> = Vec::new();
+                    let whole = loop {
+                        if Instant::now() > until {
+                            break false;
+                        }
+                        if let Ok((s, _)) = l.accept() {
+                            s.set_nonblocking(false).unwrap();
+                            s.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+                            conn = Some(s);
+                            req.clear();
+                        }
+                        let Some(s) = conn.as_mut() else {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        };
+                        let mut buf = [0u8; 4096];
+                        match s.read(&mut buf) {
+                            Ok(0) => conn = None,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                            Err(_) => {}
+                        }
+                        let text = String::from_utf8_lossy(&req);
+                        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                            let want = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("Content-Length: "))
+                                .and_then(|n| n.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if body.len() >= want {
+                                break true;
+                            }
+                        }
+                    };
+                    if !whole {
                         break;
                     }
                     seen += 1;
                     let status = if a.contains("sessionId") { "200 OK" } else { "500 Internal Server Error" };
+                    let s = conn.as_mut().unwrap();
                     s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{a}", a.len()).as_bytes())
                         .unwrap();
+                }
+                // A request nobody should send is counted too.
+                if let Some(s) = conn.as_mut() {
+                    let mut buf = [0u8; 16];
+                    if matches!(s.read(&mut buf), Ok(n) if n > 0) {
+                        seen += 1;
+                    }
                 }
                 seen
             });
