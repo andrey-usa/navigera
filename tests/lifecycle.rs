@@ -201,6 +201,26 @@ fn a_second_caller_on_one_name_is_told() {
     assert!(slow.get("notes").is_none(), "{slow}");
     let third = dir.ok(&["-s", "one", "eval", "3"]);
     assert!(third.get("notes").is_none(), "{third}");
+    // A client that has its answer and is slow to hang up runs no
+    // command: the next one, in before it is gone, is told nothing (a
+    // process on a busy machine can start before the session sees the
+    // last one's connection close).
+    #[cfg(unix)]
+    {
+        use std::io::{BufRead, BufReader, Write};
+        let socket = dir.root.path().join("navigera").join("one.sock");
+        let mut held = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        writeln!(held, r#"{{"id":1,"op":"eval","expression":"4"}}"#).unwrap();
+        let mut answer = String::new();
+        BufReader::new(held.try_clone().unwrap()).read_line(&mut answer).unwrap();
+        assert!(answer.contains(r#""result":4"#), "{answer}");
+        let next = dir.command().args(["-s", "one", "eval", "5"]).stdout(Stdio::piped()).spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        drop(held);
+        let out = next.wait_with_output().unwrap();
+        let next: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(next["result"] == 5 && next.get("notes").is_none(), "{next}");
+    }
 }
 
 /// Two processes on one session name, one after the other: the one that

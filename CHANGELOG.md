@@ -59,6 +59,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A command on a named session was sometimes told "another command was
+  running on this session" when none was: the one before it had its
+  answer, and its process had not yet been seen to hang up. Seen on a
+  busy machine, with one process run right after another. A session
+  now counts as free from the moment a command is answered.
+
 - `ax --grep` and `text --grep` with a word that starts with a character
   of three or four bytes (`--grep 日本語`, an emoji) crashed navigera
   before it reached the page: the reader of grep's own `-A2` style flags
