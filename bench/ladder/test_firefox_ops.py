@@ -29,6 +29,12 @@ class FirefoxOps(unittest.TestCase):
         self.assertEqual(cli.call_args.args[0], ['/bin/navigera', '--session', 'test', 'start',
                                                '--engine', 'firefox', '--executable', '/bin/firefox'])
 
+    def test_vibium_uses_exact_css_not_description_or_model_lookup(self):
+        source = (HERE / 'contenders' / 'firefox_library.mjs').read_text()
+        self.assertIn('page.find({ css: selector }).fill(value)', source)
+        self.assertIn('page.find({ css: selector }).click()', source)
+        self.assertNotIn('page.find(selector)', source)
+
     def test_unsupported_is_never_zero_or_failure(self):
         for code in ('ppff', 'wdioff'):
             tool = ops_agent.Tool(args(code), 'http://fixture', {}, Path('/tmp'))
