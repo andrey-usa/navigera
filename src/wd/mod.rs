@@ -48,6 +48,25 @@ const SNAPSHOT: &str = include_str!("snapshot.js");
 /// says so.
 const SNAPSHOT_MAX_NODES: u64 = 400_000;
 
+/// `function` kept in the page once it has run there, per document, and
+/// called again from there: the text still comes with each call, but the
+/// page does not make a new function of it, whose first run is a cold one.
+/// The snapshot's walk in Firefox: 13 ms on a new function, 5 ms on the
+/// kept one (3,040 nodes; Chrome 10.5 and 7.2). The key carries a hash of
+/// the text, so a navigera with other text keeps its own. Only for text
+/// that is the same on every call, or the page would keep one per call.
+fn kept(function: &str) -> String {
+    // FNV-1a: a name, not a guard (the page can reach the property anyway,
+    // as it can every built-in a read uses).
+    let hash = function.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+    format!(
+        "(...a) => {{ const k = Symbol.for('navigera.kept.{hash:016x}'); let f = window[k]; \
+         if (typeof f !== 'function') {{ f = ({function}); \
+           try {{ Object.defineProperty(window, k, {{ value: f }}); }} catch (_) {{}} }} \
+         return f(...a); }}"
+    )
+}
+
 /// The console entries a session keeps between `console --clear`s.
 const CONSOLE_KEPT: usize = 1000;
 
@@ -797,7 +816,9 @@ impl Driver {
         };
         // Ids are made by the snapshot itself; a scope found before the first
         // snapshot is named again below.
-        let answer = self.wire.call(SNAPSHOT, &json!([SNAPSHOT_MAX_NODES]).to_string(), self.timeout)?;
+        static KEPT_SNAPSHOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let snapshot = KEPT_SNAPSHOT.get_or_init(|| kept(SNAPSHOT));
+        let answer = self.wire.call(snapshot, &json!([SNAPSHOT_MAX_NODES]).to_string(), self.timeout)?;
         crate::timing::record("ax_wd_page", started);
         let text = ok_text(&answer).context("ax")?;
         // The page's own script made this: checked before it is indexed.

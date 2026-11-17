@@ -927,11 +927,16 @@ impl Bidi {
     }
 
     fn call_params(&self, function: &str, args_json: &str) -> Value {
+        // `script.evaluate` of the call, the arguments written into it as a
+        // string, not `script.callFunction`: Firefox runs a function made by
+        // callFunction's declaration with every global it names looked up
+        // the slow way (the snapshot's walk, 3,040 nodes: 10.5-12.9 ms
+        // against 6.4-7.6 for the same function made by an evaluation).
+        let args = serde_json::to_string(args_json).unwrap_or_else(|_| "\"[]\"".to_string());
         json!({
-            "functionDeclaration": wrap(function),
+            "expression": format!("({})({args})", wrap(function)),
             "awaitPromise": true,
             "target": { "context": self.context },
-            "arguments": [{ "type": "string", "value": args_json }],
             "resultOwnership": "none",
         })
     }
@@ -1037,7 +1042,7 @@ impl Wire for Bidi {
         let params = self.call_params(function, args_json);
         let mut tried = false;
         loop {
-            match self.send("script.callFunction", params.clone(), timeout) {
+            match self.send("script.evaluate", params.clone(), timeout) {
                 Ok(r) => return Self::call_answer(&r),
                 // A document replaced while the call ran (a navigation): once
                 // more, in the new one.
@@ -1080,7 +1085,7 @@ impl Wire for Bidi {
 
     fn call_and_tabs(&mut self, function: &str, args_json: &str, timeout: Duration) -> Result<(String, Vec<String>)> {
         let (called, tree) = self.send_two(
-            ("script.callFunction", self.call_params(function, args_json)),
+            ("script.evaluate", self.call_params(function, args_json)),
             ("browsingContext.getTree", json!({ "maxDepth": 0 })),
             timeout,
         )?;

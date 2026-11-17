@@ -55,6 +55,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `ax` on Firefox (experimental) takes a third less time: 18.6 to 13.1
+  ms on a 3,040-node page (the median of three local runs of the per-op
+  bench each, Firefox 160), the same tree byte for byte. navigera's
+  page scripts run through `script.evaluate` with their arguments
+  written in, not `script.callFunction`, whose functions Firefox runs
+  with every global they name looked up the slow way (the walk alone:
+  6.4-7.6 ms against 10.5-12.9); and the snapshot's function is kept in
+  the page after its first run there, so a later `ax` on the same
+  document does not start it cold.
+
 - `click` and `dblclick` on the WebDriver engines (experimental) wait
   for a navigation only when the click planned one, as on Chrome. The
   page is asked what it made of the click: a link or a submit button
