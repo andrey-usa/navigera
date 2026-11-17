@@ -1109,6 +1109,9 @@ pub fn spawn(handle: &tokio::runtime::Handle, client: &CdpClient, shared: Arc<Sh
                     shared.processed.fetch_add(1, Ordering::SeqCst);
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    // What those events said (a download, a dialog, a
+                    // navigation) is lost to the session: say so.
+                    crate::timing::log(&format!("[events] the event watcher fell behind: {missed} events dropped"));
                     shared.processed.fetch_add(missed, Ordering::SeqCst);
                     continue;
                 }
