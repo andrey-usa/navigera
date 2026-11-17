@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `scroll down`, `scroll up` (each with an optional number of pixels,
+  800 unless given) and `scroll top|bottom`: the words agents write,
+  the same as `--by` and `--to`. They were taken for a selector and
+  failed after the 5 s element wait; an element named so is
+  `--selector down`.
+
 - `ax --grep` on the WebDriver engines (experimental): the lines of the
   page's tree with the words, under their containers, as on Chrome (it
   said "not on the firefox engine yet").

@@ -1338,7 +1338,11 @@ const OPS: &[(&str, &str, &str)] = &[
     ("select", "<ref> <option>... | --selector <css> --value <option> [--add]", "choose <select> option(s) by value or label (whitespace-insensitive); --add keeps the options already chosen"),
     ("hover", "<ref> | --selector <css> | --text <t>", "move the mouse over an element (hover menus)"),
     ("mouse", "move <x> <y> [--steps n] | down | up | click <x> <y> [--count 2] | wheel <dx> <dy> [--button left|right|middle] [<target>]", "raw mouse at a point, for what has no element to aim at (a canvas, a map, a game): viewport CSS pixels (as in a screenshot), or from the target's top-left corner (scrolled into view if need be; down, up and wheel with a target go to its center); the pointer stays where it went and held buttons stay held, so down, moves, up drags or draws; a click outside the viewport is refused"),
-    ("scroll", "[--by <px> | --to top|bottom] [<ref> | --selector <css>]", "scroll the page, or an element into view"),
+    (
+        "scroll",
+        "[--by <px> | --to top|bottom | down|up [<px>] | top|bottom] [<ref> | --selector <css>]",
+        "scroll the page, or an element into view",
+    ),
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
@@ -2559,12 +2563,32 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             };
             Command::Type { value, target: target_args(&mut args, false)?, timeout_ms }
         }
-        "scroll" => Command::Scroll {
-            by: num_flag(&mut args, "--by")?,
-            to: str_flag(&mut args, "--to")?,
-            target: target_args(&mut args, true)?,
-            timeout_ms,
-        },
+        "scroll" => {
+            let mut by = num_flag(&mut args, "--by")?;
+            let mut to = str_flag(&mut args, "--to")?;
+            // The words agents write: `scroll down [<px>]`, `scroll up
+            // [<px>]` (800 px unless given, as a plain `scroll`), `scroll
+            // top|bottom`. They were read as a selector and waited out 5 s;
+            // an element named so is `--selector down`.
+            let word = args.front().map(String::as_str);
+            if by.is_none() && to.is_none() && matches!(word, Some("down" | "up" | "top" | "bottom")) {
+                let word = args.pop_front().unwrap_or_default();
+                match word.as_str() {
+                    "top" | "bottom" => to = Some(word),
+                    _ => {
+                        let px = match args.front().map(|a| a.parse::<f64>()) {
+                            Some(Ok(px)) if px.is_finite() && px >= 0.0 => {
+                                args.pop_front();
+                                px
+                            }
+                            _ => 800.0,
+                        };
+                        by = Some(if word == "up" { -px } else { px });
+                    }
+                }
+            }
+            Command::Scroll { by, to, target: target_args(&mut args, true)?, timeout_ms }
+        }
         "upload" => {
             let target = target_args(&mut args, true)?;
             let mut files = extract_values(&mut args, "--file").map_err(ArgsError::Invalid)?;
@@ -8643,6 +8667,24 @@ mod tests {
             parsed.command,
             Some(Command::Eval { expression: "({ app }) => app.getName()".into(), timeout_ms: None, main: true })
         );
+    }
+
+    #[test]
+    fn scroll_takes_the_words_agents_write() {
+        let by_to = |args: &[&str]| {
+            let mut all = vec!["navigera"];
+            all.extend_from_slice(args);
+            match parse_args(argv(&all)).map(|p| p.command) {
+                Ok(Some(Command::Scroll { by, to, target, .. })) => (by, to, target.selector),
+                other => panic!("{args:?}: {other:?}"),
+            }
+        };
+        assert_eq!(by_to(&["scroll", "down"]), (Some(800.0), None, None));
+        assert_eq!(by_to(&["scroll", "down", "300"]), (Some(300.0), None, None));
+        assert_eq!(by_to(&["scroll", "up", "300"]), (Some(-300.0), None, None));
+        assert_eq!(by_to(&["scroll", "bottom"]), (None, Some("bottom".into()), None));
+        assert_eq!(by_to(&["scroll", "--selector", "down"]), (None, None, Some("down".into())));
+        assert_eq!(by_to(&["scroll", "--by", "200"]), (Some(200.0), None, None));
     }
 
     #[test]
