@@ -43,6 +43,14 @@ All notable changes to this project are documented here. The format follows
   markdown) keeps the title as text and leaves out lines that are only
   images: the wordmark and the badges.
 
+- `text --grep` and `ax --grep` lowercase the page's text once, into one
+  buffer, and search it whole with a vectorized substring search, where
+  each line was copied and searched by itself. The search of a 2.8 MB
+  text of 20,000 lines takes 2.5-2.7 ms where it took 10.3-11.5, and
+  4.2-4.6 where it took 12.1-13.6 with accented letters on every line
+  (one machine, the function alone, best of 15 runs); the replies are
+  the same.
+
 ### Security
 
 - `--engine firefox` checks a site's certificate, as Chrome does. The

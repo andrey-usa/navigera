@@ -6,9 +6,10 @@
 //! runs once over the page's text as it reads, and the reply is the matching
 //! lines with their neighbours: a few hundred bytes instead of the page.
 //!
-//! One pass over the text, no allocation per line beyond its lowercase copy,
-//! and every size is bounded: the passages shown, the part of a long line
-//! around its match, and the reply as a whole.
+//! The text is lowercased once into one buffer and searched whole (memchr's
+//! vectorized substring search), not line by line, and every size is
+//! bounded: the passages shown, the part of a long line around its match,
+//! and the reply as a whole.
 
 /// Passages shown when `--limit` is not given.
 pub const DEFAULT_PASSAGES: usize = 5;
@@ -38,7 +39,94 @@ struct Passage {
 /// A lowercase copy with one character for each of the original's, so a
 /// position found in it is a position in the original.
 fn lower(s: &str) -> String {
-    s.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect()
+    let mut out = String::with_capacity(s.len());
+    lower_into(&mut out, s);
+    out
+}
+
+/// [`lower`], appended to `out`. Each run of ASCII, which is most of most
+/// pages, is copied and lowered in place, bytes at a time; only the
+/// characters between the runs are looked up one by one.
+fn lower_into(out: &mut String, s: &str) {
+    let mut rest = s;
+    loop {
+        let run = rest.bytes().position(|b| !b.is_ascii()).unwrap_or(rest.len());
+        let from = out.len();
+        out.push_str(&rest[..run]);
+        out[from..].make_ascii_lowercase();
+        rest = &rest[run..];
+        let Some(c) = rest.chars().next() else { return };
+        out.push(c.to_lowercase().next().unwrap_or(c));
+        rest = &rest[c.len_utf8()..];
+    }
+}
+
+/// The lines to search, lowercased into one buffer with a line feed after
+/// each: a search runs once over all of it and no line has a copy of its
+/// own (a 3.7 MB page of 20,000 lines was 20,000 allocations and as many
+/// searches set up).
+struct Lowered {
+    text: String,
+    /// Where each line starts in `text`, and where the last one ends.
+    starts: Vec<usize>,
+}
+
+impl Lowered {
+    fn new<'a>(lines: impl Iterator<Item = &'a str> + Clone) -> Self {
+        let bytes: usize = lines.clone().map(|l| l.len() + 1).sum();
+        let mut text = String::with_capacity(bytes);
+        let mut starts = Vec::with_capacity(lines.clone().count() + 1);
+        for line in lines {
+            starts.push(text.len());
+            lower_into(&mut text, line);
+            text.push('\n');
+        }
+        starts.push(text.len());
+        Lowered { text, starts }
+    }
+
+    fn lines(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    /// Line `i`, lowercased.
+    fn line(&self, i: usize) -> &str {
+        &self.text[self.starts[i]..self.starts[i + 1] - 1]
+    }
+
+    /// Calls `found(line, byte in the line)` for the first place of `needle`
+    /// in each line that has it, in line order. A needle with a line feed
+    /// is in no line.
+    fn firsts(&self, needle: &str, mut found: impl FnMut(usize, usize)) {
+        if needle.is_empty() || needle.contains('\n') {
+            return;
+        }
+        let (mut line, mut last) = (0, usize::MAX);
+        for at in memchr::memmem::find_iter(self.text.as_bytes(), needle.as_bytes()) {
+            while self.starts[line + 1] <= at {
+                line += 1;
+            }
+            if line != last {
+                last = line;
+                found(line, at - self.starts[line]);
+            }
+        }
+    }
+
+    /// The lines that have every one of `needles` (`all`) or any of them,
+    /// each with the character at which the earliest of them starts.
+    fn having<S: AsRef<str>>(&self, needles: &[S], all: bool) -> Vec<(usize, usize)> {
+        let mut first = vec![usize::MAX; self.lines()];
+        let mut have = vec![0usize; self.lines()];
+        for needle in needles {
+            self.firsts(needle.as_ref(), |i, at| {
+                have[i] += 1;
+                first[i] = first[i].min(at);
+            });
+        }
+        let need = if all { needles.len().max(1) } else { 1 };
+        (0..self.lines()).filter(|&i| have[i] >= need).map(|i| (i, self.line(i)[..first[i]].chars().count())).collect()
+    }
 }
 
 /// The part of `line` from character `from` for `len` characters, with `…`
@@ -69,11 +157,6 @@ fn alternatives(phrase: &str) -> Vec<String> {
     }
 }
 
-/// Where in a line (in characters) the first of `alts` is, if any is.
-fn first_of(line_lower: &str, alts: &[String]) -> Option<usize> {
-    alts.iter().filter_map(|a| line_lower.find(a.as_str())).min().map(|b| line_lower[..b].chars().count())
-}
-
 /// How the lines were found, as the reply says it.
 fn found_what(query: &str, by_words: bool, alts: &[String]) -> String {
     if !alts.is_empty() {
@@ -83,19 +166,6 @@ fn found_what(query: &str, by_words: bool, alts: &[String]) -> String {
     } else {
         format!("{query:?}")
     }
-}
-
-/// Where in a line (in characters) the search matched.
-fn match_at(line_lower: &str, phrase: &str, words: &[&str], by_words: bool) -> Option<usize> {
-    let chars_before = |byte: usize| line_lower[..byte].chars().count();
-    if !by_words {
-        return line_lower.find(phrase).map(chars_before);
-    }
-    let mut first = usize::MAX;
-    for w in words {
-        first = first.min(line_lower.find(w)?);
-    }
-    Some(chars_before(first))
 }
 
 /// The passages of `text` that mention `query`, as the reply to print.
@@ -115,23 +185,18 @@ pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
     // Lines that read as something, with their number in the text.
     let lines: Vec<(usize, &str)> =
         text.lines().enumerate().map(|(i, l)| (i + 1, l.trim())).filter(|(_, l)| !l.is_empty()).collect();
-    let lowered: Vec<String> = lines.iter().map(|(_, l)| lower(l)).collect();
+    let lowered = Lowered::new(lines.iter().map(|(_, l)| *l));
     let words: Vec<&str> = phrase.split_whitespace().collect();
     let mut by_words = false;
-    let mut hits: Vec<(usize, usize)> =
-        lowered.iter().enumerate().filter_map(|(i, l)| match_at(l, &phrase, &words, false).map(|at| (i, at))).collect();
+    let mut hits: Vec<(usize, usize)> = lowered.having(&[phrase.as_str()], true);
     if hits.is_empty() && words.len() > 1 {
         by_words = true;
-        hits = lowered
-            .iter()
-            .enumerate()
-            .filter_map(|(i, l)| match_at(l, &phrase, &words, true).map(|at| (i, at)))
-            .collect();
+        hits = lowered.having(&words, true);
     }
     let mut alts = Vec::new();
     if hits.is_empty() {
         alts = alternatives(&phrase);
-        hits = lowered.iter().enumerate().filter_map(|(i, l)| first_of(l, &alts).map(|at| (i, at))).collect();
+        hits = lowered.having(&alts, false);
     }
     if hits.is_empty() {
         return format!(
@@ -212,17 +277,18 @@ pub fn grep_tree(tree: &str, query: &str, limit: usize) -> String {
     let mut all = tree.lines();
     let head = all.next().unwrap_or("");
     let lines: Vec<&str> = all.filter(|l| l.trim_start().starts_with("- ")).collect();
-    let lowered: Vec<String> = lines.iter().map(|l| lower(l)).collect();
+    let lowered = Lowered::new(lines.iter().copied());
+    let lines_of = |found: Vec<(usize, usize)>| found.into_iter().map(|(i, _)| i).collect::<Vec<usize>>();
     let mut by_words = false;
-    let mut hits: Vec<usize> = (0..lines.len()).filter(|&i| lowered[i].contains(&phrase)).collect();
+    let mut hits = lines_of(lowered.having(&[phrase.as_str()], true));
     if hits.is_empty() && words.len() > 1 {
         by_words = true;
-        hits = (0..lines.len()).filter(|&i| words.iter().all(|w| lowered[i].contains(w))).collect();
+        hits = lines_of(lowered.having(&words, true));
     }
     let mut alts = Vec::new();
     if hits.is_empty() {
         alts = alternatives(&phrase);
-        hits = (0..lines.len()).filter(|&i| first_of(&lowered[i], &alts).is_some()).collect();
+        hits = lines_of(lowered.having(&alts, false));
     }
     if hits.is_empty() {
         return format!(
@@ -273,6 +339,81 @@ pub fn grep_tree(tree: &str, query: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The search as it was: each line lowered into a copy of its own and
+    /// searched by itself. The one-buffer search must find the same lines
+    /// at the same characters.
+    fn line_by_line(lines: &[&str], needles: &[&str], all: bool) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let low: String = line.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect();
+            let found: Vec<usize> = needles.iter().filter_map(|n| low.find(n)).collect();
+            let enough = if all { !needles.is_empty() && found.len() == needles.len() } else { !found.is_empty() };
+            if enough {
+                out.push((i, low[..*found.iter().min().unwrap()].chars().count()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn one_search_over_all_lines_finds_what_a_search_of_each_line_found() {
+        // Lines of ASCII and not, letters whose lowercase is shorter in
+        // bytes (the Kelvin sign, a dotted capital I, a capital sharp s), a
+        // match at a line's first and last character, a line that repeats
+        // its match, an empty line, and needles that end where a line ends.
+        let fixed = [
+            "Late payment fee: 12.99 percent",
+            "the FEE for late Payment",
+            "",
+            "payment",
+            "fee fee fee",
+            "\u{212a}elvin \u{130}stanbul STRA\u{1e9e}E caf\u{c9} FEE",
+            "\u{130}\u{130}\u{130} late",
+            "x late payment 12.99",
+            "late",
+            "a|b and a\\|b",
+        ];
+        let mut lines: Vec<String> = fixed.iter().map(|l| l.to_string()).collect();
+        // A deterministic spread of longer lines around the vector width.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for n in 0..400 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let pad = (seed >> 33) as usize % 70;
+            let word = ["fee", "Late", "PAYMENT", "caf\u{c9}", "\u{212a}", "zz", "12.99"][(seed >> 20) as usize % 7];
+            lines.push(format!("{}{word}{} {n}", "x".repeat(pad), "y".repeat((seed >> 12) as usize % 5)));
+        }
+        let lines: Vec<&str> = lines.iter().map(|l| l.as_str()).collect();
+        let lowered = Lowered::new(lines.iter().copied());
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(lowered.line(i), lower(line));
+        }
+        let needles: &[&[&str]] = &[
+            &["late payment"],
+            &["fee"],
+            &["late"],
+            &["payment"],
+            &["caf\u{e9}"],
+            &["k"],
+            &["i"],
+            &["stra\u{df}e"],
+            &["12.99"],
+            &["zz"],
+            &["nowhere"],
+            &["fee", "late"],
+            &["payment", "late", "fee"],
+            &["fee", "fee"],
+            &["zz", "nowhere"],
+            &["a", "b"],
+            &["e\nl"],
+            &[],
+        ];
+        for set in needles {
+            for all in [true, false] {
+                assert_eq!(lowered.having(set, all), line_by_line(&lines, set, all), "{set:?}, all: {all}");
+            }
+        }
+    }
 
     const PAGE: &str =
         "dialog: The Dialog element\n\nAttributes\nopen\nIndicates that the dialog box is active. It is \
