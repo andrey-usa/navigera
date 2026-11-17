@@ -3,11 +3,18 @@ name: webdriver
 # The WebDriver engines on the browsers GitHub's runners carry: Firefox over
 # WebDriver BiDi (Linux, macOS, Windows), Safari through safaridriver
 # (macOS), and chromedriver over classic WebDriver and over BiDi.
+# Dispatched with `base` (a release tag), it also times those engines and
+# the text search against that release's binary (bench/gate/engines.py):
+# the run a CHANGELOG entry cites for their numbers.
 on:
   push:
     branches: [master, next]
   pull_request:
   workflow_dispatch:
+    inputs:
+      base:
+        description: "release tag to time the engines against (empty: no timings)"
+        default: ""
   schedule:
     - cron: "41 6 * * 1"
 
@@ -72,3 +79,56 @@ jobs:
         run: cargo test --locked --test webdriver -- --nocapture --test-threads 1
       - name: Unit tests of the engines
         run: cargo test --locked --lib "wd::"
+
+  timings:
+    name: timings against the last release
+    if: github.event_name == 'workflow_dispatch' && inputs.base != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-musl
+          cache-on-failure: false
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: musl-tools
+      - name: The candidate (static musl, as a release builds it)
+        run: cargo build --locked --release --bin navigera --target x86_64-unknown-linux-musl
+      - name: The release before it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ inputs.base }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/base"
+          gh release download "$BASE" --repo "$GITHUB_REPOSITORY" \
+            --pattern navigera-x86_64-unknown-linux-musl.tar.gz --dir "$RUNNER_TEMP/base"
+          tar -xzf "$RUNNER_TEMP/base/navigera-x86_64-unknown-linux-musl.tar.gz" -C "$RUNNER_TEMP/base"
+          "$RUNNER_TEMP/base/navigera" --version
+      - name: Firefox stable and the runner's chromedriver
+        run: |
+          curl -fsSL --retry 4 --retry-all-errors 'https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64&lang=en-US' -o "$RUNNER_TEMP/firefox.tar.xz"
+          mkdir -p "$RUNNER_TEMP/firefox"
+          tar -xJf "$RUNNER_TEMP/firefox.tar.xz" -C "$RUNNER_TEMP/firefox" --strip-components=1
+          echo "NAVIGERA_FIREFOX=$RUNNER_TEMP/firefox/firefox" >> "$GITHUB_ENV"
+          echo "CHROMEDRIVER=$CHROMEWEBDRIVER/chromedriver" >> "$GITHUB_ENV"
+          echo "CHROME_BIN=$(command -v google-chrome)" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/firefox/firefox" --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          google-chrome --version
+      - name: Timings (median of 20 each, interleaved)
+        env:
+          BASE: ${{ inputs.base }}
+        run: |
+          set -o pipefail
+          rc=0
+          python3 bench/gate/engines.py --base "$RUNNER_TEMP/base/navigera" \
+            --candidate target/x86_64-unknown-linux-musl/release/navigera \
+            --runs 10 --summary "$RUNNER_TEMP/engines.md" || rc=$?
+          { echo "Base: $BASE, candidate: ${GITHUB_SHA::7}"; echo; cat "$RUNNER_TEMP/engines.md"; } >> "$GITHUB_STEP_SUMMARY"
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/engines.md" "engine timings vs $BASE"
+          exit $rc

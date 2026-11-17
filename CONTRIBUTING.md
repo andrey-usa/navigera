@@ -131,6 +131,12 @@ python3 docs-site/build.py --mdbook mdbook            # and the HTML, with every
    the static musl build a release ships. Locally:
    `cargo build --release --target x86_64-unknown-linux-musl`, then
    `python3 bench/gate/gate.py --base <old navigera> --candidate target/x86_64-unknown-linux-musl/release/navigera`.
+   Then Actions → webdriver → Run workflow with `base` set to the last
+   release tag: it times Firefox, chromedriver (classic and BiDi) and the
+   text search against that release on one runner
+   (`bench/gate/engines.py`; it reports, it does not fail). A CHANGELOG
+   entry that gives a number cites the run that measured it, this one or a
+   bench run.
 2. Bump `version` in `Cargo.toml` and in `skills/.claude-plugin/plugin.json`
    (the Claude Code plugin; `tests/plugin.rs` fails until they match), and add a
    `CHANGELOG.md` entry on `master`,
