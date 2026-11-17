@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A privacy policy and terms of use for navigera and its Claude Code
+  plugin, on the docs site (Project) and linked from the plugin's README:
+  navigera collects nothing, and is provided as is.
+
 - `scroll down`, `scroll up` (each with an optional number of pixels,
   800 unless given) and `scroll top|bottom`: the words agents write,
   the same as `--by` and `--to`. They were taken for a selector and

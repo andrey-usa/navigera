@@ -55,3 +55,5 @@ Each page below is markdown. The whole site in one file: https://andrey-usa.gith
 - [Contributing](https://andrey-usa.github.io/navigera/project/contributing.md): How to build, test, benchmark and release navigera.
 - [Source layout](https://andrey-usa.github.io/navigera/project/layout.md): Where each part of navigera lives in the repository.
 - [Security](https://andrey-usa.github.io/navigera/project/security.md): What navigera protects and how, its known exposures, and how to report a problem.
+- [Privacy policy](https://andrey-usa.github.io/navigera/project/privacy.md): navigera collects nothing.
+- [Terms of use](https://andrey-usa.github.io/navigera/project/terms.md): The terms for navigera and its plugin.
