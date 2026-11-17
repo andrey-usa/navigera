@@ -18,7 +18,6 @@
         if (i === undefined) { i = strings.length; strings.push(s); index.set(s, i); }
         return i;
     };
-    const STYLES = ['cursor', 'pointer-events', 'opacity', 'visibility', 'display', 'content', 'content-visibility'];
     const documents = [];
     let count = 0, truncated = false;
     const rare = () => ({ index: [], value: [] });
@@ -38,11 +37,11 @@
         const view = doc.defaultView || window;
         const sx = view.scrollX || 0, sy = view.scrollY || 0;
         const frames = [];
-        // (node, parent index, rendered): a stack, so a deep page can't
-        // overflow the call stack.
-        const stack = [[doc, -1, true]];
+        // (node, parent index, rendered, the parent's text-transform): a
+        // stack, so a deep page can't overflow the call stack.
+        const stack = [[doc, -1, true, 'none']];
         while (stack.length) {
-            const [n, parent, shown] = stack.pop();
+            const [n, parent, shown, ptt] = stack.pop();
             if (count >= max) { truncated = true; break; }
             count++;
             const i = N.parentIndex.length;
@@ -52,7 +51,7 @@
             N.nodeValue.push(str(n.nodeType === 1 ? '' : n.nodeValue));
             N.backendNodeId.push(idOf(n));
             const attrs = [];
-            let rendered = false;
+            let rendered = false, tt = 'none';
             if (n.nodeType === 1) {
                 for (const a of n.attributes) attrs.push(str(a.name), str(a.value));
                 const tag = n.tagName;
@@ -69,11 +68,14 @@
                 if (shown) {
                     const cs = view.getComputedStyle(n);
                     const display = cs.display;
+                    tt = cs.textTransform;
                     rendered = display !== 'none';
                     if (rendered && display !== 'contents') {
                         const r = n.getBoundingClientRect();
                         L.nodeIndex.push(i);
-                        L.styles.push(STYLES.map((p) => str(cs.getPropertyValue(p))));
+                        // cursor, pointer-events, opacity, visibility,
+                        // display, content, content-visibility.
+                        L.styles.push([str(cs.cursor), str(cs.pointerEvents), str(cs.opacity), str(cs.visibility), str(display), str(cs.content), str(cs.contentVisibility)]);
                         L.bounds.push([r.left + sx, r.top + sy, r.width, r.height]);
                         L.text.push(-1);
                     }
@@ -87,12 +89,10 @@
                 }
             } else if (n.nodeType === 3) {
                 if (shown && n.data.trim()) {
-                    const p = n.parentElement;
-                    const tt = p ? view.getComputedStyle(p).textTransform : 'none';
                     let t = n.data;
-                    if (tt === 'uppercase') t = t.toUpperCase();
-                    else if (tt === 'lowercase') t = t.toLowerCase();
-                    else if (tt === 'capitalize') t = t.replace(/(^|\s)(\S)/g, (_, a, b) => a + b.toUpperCase());
+                    if (ptt === 'uppercase') t = t.toUpperCase();
+                    else if (ptt === 'lowercase') t = t.toLowerCase();
+                    else if (ptt === 'capitalize') t = t.replace(/(^|\s)(\S)/g, (_, a, b) => a + b.toUpperCase());
                     L.nodeIndex.push(i);
                     L.styles.push([]);
                     L.bounds.push([0, 0, 0, 0]);
@@ -110,9 +110,9 @@
             const kids = n.childNodes;
             for (let k = kids.length - 1; k >= 0; k--) {
                 const c = kids[k];
-                if (c.nodeType === 1 || c.nodeType === 3 || c.nodeType === 10) stack.push([c, i, rendered]);
+                if (c.nodeType === 1 || c.nodeType === 3 || c.nodeType === 10) stack.push([c, i, rendered, tt]);
             }
-            if (n.nodeType === 1 && n.shadowRoot) stack.push([n.shadowRoot, i, rendered]);
+            if (n.nodeType === 1 && n.shadowRoot) stack.push([n.shadowRoot, i, rendered, tt]);
         }
         return frames;
     };

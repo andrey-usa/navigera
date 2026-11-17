@@ -798,6 +798,7 @@ impl Driver {
         // Ids are made by the snapshot itself; a scope found before the first
         // snapshot is named again below.
         let answer = self.wire.call(SNAPSHOT, &json!([SNAPSHOT_MAX_NODES]).to_string(), self.timeout)?;
+        crate::timing::record("ax_wd_page", started);
         let text = ok_text(&answer).context("ax")?;
         // The page's own script made this: checked before it is indexed.
         let snap = crate::cdp::snap::Snap::from_page_json(text).map_err(|why| {

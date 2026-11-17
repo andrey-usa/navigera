@@ -76,7 +76,10 @@ All notable changes to this project are documented here. The format follows
   `check` and `uncheck` click the same way. `press Enter` asks the page
   too (a form it submits, a link it follows); any other key, and text
   typed without a line break, cannot load a document and are not
-  watched for one, as on Chrome.
+  watched for one, as on Chrome. `ax` there reads each element's style
+  once (a text node asked for its parent's again): the same snapshot,
+  a quarter less time in the page (8.7-9.3 to 6.6-6.9 ms for 3,040
+  nodes in Chrome).
 
 - `ax --grep` prints a match with what it belongs to: a match inside a
   table row or a list item of up to 12 lines comes with all of it (the
