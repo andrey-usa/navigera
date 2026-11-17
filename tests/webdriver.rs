@@ -285,12 +285,6 @@ fn nav_clicks(args: &[&str], engine: &str) {
     assert_eq!(ok(&keys, 3)["title"], "Nav", "{engine}");
     assert_eq!(ok(&keys, 4)["title"], "Next", "{engine}: Enter in a form's field: {}", ok(&keys, 4));
     assert!(ok(&keys, 4)["url"].as_str().unwrap_or("").ends_with("/next.html?q=abc"), "{engine}: {}", ok(&keys, 4));
-    if engine == "safari" {
-        // Safari's own way with a page's new tabs is not pinned down yet:
-        // what it answers is in the log.
-        eprintln!("safari: target=_blank {}, window.open {}, then {}", a[1], a[2], a[3]);
-        return;
-    }
     assert_eq!(ok(&a, 2)["tabs"], 2, "{engine}: a link with target=_blank: {}", ok(&a, 2));
     assert_eq!(ok(&a, 3)["tabs"], 3, "{engine}: window.open in a click handler: {}", ok(&a, 3));
     // The session's tab is still the one in front: behind the new one a
