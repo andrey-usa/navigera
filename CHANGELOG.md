@@ -93,15 +93,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- `ax` on Firefox (experimental) takes a third less time: 18.6 to 13.1
-  ms on a 3,040-node page (the median of three local runs of the per-op
-  bench each, Firefox 160), the same tree byte for byte. navigera's
-  page scripts run through `script.evaluate` with their arguments
-  written in, not `script.callFunction`, whose functions Firefox runs
-  with every global they name looked up the slow way (the walk alone:
-  6.4-7.6 ms against 10.5-12.9); and the snapshot's function is kept in
-  the page after its first run there, so a later `ax` on the same
-  document does not start it cold.
+- `ax` on Firefox (experimental) takes 40% less time: 36.8 to 22.0 ms
+  on the per-op bench's page of 500 cards, against 0.14.1 on one runner
+  (Firefox 160, median of 20; [run 44142518208](https://github.com/andrey-usa/navigera/actions/runs/44142518208)), the same tree byte for byte.
+  navigera's page scripts run through `script.evaluate` with their
+  arguments written in, not `script.callFunction`, whose functions
+  Firefox runs with every global they name looked up the slow way; and
+  the snapshot's function is kept in the page after its first run
+  there, so a later `ax` on the same document does not start it cold.
 
 - `click` and `dblclick` on the WebDriver engines (experimental) wait
   for a navigation only when the click planned one, as on Chrome. The
@@ -110,9 +109,10 @@ All notable changes to this project are documented here. The format follows
   form a script sends, a form that fails validation), and a script that
   navigates is seen through the Navigation API. Every click waited a
   fixed 30 ms over BiDi and 50 ms over classic WebDriver for a
-  navigation to announce itself. With chromedriver on one machine, a
-  click that stays on the page: 44 to 10 ms over BiDi, 83 to 20-26 ms
-  over classic WebDriver (medians of 40, two rounds). Where the page cannot
+  navigation to announce itself. A click that stays on the page,
+  against 0.14.1 on one runner (medians of 20; [run 44142518208](https://github.com/andrey-usa/navigera/actions/runs/44142518208)): Firefox 52.4 to
+  8.0 ms, chromedriver 38.1 to 7.3 ms over BiDi and 70.7 to 32.2 ms over
+  classic WebDriver (Chrome 157). Where the page cannot
   say (no Navigation API, or a listener that hides the click), the
   click waits as before; where it says a navigation is planned, the
   click waits for it to start for up to 150 ms, as on Chrome (30 ms was
@@ -125,9 +125,10 @@ All notable changes to this project are documented here. The format follows
   too (a form it submits, a link it follows); any other key, and text
   typed without a line break, cannot load a document and are not
   watched for one, as on Chrome. `ax` there reads each element's style
-  once (a text node asked for its parent's again): the same snapshot,
-  a quarter less time in the page (8.7-9.3 to 6.6-6.9 ms for 3,040
-  nodes in Chrome).
+  once (a text node asked for its parent's again): the same snapshot in
+  less time; `ax` on that page through chromedriver takes 48.0 ms where
+  it took 58.5 over BiDi, 32.0 where it took 33.8 over classic WebDriver
+  (same [run 44142518208](https://github.com/andrey-usa/navigera/actions/runs/44142518208)).
 
 - `ax --grep` prints a match with what it belongs to: a match inside a
   table row or a list item of up to 12 lines comes with all of it (the
@@ -138,9 +139,9 @@ All notable changes to this project are documented here. The format follows
 - `ax` prints a search engine's result link by the page it goes to:
   Bing's `/ck/a?…&u=…`, Google's `/url?q=…` and DuckDuckGo's `/l/?uddg=…`
   are decoded in `url=`, so `ax --grep nodejs.org` finds a result by its
-  site (it found none of Bing's), and a Bing results page's tree is 29%
-  smaller (13,113 to 9,368 bytes on one search). `get attr <ref> href`
-  still gives the link as the page has it.
+  site (it found none of Bing's), and a results page's tree is smaller:
+  each result's link is its site's address, not the engine's redirect.
+  `get attr <ref> href` still gives the link as the page has it.
 - `ax` shows a name, value or text up to a fifth over its limit whole
   (180 characters for a name, 360 for text): a 168-character function
   signature was cut 18 characters short, with a note about as long as
@@ -159,11 +160,13 @@ All notable changes to this project are documented here. The format follows
 
 - `text --grep` and `ax --grep` lowercase the page's text once, into one
   buffer, and search it whole with a vectorized substring search, where
-  each line was copied and searched by itself. The search of a 2.8 MB
-  text of 20,000 lines takes 2.5-2.7 ms where it took 10.3-11.5, and
-  4.2-4.6 where it took 12.1-13.6 with accented letters on every line
-  (one machine, the function alone, best of 15 runs); the replies are
-  the same.
+  each line was copied and searched by itself; the replies are the same.
+  `text --grep` on a page of 2.8 MB in 20,000 lines takes 47.3 ms where
+  it took 52.9, against 0.14.1 on one runner (Chrome 157, median of 20;
+  [run 44142518208](https://github.com/andrey-usa/navigera/actions/runs/44142518208)). With accented letters on every line it is not faster there
+  (132.9 ms against 123.0; 128.5 against 139.6 on another machine): the
+  search is a few milliseconds of that command, and the rest, which such
+  a page makes more than twice as long, is what to make faster next.
 
 ### Security
 
@@ -201,11 +204,13 @@ All notable changes to this project are documented here. The format follows
 
 - On the WebDriver engines (experimental), a click after the page had
   opened a tab (a link with `target=_blank`, `window.open`) took 5
-  seconds with chromedriver, classic and BiDi: the new tab came to the
-  front, and the driver waited for a frame the session's tab, now
+  seconds with chromedriver over classic WebDriver: the new tab came to
+  the front, and the driver waited for a frame the session's tab, now
   behind it, never drew. The session's tab is brought back to the front
   when its page opens another (`browsingContext.activate` over BiDi,
-  the browser's own command through a Chromium driver): 5.1 s to 0.1 s.
+  the browser's own command through a Chromium driver): 5,070.9 to
+  32.3 ms against 0.14.1 on one runner (Chrome 157, median of 20;
+  [run 44142518208](https://github.com/andrey-usa/navigera/actions/runs/44142518208)).
   A click that opens a tab is watched as before, so the answer counts
   the new tab.
 
@@ -239,13 +244,13 @@ All notable changes to this project are documented here. The format follows
   fuzzer found it; in every release since `--grep` learned those flags.
 - `screenshot --annotate` could hand back the page without its labels
   on macOS: 1 capture in 100 there, with the labels' frame painted on
-  time (run 43971629669). navigera now reads one pixel of an outline
-  from the PNG (0.2 ms for a viewport, measured locally; the image is
-  inflated only down to that pixel's row), takes the capture again up to
+  time ([run 43971629669](https://github.com/andrey-usa/navigera/actions/runs/43971629669)). navigera now reads one pixel
+  of an outline from the PNG (the image is inflated only down to that
+  pixel's row), takes the capture again up to
   three times when the outline is not there, and fails with an error
   that says so when it still is not, instead of handing over an image
-  that claims labels it does not show. Not cured: in run 43973457667
-  (300 repeats) the one bad session stayed without labels through all
+  that claims labels it does not show. Not cured: in [run
+  43973457667](https://github.com/andrey-usa/navigera/actions/runs/43973457667) (300 repeats) the one bad session stayed without labels through all
   three retakes, so it is not a single late frame; the cause is open.
   It also waits up to 2 s, not 250 ms, for the labels' frame on a
   visible page, and the session log says when a frame was late or a
