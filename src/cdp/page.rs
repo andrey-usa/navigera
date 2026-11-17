@@ -973,7 +973,7 @@ fn settle_floor(quiet: Duration) -> Duration {
 
 /// `expression`, wrapped so that a function it evaluates to is called:
 /// `() => …`, `(() => …)()` and a plain `document.title` all give a value.
-fn call_if_function(expression: &str) -> String {
+pub(crate) fn call_if_function(expression: &str) -> String {
     format!("(() => {{ const __r = ({expression}\n); return (typeof __r === 'function') ? __r() : __r; }})()")
 }
 

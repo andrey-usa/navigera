@@ -674,26 +674,36 @@ impl Wire for Classic {
     }
 
     fn evaluate(&mut self, source: &str, timeout: Duration) -> Result<Value> {
-        // An expression first; statements (a syntax error as an expression)
-        // as a function body.
-        let as_expr = json!({ "script": format!("return (\n{source}\n);"), "args": [] });
-        match self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(as_expr.clone()), timeout)) {
-            // (chromedriver words it "Unexpected token", the others
-            // "SyntaxError".)
-            Err(e)
-                if {
-                    let said = format!("{e:#}").to_ascii_lowercase();
-                    said.contains("syntax")
-                        || said.contains("unexpected token")
-                        || said.contains("unexpected identifier")
-                } =>
-            {
-                let body = json!({ "script": source, "args": [] });
-                self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(body.clone()), timeout))
+        // As on Chrome: an expression first (an arrow function is called);
+        // statements (a syntax error as an expression) as a function body,
+        // `return` giving the answer; then as an async one, for `await`. A
+        // promise the script returns is waited for (WebDriver's own rule).
+        let forms = [
+            format!("return {};", crate::cdp::page::call_if_function(source)),
+            source.to_string(),
+            format!("return (async () => {{\n{source}\n}})();"),
+        ];
+        // (chromedriver words it "Unexpected token", the others "SyntaxError".)
+        let unparsed = |e: &anyhow::Error| {
+            let said = format!("{e:#}").to_ascii_lowercase();
+            said.contains("syntax") || said.contains("unexpected token") || said.contains("unexpected identifier")
+        };
+        let mut first = None;
+        let mut answer = None;
+        for form in forms {
+            let body = json!({ "script": form, "args": [] });
+            match self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(body.clone()), timeout)) {
+                Err(e) if unparsed(&e) => {
+                    first.get_or_insert(e);
+                }
+                other => {
+                    answer = Some(other);
+                    break;
+                }
             }
-            other => other,
         }
-        .map(|v| match v {
+        // No form parses: the expression's error says more.
+        answer.unwrap_or_else(|| Err(first.unwrap_or_else(|| anyhow!("the script did not parse")))).map(|v| match v {
             Value::Object(ref o) if o.contains_key(ELEMENT_KEY) => json!("<element>"),
             v => v,
         })

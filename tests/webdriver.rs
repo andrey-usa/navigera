@@ -194,6 +194,13 @@ fn scenario(args: &[&str], engine: &str) {
     // driver does not.
     let pdf = std::env::temp_dir().join(format!("nv-wd-{}-{}.pdf", std::process::id(), args.len()));
     let mut script = script;
+    // `eval`'s forms, as on Chrome: an arrow function is called; statements
+    // with `await` and `return` run as a function's body.
+    script.insert(script.len() - 1, json!({ "id": 22, "op": "eval", "expression": "() => 6 * 7" }));
+    script.insert(
+        script.len() - 1,
+        json!({ "id": 23, "op": "eval", "expression": "const n = await Promise.resolve(6); return n * 7" }),
+    );
     if engine != "safari" {
         script.insert(script.len() - 1, json!({ "id": 21, "op": "pdf", "path": pdf.display().to_string() }));
     }
@@ -206,6 +213,8 @@ fn scenario(args: &[&str], engine: &str) {
         let _ = std::fs::remove_file(&pdf);
     }
     assert_eq!(ok(&a, 1)["title"], "Fixture");
+    assert_eq!(ok(&a, 22), 42, "{engine}: an arrow function is called");
+    assert_eq!(ok(&a, 23), 42, "{engine}: await and return at the top");
     let tree = ok(&a, 2).as_str().unwrap().to_string();
     for want in [
         "heading \"Shop\"",

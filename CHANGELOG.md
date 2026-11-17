@@ -139,6 +139,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- On the WebDriver engines (experimental), `eval` takes the forms it
+  takes on Chrome: an arrow function is called (`eval "() =>
+  document.title"` answered `[function]`), and statements with `await`
+  and `return` run as a function's body (Firefox said "return not in
+  function"). Over BiDi, statements without `return` answer their last
+  expression, as on Chrome.
+
 - `--engine safari` (experimental): a safaridriver that exits before it
   serves is started again on another port, three tries in all (it exited
   once with status 1 at a session that followed another one at once),

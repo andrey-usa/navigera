@@ -936,6 +936,26 @@ impl Bidi {
         })
     }
 
+    /// One form of [`Wire::evaluate`]: `source` as BiDi's `script.evaluate`
+    /// runs it, its value as JSON.
+    fn evaluate_once(&mut self, source: &str, timeout: Duration) -> Result<Value> {
+        let r = self.send(
+            "script.evaluate",
+            json!({
+                "expression": source,
+                "awaitPromise": true,
+                "target": { "context": self.context },
+                "resultOwnership": "none",
+                "serializationOptions": { "maxObjectDepth": 20, "maxDomDepth": 0 },
+            }),
+            timeout,
+        )?;
+        if r["type"] == "exception" {
+            bail!("{}", r["exceptionDetails"]["text"].as_str().unwrap_or("the script threw"));
+        }
+        Ok(Self::remote_to_json(&r["result"]))
+    }
+
     /// What a `script.callFunction` answer holds: the function's text.
     fn call_answer(r: &Value) -> Result<String> {
         if r["type"] == "exception" {
@@ -1027,22 +1047,26 @@ impl Wire for Bidi {
         }
     }
 
+    /// `eval` as on Chrome: one expression (an arrow function is called);
+    /// else the source run as a script, its last expression the result;
+    /// else as the body of an async function, `await` and `return` working.
     fn evaluate(&mut self, source: &str, timeout: Duration) -> Result<Value> {
-        let r = self.send(
-            "script.evaluate",
-            json!({
-                "expression": source,
-                "awaitPromise": true,
-                "target": { "context": self.context },
-                "resultOwnership": "none",
-                "serializationOptions": { "maxObjectDepth": 20, "maxDomDepth": 0 },
-            }),
-            timeout,
-        )?;
-        if r["type"] == "exception" {
-            bail!("{}", r["exceptionDetails"]["text"].as_str().unwrap_or("the script threw"));
+        let forms = [
+            crate::cdp::page::call_if_function(source),
+            source.to_string(),
+            format!("(async () => {{\n{source}\n}})()"),
+        ];
+        let mut first = None;
+        for form in forms {
+            match self.evaluate_once(&form, timeout) {
+                Err(e) if format!("{e:#}").contains("SyntaxError") => {
+                    first.get_or_insert(e);
+                }
+                other => return other,
+            }
         }
-        Ok(Self::remote_to_json(&r["result"]))
+        // No form parses: the expression's error says more.
+        Err(first.unwrap_or_else(|| anyhow!("the script did not parse")))
     }
 
     fn call_and_tabs(&mut self, function: &str, args_json: &str, timeout: Duration) -> Result<(String, Vec<String>)> {
