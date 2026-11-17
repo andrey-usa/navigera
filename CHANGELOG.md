@@ -51,6 +51,12 @@ All notable changes to this project are documented here. The format follows
   loaded without a word. For a test site without a valid certificate:
   `--capabilities '{"acceptInsecureCerts":true}'`.
 
+- `--webdriver` and `--engine safari`: a WebDriver server's answer takes
+  memory only as it arrives, and one of more than 32 million values is
+  refused before it is parsed. A server that named a size and sent
+  nothing cost up to 256 MB, and an answer made of small values grew to
+  sixteen times its size in memory.
+
 ### Fixed
 
 - `ax --grep` and `text --grep` with a word that starts with a character

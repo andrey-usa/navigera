@@ -39,6 +39,52 @@ const LEAVE_STATE: &str = "const K = Symbol.for('navigera.leaving'); \
 /// The most an answer may hold (a full-page screenshot of a long page).
 const BODY_MAX: usize = 256 << 20;
 
+/// The most values (numbers, strings, lists, ...) an answer may hold: each
+/// costs 32 bytes or more once parsed, whatever it took on the wire, so
+/// an answer of two-byte values would grow sixteen times. The largest
+/// page tree read (400,000 nodes, some 30 values a node in the
+/// snapshot's columns) holds about a third of this.
+const VALUES_MAX: usize = 32_000_000;
+
+/// Whether JSON `text` holds at most `max` values, counted without
+/// parsing it: every value but the first follows a `,`, a `:`, a `[` or
+/// a `{`, and the three counted here are enough to bound them.
+fn values_within(text: &str, max: usize) -> bool {
+    // A value takes a byte at least: a short answer is not read twice.
+    if text.len() <= max {
+        return true;
+    }
+    let (mut count, mut quoted, mut escaped) = (0usize, false, false);
+    for &b in text.as_bytes() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                quoted = false;
+            }
+        } else if b == b'"' {
+            quoted = true;
+        } else if matches!(b, b',' | b'[' | b'{') {
+            count += 1;
+            if count > max {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// `n` more bytes of an answer's body, kept as they arrive: a server that
+/// names a size and sends nothing costs no memory.
+fn body_part(r: &mut impl BufRead, body: &mut Vec<u8>, n: usize) -> Result<()> {
+    if r.by_ref().take(n as u64).read_to_end(body)? < n {
+        bail!("the connection closed in the answer's body");
+    }
+    Ok(())
+}
+
 /// In safaridriver's "session not created" when Safari did not answer it
 /// in time: "The session timed out while connecting to a Safari instance."
 const SAFARI_SLOW_START: &str = "timed out while connecting to a Safari instance";
@@ -128,6 +174,12 @@ impl Http {
                 Ok((status, text, keep)) => {
                     if !keep {
                         self.conn = None;
+                    }
+                    if !values_within(&text, VALUES_MAX) {
+                        bail!(
+                            "{method} {path}: the answer holds over {} million values: too many to read at once",
+                            VALUES_MAX / 1_000_000
+                        );
                     }
                     let v: Value = serde_json::from_str(&text).map_err(|_| {
                         anyhow!(
@@ -254,22 +306,21 @@ fn read_response(r: &mut impl BufRead) -> Result<(u16, String, bool)> {
             if size > BODY_MAX - body.len() {
                 bail!("the answer is over {} MB", BODY_MAX >> 20);
             }
-            let at = body.len();
-            body.resize(at + size, 0);
-            r.read_exact(&mut body[at..])?;
+            body_part(r, &mut body, size)?;
             head_line(r, &mut line, &mut budget)?;
         }
     } else if let Some(n) = length {
         if n > BODY_MAX {
             bail!("the answer is over {} MB", BODY_MAX >> 20);
         }
-        body.resize(n, 0);
-        r.read_exact(&mut body)?;
+        body_part(r, &mut body, n)?;
     } else {
         r.take(BODY_MAX as u64).read_to_end(&mut body)?;
         keep = false;
     }
-    Ok((status, String::from_utf8_lossy(&body).into_owned(), keep))
+    // Without a second copy of a large answer when it is UTF-8, as JSON is.
+    let text = String::from_utf8(body).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    Ok((status, text, keep))
 }
 
 /// A WebDriver session: the server, the session id, the driver process
@@ -908,5 +959,41 @@ mod tests {
         let mut r = std::io::Cursor::new(two.to_vec());
         assert_eq!(read_response(&mut r).unwrap(), (200, "ok".to_string(), true));
         assert_eq!(read_response(&mut r).unwrap(), (204, String::new(), true));
+    }
+
+    /// A size named and not sent is an error that cost no memory, by
+    /// length and by chunk; bytes that are not UTF-8 are still an answer.
+    #[test]
+    fn a_body_shorter_than_its_size_is_an_error() {
+        let read = |bytes: Vec<u8>| read_response(&mut std::io::Cursor::new(bytes)).map_err(|e| format!("{e:#}"));
+        for head in ["Content-Length: 268435456\r\n\r\n", "Transfer-Encoding: chunked\r\n\r\nfffffff\r\n"] {
+            let e = read(format!("HTTP/1.1 200 OK\r\n{head}short").into_bytes()).unwrap_err();
+            assert!(e.contains("closed in the answer's body"), "{head}: {e}");
+        }
+        let mut body = Vec::new();
+        let mut none = std::io::Cursor::new(Vec::new());
+        assert!(body_part(&mut none, &mut body, 256 << 20).is_err());
+        assert!(body.capacity() < 1 << 20, "{} bytes kept for a body that never came", body.capacity());
+        let odd = read(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\na\xffb".to_vec()).unwrap();
+        assert_eq!(odd, (200, "a\u{fffd}b".to_string(), true));
+    }
+
+    /// Values are counted where they are, not inside strings; an answer
+    /// of more than may be read is refused before it is parsed.
+    #[test]
+    fn an_answer_of_too_many_values_is_refused_unparsed() {
+        let list = format!("[{}0]", "0,".repeat(99));
+        assert!(values_within(&list, 100));
+        assert!(!values_within(&list, 99));
+        let nested = "[".repeat(50) + &"]".repeat(50);
+        assert!(values_within(&nested, 50));
+        assert!(!values_within(&nested, 49));
+        // Commas and brackets in a string are text, also after an escaped quote.
+        let text = format!(r#"{{"value":"{}\\\"{}"}}"#, ",[{".repeat(40), ",".repeat(40));
+        assert!(serde_json::from_str::<Value>(&text).is_ok(), "{text}");
+        assert!(values_within(&text, 1));
+        assert!(!values_within(&format!("[{text},{text}]"), 2));
+        // Shorter than the bound: not counted at all.
+        assert!(values_within(",,,", 3));
     }
 }
