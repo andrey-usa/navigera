@@ -15,10 +15,10 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::{wrap, Wait, Wire, CONSOLE_HOOK, DIALOG_HOOK, LISTEN};
+use super::{wrap, Wait, Watch, Wire, CONSOLE_HOOK, DIALOG_HOOK, LISTEN};
 
 /// The key WebDriver names an element reference by.
-const ELEMENT_KEY: &str = "element-6066-11e4-a52f-4f735466cecf";
+const ELEMENT_KEY: &str = "element-6066-11e4-a52e-4f735466cecf";
 
 /// How long after an action a navigation it starts must have begun (the
 /// page's `beforeunload`) to be waited for.
@@ -39,6 +39,56 @@ const LEAVE_STATE: &str = "const K = Symbol.for('navigera.leaving'); \
 /// The most an answer may hold (a full-page screenshot of a long page).
 const BODY_MAX: usize = 256 << 20;
 
+/// The most values (numbers, strings, lists, ...) an answer may hold: each
+/// costs 32 bytes or more once parsed, whatever it took on the wire, so
+/// an answer of two-byte values would grow sixteen times. The largest
+/// page tree read (400,000 nodes, some 30 values a node in the
+/// snapshot's columns) holds about a third of this.
+const VALUES_MAX: usize = 32_000_000;
+
+/// Whether JSON `text` holds at most `max` values, counted without
+/// parsing it: every value but the first follows a `,`, a `:`, a `[` or
+/// a `{`, and the three counted here are enough to bound them.
+fn values_within(text: &str, max: usize) -> bool {
+    // A value takes a byte at least: a short answer is not read twice.
+    if text.len() <= max {
+        return true;
+    }
+    let (mut count, mut quoted, mut escaped) = (0usize, false, false);
+    for &b in text.as_bytes() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                quoted = false;
+            }
+        } else if b == b'"' {
+            quoted = true;
+        } else if matches!(b, b',' | b'[' | b'{') {
+            count += 1;
+            if count > max {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// `n` more bytes of an answer's body, kept as they arrive: a server that
+/// names a size and sends nothing costs no memory.
+fn body_part(r: &mut impl BufRead, body: &mut Vec<u8>, n: usize) -> Result<()> {
+    if r.by_ref().take(n as u64).read_to_end(body)? < n {
+        bail!("the connection closed in the answer's body");
+    }
+    Ok(())
+}
+
+/// In safaridriver's "session not created" when Safari did not answer it
+/// in time: "The session timed out while connecting to a Safari instance."
+const SAFARI_SLOW_START: &str = "timed out while connecting to a Safari instance";
+
 /// The most an answer's status line and headers may hold together, and
 /// the most one chunk's size line and trailers may.
 const HEAD_MAX: usize = 64 << 10;
@@ -49,7 +99,7 @@ struct Http {
     /// `/wd/hub` for a grid, empty for a driver.
     base: String,
     auth: Option<String>,
-    conn: Option<BufReader<TcpStream>>,
+    conn: Option<BufReader<Timed>>,
 }
 
 impl Http {
@@ -75,7 +125,7 @@ impl Http {
         Ok(Self { host: host.to_string(), base: path.to_string(), auth, conn: None })
     }
 
-    fn stream(&mut self, timeout: Duration) -> Result<&mut BufReader<TcpStream>> {
+    fn stream(&mut self, timeout: Duration) -> Result<&mut BufReader<Timed>> {
         if self.conn.is_none() {
             let addr = std::net::ToSocketAddrs::to_socket_addrs(&self.host)
                 .with_context(|| format!("WebDriver server {}", self.host))?
@@ -84,11 +134,12 @@ impl Http {
             let s = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(10)))
                 .with_context(|| format!("could not connect to the WebDriver server at {}", self.host))?;
             s.set_nodelay(true).ok();
-            self.conn = Some(BufReader::new(s));
+            self.conn = Some(BufReader::new(Timed { stream: s, until: Instant::now() }));
         }
         let conn = self.conn.as_mut().unwrap();
-        conn.get_ref().set_read_timeout(Some(timeout)).ok();
-        conn.get_ref().set_write_timeout(Some(timeout)).ok();
+        // The whole answer is due by then, however it is cut up.
+        conn.get_mut().until = Instant::now() + timeout;
+        conn.get_ref().stream.set_write_timeout(Some(timeout)).ok();
         Ok(conn)
     }
 
@@ -110,8 +161,8 @@ impl Http {
         }
         for attempt in 0..2 {
             let conn = self.stream(timeout)?;
-            let sent = conn.get_mut().write_all(head.as_bytes()).and_then(|_| match &body {
-                Some(b) => conn.get_mut().write_all(b.as_bytes()),
+            let sent = conn.get_mut().stream.write_all(head.as_bytes()).and_then(|_| match &body {
+                Some(b) => conn.get_mut().stream.write_all(b.as_bytes()),
                 None => Ok(()),
             });
             if sent.is_err() && attempt == 0 {
@@ -123,6 +174,12 @@ impl Http {
                 Ok((status, text, keep)) => {
                     if !keep {
                         self.conn = None;
+                    }
+                    if !values_within(&text, VALUES_MAX) {
+                        bail!(
+                            "{method} {path}: the answer holds over {} million values: too many to read at once",
+                            VALUES_MAX / 1_000_000
+                        );
                     }
                     let v: Value = serde_json::from_str(&text).map_err(|_| {
                         anyhow!(
@@ -151,6 +208,25 @@ impl Http {
             }
         }
         bail!("{method} {path}: the WebDriver server closed the connection twice")
+    }
+}
+
+/// The server's side of the connection, read against one time for the
+/// whole answer: a server that sends a byte now and then cannot hold a
+/// request past its timeout (a timeout per read let it).
+struct Timed {
+    stream: TcpStream,
+    until: Instant,
+}
+
+impl Read for Timed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the answer did not end within the timeout"));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
     }
 }
 
@@ -230,22 +306,21 @@ fn read_response(r: &mut impl BufRead) -> Result<(u16, String, bool)> {
             if size > BODY_MAX - body.len() {
                 bail!("the answer is over {} MB", BODY_MAX >> 20);
             }
-            let at = body.len();
-            body.resize(at + size, 0);
-            r.read_exact(&mut body[at..])?;
+            body_part(r, &mut body, size)?;
             head_line(r, &mut line, &mut budget)?;
         }
     } else if let Some(n) = length {
         if n > BODY_MAX {
             bail!("the answer is over {} MB", BODY_MAX >> 20);
         }
-        body.resize(n, 0);
-        r.read_exact(&mut body)?;
+        body_part(r, &mut body, n)?;
     } else {
         r.take(BODY_MAX as u64).read_to_end(&mut body)?;
         keep = false;
     }
-    Ok((status, String::from_utf8_lossy(&body).into_owned(), keep))
+    // Without a second copy of a large answer when it is UTF-8, as JSON is.
+    let text = String::from_utf8(body).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    Ok((status, text, keep))
 }
 
 /// A WebDriver session: the server, the session id, the driver process
@@ -294,6 +369,12 @@ impl Session {
                 }
                 http.request("POST", "/session", Some(&json!({ "capabilities": { "alwaysMatch": caps } })), bound)
             }
+            // safaridriver gives up on a Safari that is slow to start (a
+            // cold one on a busy Mac); by then Safari is up, and asking
+            // again gets the session.
+            Err(e) if format!("{e:#}").contains(SAFARI_SLOW_START) => {
+                http.request("POST", "/session", Some(&body), bound)
+            }
             other => other,
         }
         .context("the WebDriver server refused a session")?;
@@ -336,6 +417,25 @@ impl Drop for Session {
     }
 }
 
+/// What [`PICK_FORM`] throws on a page that may not make a function from
+/// text (its CSP), so the caller tries the forms one by one.
+const NO_FUNCTION: &str = "navigera: no Function here";
+
+/// `eval`'s forms (function bodies) parsed in the page without running,
+/// and the first that parses run, once. When none parses: the error of the
+/// source as written (the second form), which names the user's own text.
+const PICK_FORM: &str = r#"const forms = arguments[0];
+const errors = [];
+for (const form of forms) {
+    let fn;
+    try { fn = new Function(form); } catch (e) {
+        if (e instanceof SyntaxError) { errors.push(e); continue; }
+        throw new Error('navigera: no Function here (' + e + ')');
+    }
+    return fn.call(this);
+}
+throw errors[1] || errors[0];"#;
+
 /// A free port on this machine, for a driver navigera starts.
 fn free_port() -> Result<u16> {
     let l = std::net::TcpListener::bind("127.0.0.1:0").context("no free port for the driver")?;
@@ -343,24 +443,72 @@ fn free_port() -> Result<u16> {
 }
 
 /// Start `exe` (a WebDriver server that takes `--port`) and wait until it
-/// answers `/status`.
+/// answers `/status`. One that exits before it serves is started again on
+/// another port, three tries in all: the port can be taken between
+/// [`free_port`] and the driver's bind, and safaridriver once exited with
+/// status 1 at a test's second session, the first one's just ended (macOS
+/// runner, nothing printed: its output was not read then). What it printed
+/// last is in the error when every try fails.
 fn start_driver(exe: &str, args: &[String], timeout: Duration) -> Result<(Child, String)> {
-    let port = free_port()?;
+    let started = Instant::now();
+    let bound = timeout.max(Duration::from_secs(20));
+    let mut tries = 0u32;
+    loop {
+        tries += 1;
+        match start_driver_once(exe, args, started, bound) {
+            Ok(served) => return Ok(served),
+            Err(Start::Exited(e)) if tries < 3 && started.elapsed() + Duration::from_secs(1) < bound => {
+                crate::timing::log(&format!("[webdriver] {e:#}; starting it again"));
+                std::thread::sleep(Duration::from_millis(250) * tries);
+            }
+            Err(Start::Exited(e) | Start::Failed(e)) => return Err(e),
+        }
+    }
+}
+
+/// How one start of a driver went wrong: it exited before it served (worth
+/// another try), or anything else.
+enum Start {
+    Exited(anyhow::Error),
+    Failed(anyhow::Error),
+}
+
+fn start_driver_once(exe: &str, args: &[String], started: Instant, bound: Duration) -> Result<(Child, String), Start> {
+    let port = free_port().map_err(Start::Failed)?;
     let mut child = std::process::Command::new(exe)
         .arg(format!("--port={port}"))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("could not start {exe}"))?;
+        .with_context(|| format!("could not start {exe}"))
+        .map_err(Start::Failed)?;
+    // Read for as long as it runs, so a talkative driver never blocks on a
+    // full pipe; the last lines are kept for an error.
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Tail::default()));
+    if let Some(err) = child.stderr.take() {
+        let said = std::sync::Arc::clone(&said);
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines() {
+                let Ok(line) = line else { break };
+                said.lock().unwrap_or_else(|e| e.into_inner()).push(&line);
+            }
+            said.lock().unwrap_or_else(|e| e.into_inner()).done = true;
+        });
+    }
     let url = format!("http://127.0.0.1:{port}");
-    let mut http = Http::new(&url)?;
-    let started = Instant::now();
-    let bound = timeout.max(Duration::from_secs(20));
+    let mut http = Http::new(&url).map_err(Start::Failed)?;
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            bail!("{exe} exited ({status}) before it served WebDriver");
+            // Its last lines may still be on their way through the pipe.
+            let until = Instant::now() + Duration::from_millis(200);
+            while !said.lock().unwrap_or_else(|e| e.into_inner()).done && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let text = said.lock().unwrap_or_else(|e| e.into_inner()).text();
+            let printed = if text.is_empty() { " and printed nothing".to_string() } else { format!(": {text}") };
+            return Err(Start::Exited(anyhow!("{exe} exited ({status}) before it served WebDriver{printed}")));
         }
         if let Ok(v) = http.request("GET", "/status", None, Duration::from_secs(2)) {
             if v["ready"].as_bool() != Some(false) {
@@ -369,9 +517,38 @@ fn start_driver(exe: &str, args: &[String], timeout: Duration) -> Result<(Child,
         }
         if started.elapsed() > bound {
             let _ = child.kill();
-            bail!("{exe} did not answer on port {port} in {} s", bound.as_secs());
+            let _ = child.wait();
+            return Err(Start::Failed(anyhow!("{exe} did not answer on port {port} in {} s", bound.as_secs())));
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The last lines a driver printed: ten at most, each cut at 300 bytes.
+#[derive(Default)]
+struct Tail {
+    lines: std::collections::VecDeque<String>,
+    done: bool,
+}
+
+impl Tail {
+    fn push(&mut self, line: &str) {
+        let line = line.trim_end();
+        if line.is_empty() {
+            return;
+        }
+        let mut cut = line.len().min(300);
+        while !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if self.lines.len() == 10 {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line[..cut].to_string());
+    }
+
+    fn text(&self) -> String {
+        self.lines.iter().map(String::as_str).collect::<Vec<_>>().join(" / ")
     }
 }
 
@@ -456,6 +633,27 @@ pub struct Classic {
 }
 
 impl Classic {
+    /// [`Wire::evaluate`] where the page may not parse a script itself: each
+    /// form run in turn while the driver says it did not parse. (chromedriver
+    /// words it "Unexpected token", the others "SyntaxError".)
+    fn evaluate_by_words(&mut self, forms: &[String], timeout: Duration) -> Result<Value> {
+        let unparsed = |e: &anyhow::Error| {
+            let said = format!("{e:#}").to_ascii_lowercase();
+            said.contains("syntax") || said.contains("unexpected token") || said.contains("unexpected identifier")
+        };
+        let mut first = None;
+        for form in forms {
+            let body = json!({ "script": form, "args": [] });
+            match self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(body.clone()), timeout)) {
+                Err(e) if unparsed(&e) => {
+                    first.get_or_insert(e);
+                }
+                other => return other,
+            }
+        }
+        Err(first.unwrap_or_else(|| anyhow!("the script did not parse")))
+    }
+
     /// Run `body` with this session's dialog policy: a dialog that blocks
     /// the command is answered, and the command sent again once.
     fn with_dialogs<T>(&mut self, mut body: impl FnMut(&mut Session) -> Result<T>) -> Result<T> {
@@ -516,17 +714,28 @@ impl Wire for Classic {
     }
 
     fn evaluate(&mut self, source: &str, timeout: Duration) -> Result<Value> {
-        // An expression first; statements (a syntax error as an expression)
-        // as a function body.
-        let as_expr = json!({ "script": format!("return (\n{source}\n);"), "args": [] });
-        match self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(as_expr.clone()), timeout)) {
-            Err(e) if format!("{e:#}").to_ascii_lowercase().contains("syntax") => {
-                let body = json!({ "script": source, "args": [] });
-                self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(body.clone()), timeout))
-            }
+        // As on Chrome: an expression first (an arrow function is called);
+        // statements as a function body, `return` giving the answer; then
+        // as an async one, for `await`. A promise the script returns is
+        // waited for (WebDriver's own rule).
+        let forms = [
+            format!("return {};", crate::cdp::page::call_if_function(source)),
+            source.to_string(),
+            format!("return (async () => {{\n{source}\n}})();"),
+        ];
+        // The page parses each form without running it and runs the first
+        // that parses, once: a SyntaxError the code throws as it runs
+        // (`JSON.parse`, an invalid selector) is its answer, not a reason
+        // to run it again in the next form. The driver's error has nothing
+        // to tell the two apart by.
+        let pick = json!({ "script": PICK_FORM, "args": [forms] });
+        let answer = match self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(pick.clone()), timeout)) {
+            // A page whose policy forbids `Function`: each form is tried
+            // in turn, told apart by the driver's words.
+            Err(e) if format!("{e:#}").contains(NO_FUNCTION) => self.evaluate_by_words(&forms, timeout),
             other => other,
-        }
-        .map(|v| match v {
+        };
+        answer.map(|v| match v {
             Value::Object(ref o) if o.contains_key(ELEMENT_KEY) => json!("<element>"),
             v => v,
         })
@@ -545,7 +754,69 @@ impl Wire for Classic {
         Ok(())
     }
 
-    fn settle(&mut self, timeout: Duration) {
+    fn actions_keep(&mut self, actions: Value) -> Result<()> {
+        let body = json!({ "actions": actions });
+        self.with_dialogs(|s| s.cmd("POST", "/actions", Some(body.clone()), Duration::from_secs(30)))?;
+        Ok(())
+    }
+
+    fn set_files(&mut self, files: &[String], timeout: Duration) -> Result<()> {
+        let body = json!({ "script": format!("return {};", super::PICKED), "args": [] });
+        let v = self.s.cmd("POST", "/execute/sync", Some(body), timeout)?;
+        let element = v[ELEMENT_KEY]
+            .as_str()
+            .ok_or_else(|| anyhow!("the file input is gone from the page; run `ax` again"))?
+            .to_string();
+        // WebDriver's way to choose files: their paths "typed" into the
+        // input, one per line.
+        let body = json!({ "text": files.join("\n") });
+        self.s.cmd("POST", &format!("/element/{element}/value"), Some(body), timeout)?;
+        Ok(())
+    }
+
+    fn set_viewport(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()> {
+        if scale.is_some_and(|s| s != 1.0) {
+            bail!("--scale: classic WebDriver sizes the window and has no pixel-ratio override; drop --scale, or use --engine firefox or chrome");
+        }
+        let Some((width, height)) = size else {
+            self.s.cmd("POST", "/window/maximize", Some(json!({})), Duration::from_secs(30))?;
+            return Ok(());
+        };
+        // The command sizes the window; the viewport is that less the
+        // browser's own bars, so the difference is measured and added.
+        let inner = |s: &mut Session| -> Result<(i64, i64)> {
+            let body = json!({ "script": "return [window.innerWidth, window.innerHeight];", "args": [] });
+            let v = s.cmd("POST", "/execute/sync", Some(body), Duration::from_secs(10))?;
+            Ok((v[0].as_i64().unwrap_or(0), v[1].as_i64().unwrap_or(0)))
+        };
+        let (mut w, mut h) = (i64::from(width), i64::from(height));
+        for _ in 0..3 {
+            self.s.cmd("POST", "/window/rect", Some(json!({ "width": w, "height": h })), Duration::from_secs(30))?;
+            let (iw, ih) = inner(&mut self.s)?;
+            if (iw, ih) == (i64::from(width), i64::from(height)) {
+                return Ok(());
+            }
+            w += i64::from(width) - iw;
+            h += i64::from(height) - ih;
+        }
+        let (iw, ih) = inner(&mut self.s)?;
+        bail!("the browser's window gave a viewport of {iw}x{ih}, not {width}x{height} (a headed window has a smallest and a largest size)")
+    }
+
+    fn add_init_script(&mut self, _source: &str) -> Result<()> {
+        bail!("classic WebDriver has no script that runs before a page's own; use --engine firefox or chrome (or --bidi with a server that has it)")
+    }
+
+    fn clear_init_scripts(&mut self) -> Result<usize> {
+        Ok(0)
+    }
+
+    fn settle(&mut self, timeout: Duration, watch: Watch) {
+        let watch = match watch {
+            Watch::No => return,
+            Watch::Brief => NAV_WATCH,
+            Watch::Planned => super::NAV_PLANNED_WATCH,
+        };
         // The page's own flag says whether the action started a navigation;
         // if it did, the new document is waited for until it has loaded.
         let started = Instant::now();
@@ -558,7 +829,7 @@ impl Wire for Classic {
                 Duration::from_secs(5),
             ) {
                 Ok(v) => match (v[0].as_str().unwrap_or(""), v[1].as_str().unwrap_or("")) {
-                    ("same", _) if started.elapsed() >= NAV_WATCH => break,
+                    ("same", _) if started.elapsed() >= watch => break,
                     ("new", "complete") => break,
                     _ => {}
                 },
@@ -583,6 +854,16 @@ impl Wire for Classic {
         let data = v.as_str().ok_or_else(|| anyhow!("the driver sent no image"))?;
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| anyhow!("the image is not base64 ({e})"))
+    }
+
+    fn pdf(&mut self, landscape: bool, background: bool) -> Result<Vec<u8>> {
+        let body = json!({ "orientation": if landscape { "landscape" } else { "portrait" }, "background": background });
+        let v = self
+            .with_dialogs(|s| s.cmd("POST", "/print", Some(body.clone()), Duration::from_secs(60)))
+            .context("the driver's print command (safaridriver has none)")?;
+        let data = v.as_str().ok_or_else(|| anyhow!("the driver sent no PDF"))?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| anyhow!("the PDF is not base64 ({e})"))
     }
 
     fn history(&mut self, delta: i64) -> Result<()> {
@@ -612,6 +893,17 @@ impl Wire for Classic {
     fn tab_new(&mut self) -> Result<String> {
         let v = self.s.cmd("POST", "/window/new", Some(json!({ "type": "tab" })), Duration::from_secs(30))?;
         v["handle"].as_str().map(str::to_string).ok_or_else(|| anyhow!("the driver made no tab"))
+    }
+
+    fn front(&mut self) {
+        // Classic WebDriver has no command for it. Switching to the tab
+        // again shows it where the driver acts on the tab in front
+        // (Safari's); a Chromium driver takes the browser's own command.
+        let _ = self.s.cmd("POST", "/window", Some(json!({ "handle": self.window })), Duration::from_secs(10));
+        if matches!(self.s.describe()["name"].as_str(), Some("chrome" | "msedge" | "chrome-headless-shell")) {
+            let body = json!({ "cmd": "Page.bringToFront", "params": {} });
+            let _ = self.s.cmd("POST", "/goog/cdp/execute", Some(body), Duration::from_secs(10));
+        }
     }
 
     fn tab_select(&mut self, id: &str) -> Result<()> {
@@ -691,6 +983,66 @@ impl Wire for Classic {
 mod tests {
     use super::*;
 
+    /// A driver for [`start_driver`]: a shell script that counts its starts
+    /// in `n` and runs `body` with the port it was given in `$port`.
+    #[cfg(unix)]
+    fn fake_driver(dir: &std::path::Path, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = dir.join("driver");
+        let script = format!("#!/bin/sh\nport=${{1#--port=}}\necho x >> '{}'\n{body}\n", dir.join("n").display());
+        std::fs::write(&exe, script).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exe.display().to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_driver_that_keeps_exiting_is_tried_three_times_and_its_words_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = fake_driver(dir.path(), "echo 'Could not start: a session is already running' >&2\nexit 1");
+        let e = start_driver(&exe, &[], Duration::from_secs(20)).expect_err("it never serves");
+        let text = format!("{e:#}");
+        assert!(text.contains("before it served WebDriver: Could not start: a session is already running"), "{text}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("n")).unwrap().lines().count(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_driver_that_exits_once_is_started_again() {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let serve = r#"[ "$(wc -l < "$(dirname "$0")/n")" -ge 2 ] || exit 1
+exec python3 -c '
+import http.server as h, socketserver
+class H(h.BaseHTTPRequestHandler):
+    def do_GET(s):
+        b = b"{\"value\": {\"ready\": true}}"
+        s.send_response(200); s.send_header("Content-Length", str(len(b))); s.end_headers(); s.wfile.write(b)
+socketserver.TCPServer(("127.0.0.1", '"$port"'), H).serve_forever()'"#;
+        let exe = fake_driver(dir.path(), serve);
+        let (mut child, url) = start_driver(&exe, &[], Duration::from_secs(20)).expect("served on the second start");
+        assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("n")).unwrap().lines().count(), 2);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_drivers_last_lines_are_ten_at_most_and_cut_on_a_character() {
+        let mut t = Tail::default();
+        for i in 0..12 {
+            t.push(&format!("line {i}"));
+        }
+        t.push("");
+        assert_eq!(t.lines.len(), 10);
+        assert!(t.text().starts_with("line 2 / line 3"), "{}", t.text());
+        let mut t = Tail::default();
+        t.push(&"é".repeat(400));
+        assert_eq!(t.lines[0].len(), 300);
+    }
+
     #[test]
     fn a_servers_url_keeps_its_path_and_its_key_is_never_shown() {
         let h = Http::new("http://user:key@grid.example:4444/wd/hub/").unwrap();
@@ -729,6 +1081,116 @@ mod tests {
         assert!(format!("{e:#}").contains("no such window"), "{e:#}");
     }
 
+    /// safaridriver's refusal when Safari was slow to start is asked
+    /// again once; any other refusal, and a second one, is the answer.
+    #[test]
+    fn a_session_safari_was_too_slow_for_is_asked_for_again_once() {
+        let slow = r#"{"value":{"error":"session not created","message":"Could not create a session: The session timed out while connecting to a Safari instance."}}"#;
+        let other = r#"{"value":{"error":"session not created","message":"Could not create a session: no"}}"#;
+        let made = r#"{"value":{"sessionId":"s1","capabilities":{"browserName":"safari"}}}"#;
+        // What the server answers, in order; how many requests it saw.
+        let run = |answers: Vec<&'static str>| {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                // One whole request (head and body, however they arrive)
+                // per answer, on the connection or on a new one.
+                l.set_nonblocking(true).unwrap();
+                let mut conn: Option<TcpStream> = None;
+                let mut seen = 0;
+                for a in answers {
+                    // The first request takes a connect; one asked again follows at once.
+                    let until = Instant::now() + Duration::from_millis(if seen == 0 { 5000 } else { 500 });
+                    let mut req: Vec<u8> = Vec::new();
+                    let whole = loop {
+                        if Instant::now() > until {
+                            break false;
+                        }
+                        if let Ok((s, _)) = l.accept() {
+                            s.set_nonblocking(false).unwrap();
+                            s.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+                            conn = Some(s);
+                            req.clear();
+                        }
+                        let Some(s) = conn.as_mut() else {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        };
+                        let mut buf = [0u8; 4096];
+                        match s.read(&mut buf) {
+                            Ok(0) => conn = None,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                            Err(_) => {}
+                        }
+                        let text = String::from_utf8_lossy(&req);
+                        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                            let want = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("Content-Length: "))
+                                .and_then(|n| n.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if body.len() >= want {
+                                break true;
+                            }
+                        }
+                    };
+                    if !whole {
+                        break;
+                    }
+                    seen += 1;
+                    let status = if a.contains("sessionId") { "200 OK" } else { "500 Internal Server Error" };
+                    let s = conn.as_mut().unwrap();
+                    s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{a}", a.len()).as_bytes())
+                        .unwrap();
+                }
+                // A request nobody should send is counted too.
+                if let Some(s) = conn.as_mut() {
+                    let mut buf = [0u8; 16];
+                    if matches!(s.read(&mut buf), Ok(n) if n > 0) {
+                        seen += 1;
+                    }
+                }
+                seen
+            });
+            let mut h = Http::new(&format!("http://127.0.0.1:{port}")).unwrap();
+            let got = Session::open(&mut h, &mut json!({ "browserName": "safari" }), Duration::from_secs(5))
+                .map(|(id, _)| id)
+                .map_err(|e| format!("{e:#}"));
+            drop(h);
+            (got, server.join().unwrap())
+        };
+        assert_eq!(run(vec![slow, made]), (Ok("s1".to_string()), 2));
+        let (got, seen) = run(vec![slow, slow, made]);
+        assert!(got.as_ref().is_err_and(|e| e.contains(SAFARI_SLOW_START)), "{got:?}");
+        assert_eq!(seen, 2);
+        let (got, seen) = run(vec![other, made]);
+        assert!(got.as_ref().is_err_and(|e| e.contains("Could not create a session: no")), "{got:?}");
+        assert_eq!(seen, 1);
+    }
+
+    /// A server that sends its answer a byte at a time, each well inside
+    /// the timeout, is given up on when the timeout has passed.
+    #[test]
+    fn an_answer_sent_a_byte_at_a_time_ends_at_the_request_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut req = [0u8; 1024];
+            let _ = s.read(&mut req);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n");
+            while s.write_all(b"a").is_ok() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let mut h = Http::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let started = Instant::now();
+        let e = h.request("GET", "/status", None, Duration::from_millis(400)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}: {e:#}", started.elapsed());
+        drop(h);
+        server.join().unwrap();
+    }
+
     #[test]
     fn an_answer_that_never_ends_its_head_or_overstates_a_chunk_is_an_error() {
         let read = |bytes: Vec<u8>| read_response(&mut std::io::Cursor::new(bytes)).map_err(|e| format!("{e:#}"));
@@ -758,5 +1220,41 @@ mod tests {
         let mut r = std::io::Cursor::new(two.to_vec());
         assert_eq!(read_response(&mut r).unwrap(), (200, "ok".to_string(), true));
         assert_eq!(read_response(&mut r).unwrap(), (204, String::new(), true));
+    }
+
+    /// A size named and not sent is an error that cost no memory, by
+    /// length and by chunk; bytes that are not UTF-8 are still an answer.
+    #[test]
+    fn a_body_shorter_than_its_size_is_an_error() {
+        let read = |bytes: Vec<u8>| read_response(&mut std::io::Cursor::new(bytes)).map_err(|e| format!("{e:#}"));
+        for head in ["Content-Length: 268435456\r\n\r\n", "Transfer-Encoding: chunked\r\n\r\nfffffff\r\n"] {
+            let e = read(format!("HTTP/1.1 200 OK\r\n{head}short").into_bytes()).unwrap_err();
+            assert!(e.contains("closed in the answer's body"), "{head}: {e}");
+        }
+        let mut body = Vec::new();
+        let mut none = std::io::Cursor::new(Vec::new());
+        assert!(body_part(&mut none, &mut body, 256 << 20).is_err());
+        assert!(body.capacity() < 1 << 20, "{} bytes kept for a body that never came", body.capacity());
+        let odd = read(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\na\xffb".to_vec()).unwrap();
+        assert_eq!(odd, (200, "a\u{fffd}b".to_string(), true));
+    }
+
+    /// Values are counted where they are, not inside strings; an answer
+    /// of more than may be read is refused before it is parsed.
+    #[test]
+    fn an_answer_of_too_many_values_is_refused_unparsed() {
+        let list = format!("[{}0]", "0,".repeat(99));
+        assert!(values_within(&list, 100));
+        assert!(!values_within(&list, 99));
+        let nested = "[".repeat(50) + &"]".repeat(50);
+        assert!(values_within(&nested, 50));
+        assert!(!values_within(&nested, 49));
+        // Commas and brackets in a string are text, also after an escaped quote.
+        let text = format!(r#"{{"value":"{}\\\"{}"}}"#, ",[{".repeat(40), ",".repeat(40));
+        assert!(serde_json::from_str::<Value>(&text).is_ok(), "{text}");
+        assert!(values_within(&text, 1));
+        assert!(!values_within(&format!("[{text},{text}]"), 2));
+        // Shorter than the bound: not counted at all.
+        assert!(values_within(",,,", 3));
     }
 }

@@ -1330,7 +1330,7 @@ pub struct ParsedArgs {
 const OPS: &[(&str, &str, &str)] = &[
     ("start", "[--attach [<where>] [--tab current] | --auto-connect | --profile <name> [--from <browser> [--from-profile <p>]] [--headless] | --electron <app> [--electron-arg <arg>]...] [--natural] [--download-dir <dir>] [--own-browser] [--idle <s>] [--parent <pid>] [--allow-domains <list>] [--allow-domains-docs-only]", "spawn a detached session server (needs --session); sessions share one headless browser, each in a context of its own (cookies, storage, tabs apart; --own-browser: a browser of its own); --attach/--profile use a browser that stays open (--auto-connect, a bare --attach: your running browser, whichever serves remote debugging; $NAVIGERA_AUTO_CONNECT=1 for every start; --attach wss://… a browser in the cloud, $NAVIGERA_ATTACH to keep its key off the command line; --tab current: in the tab you are on, not a window of its own); --from seeds the profile with a copy of your browser's sign-ins; --electron launches an Electron app and drives its windows as tabs; --allow-domains <list> (comma-separated hostnames, `*.example.com` globs; also $NAVIGERA_ALLOW_DOMAINS, and `mcp --allow-domains`) refuses navigation and requests to other hosts at the Fetch request stage, before any route rule, naming the denied host; --allow-domains-docs-only checks top-level navigation only, a navigation restriction, not exfiltration protection"),
     ("goto", "<url> [--wait load|domcontentloaded|commit]", "navigate the active tab (default: wait for load)"),
-    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait] | [--selector <css>] --grep <words> [--limit <lines>]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …). --grep: only the lines that mention the words (letter case aside; `a|b` for either), under the containers they sit in, with their refs, in the target's part when one is given; the first 30"),
+    ("ax", "[<ref> | --selector <css> | --text <text> | <locator>] [--limit <lines>] [--max-depth <n>] [--all] [--refs all] [--format json] [--no-wait] | [--selector <css>] --grep <words> [--limit <lines>]", "accessibility snapshot, taken once fetches/XHRs the page started have gone quiet (up to 3 s; steady polls ignored; --no-wait skips that): indented tree, [ref=N] on actionable nodes (element commands take N, @N, eN or ref=N); a target scopes it to that element (any locator: --role/--name, --label, --testid, …). --grep: only the lines that mention the words (letter case aside; `a|b` for either), under the containers they sit in, a short table row or list item whole, with their refs, in the target's part when one is given; the first 30"),
     ("click", "<ref> | --selector <css> | --text <visible text> [--frame <css>] [--button left|right|middle] [--force] [--until-gone [--max <n>]]", "a real mouse click once the element stops moving; refuses an element covered by another (--force clicks it anyway, without the mouse); waits for any navigation it starts. --until-gone: clicks again (a \"Load more\" button) while the element is there and enabled and each click changes the page, letting what each click loads land, at most 50 clicks (--max); says how many and why it stopped"),
     ("fill", "<ref> <value> | --selector <css> --value <v> [--frame <css>] [--keys] [--force]", "set an input/textarea's value once the field is visible, enabled and editable (waits for it; the timeout error names which check failed; --force skips the checks); --keys clears it and types the value key by key (for apps that ignore a value set directly)"),
     ("type", "<text> [--selector <css> | --ref <n>]", "type key by key into the target or the focused element"),
@@ -1338,7 +1338,11 @@ const OPS: &[(&str, &str, &str)] = &[
     ("select", "<ref> <option>... | --selector <css> --value <option> [--add]", "choose <select> option(s) by value or label (whitespace-insensitive); --add keeps the options already chosen"),
     ("hover", "<ref> | --selector <css> | --text <t>", "move the mouse over an element (hover menus)"),
     ("mouse", "move <x> <y> [--steps n] | down | up | click <x> <y> [--count 2] | wheel <dx> <dy> [--button left|right|middle] [<target>]", "raw mouse at a point, for what has no element to aim at (a canvas, a map, a game): viewport CSS pixels (as in a screenshot), or from the target's top-left corner (scrolled into view if need be; down, up and wheel with a target go to its center); the pointer stays where it went and held buttons stay held, so down, moves, up drags or draws; a click outside the viewport is refused"),
-    ("scroll", "[--by <px> | --to top|bottom] [<ref> | --selector <css>]", "scroll the page, or an element into view"),
+    (
+        "scroll",
+        "[--by <px> | --to top|bottom | down|up [<px>] | top|bottom] [<ref> | --selector <css>]",
+        "scroll the page, or an element into view",
+    ),
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
     ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
@@ -1522,7 +1526,7 @@ pub fn usage_full(program: &str) -> String {
         ("--parent <pid>", "with `start`: the session ends when that process exits ($NAVIGERA_PARENT_PID)".into()),
         (
             "--attach [chrome|edge|<dir>|<port>]",
-            "with `start`: use your running browser and never close it (bare, or --auto-connect: whichever of Chrome, Edge, Brave, Chromium or ports 9222/9229 serves remote debugging). Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there; --tab current works in the tab you are on".into(),
+            "with `start`: use your running browser and never close it (bare, or --auto-connect: whichever of Chrome, Chromium, Edge, Brave, Vivaldi, Opera, Arc or ports 9222/9229 serves remote debugging). Chrome 144+: open chrome://inspect/#remote-debugging and allow remote debugging there; --tab current works in the tab you are on; --attach firefox: a Firefox started with --remote-debugging-port (experimental)".into(),
         ),
         ("--profile <name>", "with `start`: a persistent visible navigera browser, kept open between sessions (--headless to hide it)".into()),
         (
@@ -1993,7 +1997,13 @@ fn grep_habits(args: &mut Args) -> Result<Option<usize>, ArgsError> {
                 let raw = args.pop_front().unwrap_or_default();
                 context = context.max(Some(lines(&raw)?));
             }
-            a if a.len() > 2 && ["-A", "-B", "-C"].contains(&&a[..2]) && a[2..].bytes().all(|b| b.is_ascii_digit()) => {
+            // Byte 2 must start a character before the word is cut there:
+            // `--grep 日本` is a query, and cutting it mid-character panics.
+            a if a.len() > 2
+                && a.is_char_boundary(2)
+                && ["-A", "-B", "-C"].contains(&&a[..2])
+                && a[2..].bytes().all(|b| b.is_ascii_digit()) =>
+            {
                 context = context.max(Some(lines(&a[2..])?));
             }
             _ => kept.push_back(arg),
@@ -2307,9 +2317,20 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     if config.webdriver.is_some() && config.engine == "chrome" {
         config.engine = "webdriver".into();
     }
-    if crate::wd::wanted(&config) && (config.attach.is_some() || config.profile.is_some() || config.electron.is_some())
+    // `--attach firefox` names the engine as well as the browser.
+    if config.engine == "chrome" && config.attach.as_deref().is_some_and(|a| a.trim().eq_ignore_ascii_case("firefox")) {
+        config.engine = "firefox".into();
+    }
+    // Firefox is attached to over BiDi; the other WebDriver engines start
+    // a browser of their own.
+    let firefox_attach = config.engine == "firefox" && config.webdriver.is_none() && config.attach.is_some();
+    if crate::wd::wanted(&config)
+        && ((config.attach.is_some() && !firefox_attach) || config.profile.is_some() || config.electron.is_some())
     {
-        return invalid("--attach, --profile and --electron drive Chrome over CDP: drop them with --engine firefox, safari or --webdriver");
+        return invalid("--attach, --profile and --electron drive Chrome over CDP (--attach also a running Firefox, with --engine firefox): drop them with --engine safari or --webdriver");
+    }
+    if firefox_attach && config.in_current_tab {
+        return invalid("--tab current works in Chrome's tab: in your own Firefox navigera works in a window it opens");
     }
     if config.bidi && !crate::wd::wanted(&config) {
         return invalid("--bidi runs a WebDriver session over BiDi: add --webdriver <url> or --engine safari (Firefox always uses BiDi)");
@@ -2542,12 +2563,32 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
             };
             Command::Type { value, target: target_args(&mut args, false)?, timeout_ms }
         }
-        "scroll" => Command::Scroll {
-            by: num_flag(&mut args, "--by")?,
-            to: str_flag(&mut args, "--to")?,
-            target: target_args(&mut args, true)?,
-            timeout_ms,
-        },
+        "scroll" => {
+            let mut by = num_flag(&mut args, "--by")?;
+            let mut to = str_flag(&mut args, "--to")?;
+            // The words agents write: `scroll down [<px>]`, `scroll up
+            // [<px>]` (800 px unless given, as a plain `scroll`), `scroll
+            // top|bottom`. They were read as a selector and waited out 5 s;
+            // an element named so is `--selector down`.
+            let word = args.front().map(String::as_str);
+            if by.is_none() && to.is_none() && matches!(word, Some("down" | "up" | "top" | "bottom")) {
+                let word = args.pop_front().unwrap_or_default();
+                match word.as_str() {
+                    "top" | "bottom" => to = Some(word),
+                    _ => {
+                        let px = match args.front().map(|a| a.parse::<f64>()) {
+                            Some(Ok(px)) if px.is_finite() && px >= 0.0 => {
+                                args.pop_front();
+                                px
+                            }
+                            _ => 800.0,
+                        };
+                        by = Some(if word == "up" { -px } else { px });
+                    }
+                }
+            }
+            Command::Scroll { by, to, target: target_args(&mut args, true)?, timeout_ms }
+        }
         "upload" => {
             let target = target_args(&mut args, true)?;
             let mut files = extract_values(&mut args, "--file").map_err(ArgsError::Invalid)?;
@@ -3360,6 +3401,107 @@ pub struct Driver {
     refused_reads: std::collections::HashSet<u64>,
 }
 
+/// The rule a `route` command asks for: its URL glob and what happens to
+/// the requests it matches.
+pub(crate) fn route_of(command: &Command) -> anyhow::Result<crate::cdp::Route> {
+    let Command::Route {
+        pattern,
+        abort,
+        status,
+        body,
+        body_file,
+        content_type,
+        headers,
+        har,
+        not_found,
+        modify,
+        set_headers,
+        replace,
+    } = command
+    else {
+        anyhow::bail!("route: not a route command");
+    };
+    let fulfill = status.is_some() || body.is_some() || body_file.is_some();
+    let kinds = [*abort, fulfill, har.is_some(), *modify].iter().filter(|k| **k).count();
+    if kinds > 1 {
+        anyhow::bail!("route: one of --abort, a response (--status/--body), --har or --modify");
+    }
+    if not_found.is_some() && har.is_none() {
+        anyhow::bail!("route: --not-found goes with --har");
+    }
+    if (!set_headers.is_empty() || !replace.is_empty()) && !*modify {
+        anyhow::bail!("route: --set-header and --replace go with --modify");
+    }
+    let parse_header = |h: &String, flag: &str| {
+        h.split_once(':')
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .filter(|(k, _)| !k.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("route {flag} {h:?}: use 'Name: value'"))
+    };
+    let action = if let Some(path) = har {
+        let not_found_continue = match not_found.as_deref() {
+            None | Some("abort") => false,
+            Some("continue") => true,
+            Some(other) => anyhow::bail!("route --not-found {other:?}: abort or continue"),
+        };
+        let text = std::fs::read(path).map_err(|e| anyhow::Error::from(e).context(format!("route --har {path}")))?;
+        let entries = har_entries(&text).map_err(|e| e.context(format!("route --har {path}")))?;
+        if entries.is_empty() {
+            anyhow::bail!("route --har {path}: no entries");
+        }
+        crate::cdp::RouteAction::Har { entries, not_found_continue }
+    } else if *modify {
+        if set_headers.is_empty() && replace.is_empty() {
+            anyhow::bail!("route --modify: say what changes (--set-header 'Name: value', --replace <from> <to>)");
+        }
+        crate::cdp::RouteAction::Modify {
+            set_headers: set_headers.iter().map(|h| parse_header(h, "--set-header")).collect::<anyhow::Result<_>>()?,
+            replace: replace.clone(),
+        }
+    } else if fulfill {
+        use base64::Engine as _;
+        let bytes = match (body, body_file) {
+            (Some(_), Some(_)) => anyhow::bail!("route: --body or --body-file, not both"),
+            (Some(b), None) => b.clone().into_bytes(),
+            (None, Some(f)) => {
+                std::fs::read(f).map_err(|e| anyhow::Error::from(e).context(format!("route --body-file {f}")))?
+            }
+            (None, None) => Vec::new(),
+        };
+        let mut hs: Vec<(String, String)> =
+            headers.iter().map(|h| parse_header(h, "--header")).collect::<anyhow::Result<_>>()?;
+        let ctype = content_type.clone().unwrap_or_else(|| {
+            let t = String::from_utf8_lossy(&bytes);
+            let t = t.trim_start();
+            if t.starts_with('{') || t.starts_with('[') {
+                "application/json"
+            } else if t.starts_with('<') {
+                "text/html"
+            } else {
+                "text/plain"
+            }
+            .to_string()
+        });
+        if !hs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+            hs.push(("Content-Type".into(), ctype));
+        }
+        crate::cdp::RouteAction::Fulfill {
+            status: status.unwrap_or(200),
+            headers: hs,
+            body_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }
+    } else {
+        crate::cdp::RouteAction::Abort
+    };
+    // `route --har f` with no glob: the HAR answers everything.
+    let pattern = match (pattern, har) {
+        (Some(p), _) => p.clone(),
+        (None, Some(_)) => "*".to_string(),
+        (None, None) => anyhow::bail!("route: which requests? Give a URL glob first"),
+    };
+    Ok(crate::cdp::Route { pattern, action, hits: 0 })
+}
+
 /// The engine a session runs: Chrome over CDP (and Lightpanda, Electron,
 /// an attached browser), or a WebDriver engine ([`crate::wd`]: Firefox over
 /// BiDi, Safari, any WebDriver server).
@@ -3485,8 +3627,9 @@ impl Engine {
     }
 
     pub fn pre_read_if_idle(&mut self) {
-        if let Self::Chrome(d) = self {
-            d.pre_read_if_idle();
+        match self {
+            Self::Chrome(d) => d.pre_read_if_idle(),
+            Self::WebDriver(d) => d.idle(),
         }
     }
 
@@ -5351,7 +5494,7 @@ impl Driver {
 
     /// The page as `ax --grep` sees it: the whole text tree.
     fn page_tree(&self, timeout_ms: Option<f64>, scope: Option<Target>) -> anyhow::Result<String> {
-        let opts = AxOptions { limit: 20_000, scope, ..AxOptions::default() };
+        let opts = AxOptions { limit: 20_000, scope, full_text: true, ..AxOptions::default() };
         match self.session.ax(&opts, timeout_ms).map_err(|e| e.context("ax"))? {
             Value::String(tree) => Ok(tree),
             other => Ok(other.to_string()),
@@ -6108,107 +6251,10 @@ impl Driver {
                     .collect::<Vec<_>>()
                     .join("\n")))
             }
-            Command::Route {
-                pattern,
-                abort,
-                status,
-                body,
-                body_file,
-                content_type,
-                headers,
-                har,
-                not_found,
-                modify,
-                set_headers,
-                replace,
-            } => {
-                let fulfill = status.is_some() || body.is_some() || body_file.is_some();
-                let kinds = [*abort, fulfill, har.is_some(), *modify].iter().filter(|k| **k).count();
-                if kinds > 1 {
-                    anyhow::bail!("route: one of --abort, a response (--status/--body), --har or --modify");
-                }
-                if not_found.is_some() && har.is_none() {
-                    anyhow::bail!("route: --not-found goes with --har");
-                }
-                if (!set_headers.is_empty() || !replace.is_empty()) && !*modify {
-                    anyhow::bail!("route: --set-header and --replace go with --modify");
-                }
-                let parse_header = |h: &String, flag: &str| {
-                    h.split_once(':')
-                        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-                        .filter(|(k, _)| !k.is_empty())
-                        .ok_or_else(|| anyhow::anyhow!("route {flag} {h:?}: use 'Name: value'"))
-                };
-                let action = if let Some(path) = har {
-                    let not_found_continue = match not_found.as_deref() {
-                        None | Some("abort") => false,
-                        Some("continue") => true,
-                        Some(other) => anyhow::bail!("route --not-found {other:?}: abort or continue"),
-                    };
-                    let text = std::fs::read(path)
-                        .map_err(|e| anyhow::Error::from(e).context(format!("route --har {path}")))?;
-                    let entries = har_entries(&text).map_err(|e| e.context(format!("route --har {path}")))?;
-                    if entries.is_empty() {
-                        anyhow::bail!("route --har {path}: no entries");
-                    }
-                    crate::cdp::RouteAction::Har { entries, not_found_continue }
-                } else if *modify {
-                    if set_headers.is_empty() && replace.is_empty() {
-                        anyhow::bail!(
-                            "route --modify: say what changes (--set-header 'Name: value', --replace <from> <to>)"
-                        );
-                    }
-                    crate::cdp::RouteAction::Modify {
-                        set_headers: set_headers
-                            .iter()
-                            .map(|h| parse_header(h, "--set-header"))
-                            .collect::<anyhow::Result<_>>()?,
-                        replace: replace.clone(),
-                    }
-                } else if fulfill {
-                    use base64::Engine as _;
-                    let bytes = match (body, body_file) {
-                        (Some(_), Some(_)) => anyhow::bail!("route: --body or --body-file, not both"),
-                        (Some(b), None) => b.clone().into_bytes(),
-                        (None, Some(f)) => std::fs::read(f)
-                            .map_err(|e| anyhow::Error::from(e).context(format!("route --body-file {f}")))?,
-                        (None, None) => Vec::new(),
-                    };
-                    let mut hs: Vec<(String, String)> =
-                        headers.iter().map(|h| parse_header(h, "--header")).collect::<anyhow::Result<_>>()?;
-                    let ctype = content_type.clone().unwrap_or_else(|| {
-                        let t = String::from_utf8_lossy(&bytes);
-                        let t = t.trim_start();
-                        if t.starts_with('{') || t.starts_with('[') {
-                            "application/json"
-                        } else if t.starts_with('<') {
-                            "text/html"
-                        } else {
-                            "text/plain"
-                        }
-                        .to_string()
-                    });
-                    if !hs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
-                        hs.push(("Content-Type".into(), ctype));
-                    }
-                    crate::cdp::RouteAction::Fulfill {
-                        status: status.unwrap_or(200),
-                        headers: hs,
-                        body_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                    }
-                } else {
-                    crate::cdp::RouteAction::Abort
-                };
-                // `route --har f` with no glob: the HAR answers everything.
-                let pattern = match (pattern, har) {
-                    (Some(p), _) => p.clone(),
-                    (None, Some(_)) => "*".to_string(),
-                    (None, None) => anyhow::bail!("route: which requests? Give a URL glob first"),
-                };
-                let what = action.describe();
-                self.session
-                    .add_route(crate::cdp::Route { pattern: pattern.clone(), action, hits: 0 })
-                    .map_err(|e| e.context("route"))?;
+            Command::Route { .. } => {
+                let route = route_of(command)?;
+                let (pattern, what) = (route.pattern.clone(), route.action.describe());
+                self.session.add_route(route).map_err(|e| e.context("route"))?;
                 Ok(json!({ "route": pattern, "action": what }))
             }
             Command::Clock { action, value, time, paused } => {
@@ -8569,6 +8615,18 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(parse_args(argv(&["navigera", "ax", "--grep", "x", "-A", "many"])).is_err());
+        // A query whose first character is three or four bytes long (the
+        // fuzzer's find: this panicked on a cut inside the character).
+        for query in ["日本語", "\u{fffd}/", "😀 done", "é", "-A１"] {
+            match cmd(&["ax", "--grep", query]) {
+                Command::Grep { query: got, .. } => assert_eq!(got, query),
+                other => panic!("{query:?}: {other:?}"),
+            }
+            match cmd(&["text", "--grep", query]) {
+                Command::Text { grep, .. } => assert_eq!(grep.as_deref(), Some(query)),
+                other => panic!("{query:?}: {other:?}"),
+            }
+        }
         match cmd(&["ax", "--selector", "main", "--grep", "return"]) {
             Command::Grep { query, scope, .. } => {
                 assert_eq!((query.as_str(), scope.selector.as_deref()), ("return", Some("main")))
@@ -8609,6 +8667,24 @@ mod tests {
             parsed.command,
             Some(Command::Eval { expression: "({ app }) => app.getName()".into(), timeout_ms: None, main: true })
         );
+    }
+
+    #[test]
+    fn scroll_takes_the_words_agents_write() {
+        let by_to = |args: &[&str]| {
+            let mut all = vec!["navigera"];
+            all.extend_from_slice(args);
+            match parse_args(argv(&all)).map(|p| p.command) {
+                Ok(Some(Command::Scroll { by, to, target, .. })) => (by, to, target.selector),
+                other => panic!("{args:?}: {other:?}"),
+            }
+        };
+        assert_eq!(by_to(&["scroll", "down"]), (Some(800.0), None, None));
+        assert_eq!(by_to(&["scroll", "down", "300"]), (Some(300.0), None, None));
+        assert_eq!(by_to(&["scroll", "up", "300"]), (Some(-300.0), None, None));
+        assert_eq!(by_to(&["scroll", "bottom"]), (None, Some("bottom".into()), None));
+        assert_eq!(by_to(&["scroll", "--selector", "down"]), (None, None, Some("down".into())));
+        assert_eq!(by_to(&["scroll", "--by", "200"]), (Some(200.0), None, None));
     }
 
     #[test]

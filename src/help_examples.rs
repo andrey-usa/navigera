@@ -162,10 +162,12 @@ pub const EXAMPLES: &[Help] = &[
     ),
     (
         "scroll",
-        &[("navigera -s s scroll --by 500", ""), ("navigera -s s scroll --to bottom", "")],
+        &[("navigera -s s scroll --by 500", ""), ("navigera -s s scroll --to bottom", ""), ("navigera -s s scroll down", "")],
         &[
             ("--by <px>", "scroll down this many pixels"),
             ("--to top|bottom", "scroll to the top or bottom of the page"),
+            ("down|up [<px>]", "--by, 800 px unless given (up scrolls back)"),
+            ("top|bottom", "--to"),
             ("<ref>", "bring this element into view, by ref"),
             ("--selector <css>", "scroll inside this element, or bring it into view"),
         ],

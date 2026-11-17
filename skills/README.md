@@ -79,6 +79,14 @@ Also on crates.io, npm and PyPI as `navigera`.
   off (its account list and its messaging check-in; no page data in
   either).
 
+## Privacy and terms
+
+navigera collects nothing: it runs on your machine, with no account,
+telemetry or server of its own. What the agent reads through it goes to
+the model provider you use, under that provider's policy.
+[Privacy policy](https://andrey-usa.github.io/navigera/project/privacy.html)
+· [Terms of use](https://andrey-usa.github.io/navigera/project/terms.html)
+
 ## More
 
 - [Documentation](https://andrey-usa.github.io/navigera/)

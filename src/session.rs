@@ -342,8 +342,10 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
             return;
         }
     });
-    // When the last connection that ran a command was done: one that only
-    // connected (`start` checking the socket is up) kept no one waiting.
+    // When the last command was answered: a connection that only
+    // connected (`start` checking the socket is up) kept no one waiting,
+    // and neither does a client that has its answer and has yet to hang
+    // up (the next process can connect before this loop sees it gone).
     let mut free_since = Instant::now();
     let mut callers = Callers::default();
     // Set once the session took its socket file away early (shared browser
@@ -366,10 +368,10 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let waited = arrived < free_since;
-        let (quit, ran) =
+        let (quit, answered) =
             serve_connection(&mut driver, stream, &last_activity, &server, waited, &mut callers, &path, &mut retired);
-        if ran {
-            free_since = Instant::now();
+        if let Some(at) = answered {
+            free_since = at;
         }
         // A client that polls (`status` every 200 ms) never leaves a whole
         // tick free: the snapshot, due by its own clock, is taken here too.
@@ -408,7 +410,7 @@ pub const SHARED_NAME_NOTE: &str = "another command was running on this session 
      name is shared by every process that uses it, so two agents on one name drive one browser (give each its own -s name)";
 
 /// Serve one client connection; returns whether a `quit` was answered and
-/// whether it ran any command. `waited`: it came in while another
+/// when its last command was (None: it ran none). `waited`: it came in while another
 /// connection's command was running.
 #[allow(clippy::too_many_arguments)]
 fn serve_connection(
@@ -420,12 +422,12 @@ fn serve_connection(
     callers: &mut Callers,
     path: &std::path::Path,
     retired: &mut bool,
-) -> (bool, bool) {
+) -> (bool, Option<Instant>) {
     let reader = match stream.try_clone() {
         Ok(read_half) => BufReader::new(read_half),
-        Err(_) => return (false, false),
+        Err(_) => return (false, None),
     };
-    let mut ran = false;
+    let mut ran = None;
     let mut writer = stream;
     let mut waited = waited;
     for line in reader.lines() {
@@ -447,8 +449,6 @@ fn serve_connection(
         let Some((mut responses, is_quit)) = protocol::handle_line(driver, &raw) else {
             continue;
         };
-        // A `sessions` probe is no one's command either.
-        ran |= !probe;
         if let Some(c) = caller.as_deref() {
             let url = responses.first().and_then(|r| r.result.as_ref()).and_then(|r| r["url"].as_str());
             callers.after(c, url);
@@ -480,9 +480,16 @@ fn serve_connection(
             let _ = std::fs::remove_file(path);
             *retired = true;
         }
+        // The command is over before its answer leaves: a client that
+        // reads the answer and starts the next process at once would
+        // otherwise connect before a time taken after the write (this
+        // thread can lose the CPU between the two), and be told it waited.
+        let done = Instant::now();
         let written = responses.iter().try_for_each(|response| protocol::write_response(&mut writer, response, false));
+        // A `sessions` probe is no one's command.
         if !probe {
             last.store(now_s(), Ordering::Relaxed);
+            ran = Some(done);
         }
         if is_quit {
             return (true, ran);

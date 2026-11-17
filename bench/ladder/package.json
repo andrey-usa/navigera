@@ -1,1 +1,18 @@
-{"dependencies":{"playwright-core":"^1.65.0","puppeteer-core":"^25.16.0"},"description":"Node contenders for the browser-driver ladder (bench/ladder).","name":"ladder-contenders","private":true,"type":"module"}
+{
+  "dependencies": {
+    "playwright": "^1.65.1",
+    "playwright-core": "^1.65.0",
+    "puppeteer-core": "^25.17.0",
+    "vibium": "^26.11.16",
+    "webdriverio": "^10.2.0"
+  },
+  "overrides": {
+    "readdir-glob": {
+      "minimatch": "^11.0.9"
+    }
+  },
+  "description": "Node contenders for the browser-driver ladder (bench/ladder).",
+  "name": "ladder-contenders",
+  "private": true,
+  "type": "module"
+}

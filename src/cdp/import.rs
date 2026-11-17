@@ -56,7 +56,8 @@ const COPIED: &[&str] = &[
 ];
 
 /// Copies a profile of the browser `from` names -- a channel (`chrome`,
-/// `beta`, `dev`, `canary`, `chromium`, `edge`) or a user data directory --
+/// `beta`, `dev`, `canary`, `chromium`, `edge`, `brave`, `vivaldi`, `opera`,
+/// `arc`) or a user data directory --
 /// into the user data directory `dest` of the `--profile` called `name`,
 /// as its default profile. `which` picks the profile by directory (`Profile
 /// 1`), display name or signed-in email; the default is the one the browser
@@ -144,13 +145,16 @@ pub fn import_profile(from: &str, which: Option<&str>, dest: &Path, name: &str) 
 /// `--profile` browsers, and whether each runs.
 pub fn list_profiles() -> Value {
     let mut browsers = Vec::new();
-    for channel in ["chrome", "beta", "dev", "canary", "chromium", "edge", "brave"] {
+    let mut listed = Vec::new();
+    for (channel, _) in super::attach::AUTO_CHANNELS {
         let Some(dir) = user_data_dir(channel) else {
             continue;
         };
-        if !dir.join("Local State").is_file() {
+        // One directory under two names (Chrome Dev and Canary on Linux) is one browser.
+        if !dir.join("Local State").is_file() || listed.contains(&dir) {
             continue;
         }
+        listed.push(dir.clone());
         let state: Value = std::fs::read_to_string(dir.join("Local State"))
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())

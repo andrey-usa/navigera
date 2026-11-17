@@ -233,3 +233,15 @@ title = "Security"
 path = "project/security.md"
 about = "What navigera protects and how, its known exposures, and how to report a problem."
 source = { file = "SECURITY.md" }
+
+[[part.page]]
+title = "Privacy policy"
+path = "project/privacy.md"
+about = "navigera collects nothing."
+source = { file = "docs/privacy.md" }
+
+[[part.page]]
+title = "Terms of use"
+path = "project/terms.md"
+about = "The terms for navigera and its plugin."
+source = { file = "docs/terms.md" }

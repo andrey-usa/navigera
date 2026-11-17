@@ -6,7 +6,149 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-17
+
+### Behaviour changes
+
+- On the WebDriver engines (experimental), `wait` for text, an element,
+  a URL or a condition that never comes gives up after the element wait
+  (5 s, or `--timeout-ms`), as on Chrome; it waited the navigation
+  timeout (35 s on Firefox), and its error now says how to wait longer.
+
+- `scroll` on the WebDriver engines (experimental) answers where the
+  page is, `scrollY`, `scrollHeight` and `viewport`, as on Chrome and as
+  the reference says, and scrolls 800 px unless told (it was 600).
+
+- `eval` took a SyntaxError that the code threw as it ran for source
+  that did not parse, and tried the next form: `eval "() =>
+  document.querySelector('a[')"` answered `{}` instead of the invalid
+  selector's error, and statements that threw one (`JSON.parse` of bad
+  text) ran a second time before their error was reported, which was
+  then the wrong one. Only source that does not parse goes on to the
+  next form now, on every engine (Chrome and Firefox tell them apart by
+  the stack only code that ran has; over classic WebDriver the page
+  parses the forms first and runs one). Source that parses in no form
+  is reported with the error of the text as written.
+
+### Added
+
+- A privacy policy and terms of use for navigera and its Claude Code
+  plugin, on the docs site (Project) and linked from the plugin's README:
+  navigera collects nothing, and is provided as is.
+
+- `scroll down`, `scroll up` (each with an optional number of pixels,
+  800 unless given) and `scroll top|bottom`: the words agents write,
+  the same as `--by` and `--to`. They were taken for a selector and
+  failed after the 5 s element wait; an element named so is
+  `--selector down`.
+
+- `ax --grep` on the WebDriver engines (experimental): the lines of the
+  page's tree with the words, under their containers, as on Chrome (it
+  said "not on the firefox engine yet").
+
+- `--attach` and `--auto-connect` find Vivaldi, Opera and, on macOS, Arc
+  by their default profiles, after Chrome, Chromium, Edge and Brave:
+  `--attach vivaldi`, `--attach opera`, `--attach arc`. `--from` and
+  `navigera profiles` take the same names. The MCP server refuses their
+  own pages (`vivaldi:`, `opera:`, `arc:`) as it does `chrome:`.
+
+- `--attach firefox` (experimental): a running Firefox started with
+  `firefox --remote-debugging-port` is worked in over WebDriver BiDi and
+  left running. navigera finds it by the file its remote agent keeps in
+  the profile (`WebDriverBiDiServer.json`), then on port 9222; `--engine
+  firefox --attach <port>`, `host:port` or `ws://…` names one. It opens
+  a window of its own and acts, listens and answers dialogs only there:
+  your tabs are not listed and stay as they are. A tab its page opens
+  (a link with a target, `window.open`) is its own too: listed, switched
+  to, and closed with the session. The frames in its tabs are heard
+  with them: a frame's console lines and dialogs. When no Firefox
+  serves BiDi the error says how to start one that does.
+
+- `pdf` on the WebDriver engines (experimental): the browser's own print,
+  over BiDi (`--engine firefox`) and over a WebDriver server's print
+  command. safaridriver has none, and the error says so.
+
+- More ops on the WebDriver engines (experimental; `--engine firefox`,
+  `--engine safari`, `--webdriver`): `upload` (BiDi's `input.setFiles`,
+  or the file paths sent to the input over classic WebDriver), `drag`
+  (a `draggable` source gets the drag events in the page, any other a
+  held mouse), `mouse` (move, down, up, click, wheel), `keydown` and
+  `keyup` (a button or key stays held between commands), `storage`, and
+  `set viewport` (BiDi sets the viewport; classic WebDriver sizes the
+  window until the viewport fits). `init-script` runs over BiDi, as a
+  preload script; classic WebDriver has none, and the error says so.
+  The `webdriver` workflow runs them on Firefox, Safari and chromedriver
+  over both protocols.
+
+- `route` and `unroute` over WebDriver BiDi (experimental; `--engine
+  firefox`, `--bidi`): a request whose URL matches a rule's glob is
+  answered with the rule's response (`--status`, `--body`,
+  `--body-file`, `--header`), aborted (`--abort`) or replayed from a HAR
+  (`--har`), as on Chrome; `route` lists the rules with their hits.
+  While a rule is set, every request of the session's tabs is held until
+  navigera has looked at it: a session (`start`, `-s`) and the MCP
+  server look between commands too, `serve` on stdin only while a
+  command runs. `--modify` is Chrome's only, and classic WebDriver
+  cannot see requests: both say so.
+
 ### Changed
+
+- `ax` on Firefox (experimental) takes a third less time: 18.6 to 13.1
+  ms on a 3,040-node page (the median of three local runs of the per-op
+  bench each, Firefox 160), the same tree byte for byte. navigera's
+  page scripts run through `script.evaluate` with their arguments
+  written in, not `script.callFunction`, whose functions Firefox runs
+  with every global they name looked up the slow way (the walk alone:
+  6.4-7.6 ms against 10.5-12.9); and the snapshot's function is kept in
+  the page after its first run there, so a later `ax` on the same
+  document does not start it cold.
+
+- `click` and `dblclick` on the WebDriver engines (experimental) wait
+  for a navigation only when the click planned one, as on Chrome. The
+  page is asked what it made of the click: a link or a submit button
+  loads a new document unless the page cancels it (a router's link, a
+  form a script sends, a form that fails validation), and a script that
+  navigates is seen through the Navigation API. Every click waited a
+  fixed 30 ms over BiDi and 50 ms over classic WebDriver for a
+  navigation to announce itself. With chromedriver on one machine, a
+  click that stays on the page: 44 to 10 ms over BiDi, 83 to 20-26 ms
+  over classic WebDriver (medians of 40, two rounds). Where the page cannot
+  say (no Navigation API, or a listener that hides the click), the
+  click waits as before; where it says a navigation is planned, the
+  click waits for it to start for up to 150 ms, as on Chrome (30 ms was
+  too short for chromedriver on a macOS runner: a button that submits a
+  form by script answered with the page it was leaving, or failed with
+  "Cannot find context"). `fill` and `select` there read the page's URL
+  and title in the call that sets the value, and over BiDi every op
+  reads the page's state and the tab list in one round trip, not two.
+  `check` and `uncheck` click the same way. `press Enter` asks the page
+  too (a form it submits, a link it follows); any other key, and text
+  typed without a line break, cannot load a document and are not
+  watched for one, as on Chrome. `ax` there reads each element's style
+  once (a text node asked for its parent's again): the same snapshot,
+  a quarter less time in the page (8.7-9.3 to 6.6-6.9 ms for 3,040
+  nodes in Chrome).
+
+- `ax --grep` prints a match with what it belongs to: a match inside a
+  table row or a list item of up to 12 lines comes with all of it (the
+  other cells of the row; a search result's title above the snippet that
+  matched), where only the matching line was printed under bare `row:`
+  and `listitem:` lines. `--limit 1` can so print a second match of the
+  same row.
+- `ax` prints a search engine's result link by the page it goes to:
+  Bing's `/ck/a?…&u=…`, Google's `/url?q=…` and DuckDuckGo's `/l/?uddg=…`
+  are decoded in `url=`, so `ax --grep nodejs.org` finds a result by its
+  site (it found none of Bing's), and a Bing results page's tree is 29%
+  smaller (13,113 to 9,368 bytes on one search). `get attr <ref> href`
+  still gives the link as the page has it.
+- `ax` shows a name, value or text up to a fifth over its limit whole
+  (180 characters for a name, 360 for text): a 168-character function
+  signature was cut 18 characters short, with a note about as long as
+  the cut.
+
+- `--engine safari`: when safaridriver gives up on a Safari that was slow
+  to start ("timed out while connecting to a Safari instance"), the
+  session is asked for once more instead of failing the start.
 
 - The README's title is the navigera wordmark from the brand sheet
   (`assets/brand/`, light and dark), and so is the documentation site's
@@ -15,8 +157,108 @@ All notable changes to this project are documented here. The format follows
   markdown) keeps the title as text and leaves out lines that are only
   images: the wordmark and the badges.
 
+- `text --grep` and `ax --grep` lowercase the page's text once, into one
+  buffer, and search it whole with a vectorized substring search, where
+  each line was copied and searched by itself. The search of a 2.8 MB
+  text of 20,000 lines takes 2.5-2.7 ms where it took 10.3-11.5, and
+  4.2-4.6 where it took 12.1-13.6 with accented letters on every line
+  (one machine, the function alone, best of 15 runs); the replies are
+  the same.
+
+### Security
+
+- `--allow-domains` with `--engine firefox`, `--engine safari` or
+  `--webdriver` (experimental since 0.14.0) started a session that no
+  list held: the list is kept by Chrome's request interception, and the
+  WebDriver engines never read it. They now refuse to start with one,
+  and say to use `--engine chrome`.
+
+- `--engine firefox` checks a site's certificate, as Chrome does. The
+  Firefox navigera starts was told to accept any certificate
+  (`acceptInsecureCerts`), so a page behind a forged or expired one
+  loaded without a word. For a test site without a valid certificate:
+  `--capabilities '{"acceptInsecureCerts":true}'`.
+
+- `--webdriver` and `--engine safari`: a WebDriver server's answer takes
+  memory only as it arrives, and one of more than 32 million values is
+  refused before it is parsed. A server that named a size and sent
+  nothing cost up to 256 MB, and an answer made of small values grew to
+  sixteen times its size in memory.
+
 ### Fixed
 
+- On the WebDriver engines (experimental), `eval` takes the forms it
+  takes on Chrome: an arrow function is called (`eval "() =>
+  document.title"` answered `[function]`), and statements with `await`
+  and `return` run as a function's body (Firefox said "return not in
+  function"). Over BiDi, statements without `return` answer their last
+  expression, as on Chrome.
+
+- `--engine safari` (experimental): a safaridriver that exits before it
+  serves is started again on another port, three tries in all (it exited
+  once with status 1 at a session that followed another one at once),
+  and when it keeps exiting the error quotes what it printed last.
+
+- On the WebDriver engines (experimental), a click after the page had
+  opened a tab (a link with `target=_blank`, `window.open`) took 5
+  seconds with chromedriver, classic and BiDi: the new tab came to the
+  front, and the driver waited for a frame the session's tab, now
+  behind it, never drew. The session's tab is brought back to the front
+  when its page opens another (`browsingContext.activate` over BiDi,
+  the browser's own command through a Chromium driver): 5.1 s to 0.1 s.
+  A click that opens a tab is watched as before, so the answer counts
+  the new tab.
+
+- `ax --grep` searches names and texts whole. It searched the tree as
+  `ax` prints it, so words past a name's 150th character or a text's
+  300th were never found, and a matching name came back cut. A long
+  matching line is shown from its start, then around the match, with its
+  ref.
+- `ax --grep` and `text --grep` read a query written as a regular
+  expression (`nodejs\.org`: a backslash before punctuation) without its
+  backslashes when it matches nothing as written: `--grep 'nodejs\.org'` found nothing on a
+  page full of `nodejs.org`.
+
+- `eval` over a WebDriver server (classic WebDriver) runs several
+  statements on chromedriver too: its syntax error for the expression
+  form ("Unexpected token") was not recognized, so the script failed
+  instead of running as statements.
+
+- A command on a named session was sometimes told "another command was
+  running on this session" when none was: the one before it had its
+  answer, and its process had not yet been seen to hang up. Seen on a
+  busy machine, with one process run right after another. A session
+  now counts as free from the moment a command is over, a moment taken
+  before its answer is sent (taken after, a caller that read the answer
+  could still connect "before" it).
+
+- `ax --grep` and `text --grep` with a word that starts with a character
+  of three or four bytes (`--grep 日本語`, an emoji) crashed navigera
+  before it reached the page: the reader of grep's own `-A2` style flags
+  cut such a word in the middle of its first character. The nightly
+  fuzzer found it; in every release since `--grep` learned those flags.
+- `screenshot --annotate` could hand back the page without its labels
+  on macOS: 1 capture in 100 there, with the labels' frame painted on
+  time (run 43971629669). navigera now reads one pixel of an outline
+  from the PNG (0.2 ms for a viewport, measured locally; the image is
+  inflated only down to that pixel's row), takes the capture again up to
+  three times when the outline is not there, and fails with an error
+  that says so when it still is not, instead of handing over an image
+  that claims labels it does not show. Not cured: in run 43973457667
+  (300 repeats) the one bad session stayed without labels through all
+  three retakes, so it is not a single late frame; the cause is open.
+  It also waits up to 2 s, not 250 ms, for the labels' frame on a
+  visible page, and the session log says when a frame was late or a
+  capture retaken.
+- A WebDriver server (`--webdriver`, safaridriver) that sends its answer
+  a few bytes at a time is given up on when the request's timeout has
+  passed; the timeout counted each read, so such an answer could hold a
+  command for as long as it kept coming.
+- `--attach` to an address that is not a DevTools endpoint: an HTTP answer
+  over 16 MB, or one still arriving after 30 s, is an error that says so.
+  Before, navigera read whatever the server sent, for as long as it sent.
+- `navigera profiles` on Linux lists Chrome Dev once: `dev` and `canary`
+  share a directory there and were listed as two browsers.
 - Claude Code plugin: `plugin.json` names its icon (`icon`), the key
   Anthropic's directory reads the listing's icon from; the file alone was
   not enough. The plugin's README says how to install on Claude Code

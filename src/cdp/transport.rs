@@ -629,7 +629,23 @@ fn poll_ws_url(port: u16, timeout: Duration, child: &mut Child) -> Result<String
 /// `lightpanda serve` answer `/json/version` but never close the socket, so
 /// a read-to-EOF client sat in `read` until its 5 s timeout (EAGAIN) on
 /// every poll and never saw the URL.
+///
+/// Bounded: an `--attach` endpoint can be any server, so an answer larger
+/// than [`HTTP_BODY_LIMIT`] or still arriving after [`HTTP_ANSWER_TIME`] is
+/// an error, not memory filled or a start that never ends.
 pub(crate) fn http_get_body(host: &str, port: u16, path: &str) -> Result<String> {
+    http_get_body_within(host, port, path, HTTP_BODY_LIMIT, HTTP_ANSWER_TIME)
+}
+
+/// The most a DevTools HTTP answer may be: ten times Chrome's largest, its
+/// `/json/protocol` (1.6 MB in Chrome 153).
+const HTTP_BODY_LIMIT: usize = 16 << 20;
+
+/// How long a whole DevTools HTTP answer may take (each read: 5 s).
+const HTTP_ANSWER_TIME: Duration = Duration::from_secs(30);
+
+fn http_get_body_within(host: &str, port: u16, path: &str, limit: usize, within: Duration) -> Result<String> {
+    let deadline = Instant::now() + within;
     let mut stream = TcpStream::connect((host, port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -648,6 +664,15 @@ pub(crate) fn http_get_body(host: &str, port: u16, path: &str) -> Result<String>
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > limit {
+            anyhow::bail!(
+                "the answer to {path} from {host}:{port} is over {} MB: not a DevTools endpoint",
+                limit >> 20
+            );
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("the answer to {path} from {host}:{port} did not end within {} s", within.as_secs());
+        }
     }
     // EOF: whatever follows the headers is the body.
     let resp = String::from_utf8_lossy(&buf);
@@ -837,6 +862,40 @@ mod tests {
             let got = http_get_body("127.0.0.1", port, "/big").unwrap();
             assert!(got == body, "{} bytes back, chunked {chunked}", got.len());
             assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+            server.join().unwrap();
+        }
+    }
+
+    /// A server that never stops sending, and one that sends a byte at a
+    /// time for ever, each end in an error that says which; neither fills
+    /// memory or holds the start.
+    #[test]
+    fn http_get_gives_up_on_an_answer_without_end() {
+        for trickle in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut req = [0u8; 1024];
+                let _ = sock.read(&mut req);
+                let _ = write!(sock, "HTTP/1.1 200 OK\r\nContent-Length: 4000000000\r\n\r\n");
+                let part = [b'a'; 8192];
+                loop {
+                    let sent = if trickle { sock.write_all(b"a") } else { sock.write_all(&part) };
+                    if sent.is_err() {
+                        break;
+                    }
+                    if trickle {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+            });
+            let started = Instant::now();
+            let err = http_get_body_within("127.0.0.1", port, "/json/version", 1 << 20, Duration::from_millis(500))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(if trickle { "did not end within" } else { "is over 1 MB" }), "{err}");
+            assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
             server.join().unwrap();
         }
     }

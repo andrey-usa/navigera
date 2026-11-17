@@ -820,7 +820,17 @@ const FILE_FIELDS: &[(&str, &[&str])] = &[
 ];
 
 /// Pages of the browser itself (settings, inspect, flags), not of the web.
-const BROWSER_PAGES: &[&str] = &["chrome:", "chrome-untrusted:", "chrome-extension:", "devtools:", "edge:", "brave:"];
+const BROWSER_PAGES: &[&str] = &[
+    "chrome:",
+    "chrome-untrusted:",
+    "chrome-extension:",
+    "devtools:",
+    "edge:",
+    "brave:",
+    "vivaldi:",
+    "opera:",
+    "arc:",
+];
 
 /// An MCP client may have no shell of its own (Claude Desktop): the browser
 /// must not become its way to the disk, to the browser's own pages, or to

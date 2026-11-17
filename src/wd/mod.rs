@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use crate::cdp::Target;
+use crate::cdp::{Route, Target};
 use crate::protocol::{Command, Outcome, SessionConfig};
 
 /// `--engine` names served here.
@@ -47,6 +47,25 @@ const SNAPSHOT: &str = include_str!("snapshot.js");
 /// The most nodes one snapshot reads: a page past it is read in part, and
 /// says so.
 const SNAPSHOT_MAX_NODES: u64 = 400_000;
+
+/// `function` kept in the page once it has run there, per document, and
+/// called again from there: the text still comes with each call, but the
+/// page does not make a new function of it, whose first run is a cold one.
+/// The snapshot's walk in Firefox: 13 ms on a new function, 5 ms on the
+/// kept one (3,040 nodes; Chrome 10.5 and 7.2). The key carries a hash of
+/// the text, so a navigera with other text keeps its own. Only for text
+/// that is the same on every call, or the page would keep one per call.
+fn kept(function: &str) -> String {
+    // FNV-1a: a name, not a guard (the page can reach the property anyway,
+    // as it can every built-in a read uses).
+    let hash = function.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+    format!(
+        "(...a) => {{ const k = Symbol.for('navigera.kept.{hash:016x}'); let f = window[k]; \
+         if (typeof f !== 'function') {{ f = ({function}); \
+           try {{ Object.defineProperty(window, k, {{ value: f }}); }} catch (_) {{}} }} \
+         return f(...a); }}"
+    )
+}
 
 /// The console entries a session keeps between `console --clear`s.
 const CONSOLE_KEPT: usize = 1000;
@@ -143,8 +162,187 @@ const POINT_EL: &str = r#"function (el, force) {
     return { x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)) };
 }"#;
 
+/// Before a click: watch what the page makes of it, so the click waits
+/// for a navigation only when one was planned (as Chrome's engine does,
+/// `armNav` there). A link's or a submit button's click loads a new
+/// document unless the page cancels it (a router's link, a form a script
+/// sends itself, a form that fails validation); anything else navigates
+/// only by script, which the Navigation API reports as it happens.
+const ARM_NAV: &str = r#"function (el, key) {
+    const K = Symbol.for('navigera.nav');
+    if (window[K]) window[K].off();
+    if (key) {
+        // Enter goes to the focused element, through shadow roots and
+        // frames.
+        el = document.activeElement;
+        for (;;) {
+            if (el && el.shadowRoot && el.shadowRoot.activeElement) { el = el.shadowRoot.activeElement; continue; }
+            if (el && (el.localName === 'iframe' || el.localName === 'frame')) {
+                let d = null; try { d = el.contentDocument; } catch (_) {}
+                if (!d || !d.activeElement) return true;
+                el = d.activeElement; continue;
+            }
+            break;
+        }
+        if (!el || el.nodeType !== 1) return false;
+    }
+    const w = el.ownerDocument.defaultView;
+    // Only a navigation of the tab's own document is waited for.
+    const here = (target) => {
+        const t = (target || '').toLowerCase();
+        if (t === '_top' || t === '_parent') return true;
+        if (t && t !== '_self') return false;
+        return w === w.top;
+    };
+    const a = el.closest('a[href], area[href]');
+    // A press submits through a submit button; Enter, from any field of
+    // the form.
+    const c = a ? null : key ? (el.form ? el : null) : el.closest('button, input');
+    const form = c && c.form && (key || c.type === 'submit' || c.type === 'image') ? c.form : null;
+    // `may`: the click loads a document here; `opens`: in another tab,
+    // which the browser takes a moment to list.
+    let may = false, opens = false;
+    if (a) {
+        const h = a.getAttribute('href') || '';
+        const loads = !(h.startsWith('#') || h.startsWith('javascript:') || a.hasAttribute('download'));
+        may = loads && here(a.getAttribute('target'));
+        opens = loads && !may;
+    } else if (form) {
+        may = here(c.getAttribute('formtarget') || form.getAttribute('target'));
+        opens = !may;
+    }
+    const n = { click: null, submit: null, invalid: false, planned: false, opened: false, offs: [] };
+    const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
+    on(w, 'click', (e) => { if (!n.click && e.isTrusted) n.click = e; });
+    on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
+    on(w, 'invalid', () => { n.invalid = true; });
+    // A handler that navigates by script (`location`, `form.submit()`),
+    // this window or the tab's.
+    let told = 0;
+    for (const v of w === window ? [w] : [w, window]) {
+        const api = v.navigation;
+        if (api && api.addEventListener) {
+            told++;
+            on(api, 'navigate', (e) => { if (!(e.destination && e.destination.sameDocument)) n.planned = true; });
+        }
+    }
+    const F = w.HTMLFormElement && w.HTMLFormElement.prototype, submit = F && F.submit;
+    if (typeof submit === 'function') {
+        // Put back only while ours is there: a method the page put in
+        // meanwhile stays.
+        const mine = function () { n.planned = true; return submit.apply(this, arguments); };
+        F.submit = mine;
+        n.offs.push(() => { if (F.submit === mine) F.submit = submit; });
+    }
+    const open = w.open;
+    if (typeof open === 'function') {
+        const mine = function () { n.opened = true; return open.apply(this, arguments); };
+        w.open = mine;
+        n.offs.push(() => { if (w.open === mine) w.open = open; });
+    }
+    n.off = () => { for (const off of n.offs.splice(0)) off(); };
+    // Never left behind, whatever happens to the click.
+    setTimeout(n.off, 10000);
+    // true: a navigation is on its way; false: none is; null: can't be
+    // told (a listener ahead of these hid the click, the browser has no
+    // Navigation API to report a script's navigation, or the click opens
+    // a tab).
+    n.verdict = () => {
+        n.off();
+        if (n.planned) return true;
+        if (key) {
+            if (n.opened || opens) return null;
+            if (n.submit) return !n.submit.defaultPrevented;
+            if (n.invalid) return false;
+            if (a && may) return n.click ? !n.click.defaultPrevented : null;
+            return told ? false : null;
+        }
+        if (!n.click) return null;
+        if (n.opened || (opens && !n.click.defaultPrevented)) return null;
+        if (may) {
+            if (n.click.defaultPrevented) return false;
+            if (a) return true;
+            if (n.submit) return !n.submit.defaultPrevented;
+            return n.invalid ? false : null;
+        }
+        return told ? false : null;
+    };
+    Object.defineProperty(window, K, { value: n, configurable: true, enumerable: false, writable: true });
+    // For Enter: whether it can load a document from here at all.
+    return !!(el.form || el.closest('a[href], button, [role=button], [role=link]'));
+}"#;
+
+/// After the click: the verdict of [`ARM_NAV`], and the page's URL and
+/// title (the page's state when no navigation follows).
+const NAV_VERDICT: &str = "() => { const K = Symbol.for('navigera.nav'); const n = window[K]; delete window[K]; \
+    return [n ? n.verdict() : null, location.href, document.title]; }";
+
+/// The page expression for the element an op kept for the protocol's own
+/// element command (`upload`).
+pub const PICKED: &str = "window[Symbol.for('navigera.picked')]";
+
+/// Keep a file input for [`PICKED`], after checking it can take `count`
+/// files.
+const PICK_FILE_INPUT: &str = r#"function (el, count) {
+    if (!(el instanceof el.ownerDocument.defaultView.HTMLInputElement) || el.type !== 'file') throw new Error('the element is not an <input type=file> (it is <' + el.localName + '>); `ax` shows the file input, or click what opens the chooser');
+    if (count > 1 && !el.multiple) throw new Error('the file input takes one file (no `multiple`), got ' + count);
+    window[Symbol.for('navigera.picked')] = el;
+    return true;
+}"#;
+
+/// A point `mouse` aims at: the element scrolled into view, then (dx, dy)
+/// from its top-left corner, or its middle, in the top window's viewport.
+const MOUSE_POINT_EL: &str = r#"function (el, dx, dy) {
+    let r = el.getBoundingClientRect();
+    if (r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth || el.ownerDocument !== document) {
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        r = el.getBoundingClientRect();
+    }
+    let x = r.left + (dx == null ? r.width / 2 : dx), y = r.top + (dy == null ? r.height / 2 : dy);
+    for (let w = el.ownerDocument.defaultView; w && w.frameElement; w = w.parent) {
+        const f = w.frameElement.getBoundingClientRect();
+        x += f.left + w.frameElement.clientLeft;
+        y += f.top + w.frameElement.clientTop;
+    }
+    return { x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)) };
+}"#;
+
+/// The viewport's size.
+const VIEWPORT_SIZE: &str = "() => [window.innerWidth, window.innerHeight]";
+
+/// Mouse moves from the press to the target of a `drag`, as on Chrome.
+const DRAG_STEPS: i64 = 8;
+
+/// The first moves of a held mouse: past any drag threshold.
+const DRAG_START_STEPS: [i64; 5] = [3, 6, 10, 15, 20];
+
+/// One pointer source's actions.
+fn pointer(acts: Vec<Value>) -> Value {
+    json!([{ "type": "pointer", "id": "mouse", "parameters": { "pointerType": "mouse" }, "actions": acts }])
+}
+
+fn move_to(x: i64, y: i64) -> Value {
+    json!({ "type": "pointerMove", "x": x, "y": y, "origin": "viewport", "duration": 0 })
+}
+
 /// The page's location and title.
 const URL_TITLE: &str = "() => [location.href, document.title]";
+
+/// How long an action is watched for a navigation to start.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Watch {
+    /// The page said none was planned: only one already seen is waited for.
+    No,
+    /// The page could not say: a moment.
+    Brief,
+    /// The page planned one, or its document is already going: as long as
+    /// a browser may take to announce it (it can trail the input's answer
+    /// by a task or two), ended as soon as it does.
+    Planned,
+}
+
+/// The longest a planned navigation is waited for to start.
+pub const NAV_PLANNED_WATCH: Duration = Duration::from_millis(150);
 
 /// How long a navigation waits: until the document is parsed, until it
 /// loaded (the default), or not at all.
@@ -163,13 +361,55 @@ pub trait Wire: Send {
     /// Run `function` (an async function of `argsJson`, a JSON array as
     /// text) in the page; its answer is JSON text (see [`wrap`]).
     fn call(&mut self, function: &str, args_json: &str, timeout: Duration) -> Result<String>;
+    /// [`Wire::call`], and the session's tabs as they are meanwhile: one
+    /// round trip for the two where the wire takes commands together.
+    fn call_and_tabs(&mut self, function: &str, args_json: &str, timeout: Duration) -> Result<(String, Vec<String>)> {
+        let answer = self.call(function, args_json, timeout)?;
+        Ok((answer, self.tabs()?))
+    }
     /// `eval`: the value of a script, as JSON.
     fn evaluate(&mut self, source: &str, timeout: Duration) -> Result<Value>;
     /// W3C input actions (the same shape in both protocols).
     fn actions(&mut self, actions: Value) -> Result<()>;
+    /// Input actions after which a button or a key stays held, for the
+    /// calls that follow (`mouse down`, `keydown`).
+    fn actions_keep(&mut self, actions: Value) -> Result<()> {
+        self.actions(actions)
+    }
+    /// Give the file input the page keeps under [`PICKED`] these files
+    /// (absolute paths on the browser's machine).
+    fn set_files(&mut self, files: &[String], timeout: Duration) -> Result<()>;
+    /// The viewport's size in CSS pixels and its pixel ratio; `None` is the
+    /// browser's own again.
+    fn set_viewport(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()>;
+    /// A script every new document runs before its own.
+    fn add_init_script(&mut self, source: &str) -> Result<()>;
+    /// Take the init scripts away again; how many there were.
+    fn clear_init_scripts(&mut self) -> Result<usize>;
+    /// `route`: answer the requests a rule's glob matches the rule's way,
+    /// from now on (a rule with the same glob is replaced).
+    fn add_route(&mut self, _route: Route) -> Result<()> {
+        bail!("classic WebDriver cannot see a page's requests; use --engine firefox or chrome (or --bidi with a server that has it)")
+    }
+    /// Remove the rule for `pattern`, or every rule; how many went.
+    fn remove_routes(&mut self, _pattern: Option<&str>) -> Result<usize> {
+        Ok(0)
+    }
+    fn routes(&self) -> Vec<Route> {
+        Vec::new()
+    }
+    /// Between commands: take what the browser sent meanwhile (a request
+    /// waiting for its rule, a dialog).
+    fn idle(&mut self) {}
+    /// The session's tab to the front again, after its page opened
+    /// another: a tab behind another gets no frames, and a driver waits
+    /// seconds for one at every press there.
+    fn front(&mut self) {}
     /// Wait for a navigation an action started, if one did.
-    fn settle(&mut self, _timeout: Duration) {}
+    fn settle(&mut self, _timeout: Duration, _watch: Watch) {}
     fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>>;
+    /// The page printed to PDF, by the browser's own print.
+    fn pdf(&mut self, landscape: bool, background: bool) -> Result<Vec<u8>>;
     fn history(&mut self, delta: i64) -> Result<()>;
     fn reload(&mut self, timeout: Duration) -> Result<()>;
     fn tabs(&mut self) -> Result<Vec<String>>;
@@ -322,6 +562,15 @@ pub struct Driver {
     timeout: Duration,
     /// Console entries read from the wire and not yet returned.
     console: Vec<Value>,
+    /// Where `mouse` left the pointer, and the buttons it holds (bit 1
+    /// left, 2 right, 4 middle).
+    pointer: (i64, i64),
+    buttons: u8,
+    /// Keys `keydown` holds.
+    keys: Vec<String>,
+    init_scripts: Vec<String>,
+    /// How many tabs the last look found.
+    tabs_seen: usize,
 }
 
 impl Driver {
@@ -335,8 +584,19 @@ impl Driver {
             bail!("--capabilities must be a JSON object, like '{{\"platformName\":\"iOS\"}}'");
         }
         let engine = engine_name(config);
+        // The list of hosts is held by Chrome's request interception. Here
+        // nothing would hold it, and a session that looks restricted and
+        // is not is worse than none.
+        if config.allow_domains.is_some() {
+            bail!("--allow-domains is not on the {engine} engine yet: nothing would keep its pages to the list. Run it with --engine chrome, or drop the list");
+        }
         let wire: Box<dyn Wire> = match (&config.webdriver, config.engine.as_str()) {
             (Some(url), _) => classic::connect(url, caps, config.bidi, timeout)?,
+            (None, "firefox") if config.attach.is_some() => Box::new(bidi::Bidi::attach_firefox(
+                config.attach.as_deref().unwrap_or(crate::cdp::attach::AUTO),
+                caps,
+                timeout,
+            )?),
             (None, "firefox") => {
                 Box::new(bidi::Bidi::launch_firefox(config.chromium.as_deref(), !config.headed, caps, timeout)?)
             }
@@ -351,7 +611,17 @@ impl Driver {
                 bail!("--engine {other}: not a WebDriver engine (firefox, safari, safari-preview, webdriver)")
             }
         };
-        Ok(Self { wire, engine, timeout, console: Vec::new() })
+        Ok(Self {
+            wire,
+            engine,
+            timeout,
+            console: Vec::new(),
+            pointer: (0, 0),
+            buttons: 0,
+            keys: Vec::new(),
+            init_scripts: Vec::new(),
+            tabs_seen: usize::MAX,
+        })
     }
 
     pub fn engine(&self) -> &'static str {
@@ -364,6 +634,12 @@ impl Driver {
 
     pub fn close(&mut self) {
         self.wire.close();
+    }
+
+    /// Between commands (the session's tick): requests waiting for a
+    /// `route` rule and dialogs are answered.
+    pub fn idle(&mut self) {
+        self.wire.idle();
     }
 
     pub fn take_dialogs(&mut self) -> Vec<Value> {
@@ -386,6 +662,12 @@ impl Driver {
         Ok(serde_json::from_str(ok_text(&answer)?)?)
     }
 
+    /// [`Driver::call`] with the session's tabs, read as the call runs.
+    fn call_tabs(&mut self, function: &str, args: Value) -> Result<(Value, Vec<String>)> {
+        let (answer, tabs) = self.wire.call_and_tabs(function, &args.to_string(), self.timeout)?;
+        Ok((serde_json::from_str(ok_text(&answer)?)?, tabs))
+    }
+
     fn url_title(&mut self) -> Result<(String, String)> {
         let v = self.call(URL_TITLE, json!([]))?;
         let at = |i: usize| v.get(i).and_then(Value::as_str).unwrap_or("").to_string();
@@ -393,11 +675,19 @@ impl Driver {
     }
 
     fn state(&mut self) -> Result<Value> {
-        let (url, title) = self.url_title()?;
-        let tabs = self.wire.tabs()?;
+        let (v, tabs) = self.call_tabs(URL_TITLE, json!([]))?;
+        let at = |i: usize| v.get(i).and_then(Value::as_str).unwrap_or("").to_string();
+        Ok(self.state_of(at(0), at(1), tabs))
+    }
+
+    fn state_of(&mut self, url: String, title: String, tabs: Vec<String>) -> Value {
+        if tabs.len() > self.tabs_seen {
+            self.wire.front();
+        }
+        self.tabs_seen = tabs.len();
         let current = self.wire.current_tab();
         let tab = tabs.iter().position(|t| *t == current).unwrap_or(0);
-        Ok(json!({ "tab": tab, "tabs": tabs.len(), "url": url, "title": title }))
+        json!({ "tab": tab, "tabs": tabs.len(), "url": url, "title": title })
     }
 
     /// The page expression that finds `target` (auto-waiting as Chrome's
@@ -417,6 +707,19 @@ impl Driver {
         self.call(&function, args).map_err(|e| e.context(what.to_string()))
     }
 
+    /// [`Driver::on`] for an op that leaves the page where it is: what
+    /// `then` gave, and the page's state read in the same round trip.
+    fn on_here(&mut self, target: &Target, what: &str, then: &str, args: Value) -> Result<(Value, Value)> {
+        let finder = self.finder(target, what);
+        let function = format!(
+            "async (...args) => {{ const el = await ({finder}); return [await ({then})(el, ...args), location.href, document.title]; }}"
+        );
+        let (mut v, tabs) = self.call_tabs(&function, args).map_err(|e| e.context(what.to_string()))?;
+        let text = |v: &Value, i: usize| v.get(i).and_then(Value::as_str).unwrap_or("").to_string();
+        let (url, title) = (text(&v, 1), text(&v, 2));
+        Ok((v.get_mut(0).map(Value::take).unwrap_or(Value::Null), self.state_of(url, title, tabs)))
+    }
+
     fn point(&mut self, target: &Target, what: &str, force: bool) -> Result<(i64, i64)> {
         let p = self.on(target, what, POINT_EL, json!([force]))?;
         let at = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0) as i64;
@@ -424,14 +727,70 @@ impl Driver {
     }
 
     fn act(&mut self, actions: Value) -> Result<()> {
-        self.wire.actions(actions)?;
-        self.wire.settle(self.timeout);
+        self.act_watched(actions, Watch::Brief)
+    }
+
+    /// Keys typed as text: only Enter can load a new document (a form's
+    /// implicit submission, a link it follows), as on Chrome's engine.
+    fn type_keys(&mut self, text: &str) -> Result<()> {
+        let watch = if text.contains('\n') { Watch::Brief } else { Watch::No };
+        self.act_watched(type_actions(text), watch)
+    }
+
+    fn act_watched(&mut self, actions: Value, watch: Watch) -> Result<()> {
+        // While `mouse down` or `keydown` holds something, nothing lets go
+        // of it but its own `up`.
+        if self.buttons != 0 || !self.keys.is_empty() {
+            self.wire.actions_keep(actions)?;
+        } else {
+            self.wire.actions(actions)?;
+        }
+        self.wire.settle(self.timeout, watch);
         Ok(())
+    }
+
+    /// A click on `target`, then the page's state. The page is asked what
+    /// it made of the click: one that planned no navigation is not watched
+    /// for one.
+    fn press(&mut self, target: &Target, what: &str, force: bool, button: u8, count: u32) -> Result<Value> {
+        let armed = format!("function (el, force) {{ const p = ({POINT_EL})(el, force); ({ARM_NAV})(el); return p; }}");
+        let p = self.on(target, what, &armed, json!([force]))?;
+        let at = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0) as i64;
+        let actions = click_actions(at("x"), at("y"), button, count);
+        if self.buttons != 0 || !self.keys.is_empty() {
+            self.wire.actions_keep(actions)?;
+        } else {
+            self.wire.actions(actions)?;
+        }
+        self.after_armed(Watch::Brief)
+    }
+
+    /// After an action [`ARM_NAV`] watched: the page's state, once the
+    /// navigation the page says is planned has loaded. `unknown`: how to
+    /// watch when the page cannot say.
+    fn after_armed(&mut self, unknown: Watch) -> Result<Value> {
+        // A document already replaced answers without a verdict; one on
+        // its way out may not answer at all.
+        let read = self.call_tabs(NAV_VERDICT, json!([]));
+        let gone = read.is_err();
+        let (read, tabs) = read.unwrap_or_default();
+        let text = |i: usize| read.get(i).and_then(Value::as_str).map(str::to_string);
+        match (read.get(0).and_then(Value::as_bool), text(1), text(2)) {
+            (Some(false), Some(url), Some(title)) => {
+                self.wire.settle(self.timeout, Watch::No);
+                Ok(self.state_of(url, title, tabs))
+            }
+            (planned, ..) => {
+                let watch = if gone || planned == Some(true) { Watch::Planned } else { unknown };
+                self.wire.settle(self.timeout, watch);
+                self.state()
+            }
+        }
     }
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, tabs, cookies, console)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport, route, unroute)",
             op_name(command),
             self.engine
         )
@@ -457,7 +816,10 @@ impl Driver {
         };
         // Ids are made by the snapshot itself; a scope found before the first
         // snapshot is named again below.
-        let answer = self.wire.call(SNAPSHOT, &json!([SNAPSHOT_MAX_NODES]).to_string(), self.timeout)?;
+        static KEPT_SNAPSHOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let snapshot = KEPT_SNAPSHOT.get_or_init(|| kept(SNAPSHOT));
+        let answer = self.wire.call(snapshot, &json!([SNAPSHOT_MAX_NODES]).to_string(), self.timeout)?;
+        crate::timing::record("ax_wd_page", started);
         let text = ok_text(&answer).context("ax")?;
         // The page's own script made this: checked before it is indexed.
         let snap = crate::cdp::snap::Snap::from_page_json(text).map_err(|why| {
@@ -580,20 +942,27 @@ impl Driver {
                 let scope = scope.optional("ax")?;
                 self.snapshot(&view, scope.as_ref())
             }
+            // As on Chrome: the whole tree as text, then its lines with the
+            // words under their containers.
+            Command::Grep { query, limit, timeout_ms: _, no_wait: _, scope } => {
+                let view = AxView { full_text: true, all_refs: false, limit: 20_000, json_list: false };
+                let scope = scope.optional("ax")?;
+                let tree = match self.snapshot(&view, scope.as_ref())? {
+                    Value::String(tree) => tree,
+                    other => other.to_string(),
+                };
+                Ok(json!(crate::grep::grep_tree(&tree, query, limit.unwrap_or(crate::grep::DEFAULT_TREE_LINES))))
+            }
             Command::Click { target, timeout_ms: _, button, force, until_gone } => {
                 if until_gone.is_some() {
                     return Err(self.not_here(command));
                 }
                 let t = target.target("click")?;
-                let (x, y) = self.point(&t, "click", *force)?;
-                self.act(click_actions(x, y, button_number(button.as_deref())?, 1))?;
-                self.state()
+                self.press(&t, "click", *force, button_number(button.as_deref())?, 1)
             }
             Command::Dblclick { target, timeout_ms: _ } => {
                 let t = target.target("dblclick")?;
-                let (x, y) = self.point(&t, "dblclick", false)?;
-                self.act(click_actions(x, y, 0, 2))?;
-                self.state()
+                self.press(&t, "dblclick", false, 0, 2)
             }
             Command::Hover { target, timeout_ms: _ } => {
                 let t = target.target("hover")?;
@@ -606,23 +975,23 @@ impl Driver {
                 let t = target.target("fill")?;
                 if *keys {
                     self.on(&t, "fill", crate::cdp::page::FOCUS_SELECT_ALL, json!([]))?;
-                    self.act(type_actions(value))?;
+                    self.type_keys(value)?;
+                    self.state()
                 } else {
-                    self.on(&t, "fill", crate::cdp::page::FILL_EL_JS, json!([value]))?;
+                    Ok(self.on_here(&t, "fill", crate::cdp::page::FILL_EL_JS, json!([value]))?.1)
                 }
-                self.state()
             }
             Command::InsertText { value, target, timeout_ms: _ } => {
                 if let Some(t) = target.optional("insert-text")? {
                     self.on(&t, "insert-text", crate::cdp::page::FOCUS_EL, json!([]))?;
                 }
-                self.act(type_actions(value))?;
+                self.type_keys(value)?;
                 self.state()
             }
             Command::Select { target, value, timeout_ms: _, add } => {
                 let t = target.target("select")?;
-                let chosen = self.on(&t, "select", crate::cdp::page::SELECT_EL_JS, json!([value, add]))?;
-                let mut state = self.state()?;
+                let (chosen, mut state) =
+                    self.on_here(&t, "select", crate::cdp::page::SELECT_EL_JS, json!([value, add]))?;
                 state["selected"] = chosen;
                 Ok(state)
             }
@@ -630,8 +999,7 @@ impl Driver {
                 let t = target.target(if *checked { "check" } else { "uncheck" })?;
                 let now = self.on(&t, "check", "(el) => !!el.checked", json!([]))?;
                 if now.as_bool() != Some(*checked) {
-                    let (x, y) = self.point(&t, "check", false)?;
-                    self.act(click_actions(x, y, 0, 1))?;
+                    self.press(&t, "check", false, 0, 1)?;
                     let after = self.on(&t, "check", "(el) => !!el.checked", json!([]))?;
                     if after.as_bool() != Some(*checked) {
                         bail!("check: the click did not change the element's state (still {after})");
@@ -648,32 +1016,53 @@ impl Driver {
                 if let Some(t) = target.optional("press")? {
                     self.on(&t, "press", crate::cdp::page::FOCUS_EL, json!([]))?;
                 }
-                self.act(press_actions(key)?)?;
-                self.state()
+                // Only Enter can load a new document (a form's implicit
+                // submission, a link it follows), as on Chrome's engine;
+                // the page says whether it did.
+                if !matches!(key.to_ascii_lowercase().as_str(), "enter" | "return") {
+                    self.act_watched(press_actions(key)?, Watch::No)?;
+                    return self.state();
+                }
+                let armed = format!("() => ({ARM_NAV})(null, true)");
+                let may = self.call(&armed, json!([])).ok().and_then(|v| v.as_bool()).unwrap_or(true);
+                self.act_watched(press_actions(key)?, Watch::No)?;
+                self.after_armed(if may { Watch::Planned } else { Watch::Brief })
             }
             Command::Type { value, target, timeout_ms: _ } => {
                 if let Some(t) = target.optional("type")? {
                     self.on(&t, "type", crate::cdp::page::FOCUS_EL, json!([]))?;
                 }
-                self.act(type_actions(value))?;
+                self.type_keys(value)?;
                 self.state()
             }
             Command::Scroll { target, by, to, timeout_ms: _ } => {
-                match target.optional("scroll")? {
-                    Some(t) => {
-                        self.on(
-                            &t,
-                            "scroll",
-                            "(el) => el.scrollIntoView({ block: 'center', behavior: 'instant' })",
-                            json!([]),
-                        )?;
-                    }
+                // Where the page is after, as Chrome's engine answers.
+                const AT: &str = "[Math.round(scrollY), document.documentElement.scrollHeight, innerHeight]";
+                let at = match target.optional("scroll")? {
+                    Some(t) => self.on(
+                        &t,
+                        "scroll",
+                        &format!(
+                            "(el) => {{ el.scrollIntoView({{ block: 'center', behavior: 'instant' }}); return {AT}; }}"
+                        ),
+                        json!([]),
+                    )?,
                     None => {
-                        let js = "(by, to) => { if (to === 'top') scrollTo(0, 0); else if (to === 'bottom') scrollTo(0, document.documentElement.scrollHeight); else scrollBy(0, by); }";
-                        self.call(js, json!([by.unwrap_or(600.0), to]))?;
+                        // 800 px unless given, as on Chrome.
+                        let js = format!(
+                            "(by, to) => {{ if (to === 'top') scrollTo(0, 0); else if (to === 'bottom') \
+                             scrollTo(0, document.documentElement.scrollHeight); else scrollBy(0, by); return {AT}; }}"
+                        );
+                        self.call(&js, json!([by.unwrap_or(800.0), to]))?
+                    }
+                };
+                let mut state = self.state()?;
+                if let (Some(o), Some(a)) = (state.as_object_mut(), at.as_array()) {
+                    for (i, key) in ["scrollY", "scrollHeight", "viewport"].into_iter().enumerate() {
+                        o.insert(key.into(), a.get(i).cloned().unwrap_or(Value::Null));
                     }
                 }
-                self.state()
+                Ok(state)
             }
             Command::Text { selector, grep, context, limit, timeout_ms: _ } => {
                 let text = if selector.is_empty() {
@@ -716,7 +1105,10 @@ impl Driver {
                 if frame.is_some() || download.is_some() {
                     return Err(self.not_here(command));
                 }
-                let timeout = timeout_ms.map_or(self.timeout, |ms| Duration::from_millis(ms.max(1.0) as u64));
+                // As on Chrome: the element wait (5 s unless set), not the
+                // navigation timeout, for what may never come.
+                let timeout = timeout_ms
+                    .map_or_else(crate::browser::element_wait, |ms| Duration::from_millis(ms.max(1.0) as u64));
                 let started = Instant::now();
                 if let Some(ms) = ms {
                     std::thread::sleep(Duration::from_millis(ms.max(0.0) as u64));
@@ -727,7 +1119,7 @@ impl Driver {
                             return Ok(());
                         }
                         if started.elapsed() >= timeout {
-                            bail!("wait: {what} after {} ms", timeout.as_millis());
+                            bail!("wait: {what} within {} ms (wait longer with --timeout-ms)", timeout.as_millis());
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
@@ -753,7 +1145,10 @@ impl Driver {
                             break;
                         }
                         if started.elapsed() >= timeout {
-                            bail!("wait: the URL is {now}, not {pattern:?}, after {} ms", timeout.as_millis());
+                            bail!(
+                                "wait: the URL is {now}, not {pattern:?}, within {} ms (wait longer with --timeout-ms)",
+                                timeout.as_millis()
+                            );
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
@@ -763,6 +1158,22 @@ impl Driver {
                     poll(self, &f, json!([]), "the condition is still false")?;
                 }
                 Ok(json!({ "waited_ms": started.elapsed().as_millis() as u64 }))
+            }
+            Command::Pdf { path, landscape, background } => {
+                let bytes = self.wire.pdf(*landscape, *background).context("pdf")?;
+                let path = path.clone().unwrap_or_else(|| {
+                    format!(
+                        "page-{}.pdf",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)
+                    )
+                });
+                crate::protocol::write_own(&path, &bytes)
+                    .map_err(|e| anyhow::Error::from(e).context(format!("pdf: writing {path}")))?;
+                let path = std::path::absolute(&path).map(|p| p.display().to_string()).unwrap_or(path);
+                Ok(json!({ "path": path, "bytes": bytes.len() }))
             }
             Command::Screenshot { path, full_page, target, annotate, quality, timeout_ms: _ } => {
                 if *annotate || quality.is_some() || target.optional("screenshot")?.is_some() {
@@ -911,6 +1322,267 @@ impl Driver {
             Command::Dialog { accept, prompt_text } => {
                 self.wire.set_dialog_policy(accept.unwrap_or(true), prompt_text.clone());
                 Ok(json!({ "dialogs": if accept.unwrap_or(true) { "accept" } else { "dismiss" } }))
+            }
+            Command::Upload { target, files, timeout_ms: _ } => {
+                let t = target.target("upload")?;
+                let files: Vec<String> = files
+                    .iter()
+                    .map(|f| {
+                        std::fs::canonicalize(f)
+                            .map(|p| p.display().to_string())
+                            .map_err(|e| anyhow!("upload: {f}: {e}"))
+                    })
+                    .collect::<Result<_>>()?;
+                self.on(&t, "upload", PICK_FILE_INPUT, json!([files.len()]))?;
+                self.wire.set_files(&files, self.timeout).map_err(|e| e.context("upload"))?;
+                Ok(json!({ "files": files.len() }))
+            }
+            Command::Drag { from, to, from_at, to_at, timeout_ms: _ } => {
+                let (f, t) = (from.target("drag")?, to.target("drag")?);
+                let what = format!("drag {} to {}", f.label(), t.label());
+                let html5 = self
+                    .on(&f, "drag", crate::cdp::page::DRAG_IS_HTML5, json!([]))
+                    .map_err(|e| e.context(what.clone()))?;
+                let r = if html5 == Value::Bool(true) {
+                    // A `draggable` source: the events a browser fires,
+                    // dragstart through dragend, in the page (no driver
+                    // starts a real drag from input actions on every
+                    // browser).
+                    self.on(&f, "drag", crate::cdp::page::DRAG_START, json!([]))
+                        .map_err(|e| e.context(what.clone()))?;
+                    let dropped = self
+                        .on(&t, "drag", crate::cdp::page::DRAG_DROP, json!([]))
+                        .map_err(|e| e.context(what.clone()))?;
+                    json!({ "html5": true, "dropped": dropped, "path": "synthetic" })
+                } else {
+                    let at = |p: &Option<Box<[f64; 2]>>| match p.as_deref() {
+                        Some([x, y]) => json!([x, y]),
+                        None => json!([null, null]),
+                    };
+                    let a = self.on(&f, "drag", MOUSE_POINT_EL, at(from_at)).map_err(|e| e.context(what.clone()))?;
+                    let (ax, ay) = (a["x"].as_i64().unwrap_or(0), a["y"].as_i64().unwrap_or(0));
+                    let mut acts = vec![move_to(ax, ay), json!({ "type": "pointerDown", "button": 0 })];
+                    acts.extend(DRAG_START_STEPS.iter().map(|d| move_to(ax + d, ay + d)));
+                    self.wire.actions_keep(pointer(acts)).map_err(|e| e.context(what.clone()))?;
+                    // The target is found with the mouse held: a drop zone
+                    // may only be there once the drag began.
+                    let b = self.on(&t, "drag", MOUSE_POINT_EL, at(to_at));
+                    let (sx, sy) = (ax + 20, ay + 20);
+                    let mut acts = Vec::new();
+                    let end = match &b {
+                        Ok(b) => {
+                            let (bx, by) = (b["x"].as_i64().unwrap_or(0), b["y"].as_i64().unwrap_or(0));
+                            acts.extend(
+                                (1..=DRAG_STEPS)
+                                    .map(|i| move_to(sx + (bx - sx) * i / DRAG_STEPS, sy + (by - sy) * i / DRAG_STEPS)),
+                            );
+                            (bx, by)
+                        }
+                        Err(_) => (sx, sy),
+                    };
+                    acts.push(json!({ "type": "pointerUp", "button": 0 }));
+                    self.buttons &= !1;
+                    self.pointer = end;
+                    self.act(pointer(acts)).map_err(|e| e.context(what.clone()))?;
+                    b.map_err(|e| e.context(what.clone()))?;
+                    json!({ "from": { "x": ax, "y": ay }, "to": { "x": end.0, "y": end.1 }, "path": "mouse" })
+                };
+                let mut out = self.state()?;
+                out["drag"] = r;
+                Ok(out)
+            }
+            Command::Mouse { action, x, y, button, count, steps, target, timeout_ms: _ } => {
+                let (number, bit) = match button.as_deref().unwrap_or("left") {
+                    "left" | "" => (0u8, 1u8),
+                    "middle" => (1, 4),
+                    "right" => (2, 2),
+                    other => bail!("mouse --button takes left, right or middle, not {other:?}"),
+                };
+                let offset = match (action.as_str(), x, y) {
+                    ("move" | "click", Some(x), Some(y)) => Some((*x, *y)),
+                    _ => None,
+                };
+                let at = match target.optional("mouse")? {
+                    Some(t) => {
+                        let args = match offset {
+                            Some((dx, dy)) => json!([dx, dy]),
+                            None => json!([null, null]),
+                        };
+                        let p = self.on(&t, &format!("mouse {action}"), MOUSE_POINT_EL, args)?;
+                        Some((p["x"].as_i64().unwrap_or(0), p["y"].as_i64().unwrap_or(0)))
+                    }
+                    None => {
+                        if let (Some((px, py)), "click") = (offset, action.as_str()) {
+                            let v = self.call(VIEWPORT_SIZE, json!([]))?;
+                            let (w, h) =
+                                (v[0].as_f64().unwrap_or(f64::INFINITY), v[1].as_f64().unwrap_or(f64::INFINITY));
+                            if px < 0.0 || py < 0.0 || px >= w || py >= h {
+                                bail!("mouse click: ({px}, {py}) is outside the viewport ({w}x{h}): scroll first, or aim from an element (`mouse click <x> <y> --selector <css>` scrolls it into view)");
+                            }
+                        }
+                        offset.map(|(x, y)| (x.round() as i64, y.round() as i64))
+                    }
+                };
+                if matches!(action.as_str(), "move" | "click") && at.is_none() {
+                    bail!("mouse {action} needs x and y");
+                }
+                let mut acts = Vec::new();
+                if let Some((x, y)) = at {
+                    let (px, py) = self.pointer;
+                    let n = i64::from(steps.unwrap_or(1).clamp(1, 1000));
+                    acts.extend((1..=n).map(|i| move_to(px + (x - px) * i / n, py + (y - py) * i / n)));
+                    self.pointer = (x, y);
+                }
+                let mut wheel = None;
+                match action.as_str() {
+                    "move" => {}
+                    "down" => {
+                        acts.push(json!({ "type": "pointerDown", "button": number }));
+                        self.buttons |= bit;
+                    }
+                    "up" => acts.push(json!({ "type": "pointerUp", "button": number })),
+                    "click" => {
+                        for _ in 0..count.unwrap_or(1).clamp(1, 10) {
+                            acts.push(json!({ "type": "pointerDown", "button": number }));
+                            acts.push(json!({ "type": "pointerUp", "button": number }));
+                        }
+                    }
+                    "wheel" => {
+                        let (dx, dy) = (x.unwrap_or(0.0).round() as i64, y.unwrap_or(0.0).round() as i64);
+                        wheel = Some(json!({ "type": "wheel", "id": "wheel", "actions": [{ "type": "scroll",
+                            "x": self.pointer.0, "y": self.pointer.1, "deltaX": dx, "deltaY": dy, "origin": "viewport", "duration": 0 }] }));
+                    }
+                    other => bail!("mouse takes move, down, up, click or wheel, not {other:?}"),
+                }
+                let mut sources = Vec::new();
+                if !acts.is_empty() {
+                    sources.push(pointer(acts)[0].clone());
+                }
+                sources.extend(wheel);
+                // An `up` lets go after its own actions ran held.
+                let sent = if sources.is_empty() { Ok(()) } else { self.act(Value::Array(sources)) };
+                if action == "up" {
+                    self.buttons &= !bit;
+                    if self.buttons == 0 && self.keys.is_empty() {
+                        // Nothing held any more: the driver's input state
+                        // goes back to rest (the pointer stays put).
+                        let _ = self.wire.actions(pointer(vec![move_to(self.pointer.0, self.pointer.1)]));
+                    }
+                }
+                sent.map_err(|e| e.context(format!("mouse {action}")))?;
+                let held: Vec<&str> = [(1u8, "left"), (2, "right"), (4, "middle")]
+                    .iter()
+                    .filter(|(b, _)| self.buttons & b != 0)
+                    .map(|(_, n)| *n)
+                    .collect();
+                let mut state = self.state()?;
+                state["mouse"] = json!({ "x": self.pointer.0, "y": self.pointer.1, "held": held });
+                Ok(state)
+            }
+            Command::KeyDown { key } => {
+                let value = key_value(key).map_err(|e| e.context("keydown"))?;
+                if !self.keys.contains(&value) {
+                    self.keys.push(value.clone());
+                }
+                self.act(
+                    json!([{ "type": "key", "id": "keyboard", "actions": [{ "type": "keyDown", "value": value }] }]),
+                )
+                .map_err(|e| e.context("keydown"))?;
+                Ok(json!({ "down": key }))
+            }
+            Command::KeyUp { key } => {
+                let value = key_value(key).map_err(|e| e.context("keyup"))?;
+                let sent = self.act(
+                    json!([{ "type": "key", "id": "keyboard", "actions": [{ "type": "keyUp", "value": value }] }]),
+                );
+                self.keys.retain(|k| *k != value);
+                if self.buttons == 0 && self.keys.is_empty() {
+                    let _ = self.wire.actions(
+                        json!([{ "type": "key", "id": "keyboard", "actions": [{ "type": "pause", "duration": 0 }] }]),
+                    );
+                }
+                sent.map_err(|e| e.context("keyup"))?;
+                Ok(json!({ "up": key }))
+            }
+            Command::Storage { area, action, key, value } => {
+                let area = match area.as_deref().unwrap_or("local") {
+                    "local" => "localStorage",
+                    "session" => "sessionStorage",
+                    other => bail!("storage takes local|session, got {other:?}"),
+                };
+                let js = match (action.as_deref().unwrap_or("get"), key, value) {
+                    ("get", Some(_), _) => "(k) => A.getItem(k)",
+                    ("get", None, _) => "() => Object.fromEntries(Object.entries(A))",
+                    ("set", Some(_), Some(_)) => "(k, v) => (A.setItem(k, v), true)",
+                    ("remove", Some(_), _) => "(k) => (A.removeItem(k), true)",
+                    ("clear", _, _) => "() => (A.clear(), true)",
+                    (other, ..) => bail!("storage: {other} needs a key (set: and a value)"),
+                };
+                self.call(&js.replace('A', area), json!([key, value])).map_err(|e| e.context("storage"))
+            }
+            Command::InitScript { source: Some(source), .. } => {
+                self.wire.add_init_script(source).map_err(|e| e.context("init-script"))?;
+                self.init_scripts.push(source.clone());
+                Ok(json!({ "init_scripts": self.init_scripts.len() }))
+            }
+            Command::InitScript { source: None, clear: true } => {
+                self.wire.clear_init_scripts().map_err(|e| e.context("init-script"))?;
+                Ok(json!({ "removed": std::mem::take(&mut self.init_scripts).len() }))
+            }
+            Command::InitScript { source: None, clear: false } => {
+                if self.init_scripts.is_empty() {
+                    return Ok(json!("(no init scripts)"));
+                }
+                Ok(json!(self
+                    .init_scripts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, src)| format!(
+                        "{}: {}",
+                        i + 1,
+                        src.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect::<String>()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n")))
+            }
+            Command::Set { what, values, scale, mobile, accuracy } if what == "viewport" => {
+                if *mobile {
+                    bail!("set viewport --mobile: not on the {} engine (a mobile viewport is Chrome's emulation); drop --mobile, or run it with --engine chrome", self.engine);
+                }
+                let plan = crate::emulate::plan("viewport", values, *scale, false, *accuracy, false)?;
+                let size = match &plan.result["viewport"] {
+                    Value::Array(wh) => {
+                        Some((wh[0].as_f64().unwrap_or(0.0) as u32, wh[1].as_f64().unwrap_or(0.0) as u32))
+                    }
+                    _ => None,
+                };
+                self.wire.set_viewport(size, *scale).map_err(|e| e.context("set viewport"))?;
+                let v = self.call(VIEWPORT_SIZE, json!([]))?;
+                Ok(match size {
+                    Some(_) => json!({ "viewport": v, "scale": scale }),
+                    None => json!({ "viewport": "default" }),
+                })
+            }
+            Command::Route { pattern: None, har: None, .. } => {
+                let routes = self.wire.routes();
+                if routes.is_empty() {
+                    return Ok(json!("(no routes)"));
+                }
+                Ok(json!(routes
+                    .iter()
+                    .map(|r| format!("{} -> {} ({} hits)", r.pattern, r.action.describe(), r.hits))
+                    .collect::<Vec<_>>()
+                    .join("\n")))
+            }
+            Command::Route { .. } => {
+                let route = crate::protocol::route_of(command)?;
+                let (pattern, what) = (route.pattern.clone(), route.action.describe());
+                self.wire.add_route(route).map_err(|e| e.context("route"))?;
+                Ok(json!({ "route": pattern, "action": what }))
+            }
+            Command::Unroute { pattern } => {
+                let removed = self.wire.remove_routes(pattern.as_deref()).map_err(|e| e.context("unroute"))?;
+                Ok(json!({ "removed": removed }))
             }
             Command::Quit { .. } => {
                 self.wire.close();

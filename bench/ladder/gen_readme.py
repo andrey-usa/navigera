@@ -353,7 +353,9 @@ if ops:
         row = [f"`{op}`"]
         for o in ops_cols:
             cell = (o.get("cells") or {}).get(op) or {}
-            if cell.get("median_ms") is None:
+            if cell.get("not_run"):
+                row.append("not run: " + cell["not_run"])
+            elif cell.get("median_ms") is None:
                 row.append("failed")
             elif cell.get("incomplete"):
                 n = cell.get("reps", 0)
@@ -365,6 +367,13 @@ if ops:
                            f"{'s' if cell['calls'] != 1 else ''})")
         ops_lines.append("| " + " | ".join(row) + " |")
     ops_lines += [
+        "",
+        "Firefox API arms use persistent library sessions, with the JSON-line control pipe",
+        "included in wall time. They are not CLI-per-op timings. Playwright Node/Bun use",
+        "its bundled patched Firefox; Puppeteer/WebdriverIO use the runner Firefox;",
+        "Vibium uses its managed Firefox. Browser builds are recorded in publish.json.",
+        "Puppeteer disables its extra bounding-box stability wait on static fixtures;",
+        "visibility/enabled checks remain. API form-batch has four calls in one request.",
         "",
         "Snapshot outputs differ in form (each tool's default tree), so that row compares",
         "call latency, not equivalent work. The browser-use snapshot comes from its",

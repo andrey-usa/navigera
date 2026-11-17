@@ -276,13 +276,20 @@ impl<'a> Doc<'a> {
         let mut layout = NodeMap::new(count);
         let mut content_alt = NodeMap::new(count);
         let mut counters = NodeSet::new(count);
+        // One searcher for every layout object's `content` (most say
+        // "normal"): `str::contains` and `rsplit_once` each set one up per
+        // object, 220,000 of them on a 10,000-row table.
+        let counter = memchr::memmem::Finder::new("counter");
         for l in &doc.layout {
             let node = l.node;
             let content = at(l.styles[STYLE_CONTENT]);
-            if let Some(alt) = content_alt_text(content) {
-                content_alt.insert(node, alt);
+            // Alternative text comes after a slash.
+            if memchr::memchr(b'/', content.as_bytes()).is_some() {
+                if let Some(alt) = content_alt_text(content) {
+                    content_alt.insert(node, alt);
+                }
             }
-            if content.contains("counter") {
+            if counter.find(content.as_bytes()).is_some() {
                 counters.insert(node);
             }
             let text = Some(l.text).filter(|t| *t >= 0).map(at);
@@ -1387,9 +1394,31 @@ impl<'a> Doc<'a> {
     }
 }
 
-/// A tree node's id: its document and its index there.
+/// A tree node's id: its document and its index there (`d0n42`). Written
+/// out by hand: it is made for every node, its parent and each of its
+/// children, and through `format!` that was 4% of a large page's read.
 fn node_id(d: usize, i: usize) -> String {
-    format!("d{d}n{i}")
+    let mut id = String::with_capacity(16);
+    id.push('d');
+    push_number(&mut id, d);
+    id.push('n');
+    push_number(&mut id, i);
+    id
+}
+
+/// `n` in decimal, appended to `out`.
+fn push_number(out: &mut String, mut n: usize) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend(digits[at..].iter().map(|&b| b as char));
 }
 
 /// The document and index a [`node_id`] names (`None` for a text child's).
@@ -1512,6 +1541,15 @@ fn squash(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_id_is_written_as_format_wrote_it() {
+        for (d, i) in [(0, 0), (0, 9), (0, 10), (3, 12_345), (17, 999_999), (usize::MAX, usize::MAX), (100, 1_000_000)]
+        {
+            assert_eq!(node_id(d, i), format!("d{d}n{i}"));
+            assert_eq!(parse_id(&node_id(d, i)), Some((d, i)));
+        }
+    }
 
     /// (tag, parent index, attributes, text, laid out)
     type Spec<'a> = (&'a str, i64, &'a [(&'a str, &'a str)], Option<&'a str>, bool);

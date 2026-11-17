@@ -358,7 +358,30 @@ fn text_grep_prints_the_passages_that_mention_the_words() {
     let number = link.split("[ref=").nth(1).unwrap().split(']').next().unwrap();
     s.ok(&["click", number]);
     assert!(s.ok(&["eval", "location.hash"]) == "#fees");
+    // A match in a cell comes with its row, one in a result's snippet with
+    // the result's title; a name is searched and shown past where `ax`
+    // cuts it; a search engine's link prints where it goes; a regular
+    // expression's escape is read as the character.
+    s.ok(&[
+        "eval",
+        "document.body.innerHTML = '<table><tr><th>Company<th>Year<th>Raised</tr><tr><td>Enel<td>1999<td>16.59</tr>\
+         <tr><td>Facebook<td>2012<td>16.01</tr></table><ul><li><a href=\"/wiki/Arm\">Arm Holdings</a> <span>an \
+         approach in the weeks before the offering</span></li><li><a \
+         href=\"https://www.bing.com/ck/a?p=1&u=a1aHR0cHM6Ly9ub2RlanMub3JnL2VuL2Rvd25sb2Fk&ntb=1\">Download</a></li></ul>\
+         <button aria-label=\"' + 'long name '.repeat(30) + 'the tail end\">go</button>'; 1",
+    ]);
+    let out = s.text(&["ax", "--grep", "16.01"]);
+    assert!(out.contains("cell \"Facebook\"\n") && out.contains("cell \"2012\"\n"), "{out}");
+    assert!(out.ends_with("cell \"16.01\"") && !out.contains("Enel"), "{out}");
+    let out = s.text(&["ax", "--grep", "weeks before"]);
+    assert!(out.contains("link \"Arm Holdings\" [ref="), "{out}");
+    let out = s.text(&["ax", "--grep", r"nodejs\.org"]);
+    assert!(out.contains("1 line with \"nodejs.org\""), "{out}");
+    assert!(out.contains("link \"Download\" [ref=") && out.ends_with("url=https://nodejs.org/en/download"), "{out}");
+    let out = s.text(&["ax", "--grep", "tail end"]);
+    assert!(out.contains("1 line with \"tail end\"") && out.contains("the tail end\" [ref="), "{out}");
     // Inside one element, and nothing found is an answer, not a failure.
+    s.ok(&["eval", "document.body.insertAdjacentHTML('beforeend', '<h2>Fees</h2>'); 1"]);
     let out = s.text(&["text", "--selector", "h2", "--grep", "fees"]);
     assert!(out.ends_with("1: Fees"), "{out}");
     assert!(s.text(&["text", "--grep", "warranty"]).starts_with("no line of the text has \"warranty\""));
@@ -375,6 +398,14 @@ fn eval_takes_statements_await_and_a_body() {
     assert_eq!(s.ok(&["eval", "const r = await fetch(location.href); r.status"]), 200);
     assert_eq!(s.ok(&["eval", "const n = 6 * 7; return n"]), 42);
     assert!(s.fails(&["eval", "((("]).contains("SyntaxError"));
+    // A SyntaxError the code throws as it runs is its answer: the function
+    // was called (not answered as `{}`), and statements ran once, not
+    // again as the next form.
+    let m = s.fails(&["eval", "() => document.querySelector('a[')"]);
+    assert!(m.contains("not a valid selector"), "{m}");
+    let m = s.fails(&["eval", "window.__runs = (window.__runs || 0) + 1; JSON.parse('{bad')"]);
+    assert!(m.contains("JSON"), "{m}");
+    assert_eq!(s.ok(&["eval", "window.__runs"]), 1);
     // Text where CSS goes is said at once, with what to write instead.
     let started = std::time::Instant::now();
     let m = s.fails(&["click", "--selector", "35.75"]);

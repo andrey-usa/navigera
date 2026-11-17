@@ -3625,20 +3625,24 @@ impl BrowserSession {
         // Marked, so a `clock` counts it as the page's own code.
         let marked = format!("{source}\n//# sourceURL={}\n", crate::clock::USER_EVAL_URL);
         let source = marked.as_str();
-        let first = match tab.evaluate(source, timeout) {
-            Err(e) if is_syntax_error(&format!("{e:#}")) => e,
+        // Only source that did not parse goes on to the next form: a
+        // SyntaxError the code threw as it ran is its answer, and running
+        // it again as the next form would repeat what it did.
+        match tab.evaluate(source, timeout) {
+            Err(e) if cdp::page::did_not_parse(&e) => {}
+            other => return other,
+        }
+        let unparsed = match tab.evaluate_script(source, timeout) {
+            Err(e) if cdp::page::did_not_parse(&e) => e,
             other => return other,
         };
-        match tab.evaluate_script(source, timeout) {
-            Err(e) if is_syntax_error(&format!("{e:#}")) => {}
-            other => return other,
-        }
         match tab.evaluate_body(source, timeout) {
-            Err(e) if is_syntax_error(&format!("{e:#}")) => {}
+            Err(e) if cdp::page::did_not_parse(&e) => {}
             other => return other,
         }
-        // No form parses: the expression's error says more.
-        Err(first)
+        // No form parses: the error of the source as written, which points
+        // into the user's own text, not the expression form's wrapper.
+        Err(unparsed)
     }
 
     /// `eval` as a read (see [`cdp::Page::evaluate_read`]): its answer when
@@ -4113,10 +4117,61 @@ impl BrowserSession {
             .into_iter()
             .filter(|&(_, x, y, w, h)| full_page || (x + w > 0.0 && y + h > 0.0 && x < vw && y < vh))
             .collect();
-        tab.evaluate(&crate::annotate::draw(&shown), timeout)?;
-        let shot = tab.screenshot_as(timeout, full_page, quality);
+        let drawn = tab.evaluate(&crate::annotate::draw(&shown), timeout)?;
+        // In the session log: a late frame is one way an image comes out
+        // without its labels.
+        match (drawn[0].as_bool(), drawn[1].as_u64().unwrap_or(0)) {
+            (Some(false), ms) => eprintln!("[screenshot] --annotate: the page painted no frame in {ms} ms"),
+            (_, ms) if ms > 250 => eprintln!("[screenshot] --annotate: the labels' frame took {ms} ms"),
+            _ => {}
+        }
+        // The other way: the browser hands back the frame before. Chrome
+        // on macOS cannot tell when a frame has reached the screen and
+        // captures on a timer, so about 1 capture in 100 there showed the
+        // page without the marks, two frames after they were drawn. So
+        // the image is asked for proof: one pixel of the last outline, in
+        // the outline's colour. Without it the capture is taken again.
+        let n = |i: usize| drawn[i].as_f64().unwrap_or(0.0);
+        let (dpr, sx, sy) = (if n(2) > 0.0 { n(2) } else { 1.0 }, n(3), n(4));
+        let proof = match quality {
+            // A JPEG's pixels are not exact, and not read here.
+            Some(_) => None,
+            None if full_page => {
+                crate::annotate::proof_point(&shown, f64::MAX, f64::MAX).map(|(x, y)| (x + sx, y + sy))
+            }
+            None => crate::annotate::proof_point(&shown, vw, vh),
+        }
+        .filter(|&(x, y)| x >= 0.0 && y >= 0.0)
+        .map(|(x, y)| ((x * dpr) as u32, (y * dpr) as u32));
+        let mut shot = tab.screenshot_as(timeout, full_page, quality);
+        if let Some((x, y)) = proof {
+            for again in 1..=3 {
+                match shot.as_deref().ok().map(|image| crate::annotate::shows_mark(image, x, y)) {
+                    Some(Some(false)) => {}
+                    _ => break,
+                }
+                eprintln!("[screenshot] --annotate: the capture came without the labels; taking it again ({again})");
+                // Retakes alone did not bring them (macOS, 1 session in 300:
+                // three retakes, all without): a tab the window does not
+                // show keeps its last frame. Brought to the front first.
+                if again == 1 && self.bring_to_front().is_ok() {
+                    eprintln!("[screenshot] --annotate: the tab brought to the front before the retake");
+                }
+                let _ = tab.evaluate(crate::annotate::NEXT_FRAME, timeout);
+                shot = tab.screenshot_as(timeout, full_page, quality);
+            }
+        }
         let _ = tab.evaluate(crate::annotate::REMOVE, timeout);
-        Ok((shot?, shown.len()))
+        let shot = shot?;
+        // Still without them: an image that claims labels it does not
+        // show would have an agent act on the wrong thing.
+        if proof.and_then(|(x, y)| crate::annotate::shows_mark(&shot, x, y)) == Some(false) {
+            bail!(
+                "the browser's capture does not show the labels (4 captures). A dialog or popover shown on top of \
+                 the page hides them: close it first. Otherwise take it again, or act on the refs `ax` prints"
+            );
+        }
+        Ok((shot, shown.len()))
     }
 
     /// `a11y`: an accessibility audit of the active tab (see [`crate::a11y`]).
@@ -4337,10 +4392,6 @@ fn tab_range(count: usize) -> String {
 }
 
 /// A parse error, as V8 words it: the source isn't one expression.
-fn is_syntax_error(message: &str) -> bool {
-    message.contains("SyntaxError")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
