@@ -53,12 +53,12 @@ function locator(selector) {
 }
 async function fill(selector, value) {
   if (kind === 'webdriverio') return (await browser.$(selector)).setValue(value);
-  if (kind === 'vibium') return page.find(selector).fill(value);
+  if (kind === 'vibium') return page.find({ css: selector }).fill(value);
   return locator(selector).fill(value);
 }
 async function click(selector) {
   if (kind === 'webdriverio') return (await browser.$(selector)).click();
-  if (kind === 'vibium') return page.find(selector).click();
+  if (kind === 'vibium') return page.find({ css: selector }).click();
   return locator(selector).click();
 }
 async function close() {
