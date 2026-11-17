@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `ax --grep` on the WebDriver engines (experimental): the lines of the
+  page's tree with the words, under their containers, as on Chrome (it
+  said "not on the firefox engine yet").
+
 - `--attach` and `--auto-connect` find Vivaldi, Opera and, on macOS, Arc
   by their default profiles, after Chrome, Chromium, Edge and Brave:
   `--attach vivaldi`, `--attach opera`, `--attach arc`. `--from` and
@@ -148,6 +152,11 @@ All notable changes to this project are documented here. The format follows
   sixteen times its size in memory.
 
 ### Fixed
+
+- On the WebDriver engines (experimental), `wait` for text, an element,
+  a URL or a condition that never comes gives up after the element wait
+  (5 s, or `--timeout-ms`), as on Chrome; it waited the navigation
+  timeout (35 s on Firefox), and its error now says how to wait longer.
 
 - `eval` took a SyntaxError that the code threw as it ran for source
   that did not parse, and tried the next form: `eval "() =>

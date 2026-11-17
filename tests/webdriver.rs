@@ -212,6 +212,10 @@ fn scenario(args: &[&str], engine: &str) {
         json!({ "id": 25, "op": "eval", "expression": "window.__runs = (window.__runs || 0) + 1; JSON.parse('{bad')" }),
     );
     script.insert(script.len() - 1, json!({ "id": 26, "op": "eval", "expression": "window.__runs" }));
+    // `ax --grep`, and a wait for what never comes ends at the element
+    // wait (5 s), as on Chrome, not the navigation timeout.
+    script.insert(script.len() - 1, json!({ "id": 27, "op": "grep", "query": "Send" }));
+    script.insert(script.len() - 1, json!({ "id": 28, "op": "wait", "text": "Not on this page" }));
     if engine != "safari" {
         script.insert(script.len() - 1, json!({ "id": 21, "op": "pdf", "path": pdf.display().to_string() }));
     }
@@ -231,6 +235,10 @@ fn scenario(args: &[&str], engine: &str) {
         assert_eq!(step["ok"], false, "{engine}: step {id} throws: {step}");
     }
     assert_eq!(ok(&a, 26), 1, "{engine}: the statements ran once");
+    let grep = ok(&a, 27).as_str().unwrap_or_default().to_string();
+    assert!(grep.contains("line with \"Send\"") && grep.contains("button \"Send\" [ref="), "{engine}: {grep}");
+    let waited = a.iter().find(|x| x["id"] == 28).unwrap();
+    assert!(waited["error"].as_str().unwrap_or("").contains("within 5000 ms"), "{engine}: {waited}");
     let tree = ok(&a, 2).as_str().unwrap().to_string();
     for want in [
         "heading \"Shop\"",

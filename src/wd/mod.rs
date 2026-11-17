@@ -942,6 +942,17 @@ impl Driver {
                 let scope = scope.optional("ax")?;
                 self.snapshot(&view, scope.as_ref())
             }
+            // As on Chrome: the whole tree as text, then its lines with the
+            // words under their containers.
+            Command::Grep { query, limit, timeout_ms: _, no_wait: _, scope } => {
+                let view = AxView { full_text: true, all_refs: false, limit: 20_000, json_list: false };
+                let scope = scope.optional("ax")?;
+                let tree = match self.snapshot(&view, scope.as_ref())? {
+                    Value::String(tree) => tree,
+                    other => other.to_string(),
+                };
+                Ok(json!(crate::grep::grep_tree(&tree, query, limit.unwrap_or(crate::grep::DEFAULT_TREE_LINES))))
+            }
             Command::Click { target, timeout_ms: _, button, force, until_gone } => {
                 if until_gone.is_some() {
                     return Err(self.not_here(command));
@@ -1082,7 +1093,10 @@ impl Driver {
                 if frame.is_some() || download.is_some() {
                     return Err(self.not_here(command));
                 }
-                let timeout = timeout_ms.map_or(self.timeout, |ms| Duration::from_millis(ms.max(1.0) as u64));
+                // As on Chrome: the element wait (5 s unless set), not the
+                // navigation timeout, for what may never come.
+                let timeout = timeout_ms
+                    .map_or_else(crate::browser::element_wait, |ms| Duration::from_millis(ms.max(1.0) as u64));
                 let started = Instant::now();
                 if let Some(ms) = ms {
                     std::thread::sleep(Duration::from_millis(ms.max(0.0) as u64));
@@ -1093,7 +1107,7 @@ impl Driver {
                             return Ok(());
                         }
                         if started.elapsed() >= timeout {
-                            bail!("wait: {what} after {} ms", timeout.as_millis());
+                            bail!("wait: {what} within {} ms (wait longer with --timeout-ms)", timeout.as_millis());
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
@@ -1119,7 +1133,10 @@ impl Driver {
                             break;
                         }
                         if started.elapsed() >= timeout {
-                            bail!("wait: the URL is {now}, not {pattern:?}, after {} ms", timeout.as_millis());
+                            bail!(
+                                "wait: the URL is {now}, not {pattern:?}, within {} ms (wait longer with --timeout-ms)",
+                                timeout.as_millis()
+                            );
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
