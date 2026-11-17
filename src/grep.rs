@@ -157,14 +157,77 @@ fn alternatives(phrase: &str) -> Vec<String> {
     }
 }
 
-/// How the lines were found, as the reply says it.
-fn found_what(query: &str, by_words: bool, alts: &[String]) -> String {
-    if !alts.is_empty() {
-        format!("any of {}", alts.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(", "))
-    } else if by_words {
-        format!("all of {query:?}, in any order")
-    } else {
-        format!("{query:?}")
+/// A query written with a regular expression's escapes (`nodejs\\.org`, as
+/// for grep): the same without them, when it has any. `\\|` stays: it is
+/// alternation, read by [`alternatives`].
+fn unescaped(query: &str) -> Option<String> {
+    let mut out = String::with_capacity(query.len());
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        match chars.peek() {
+            Some(&next) if c == '\\' && next.is_ascii_punctuation() && next != '|' => {}
+            _ => out.push(c),
+        }
+    }
+    (out.len() < query.len()).then_some(out)
+}
+
+/// What a query found in the lines, and how it was read.
+struct Found {
+    /// Each matching line, with the character its match starts at.
+    hits: Vec<(usize, usize)>,
+    by_words: bool,
+    alts: Vec<String>,
+    /// The query as it matched: as written, or without its escapes.
+    query: String,
+}
+
+impl Found {
+    /// A line matches when it has the query as written, letter case aside.
+    /// When no line does and the query is several words, a line matches
+    /// when it has all of them in any order; when none does either and the
+    /// query is grep alternation (`a\\|b`), when it has any of its parts.
+    fn read(lowered: &Lowered, query: &str) -> Found {
+        let phrase = lower(query);
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        let mut by_words = false;
+        let mut hits = lowered.having(&[phrase.as_str()], true);
+        if hits.is_empty() && words.len() > 1 {
+            by_words = true;
+            hits = lowered.having(&words, true);
+        }
+        let mut alts = Vec::new();
+        if hits.is_empty() {
+            alts = alternatives(&phrase);
+            hits = lowered.having(&alts, false);
+        }
+        Found { hits, by_words, alts, query: query.to_string() }
+    }
+
+    /// [`Found::read`] of the query, and when that finds nothing, of the
+    /// query without its regular-expression escapes.
+    fn of(lowered: &Lowered, query: &str) -> Found {
+        let found = Found::read(lowered, query);
+        if found.hits.is_empty() {
+            if let Some(plain) = unescaped(query) {
+                let again = Found::read(lowered, &plain);
+                if !again.hits.is_empty() {
+                    return again;
+                }
+            }
+        }
+        found
+    }
+
+    /// How the lines were found, as the reply says it.
+    fn what(&self) -> String {
+        if !self.alts.is_empty() {
+            format!("any of {}", self.alts.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(", "))
+        } else if self.by_words {
+            format!("all of {:?}, in any order", self.query)
+        } else {
+            format!("{:?}", self.query)
+        }
     }
 }
 
@@ -176,8 +239,8 @@ fn found_what(query: &str, by_words: bool, alts: &[String]) -> String {
 /// alternation (`a\\|b`), when it has any of its parts. Matching lines
 /// closer than the context are one passage.
 pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
-    let phrase = lower(query.trim());
-    if phrase.is_empty() {
+    let query = query.trim();
+    if query.is_empty() {
         return "text --grep needs something to look for".to_string();
     }
     let context = context.min(MAX_CONTEXT);
@@ -185,19 +248,8 @@ pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
     // Lines that read as something, with their number in the text.
     let lines: Vec<(usize, &str)> =
         text.lines().enumerate().map(|(i, l)| (i + 1, l.trim())).filter(|(_, l)| !l.is_empty()).collect();
-    let lowered = Lowered::new(lines.iter().map(|(_, l)| *l));
-    let words: Vec<&str> = phrase.split_whitespace().collect();
-    let mut by_words = false;
-    let mut hits: Vec<(usize, usize)> = lowered.having(&[phrase.as_str()], true);
-    if hits.is_empty() && words.len() > 1 {
-        by_words = true;
-        hits = lowered.having(&words, true);
-    }
-    let mut alts = Vec::new();
-    if hits.is_empty() {
-        alts = alternatives(&phrase);
-        hits = lowered.having(&alts, false);
-    }
+    let found = Found::of(&Lowered::new(lines.iter().map(|(_, l)| *l)), query);
+    let hits = &found.hits;
     if hits.is_empty() {
         return format!(
             "no line of the text has {query:?} ({} lines searched). Text a page has not opened yet (closed \
@@ -209,7 +261,7 @@ pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
     // so a page that repeats the word on every line is still many short
     // passages and not one long one.
     let mut passages: Vec<Passage> = Vec::new();
-    for &(i, at) in &hits {
+    for &(i, at) in hits {
         let (from, to) = (i.saturating_sub(context), (i + context).min(lines.len() - 1));
         match passages.last_mut() {
             Some(p) if context > 0 && from <= p.to + 1 && p.hits.len() < PASSAGE_HITS => {
@@ -249,7 +301,7 @@ pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
         body.push_str(&part);
         shown += 1;
     }
-    let what = found_what(query, by_words, &alts);
+    let what = found.what();
     let head = if shown < total {
         format!("{shown} of {total} passages with {what} (--limit {total} for all; N: is the line of the text):")
     } else if total == 1 {
@@ -263,33 +315,69 @@ pub fn grep(text: &str, query: &str, context: usize, limit: usize) -> String {
 /// Matching lines `ax --grep` shows when `--limit` is not given.
 pub const DEFAULT_TREE_LINES: usize = 30;
 
+/// The most lines of a table row or list item that `ax --grep` prints whole
+/// around a match inside it.
+const RECORD_LINES: usize = 12;
+
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// Whether a tree line is a table row or a list item: what a match inside
+/// is one field of (a search result's snippet without its title, a cell
+/// without the rest of its row, says little).
+fn is_record(line: &str) -> bool {
+    let line = line.trim_start();
+    ["- row", "- listitem"]
+        .iter()
+        .any(|role| line.strip_prefix(role).is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', ':'])))
+}
+
+/// A matching tree line as shown: whole when it is short; a long one from
+/// its start when the match is near it, and otherwise its start, then the
+/// part around the match. Its ref is kept when the cut would lose it.
+fn tree_line(line: &str, at: usize) -> String {
+    /// Characters of the line's start (its role and the name's first
+    /// words) kept before a match further in.
+    const START_CHARS: usize = 40;
+    let depth = indent(line);
+    let room = BEFORE_CHARS + AFTER_CHARS + depth;
+    if line.len() <= room {
+        return line.to_string();
+    }
+    let mut out = if at <= depth + START_CHARS + BEFORE_CHARS {
+        window(line, 0, room)
+    } else {
+        let mut out: String = line.chars().take(depth + START_CHARS).collect();
+        out.push_str(&window(line, at - BEFORE_CHARS, room - depth - START_CHARS));
+        out
+    };
+    if let Some(from) = line.rfind(" [ref=") {
+        let end = line[from..].find(']').map_or(line.len(), |e| from + e + 1);
+        if !out.contains(&line[from..end]) {
+            out.push_str(&line[from..end]);
+        }
+    }
+    out
+}
+
 /// The lines of an `ax` text tree that mention `query`, each under the
 /// containers it sits in, so a ref comes with what it belongs to: the tree,
-/// pruned to what was asked for. Matching is as for [`grep`]. One pass; a
-/// container is printed once, before the first match inside it.
+/// pruned to what was asked for. A match inside a table row or a list item
+/// of up to [`RECORD_LINES`] lines comes with all of it. Matching is as for
+/// [`grep`]. One pass; a container is printed once, before the first match
+/// inside it.
 pub fn grep_tree(tree: &str, query: &str, limit: usize) -> String {
-    let phrase = lower(query.trim());
-    if phrase.is_empty() {
+    let query = query.trim();
+    if query.is_empty() {
         return "ax --grep needs something to look for".to_string();
     }
     let limit = limit.max(1);
-    let words: Vec<&str> = phrase.split_whitespace().collect();
     let mut all = tree.lines();
     let head = all.next().unwrap_or("");
     let lines: Vec<&str> = all.filter(|l| l.trim_start().starts_with("- ")).collect();
-    let lowered = Lowered::new(lines.iter().copied());
-    let lines_of = |found: Vec<(usize, usize)>| found.into_iter().map(|(i, _)| i).collect::<Vec<usize>>();
-    let mut by_words = false;
-    let mut hits = lines_of(lowered.having(&[phrase.as_str()], true));
-    if hits.is_empty() && words.len() > 1 {
-        by_words = true;
-        hits = lines_of(lowered.having(&words, true));
-    }
-    let mut alts = Vec::new();
-    if hits.is_empty() {
-        alts = alternatives(&phrase);
-        hits = lines_of(lowered.having(&alts, false));
-    }
+    let found = Found::of(&Lowered::new(lines.iter().copied()), query);
+    let hits = &found.hits;
     if hits.is_empty() {
         return format!(
             "{head}\nno line of the tree has {query:?} ({} lines searched). What a page has not opened yet (closed \
@@ -297,36 +385,72 @@ pub fn grep_tree(tree: &str, query: &str, limit: usize) -> String {
             lines.len()
         );
     }
-    let indent = |l: &str| l.len() - l.trim_start().len();
     // The open containers above the current line, and whether each is printed.
     let mut open: Vec<(usize, usize, bool)> = Vec::new();
     let mut out = String::new();
-    let mut next_hit = 0;
-    let shown = hits.len().min(limit);
+    // Matching lines printed, and the lines before `through` that a row or
+    // list item printed whole already covers.
+    let (mut shown, mut through) = (0, 0);
+    let mut full = false;
     for (i, line) in lines.iter().enumerate() {
-        if next_hit >= shown {
-            break;
-        }
         let depth = indent(line);
         while open.last().is_some_and(|(d, _, _)| *d >= depth) {
             open.pop();
         }
-        if hits[next_hit] == i {
-            next_hit += 1;
-            for (_, at, printed) in open.iter_mut().filter(|(_, _, printed)| !*printed) {
-                out.push_str(&window(lines[*at], 0, CONTEXT_CHARS + indent(lines[*at])));
-                out.push('\n');
-                *printed = true;
-            }
-            out.push_str(&window(line, 0, BEFORE_CHARS + AFTER_CHARS + depth));
-            out.push('\n');
+        if i < through {
             open.push((depth, i, true));
-        } else {
-            open.push((depth, i, false));
+            continue;
         }
+        if shown >= hits.len() || shown >= limit {
+            break;
+        }
+        if hits[shown].0 != i {
+            open.push((depth, i, false));
+            continue;
+        }
+        if shown > 0 && out.len() > REPLY_CHARS {
+            full = true;
+            break;
+        }
+        // The row or list item the match is in (or is), when it is small:
+        // its lines are `from..to`. Otherwise the matching line alone.
+        let record =
+            if is_record(line) { Some(i) } else { open.iter().rev().map(|o| o.1).find(|&o| is_record(lines[o])) };
+        let (from, to) = record
+            .and_then(|r| {
+                let end = lines[r + 1..].iter().take(RECORD_LINES).position(|l| indent(l) <= indent(lines[r]));
+                let end = end.or((lines.len() - r - 1 < RECORD_LINES).then_some(lines.len() - r - 1))?;
+                Some((r, r + 1 + end))
+            })
+            .unwrap_or((i, i + 1));
+        for (_, at, printed) in open.iter_mut().filter(|(_, at, printed)| !*printed && *at < from) {
+            out.push_str(&window(lines[*at], 0, CONTEXT_CHARS + indent(lines[*at])));
+            out.push('\n');
+            *printed = true;
+        }
+        for (j, line) in lines.iter().enumerate().take(to).skip(from) {
+            if hits.get(shown).is_some_and(|h| h.0 == j) {
+                out.push_str(&tree_line(line, hits[shown].1));
+                shown += 1;
+            } else {
+                out.push_str(&window(line, 0, CONTEXT_CHARS + indent(line)));
+            }
+            out.push('\n');
+        }
+        // The match's containers from the record on are printed now.
+        for o in open.iter_mut().filter(|o| o.1 >= from) {
+            o.2 = true;
+        }
+        open.push((depth, i, true));
+        through = to;
     }
-    let what = found_what(query, by_words, &alts);
-    let count = if shown < hits.len() {
+    let what = found.what();
+    let count = if full {
+        format!(
+            "{shown} of {} lines with {what} (the reply is full: add a word, or scope it with a target)",
+            hits.len()
+        )
+    } else if shown < hits.len() {
         format!("{shown} of {} lines with {what} (--limit {} for all)", hits.len(), hits.len())
     } else if hits.len() == 1 {
         format!("1 line with {what}")
@@ -504,13 +628,69 @@ mod tests {
             out,
             "page \"Elements\" http://x/el\n3 lines with \"DIALOG\", under their containers:\n- main:\n  - region \"Interactive\":\n    - table:\n      - row:\n        - cell: link \"<dialog>\" [ref=7] url=/el/dialog\n        - cell \"A dialog box or subwindow.\"\n- navigation \"Related\":\n  - link \"<dialog>\" [ref=20] url=/el/dialog"
         );
-        // The limit counts matching lines; what was left out is said.
+        // A match in one cell comes with its row.
+        let out = grep_tree(tree, "details", 30);
+        assert!(out.ends_with("      - row:\n        - cell: link \"<details>\" [ref=9] url=/el/details"), "{out}");
+        // The limit counts matching lines (a row begun is finished); what
+        // was left out is said.
         let out = grep_tree(tree, "dialog", 1);
-        assert!(out.contains("1 of 3 lines with \"dialog\" (--limit 3 for all)"), "{out}");
-        assert!(out.ends_with("[ref=7] url=/el/dialog"), "{out}");
+        assert!(out.contains("2 of 3 lines with \"dialog\" (--limit 3 for all)"), "{out}");
+        assert!(out.ends_with("[ref=7] url=/el/dialog\n        - cell \"A dialog box or subwindow.\""), "{out}");
         // Words in any order, and nothing found.
         assert!(grep_tree(tree, "url=/el/details link", 30).contains("1 line with all of"), "{out}");
         assert!(grep_tree(tree, "popover", 30).contains("no line of the tree has \"popover\" (12 lines searched)"));
+    }
+
+    #[test]
+    fn a_match_comes_with_its_row_or_list_item_when_that_is_small() {
+        // A search result: the snippet matches, the title is its sibling.
+        let tree = "page \"Results\" http://x/s\n- main:\n  - list:\n    - listitem:\n      - link \"Arm Holdings\" [ref=3] url=/wiki/Arm\n      - text: a reported approach in the weeks before the offering\n    - listitem:\n      - link \"Altera\" [ref=5] url=/wiki/Altera\n      - text: one of the largest listings\n  - table:\n    - row:\n      - cell \"Enel\"\n      - cell \"1999\"\n      - cell \"16.59\"";
+        let out = grep_tree(tree, "reported approach", 30);
+        assert_eq!(
+            out,
+            "page \"Results\" http://x/s\n1 line with \"reported approach\", under their containers:\n- main:\n  - list:\n    - listitem:\n      - link \"Arm Holdings\" [ref=3] url=/wiki/Arm\n      - text: a reported approach in the weeks before the offering"
+        );
+        let out = grep_tree(tree, "16.59", 30);
+        assert!(
+            out.ends_with(
+                "  - table:\n    - row:\n      - cell \"Enel\"\n      - cell \"1999\"\n      - cell \"16.59\""
+            ),
+            "{out}"
+        );
+        // Two matches in one list item: it is printed once, both counted.
+        let out = grep_tree(tree, "arm|offering", 30);
+        assert!(out.contains("2 lines with any of \"arm\", \"offering\""), "{out}");
+        assert_eq!(out.matches("Arm Holdings").count(), 1, "{out}");
+        assert!(!out.contains("Altera"), "{out}");
+        // A list item of many lines is not a record to print: the match alone.
+        let items: String = (0..40).map(|i| format!("\n    - link \"entry {i}\" [ref={i}] url=/e/{i}")).collect();
+        let big = format!("page \"Menu\" http://x/m\n- list:\n  - listitem:{items}");
+        let out = grep_tree(&big, "entry 17", 30);
+        assert!(out.ends_with("- list:\n  - listitem:\n    - link \"entry 17\" [ref=17] url=/e/17"), "{out}");
+    }
+
+    #[test]
+    fn a_query_with_regex_escapes_matches_without_them_when_it_matches_nothing_as_written() {
+        let tree = "page \"S\" http://x/\n- link \"nodejs.org\" [ref=1] url=https://nodejs.org/en/download\n- text: a\\.b as written";
+        assert!(grep_tree(tree, r"nodejs\.org", 30).contains("1 line with \"nodejs.org\""));
+        assert!(grep_tree(tree, r"a\.b", 30).contains("1 line with \"a\\\\.b\""));
+        assert!(grep_tree(tree, r"nodejs\.org\|absent", 30).contains("1 line with any of \"nodejs.org\", \"absent\""));
+        assert!(grep("see nodejs.org (LTS)", r"nodejs\.org \(LTS\)", 0, 5)
+            .starts_with("1 passage with \"nodejs.org (LTS)\""));
+    }
+
+    #[test]
+    fn a_long_tree_line_is_shown_around_its_match_with_its_ref_and_the_reply_is_bounded() {
+        let name = format!("{} needle {}", "a".repeat(2000), "z".repeat(2000));
+        let tree = format!("page \"L\" http://x/\n- main:\n  - link \"{name}\" [ref=42] url=/far");
+        let out = grep_tree(&tree, "needle", 30);
+        let line = out.lines().last().unwrap();
+        assert!(line.starts_with("  - link \"aaaa") && line.contains("…aaa") && line.contains(" needle zzz"), "{line}");
+        assert!(line.ends_with("… [ref=42]") && line.chars().count() < 520, "{line}");
+        let many: String = (0..5000).map(|i| format!("\n- text: needle {i} {}", "x".repeat(300))).collect();
+        let out = grep_tree(&format!("page \"M\" http://x/{many}"), "needle", 5000);
+        assert!(out.len() < REPLY_CHARS + 1000, "{}", out.len());
+        assert!(out.contains(" of 5000 lines with \"needle\" (the reply is full"), "{}", &out[..120]);
     }
 
     #[test]

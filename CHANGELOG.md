@@ -55,6 +55,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `ax --grep` prints a match with what it belongs to: a match inside a
+  table row or a list item of up to 12 lines comes with all of it (the
+  other cells of the row; a search result's title above the snippet that
+  matched), where only the matching line was printed under bare `row:`
+  and `listitem:` lines. `--limit 1` can so print a second match of the
+  same row.
+- `ax` prints a search engine's result link by the page it goes to:
+  Bing's `/ck/a?…&u=…`, Google's `/url?q=…` and DuckDuckGo's `/l/?uddg=…`
+  are decoded in `url=`, so `ax --grep nodejs.org` finds a result by its
+  site (it found none of Bing's), and a Bing results page's tree is 29%
+  smaller (13,113 to 9,368 bytes on one search). `get attr <ref> href`
+  still gives the link as the page has it.
+- `ax` shows a name, value or text up to a fifth over its limit whole
+  (180 characters for a name, 360 for text): a 168-character function
+  signature was cut 18 characters short, with a note about as long as
+  the cut.
+
 - `--engine safari`: when safaridriver gives up on a Safari that was slow
   to start ("timed out while connecting to a Safari instance"), the
   session is asked for once more instead of failing the start.
@@ -95,6 +112,16 @@ All notable changes to this project are documented here. The format follows
   sixteen times its size in memory.
 
 ### Fixed
+
+- `ax --grep` searches names and texts whole. It searched the tree as
+  `ax` prints it, so words past a name's 150th character or a text's
+  300th were never found, and a matching name came back cut. A long
+  matching line is shown from its start, then around the match, with its
+  ref.
+- `ax --grep` and `text --grep` read a query written as a regular
+  expression (`nodejs\.org`: a backslash before punctuation) without its
+  backslashes when it matches nothing as written: `--grep 'nodejs\.org'` found nothing on a
+  page full of `nodejs.org`.
 
 - `eval` over a WebDriver server (classic WebDriver) runs several
   statements on chromedriver too: its syntax error for the expression

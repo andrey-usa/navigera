@@ -181,7 +181,7 @@ impl Proxy {
 }
 
 /// `%XX` decoded, as curl reads a proxy URL's user and password.
-fn percent_decoded(s: &str) -> String {
+pub(crate) fn percent_decoded(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

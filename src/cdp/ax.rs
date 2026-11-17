@@ -246,11 +246,17 @@ const TEXT_MAX: usize = 300;
 /// Characters of a name or value shown before it cuts.
 const NAME_MAX: usize = 150;
 
+/// A text up to a fifth over its limit is shown whole: the note that says
+/// what was cut is about as long as what the cut would save, and reading
+/// the rest is a call more (a 168-character function signature was cut 18
+/// short).
+const WHOLE_WITHIN: usize = 5;
+
 /// `s` cut to `max` characters, saying how much was left out and, given the
 /// node it came from, how to read all of it.
 fn clip(s: &str, max: usize, read_by: Option<u64>) -> String {
     let n = s.chars().count();
-    if n <= max {
+    if n <= max + max / WHOLE_WITHIN {
         return s.to_string();
     }
     let mut out: String = s.chars().take(max).collect();
@@ -265,6 +271,41 @@ fn cut_note(omitted: usize, read_by: Option<u64>) -> String {
     }
 }
 
+/// Where a search engine's redirect link goes: the page a result names,
+/// which the link's own URL holds in a parameter (Bing's `/ck/a?…&u=a1` and
+/// base64, Google's `/url?q=`, DuckDuckGo's `/l/?uddg=`). The tree prints
+/// that, so a result is found by its site and the line is a third as long.
+/// `None` for any other link, and for a parameter that is not a plain web
+/// address or a path.
+fn destination(url: &str) -> Option<String> {
+    use base64::Engine as _;
+    let rest = url.strip_prefix("https://")?;
+    let (host, rest) = rest.split_once('/')?;
+    let (path, query) = rest.split_once('?')?;
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let param = |name: &str| {
+        query.split('&').find_map(|pair| pair.split_once('=').filter(|(key, _)| *key == name).map(|(_, value)| value))
+    };
+    let to = match (host, path) {
+        ("bing.com", "ck/a") => {
+            let coded = param("u")?.strip_prefix("a1")?;
+            String::from_utf8(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(coded.trim_end_matches('=')).ok()?,
+            )
+            .ok()?
+        }
+        ("duckduckgo.com", "l/") => crate::proxy::percent_decoded(param("uddg")?),
+        (host, "url") if host.strip_prefix("google.").is_some_and(|tld| tld.len() <= 6) => {
+            crate::proxy::percent_decoded(param("q").or_else(|| param("url"))?)
+        }
+        _ => return None,
+    };
+    // A web address, or (Bing's own tabs: Images, News) a path on the site.
+    let named =
+        to.starts_with("https://") || to.starts_with("http://") || (to.starts_with('/') && !to.starts_with("//"));
+    (named && to.len() <= 2000 && !to.chars().any(|c| c.is_whitespace() || c.is_control())).then_some(to)
+}
+
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| format!("\"{s}\""))
 }
@@ -273,7 +314,7 @@ fn quote(s: &str) -> String {
 /// (inside, it would read as part of the name).
 fn quote_clip(s: &str, max: usize) -> String {
     let n = s.chars().count();
-    if n <= max {
+    if n <= max + max / WHOLE_WITHIN {
         return quote(s);
     }
     let cut: String = s.chars().take(max).collect();
@@ -385,7 +426,7 @@ impl<'a> Tree<'a> {
 
     fn count_cut(&self, s: &str, max: usize) {
         let n = s.chars().count();
-        if n > max {
+        if n > max + max / WHOLE_WITHIN {
             self.cuts.set(self.cuts.get() + 1);
             self.cut_chars.set(self.cut_chars.get() + n - max);
         }
@@ -698,6 +739,9 @@ impl<'a> Tree<'a> {
     }
 
     fn short_url(&self, url: &str) -> String {
+        if let Some(to) = destination(url) {
+            return to;
+        }
         if !self.opts.origin.is_empty() {
             if let Some(rest) = url.strip_prefix(&self.opts.origin) {
                 if rest.starts_with('/') {
@@ -1291,6 +1335,38 @@ mod tests {
         n
     }
 
+    #[test]
+    fn a_search_result_link_prints_where_it_goes() {
+        let bing = "https://www.bing.com/ck/a?!&&p=9cc8JmltdHM9MTc5NDc4NzIwMA&ptn=3&ver=2&hsh=4&fclid=2c12&u=a1aHR0cHM6Ly9ub2RlanMub3JnL2VuL2Rvd25sb2Fk&ntb=1";
+        assert_eq!(destination(bing).as_deref(), Some("https://nodejs.org/en/download"));
+        assert_eq!(
+            destination(
+                "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fnodejs.org%2Fen%2Fabout%2Fprevious%2Dreleases&rut=0f"
+            )
+            .as_deref(),
+            Some("https://nodejs.org/en/about/previous-releases")
+        );
+        assert_eq!(
+            destination("https://www.google.com/url?sa=t&q=https://nodejs.org/&usg=x").as_deref(),
+            Some("https://nodejs.org/")
+        );
+        let tab = "https://www.bing.com/ck/a?!&&p=f714&u=a1L2ltYWdlcy9zZWFyY2g_cT1ub2RlLmpzK2N1cnJlbnQrTFRTK3ZlcnNpb24mRk9STT1IRFJTQzI&ntb=1";
+        assert_eq!(destination(tab).as_deref(), Some("/images/search?q=node.js+current+LTS+version&FORM=HDRSC2"));
+        // Not a redirect link, or not a plain web address inside: as it is.
+        for url in [
+            "https://www.bing.com/search?q=u&u=a1aHR0cHM6Ly9ub2RlanMub3Jn",
+            "https://example.com/ck/a?u=a1aHR0cHM6Ly9ub2RlanMub3Jn",
+            "https://www.bing.com/ck/a?u=a1amF2YXNjcmlwdDphbGVydCgxKQ",
+            "https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9hLmIvIGM",
+            "https://www.bing.com/ck/a?u=a1!!",
+            "https://www.bing.com/ck/a?u=a1Ly9ldmlsLmV4YW1wbGUv",
+            "https://www.google.com/url?q=javascript:alert(1)",
+            "https://www.google.com/search?q=https://nodejs.org/",
+            "http://www.bing.com/ck/a",
+        ] {
+            assert_eq!(destination(url), None, "{url}");
+        }
+    }
     #[test]
     fn renders_nested_tree_with_refs_on_actionable_nodes_only() {
         let nodes = vec![

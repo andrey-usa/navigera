@@ -40,7 +40,14 @@ page "Checkout — Acme" http://shop.test/checkout
   (default 2000).
 - An element on a long page by a word of its name: `ax --grep "<word>"`
   prints the lines that mention it under the containers they sit in, with
-  refs to act on (`--limit <lines>`, 30 by default).
+  refs to act on (`--limit <lines>`, 30 by default). A match in a table
+  row or a list item (a search result) comes with the rest of it: the
+  other cells, the title above a snippet. Plain words, not a regular
+  expression; `a|b` for either.
+- A table's rows in order (after a sort, the first three): `text
+  --selector table`, one row a line.
+- A search engine's result link prints the page it goes to (`url=`), so
+  `ax --grep "nodejs.org"` finds a result by its site.
 - One fact from a long page (a default, a price, a date): `text --grep
   "<word or phrase>"` prints the passages that mention it with the lines
   around them (`--context <lines>`, `--limit <passages>`), a few hundred
