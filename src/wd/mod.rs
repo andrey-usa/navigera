@@ -283,6 +283,22 @@ fn move_to(x: i64, y: i64) -> Value {
 /// The page's location and title.
 const URL_TITLE: &str = "() => [location.href, document.title]";
 
+/// How long an action is watched for a navigation to start.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Watch {
+    /// The page said none was planned: only one already seen is waited for.
+    No,
+    /// The page could not say: a moment.
+    Brief,
+    /// The page planned one, or its document is already going: as long as
+    /// a browser may take to announce it (it can trail the input's answer
+    /// by a task or two), ended as soon as it does.
+    Planned,
+}
+
+/// The longest a planned navigation is waited for to start.
+pub const NAV_PLANNED_WATCH: Duration = Duration::from_millis(150);
+
 /// How long a navigation waits: until the document is parsed, until it
 /// loaded (the default), or not at all.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -300,6 +316,12 @@ pub trait Wire: Send {
     /// Run `function` (an async function of `argsJson`, a JSON array as
     /// text) in the page; its answer is JSON text (see [`wrap`]).
     fn call(&mut self, function: &str, args_json: &str, timeout: Duration) -> Result<String>;
+    /// [`Wire::call`], and the session's tabs as they are meanwhile: one
+    /// round trip for the two where the wire takes commands together.
+    fn call_and_tabs(&mut self, function: &str, args_json: &str, timeout: Duration) -> Result<(String, Vec<String>)> {
+        let answer = self.call(function, args_json, timeout)?;
+        Ok((answer, self.tabs()?))
+    }
     /// `eval`: the value of a script, as JSON.
     fn evaluate(&mut self, source: &str, timeout: Duration) -> Result<Value>;
     /// W3C input actions (the same shape in both protocols).
@@ -338,10 +360,8 @@ pub trait Wire: Send {
     /// another: a tab behind another gets no frames, and a driver waits
     /// seconds for one at every press there.
     fn front(&mut self) {}
-    /// Wait for a navigation an action started, if one did. `watch`: the
-    /// page could not say whether one did, so the action is watched for a
-    /// moment; without it only a navigation already seen is waited for.
-    fn settle(&mut self, _timeout: Duration, _watch: bool) {}
+    /// Wait for a navigation an action started, if one did.
+    fn settle(&mut self, _timeout: Duration, _watch: Watch) {}
     fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>>;
     /// The page printed to PDF, by the browser's own print.
     fn pdf(&mut self, landscape: bool, background: bool) -> Result<Vec<u8>>;
@@ -597,6 +617,12 @@ impl Driver {
         Ok(serde_json::from_str(ok_text(&answer)?)?)
     }
 
+    /// [`Driver::call`] with the session's tabs, read as the call runs.
+    fn call_tabs(&mut self, function: &str, args: Value) -> Result<(Value, Vec<String>)> {
+        let (answer, tabs) = self.wire.call_and_tabs(function, &args.to_string(), self.timeout)?;
+        Ok((serde_json::from_str(ok_text(&answer)?)?, tabs))
+    }
+
     fn url_title(&mut self) -> Result<(String, String)> {
         let v = self.call(URL_TITLE, json!([]))?;
         let at = |i: usize| v.get(i).and_then(Value::as_str).unwrap_or("").to_string();
@@ -604,19 +630,19 @@ impl Driver {
     }
 
     fn state(&mut self) -> Result<Value> {
-        let (url, title) = self.url_title()?;
-        self.state_of(url, title)
+        let (v, tabs) = self.call_tabs(URL_TITLE, json!([]))?;
+        let at = |i: usize| v.get(i).and_then(Value::as_str).unwrap_or("").to_string();
+        Ok(self.state_of(at(0), at(1), tabs))
     }
 
-    fn state_of(&mut self, url: String, title: String) -> Result<Value> {
-        let tabs = self.wire.tabs()?;
+    fn state_of(&mut self, url: String, title: String, tabs: Vec<String>) -> Value {
         if tabs.len() > self.tabs_seen {
             self.wire.front();
         }
         self.tabs_seen = tabs.len();
         let current = self.wire.current_tab();
         let tab = tabs.iter().position(|t| *t == current).unwrap_or(0);
-        Ok(json!({ "tab": tab, "tabs": tabs.len(), "url": url, "title": title }))
+        json!({ "tab": tab, "tabs": tabs.len(), "url": url, "title": title })
     }
 
     /// The page expression that finds `target` (auto-waiting as Chrome's
@@ -637,13 +663,16 @@ impl Driver {
     }
 
     /// [`Driver::on`] for an op that leaves the page where it is: what
-    /// `then` gave, and the page's state read in the same call.
+    /// `then` gave, and the page's state read in the same round trip.
     fn on_here(&mut self, target: &Target, what: &str, then: &str, args: Value) -> Result<(Value, Value)> {
-        let read = format!("async (el, ...args) => [await ({then})(el, ...args), location.href, document.title]");
-        let mut v = self.on(target, what, &read, args)?;
+        let finder = self.finder(target, what);
+        let function = format!(
+            "async (...args) => {{ const el = await ({finder}); return [await ({then})(el, ...args), location.href, document.title]; }}"
+        );
+        let (mut v, tabs) = self.call_tabs(&function, args).map_err(|e| e.context(what.to_string()))?;
         let text = |v: &Value, i: usize| v.get(i).and_then(Value::as_str).unwrap_or("").to_string();
         let (url, title) = (text(&v, 1), text(&v, 2));
-        Ok((v.get_mut(0).map(Value::take).unwrap_or(Value::Null), self.state_of(url, title)?))
+        Ok((v.get_mut(0).map(Value::take).unwrap_or(Value::Null), self.state_of(url, title, tabs)))
     }
 
     fn point(&mut self, target: &Target, what: &str, force: bool) -> Result<(i64, i64)> {
@@ -660,7 +689,7 @@ impl Driver {
         } else {
             self.wire.actions(actions)?;
         }
-        self.wire.settle(self.timeout, true);
+        self.wire.settle(self.timeout, Watch::Brief);
         Ok(())
     }
 
@@ -677,16 +706,20 @@ impl Driver {
         } else {
             self.wire.actions(actions)?;
         }
-        // A document already replaced answers without a verdict.
-        let read = self.call(NAV_VERDICT, json!([])).ok();
-        let text = |i: usize| read.as_ref().and_then(|v| v.get(i)).and_then(Value::as_str).map(str::to_string);
-        match (read.as_ref().and_then(|v| v.get(0)).and_then(Value::as_bool), text(1), text(2)) {
+        // A document already replaced answers without a verdict; one on
+        // its way out may not answer at all.
+        let read = self.call_tabs(NAV_VERDICT, json!([]));
+        let gone = read.is_err();
+        let (read, tabs) = read.unwrap_or_default();
+        let text = |i: usize| read.get(i).and_then(Value::as_str).map(str::to_string);
+        match (read.get(0).and_then(Value::as_bool), text(1), text(2)) {
             (Some(false), Some(url), Some(title)) => {
-                self.wire.settle(self.timeout, false);
-                self.state_of(url, title)
+                self.wire.settle(self.timeout, Watch::No);
+                Ok(self.state_of(url, title, tabs))
             }
-            _ => {
-                self.wire.settle(self.timeout, true);
+            (planned, ..) => {
+                let watch = if gone || planned == Some(true) { Watch::Planned } else { Watch::Brief };
+                self.wire.settle(self.timeout, watch);
                 self.state()
             }
         }

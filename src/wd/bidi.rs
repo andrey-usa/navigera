@@ -15,7 +15,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::{self, stream::MaybeTlsStream, Message, WebSocket};
 
-use super::{wrap, Wait, Wire, LISTEN};
+use super::{wrap, Wait, Watch, Wire, LISTEN};
 use crate::cdp::{Route, RouteAction};
 
 /// Events every session listens to.
@@ -901,13 +901,90 @@ impl Bidi {
 
     fn top_contexts(&mut self) -> Result<Vec<String>> {
         let tree = self.send("browsingContext.getTree", json!({ "maxDepth": 0 }), Duration::from_secs(10))?;
+        Ok(self.tops_of(&tree))
+    }
+
+    /// The top-level contexts of a `getTree` answer.
+    fn tops_of(&mut self, tree: &Value) -> Vec<String> {
         if self.attached {
-            adopt_opened(&mut self.own, &tree);
+            adopt_opened(&mut self.own, tree);
         }
-        Ok(tree["contexts"]
+        tree["contexts"]
             .as_array()
             .map(|c| c.iter().filter_map(|c| c["context"].as_str().map(str::to_string)).collect())
-            .unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// The session's tabs among the browser's.
+    fn tabs_among(&mut self, all: Vec<String>) -> Vec<String> {
+        if !self.attached {
+            return all;
+        }
+        // In the user's browser: the tabs this session opened, or its
+        // pages did, and that are still there.
+        self.own.retain(|o| all.contains(o));
+        self.own.clone()
+    }
+
+    fn call_params(&self, function: &str, args_json: &str) -> Value {
+        json!({
+            "functionDeclaration": wrap(function),
+            "awaitPromise": true,
+            "target": { "context": self.context },
+            "arguments": [{ "type": "string", "value": args_json }],
+            "resultOwnership": "none",
+        })
+    }
+
+    /// What a `script.callFunction` answer holds: the function's text.
+    fn call_answer(r: &Value) -> Result<String> {
+        if r["type"] == "exception" {
+            bail!("{}", r["exceptionDetails"]["text"].as_str().unwrap_or("the page's script failed"));
+        }
+        match &r["result"]["value"] {
+            Value::String(s) => Ok(s.clone()),
+            _ => bail!("the page's answer was not text ({})", r["result"]["type"]),
+        }
+    }
+
+    /// Two commands sent together, and the answer to each: the browser
+    /// works on both at once, one round trip for the two.
+    fn send_two(
+        &mut self,
+        a: (&str, Value),
+        b: (&str, Value),
+        timeout: Duration,
+    ) -> Result<(Result<Value>, Result<Value>)> {
+        if self.closed {
+            bail!("{}: the browser is gone", a.0);
+        }
+        let ids = [self.write(a.0, a.1)?, self.write(b.0, b.1)?];
+        let names = [a.0, b.0];
+        let mut got: [Option<Result<Value>>; 2] = [None, None];
+        let deadline = Instant::now() + timeout;
+        while got.iter().any(Option::is_none) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                bail!("{}: no answer from the browser in {} ms", names[0], timeout.as_millis());
+            }
+            let Some(mut v) = self.read_one(left.min(READ_SLICE))? else { continue };
+            if v["type"] == "event" {
+                self.on_event(v);
+                continue;
+            }
+            let Some(i) = ids.iter().position(|id| v["id"].as_u64() == Some(*id)) else { continue };
+            got[i] = Some(match v["type"].as_str() {
+                Some("success") => Ok(v["result"].take()),
+                _ => Err(anyhow!(
+                    "{}: {}: {}",
+                    names[i],
+                    v["error"].as_str().unwrap_or("error"),
+                    v["message"].as_str().unwrap_or("")
+                )),
+            });
+        }
+        let [a, b] = got;
+        Ok((a.unwrap_or_else(|| Err(anyhow!("no answer"))), b.unwrap_or_else(|| Err(anyhow!("no answer")))))
     }
 }
 
@@ -928,26 +1005,11 @@ impl Wire for Bidi {
     }
 
     fn call(&mut self, function: &str, args_json: &str, timeout: Duration) -> Result<String> {
-        let params = json!({
-            "functionDeclaration": wrap(function),
-            "awaitPromise": true,
-            "target": { "context": self.context },
-            "arguments": [{ "type": "string", "value": args_json }],
-            "resultOwnership": "none",
-        });
+        let params = self.call_params(function, args_json);
         let mut tried = false;
         loop {
             match self.send("script.callFunction", params.clone(), timeout) {
-                Ok(r) => {
-                    if r["type"] == "exception" {
-                        let text = r["exceptionDetails"]["text"].as_str().unwrap_or("the page's script failed");
-                        bail!("{text}");
-                    }
-                    return match &r["result"]["value"] {
-                        Value::String(s) => Ok(s.clone()),
-                        _ => bail!("the page's answer was not text ({})", r["result"]["type"]),
-                    };
-                }
+                Ok(r) => return Self::call_answer(&r),
                 // A document replaced while the call ran (a navigation): once
                 // more, in the new one.
                 Err(e)
@@ -958,7 +1020,7 @@ impl Wire for Bidi {
                     } =>
                 {
                     tried = true;
-                    self.settle(timeout, true);
+                    self.settle(timeout, Watch::Planned);
                 }
                 Err(e) => return Err(e),
             }
@@ -981,6 +1043,25 @@ impl Wire for Bidi {
             bail!("{}", r["exceptionDetails"]["text"].as_str().unwrap_or("the script threw"));
         }
         Ok(Self::remote_to_json(&r["result"]))
+    }
+
+    fn call_and_tabs(&mut self, function: &str, args_json: &str, timeout: Duration) -> Result<(String, Vec<String>)> {
+        let (called, tree) = self.send_two(
+            ("script.callFunction", self.call_params(function, args_json)),
+            ("browsingContext.getTree", json!({ "maxDepth": 0 })),
+            timeout,
+        )?;
+        let answer = match called {
+            Ok(r) => Self::call_answer(&r)?,
+            // The document was replaced as the call came (a navigation):
+            // made again by itself, which waits for the new one.
+            Err(_) => self.call(function, args_json, timeout)?,
+        };
+        let all = match tree {
+            Ok(tree) => self.tops_of(&tree),
+            Err(_) => self.top_contexts()?,
+        };
+        Ok((answer, self.tabs_among(all)))
     }
 
     fn actions(&mut self, actions: Value) -> Result<()> {
@@ -1089,10 +1170,15 @@ impl Wire for Bidi {
         }
     }
 
-    fn settle(&mut self, timeout: Duration, watch: bool) {
+    fn settle(&mut self, timeout: Duration, watch: Watch) {
         // A navigation the action started announces itself within a few
         // milliseconds; then its load is waited for.
-        let watch_until = Instant::now() + if watch { NAV_START_WATCH } else { Duration::ZERO };
+        let watch_until = Instant::now()
+            + match watch {
+                Watch::No => Duration::ZERO,
+                Watch::Brief => NAV_START_WATCH,
+                Watch::Planned => super::NAV_PLANNED_WATCH,
+            };
         while self.nav.is_none() && Instant::now() < watch_until {
             match self.read_one(watch_until.saturating_duration_since(Instant::now())) {
                 Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
@@ -1165,7 +1251,7 @@ impl Wire for Bidi {
             json!({ "context": self.context, "delta": delta }),
             Duration::from_secs(30),
         )?;
-        self.settle(Duration::from_secs(30), true);
+        self.settle(Duration::from_secs(30), Watch::Brief);
         Ok(())
     }
 
@@ -1176,13 +1262,7 @@ impl Wire for Bidi {
 
     fn tabs(&mut self) -> Result<Vec<String>> {
         let all = self.top_contexts()?;
-        if !self.attached {
-            return Ok(all);
-        }
-        // In the user's browser: the tabs this session opened, or its
-        // pages did, and that are still there.
-        self.own.retain(|o| all.contains(o));
-        Ok(self.own.clone())
+        Ok(self.tabs_among(all))
     }
 
     fn current_tab(&self) -> String {

@@ -66,8 +66,13 @@ All notable changes to this project are documented here. The format follows
   click that stays on the page: 44 to 10 ms over BiDi, 83 to 20-26 ms
   over classic WebDriver (medians of 40, two rounds). Where the page cannot
   say (no Navigation API, or a listener that hides the click), the
-  click waits as before. `fill` and `select` there read the page's URL
-  and title in the call that sets the value: one round trip fewer.
+  click waits as before; where it says a navigation is planned, the
+  click waits for it to start for up to 150 ms, as on Chrome (30 ms was
+  too short for chromedriver on a macOS runner: a button that submits a
+  form by script answered with the page it was leaving, or failed with
+  "Cannot find context"). `fill` and `select` there read the page's URL
+  and title in the call that sets the value, and over BiDi every op
+  reads the page's state and the tab list in one round trip, not two.
 
 - `ax --grep` prints a match with what it belongs to: a match inside a
   table row or a list item of up to 12 lines comes with all of it (the

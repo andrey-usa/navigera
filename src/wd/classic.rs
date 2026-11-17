@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::{wrap, Wait, Wire, CONSOLE_HOOK, DIALOG_HOOK, LISTEN};
+use super::{wrap, Wait, Watch, Wire, CONSOLE_HOOK, DIALOG_HOOK, LISTEN};
 
 /// The key WebDriver names an element reference by.
 const ELEMENT_KEY: &str = "element-6066-11e4-a52e-4f735466cecf";
@@ -692,10 +692,12 @@ impl Wire for Classic {
         Ok(0)
     }
 
-    fn settle(&mut self, timeout: Duration, watch: bool) {
-        if !watch {
-            return;
-        }
+    fn settle(&mut self, timeout: Duration, watch: Watch) {
+        let watch = match watch {
+            Watch::No => return,
+            Watch::Brief => NAV_WATCH,
+            Watch::Planned => super::NAV_PLANNED_WATCH,
+        };
         // The page's own flag says whether the action started a navigation;
         // if it did, the new document is waited for until it has loaded.
         let started = Instant::now();
@@ -708,7 +710,7 @@ impl Wire for Classic {
                 Duration::from_secs(5),
             ) {
                 Ok(v) => match (v[0].as_str().unwrap_or(""), v[1].as_str().unwrap_or("")) {
-                    ("same", _) if started.elapsed() >= NAV_WATCH => break,
+                    ("same", _) if started.elapsed() >= watch => break,
                     ("new", "complete") => break,
                     _ => {}
                 },
