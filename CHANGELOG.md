@@ -139,6 +139,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `--engine safari` (experimental): a safaridriver that exits before it
+  serves is started again on another port, three tries in all (it exited
+  once with status 1 at a session that followed another one at once),
+  and when it keeps exiting the error quotes what it printed last.
+
 - On the WebDriver engines (experimental), a click after the page had
   opened a tab (a link with `target=_blank`, `window.open`) took 5
   seconds with chromedriver, classic and BiDi: the new tab came to the

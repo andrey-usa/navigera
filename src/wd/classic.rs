@@ -424,24 +424,72 @@ fn free_port() -> Result<u16> {
 }
 
 /// Start `exe` (a WebDriver server that takes `--port`) and wait until it
-/// answers `/status`.
+/// answers `/status`. One that exits before it serves is started again on
+/// another port, three tries in all: the port can be taken between
+/// [`free_port`] and the driver's bind, and safaridriver once exited with
+/// status 1 at a test's second session, the first one's just ended (macOS
+/// runner, nothing printed: its output was not read then). What it printed
+/// last is in the error when every try fails.
 fn start_driver(exe: &str, args: &[String], timeout: Duration) -> Result<(Child, String)> {
-    let port = free_port()?;
+    let started = Instant::now();
+    let bound = timeout.max(Duration::from_secs(20));
+    let mut tries = 0u32;
+    loop {
+        tries += 1;
+        match start_driver_once(exe, args, started, bound) {
+            Ok(served) => return Ok(served),
+            Err(Start::Exited(e)) if tries < 3 && started.elapsed() + Duration::from_secs(1) < bound => {
+                crate::timing::log(&format!("[webdriver] {e:#}; starting it again"));
+                std::thread::sleep(Duration::from_millis(250) * tries);
+            }
+            Err(Start::Exited(e) | Start::Failed(e)) => return Err(e),
+        }
+    }
+}
+
+/// How one start of a driver went wrong: it exited before it served (worth
+/// another try), or anything else.
+enum Start {
+    Exited(anyhow::Error),
+    Failed(anyhow::Error),
+}
+
+fn start_driver_once(exe: &str, args: &[String], started: Instant, bound: Duration) -> Result<(Child, String), Start> {
+    let port = free_port().map_err(Start::Failed)?;
     let mut child = std::process::Command::new(exe)
         .arg(format!("--port={port}"))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("could not start {exe}"))?;
+        .with_context(|| format!("could not start {exe}"))
+        .map_err(Start::Failed)?;
+    // Read for as long as it runs, so a talkative driver never blocks on a
+    // full pipe; the last lines are kept for an error.
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Tail::default()));
+    if let Some(err) = child.stderr.take() {
+        let said = std::sync::Arc::clone(&said);
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines() {
+                let Ok(line) = line else { break };
+                said.lock().unwrap_or_else(|e| e.into_inner()).push(&line);
+            }
+            said.lock().unwrap_or_else(|e| e.into_inner()).done = true;
+        });
+    }
     let url = format!("http://127.0.0.1:{port}");
-    let mut http = Http::new(&url)?;
-    let started = Instant::now();
-    let bound = timeout.max(Duration::from_secs(20));
+    let mut http = Http::new(&url).map_err(Start::Failed)?;
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            bail!("{exe} exited ({status}) before it served WebDriver");
+            // Its last lines may still be on their way through the pipe.
+            let until = Instant::now() + Duration::from_millis(200);
+            while !said.lock().unwrap_or_else(|e| e.into_inner()).done && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let text = said.lock().unwrap_or_else(|e| e.into_inner()).text();
+            let printed = if text.is_empty() { " and printed nothing".to_string() } else { format!(": {text}") };
+            return Err(Start::Exited(anyhow!("{exe} exited ({status}) before it served WebDriver{printed}")));
         }
         if let Ok(v) = http.request("GET", "/status", None, Duration::from_secs(2)) {
             if v["ready"].as_bool() != Some(false) {
@@ -450,9 +498,38 @@ fn start_driver(exe: &str, args: &[String], timeout: Duration) -> Result<(Child,
         }
         if started.elapsed() > bound {
             let _ = child.kill();
-            bail!("{exe} did not answer on port {port} in {} s", bound.as_secs());
+            let _ = child.wait();
+            return Err(Start::Failed(anyhow!("{exe} did not answer on port {port} in {} s", bound.as_secs())));
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The last lines a driver printed: ten at most, each cut at 300 bytes.
+#[derive(Default)]
+struct Tail {
+    lines: std::collections::VecDeque<String>,
+    done: bool,
+}
+
+impl Tail {
+    fn push(&mut self, line: &str) {
+        let line = line.trim_end();
+        if line.is_empty() {
+            return;
+        }
+        let mut cut = line.len().min(300);
+        while !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if self.lines.len() == 10 {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line[..cut].to_string());
+    }
+
+    fn text(&self) -> String {
+        self.lines.iter().map(String::as_str).collect::<Vec<_>>().join(" / ")
     }
 }
 
@@ -863,6 +940,66 @@ impl Wire for Classic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A driver for [`start_driver`]: a shell script that counts its starts
+    /// in `n` and runs `body` with the port it was given in `$port`.
+    #[cfg(unix)]
+    fn fake_driver(dir: &std::path::Path, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = dir.join("driver");
+        let script = format!("#!/bin/sh\nport=${{1#--port=}}\necho x >> '{}'\n{body}\n", dir.join("n").display());
+        std::fs::write(&exe, script).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exe.display().to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_driver_that_keeps_exiting_is_tried_three_times_and_its_words_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = fake_driver(dir.path(), "echo 'Could not start: a session is already running' >&2\nexit 1");
+        let e = start_driver(&exe, &[], Duration::from_secs(20)).expect_err("it never serves");
+        let text = format!("{e:#}");
+        assert!(text.contains("before it served WebDriver: Could not start: a session is already running"), "{text}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("n")).unwrap().lines().count(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_driver_that_exits_once_is_started_again() {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let serve = r#"[ "$(wc -l < "$(dirname "$0")/n")" -ge 2 ] || exit 1
+exec python3 -c '
+import http.server as h, socketserver
+class H(h.BaseHTTPRequestHandler):
+    def do_GET(s):
+        b = b"{\"value\": {\"ready\": true}}"
+        s.send_response(200); s.send_header("Content-Length", str(len(b))); s.end_headers(); s.wfile.write(b)
+socketserver.TCPServer(("127.0.0.1", '"$port"'), H).serve_forever()'"#;
+        let exe = fake_driver(dir.path(), serve);
+        let (mut child, url) = start_driver(&exe, &[], Duration::from_secs(20)).expect("served on the second start");
+        assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("n")).unwrap().lines().count(), 2);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_drivers_last_lines_are_ten_at_most_and_cut_on_a_character() {
+        let mut t = Tail::default();
+        for i in 0..12 {
+            t.push(&format!("line {i}"));
+        }
+        t.push("");
+        assert_eq!(t.lines.len(), 10);
+        assert!(t.text().starts_with("line 2 / line 3"), "{}", t.text());
+        let mut t = Tail::default();
+        t.push(&"é".repeat(400));
+        assert_eq!(t.lines[0].len(), 300);
+    }
 
     #[test]
     fn a_servers_url_keeps_its_path_and_its_key_is_never_shown() {
