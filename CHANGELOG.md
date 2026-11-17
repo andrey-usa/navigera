@@ -73,6 +73,10 @@ All notable changes to this project are documented here. The format follows
   "Cannot find context"). `fill` and `select` there read the page's URL
   and title in the call that sets the value, and over BiDi every op
   reads the page's state and the tab list in one round trip, not two.
+  `check` and `uncheck` click the same way. `press Enter` asks the page
+  too (a form it submits, a link it follows); any other key, and text
+  typed without a line break, cannot load a document and are not
+  watched for one, as on Chrome.
 
 - `ax --grep` prints a match with what it belongs to: a match inside a
   table row or a list item of up to 12 lines comes with all of it (the

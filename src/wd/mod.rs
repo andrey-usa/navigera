@@ -149,9 +149,24 @@ const POINT_EL: &str = r#"function (el, force) {
 /// document unless the page cancels it (a router's link, a form a script
 /// sends itself, a form that fails validation); anything else navigates
 /// only by script, which the Navigation API reports as it happens.
-const ARM_NAV: &str = r#"function (el) {
+const ARM_NAV: &str = r#"function (el, key) {
     const K = Symbol.for('navigera.nav');
     if (window[K]) window[K].off();
+    if (key) {
+        // Enter goes to the focused element, through shadow roots and
+        // frames.
+        el = document.activeElement;
+        for (;;) {
+            if (el && el.shadowRoot && el.shadowRoot.activeElement) { el = el.shadowRoot.activeElement; continue; }
+            if (el && (el.localName === 'iframe' || el.localName === 'frame')) {
+                let d = null; try { d = el.contentDocument; } catch (_) {}
+                if (!d || !d.activeElement) return true;
+                el = d.activeElement; continue;
+            }
+            break;
+        }
+        if (!el || el.nodeType !== 1) return false;
+    }
     const w = el.ownerDocument.defaultView;
     // Only a navigation of the tab's own document is waited for.
     const here = (target) => {
@@ -161,8 +176,10 @@ const ARM_NAV: &str = r#"function (el) {
         return w === w.top;
     };
     const a = el.closest('a[href], area[href]');
-    const c = a ? null : el.closest('button, input');
-    const form = c && c.form && (c.type === 'submit' || c.type === 'image') ? c.form : null;
+    // A press submits through a submit button; Enter, from any field of
+    // the form.
+    const c = a ? null : key ? (el.form ? el : null) : el.closest('button, input');
+    const form = c && c.form && (key || c.type === 'submit' || c.type === 'image') ? c.form : null;
     // `may`: the click loads a document here; `opens`: in another tab,
     // which the browser takes a moment to list.
     let may = false, opens = false;
@@ -214,6 +231,13 @@ const ARM_NAV: &str = r#"function (el) {
     n.verdict = () => {
         n.off();
         if (n.planned) return true;
+        if (key) {
+            if (n.opened || opens) return null;
+            if (n.submit) return !n.submit.defaultPrevented;
+            if (n.invalid) return false;
+            if (a && may) return n.click ? !n.click.defaultPrevented : null;
+            return told ? false : null;
+        }
         if (!n.click) return null;
         if (n.opened || (opens && !n.click.defaultPrevented)) return null;
         if (may) {
@@ -225,6 +249,8 @@ const ARM_NAV: &str = r#"function (el) {
         return told ? false : null;
     };
     Object.defineProperty(window, K, { value: n, configurable: true, enumerable: false, writable: true });
+    // For Enter: whether it can load a document from here at all.
+    return !!(el.form || el.closest('a[href], button, [role=button], [role=link]'));
 }"#;
 
 /// After the click: the verdict of [`ARM_NAV`], and the page's URL and
@@ -682,6 +708,17 @@ impl Driver {
     }
 
     fn act(&mut self, actions: Value) -> Result<()> {
+        self.act_watched(actions, Watch::Brief)
+    }
+
+    /// Keys typed as text: only Enter can load a new document (a form's
+    /// implicit submission, a link it follows), as on Chrome's engine.
+    fn type_keys(&mut self, text: &str) -> Result<()> {
+        let watch = if text.contains('\n') { Watch::Brief } else { Watch::No };
+        self.act_watched(type_actions(text), watch)
+    }
+
+    fn act_watched(&mut self, actions: Value, watch: Watch) -> Result<()> {
         // While `mouse down` or `keydown` holds something, nothing lets go
         // of it but its own `up`.
         if self.buttons != 0 || !self.keys.is_empty() {
@@ -689,7 +726,7 @@ impl Driver {
         } else {
             self.wire.actions(actions)?;
         }
-        self.wire.settle(self.timeout, Watch::Brief);
+        self.wire.settle(self.timeout, watch);
         Ok(())
     }
 
@@ -706,6 +743,13 @@ impl Driver {
         } else {
             self.wire.actions(actions)?;
         }
+        self.after_armed(Watch::Brief)
+    }
+
+    /// After an action [`ARM_NAV`] watched: the page's state, once the
+    /// navigation the page says is planned has loaded. `unknown`: how to
+    /// watch when the page cannot say.
+    fn after_armed(&mut self, unknown: Watch) -> Result<Value> {
         // A document already replaced answers without a verdict; one on
         // its way out may not answer at all.
         let read = self.call_tabs(NAV_VERDICT, json!([]));
@@ -718,7 +762,7 @@ impl Driver {
                 Ok(self.state_of(url, title, tabs))
             }
             (planned, ..) => {
-                let watch = if gone || planned == Some(true) { Watch::Planned } else { Watch::Brief };
+                let watch = if gone || planned == Some(true) { Watch::Planned } else { unknown };
                 self.wire.settle(self.timeout, watch);
                 self.state()
             }
@@ -898,7 +942,7 @@ impl Driver {
                 let t = target.target("fill")?;
                 if *keys {
                     self.on(&t, "fill", crate::cdp::page::FOCUS_SELECT_ALL, json!([]))?;
-                    self.act(type_actions(value))?;
+                    self.type_keys(value)?;
                     self.state()
                 } else {
                     Ok(self.on_here(&t, "fill", crate::cdp::page::FILL_EL_JS, json!([value]))?.1)
@@ -908,7 +952,7 @@ impl Driver {
                 if let Some(t) = target.optional("insert-text")? {
                     self.on(&t, "insert-text", crate::cdp::page::FOCUS_EL, json!([]))?;
                 }
-                self.act(type_actions(value))?;
+                self.type_keys(value)?;
                 self.state()
             }
             Command::Select { target, value, timeout_ms: _, add } => {
@@ -922,8 +966,7 @@ impl Driver {
                 let t = target.target(if *checked { "check" } else { "uncheck" })?;
                 let now = self.on(&t, "check", "(el) => !!el.checked", json!([]))?;
                 if now.as_bool() != Some(*checked) {
-                    let (x, y) = self.point(&t, "check", false)?;
-                    self.act(click_actions(x, y, 0, 1))?;
+                    self.press(&t, "check", false, 0, 1)?;
                     let after = self.on(&t, "check", "(el) => !!el.checked", json!([]))?;
                     if after.as_bool() != Some(*checked) {
                         bail!("check: the click did not change the element's state (still {after})");
@@ -940,14 +983,23 @@ impl Driver {
                 if let Some(t) = target.optional("press")? {
                     self.on(&t, "press", crate::cdp::page::FOCUS_EL, json!([]))?;
                 }
-                self.act(press_actions(key)?)?;
-                self.state()
+                // Only Enter can load a new document (a form's implicit
+                // submission, a link it follows), as on Chrome's engine;
+                // the page says whether it did.
+                if !matches!(key.to_ascii_lowercase().as_str(), "enter" | "return") {
+                    self.act_watched(press_actions(key)?, Watch::No)?;
+                    return self.state();
+                }
+                let armed = format!("() => ({ARM_NAV})(null, true)");
+                let may = self.call(&armed, json!([])).ok().and_then(|v| v.as_bool()).unwrap_or(true);
+                self.act_watched(press_actions(key)?, Watch::No)?;
+                self.after_armed(if may { Watch::Planned } else { Watch::Brief })
             }
             Command::Type { value, target, timeout_ms: _ } => {
                 if let Some(t) = target.optional("type")? {
                     self.on(&t, "type", crate::cdp::page::FOCUS_EL, json!([]))?;
                 }
-                self.act(type_actions(value))?;
+                self.type_keys(value)?;
                 self.state()
             }
             Command::Scroll { target, by, to, timeout_ms: _ } => {

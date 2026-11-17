@@ -777,8 +777,10 @@ impl Wire for Classic {
     }
 
     fn front(&mut self) {
-        // Classic WebDriver has no command for it; a Chromium driver takes
-        // the browser's own.
+        // Classic WebDriver has no command for it. Switching to the tab
+        // again shows it where the driver acts on the tab in front
+        // (Safari's); a Chromium driver takes the browser's own command.
+        let _ = self.s.cmd("POST", "/window", Some(json!({ "handle": self.window })), Duration::from_secs(10));
         if matches!(self.s.describe()["name"].as_str(), Some("chrome" | "msedge" | "chrome-headless-shell")) {
             let body = json!({ "cmd": "Page.bringToFront", "params": {} });
             let _ = self.s.cmd("POST", "/goog/cdp/execute", Some(body), Duration::from_secs(10));

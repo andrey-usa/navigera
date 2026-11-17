@@ -272,6 +272,19 @@ fn nav_clicks(args: &[&str], engine: &str) {
         json!({ "id": 5, "op": "quit" }),
     ];
     let a = session(args, &script);
+    // Enter in a form's field submits it; a character typed there does not.
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/nav.html") }),
+        json!({ "id": 2, "op": "type", "selector": "input[name=q]", "value": "ab" }),
+        json!({ "id": 3, "op": "press", "selector": "input[name=q]", "key": "c" }),
+        json!({ "id": 4, "op": "press", "selector": "input[name=q]", "key": "Enter" }),
+        json!({ "id": 5, "op": "quit" }),
+    ];
+    let keys = session(args, &script);
+    assert_eq!(ok(&keys, 2)["title"], "Nav", "{engine}");
+    assert_eq!(ok(&keys, 3)["title"], "Nav", "{engine}");
+    assert_eq!(ok(&keys, 4)["title"], "Next", "{engine}: Enter in a form's field: {}", ok(&keys, 4));
+    assert!(ok(&keys, 4)["url"].as_str().unwrap_or("").ends_with("/next.html?q=abc"), "{engine}: {}", ok(&keys, 4));
     if engine == "safari" {
         // Safari's own way with a page's new tabs is not pinned down yet:
         // what it answers is in the log.
