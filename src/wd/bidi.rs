@@ -26,6 +26,15 @@ const EVENTS: &[&str] = &[
     "browsingContext.load",
 ];
 
+/// In the user's browser (`--attach`), also which frames and opened tabs
+/// belong to this session's tabs: their console lines and dialogs are its
+/// own, and an event names the frame, not the tab.
+const ATTACHED_EVENTS: &[&str] = &["browsingContext.contextCreated", "browsingContext.contextDestroyed"];
+
+/// The frames a session keeps track of in the user's browser; a page with
+/// more keeps the newest.
+const FRAMES_MAX: usize = 1024;
+
 /// The longest a single read waits before the deadline is looked at again.
 const READ_SLICE: Duration = Duration::from_millis(250);
 
@@ -63,6 +72,8 @@ pub struct Bidi {
     /// browser itself is left running.
     attached: bool,
     own: Vec<String>,
+    /// The frames inside `own` tabs, each with its tab.
+    frames: Vec<(String, String)>,
     closed: bool,
 }
 
@@ -150,6 +161,60 @@ fn adopt_opened(own: &mut Vec<String>, tree: &Value) {
             return;
         }
     }
+}
+
+/// The tab of this session an event about `context` belongs to: the tab
+/// itself, or the tab a frame is in.
+fn tab_of<'a>(own: &'a [String], frames: &'a [(String, String)], context: &str) -> Option<&'a str> {
+    own.iter()
+        .find(|o| o.as_str() == context)
+        .or_else(|| frames.iter().find(|(frame, _)| frame == context).map(|(_, tab)| tab))
+        .map(String::as_str)
+}
+
+/// `browsingContext.contextCreated` in the user's browser: a frame in one
+/// of this session's tabs (or in a frame of one) is noted with its tab,
+/// and a tab one of its pages opened is its own from now, before the
+/// next listing.
+fn context_created(own: &mut Vec<String>, frames: &mut Vec<(String, String)>, info: &Value) {
+    let Some(id) = info["context"].as_str() else { return };
+    if tab_of(own, frames, id).is_some() {
+        return;
+    }
+    match info["parent"].as_str() {
+        Some(parent) => {
+            let Some(tab) = tab_of(own, frames, parent).map(str::to_string) else { return };
+            if frames.len() >= FRAMES_MAX {
+                frames.remove(0);
+            }
+            frames.push((id.to_string(), tab));
+        }
+        None => {
+            if info["originalOpener"].as_str().is_some_and(|opener| tab_of(own, frames, opener).is_some()) {
+                own.push(id.to_string());
+            }
+        }
+    }
+}
+
+/// `browsingContext.contextDestroyed`: the frame, the frames inside it
+/// (named in the event, with no event of their own) and, for a tab, all
+/// its frames are forgotten.
+fn context_destroyed(frames: &mut Vec<(String, String)>, info: &Value) {
+    let Some(id) = info["context"].as_str() else { return };
+    frames.retain(|(frame, tab)| frame != id && tab != id);
+    // As deep as a browser nests frames; a deeper answer is not walked.
+    fn inner(frames: &mut Vec<(String, String)>, info: &Value, depth: usize) {
+        for child in info["children"].as_array().into_iter().flatten().take(FRAMES_MAX) {
+            if let Some(id) = child["context"].as_str() {
+                frames.retain(|(frame, _)| frame != id);
+            }
+            if depth < 32 {
+                inner(frames, child, depth + 1);
+            }
+        }
+    }
+    inner(frames, info, 0);
 }
 
 /// The endpoints `--attach <spec>` means on the Firefox engine: `firefox`
@@ -454,6 +519,12 @@ impl Bidi {
         !self.attached || context.is_some_and(|c| self.own.iter().any(|o| o == c))
     }
 
+    /// Whether an event from `context` is this session's to hear: its
+    /// tabs, and in the user's browser the frames inside them too.
+    fn heard(&self, context: Option<&str>) -> bool {
+        !self.attached || context.is_some_and(|c| tab_of(&self.own, &self.frames, c).is_some())
+    }
+
     /// The BiDi side of a classic session that asked for `webSocketUrl`.
     pub fn over(session: super::classic::Session, ws_url: &str, timeout: Duration) -> Result<Self> {
         let mut me = Self::connect(ws_url, timeout)?;
@@ -500,6 +571,7 @@ impl Bidi {
             classic: None,
             attached: false,
             own: Vec::new(),
+            frames: Vec::new(),
             closed: false,
         })
     }
@@ -509,6 +581,9 @@ impl Bidi {
     fn start(&mut self, timeout: Duration) -> Result<()> {
         self.send("session.subscribe", json!({ "events": EVENTS }), timeout)?;
         if self.attached {
+            // A browser without these events still works: a frame's
+            // console lines are then not heard.
+            let _ = self.send("session.subscribe", json!({ "events": ATTACHED_EVENTS }), timeout);
             // A window of its own, as in the user's Chrome: their tabs are
             // not navigated, read or scripted. (A background tab would not
             // do: it paints no frames and its timers are slowed.)
@@ -612,7 +687,7 @@ impl Bidi {
     fn on_event(&mut self, v: Value) {
         let params = &v["params"];
         match v["method"].as_str().unwrap_or("") {
-            "log.entryAdded" if self.ours(params["source"]["context"].as_str()) => {
+            "log.entryAdded" if self.heard(params["source"]["context"].as_str()) => {
                 let level = match params["level"].as_str().unwrap_or("info") {
                     "warn" => "warning",
                     l => l,
@@ -628,8 +703,20 @@ impl Bidi {
                     self.console.pop_front();
                 }
             }
-            "browsingContext.userPromptOpened" if self.ours(params["context"].as_str()) => {
-                let context = params["context"].as_str().unwrap_or(&self.context).to_string();
+            "browsingContext.contextCreated" if self.attached => {
+                context_created(&mut self.own, &mut self.frames, params);
+            }
+            "browsingContext.contextDestroyed" if self.attached => {
+                context_destroyed(&mut self.frames, params);
+            }
+            "browsingContext.userPromptOpened" if self.heard(params["context"].as_str()) => {
+                // A frame's dialog blocks its tab, and the tab is what is answered.
+                let named = params["context"].as_str().unwrap_or(&self.context);
+                let context = match tab_of(&self.own, &self.frames, named) {
+                    Some(tab) if self.attached => tab,
+                    _ => named,
+                }
+                .to_string();
                 let kind = params["type"].as_str().unwrap_or("alert").to_string();
                 let accept = self.accept_dialogs || kind == "alert";
                 let mut p = json!({ "context": context, "accept": accept });
@@ -919,6 +1006,7 @@ impl Wire for Bidi {
             bail!("tab {id} is not one this session opened: your own tabs are yours to close");
         }
         self.own.retain(|o| o != id);
+        self.frames.retain(|(_, tab)| tab != id);
         self.send("browsingContext.close", json!({ "context": id }), Duration::from_secs(10))?;
         Ok(())
     }
@@ -1126,6 +1214,45 @@ mod tests {
         // An answer with no tabs changes nothing.
         adopt_opened(&mut own, &json!({}));
         assert_eq!(own.len(), 3);
+    }
+
+    /// A frame in one of the session's tabs is heard as that tab, at any
+    /// depth; the user's frames are not; a tab its page opens is its own
+    /// at once; a closed frame takes the frames inside it along.
+    #[test]
+    fn a_frame_in_an_own_tab_belongs_to_that_tab() {
+        let mut own = vec!["ours".to_string()];
+        let mut frames: Vec<(String, String)> = Vec::new();
+        let made =
+            |own: &mut Vec<String>, frames: &mut Vec<(String, String)>, v: Value| context_created(own, frames, &v);
+        made(&mut own, &mut frames, json!({ "context": "f1", "parent": "ours" }));
+        made(&mut own, &mut frames, json!({ "context": "f2", "parent": "f1" }));
+        made(&mut own, &mut frames, json!({ "context": "theirs", "parent": "user" }));
+        made(&mut own, &mut frames, json!({ "context": "f1", "parent": "ours" }));
+        assert_eq!(frames.len(), 2);
+        assert_eq!(tab_of(&own, &frames, "f2"), Some("ours"));
+        assert_eq!(tab_of(&own, &frames, "ours"), Some("ours"));
+        assert_eq!(tab_of(&own, &frames, "theirs"), None);
+        assert_eq!(tab_of(&own, &frames, "user"), None);
+        // Opened from a frame of ours: ours. Opened by the user's tab: not.
+        made(&mut own, &mut frames, json!({ "context": "pop", "parent": null, "originalOpener": "f2" }));
+        made(&mut own, &mut frames, json!({ "context": "other", "parent": null, "originalOpener": "user" }));
+        made(&mut own, &mut frames, json!({ "context": "plain", "parent": null, "originalOpener": null }));
+        assert_eq!(own, ["ours", "pop"]);
+        made(&mut own, &mut frames, json!({ "context": "f3", "parent": "pop" }));
+        assert_eq!(tab_of(&own, &frames, "f3"), Some("pop"));
+        // The outer frame goes, and names the one inside it.
+        context_destroyed(&mut frames, &json!({ "context": "f1", "children": [{ "context": "f2", "children": [] }] }));
+        assert_eq!(frames, [("f3".to_string(), "pop".to_string())]);
+        context_destroyed(&mut frames, &json!({ "context": "pop", "children": null }));
+        assert!(frames.is_empty());
+        // More frames than are kept: the oldest are dropped.
+        for i in 0..FRAMES_MAX + 10 {
+            made(&mut own, &mut frames, json!({ "context": format!("n{i}"), "parent": "ours" }));
+        }
+        assert_eq!(frames.len(), FRAMES_MAX);
+        assert_eq!(tab_of(&own, &frames, "n0"), None);
+        assert_eq!(tab_of(&own, &frames, &format!("n{}", FRAMES_MAX + 9)), Some("ours"));
     }
 
     #[test]

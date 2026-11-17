@@ -22,8 +22,9 @@ All notable changes to this project are documented here. The format follows
   a window of its own and acts, listens and answers dialogs only there:
   your tabs are not listed and stay as they are. A tab its page opens
   (a link with a target, `window.open`) is its own too: listed, switched
-  to, and closed with the session. When no Firefox serves
-  BiDi the error says how to start one that does.
+  to, and closed with the session. The frames in its tabs are heard
+  with them: a frame's console lines and dialogs. When no Firefox
+  serves BiDi the error says how to start one that does.
 
 - `pdf` on the WebDriver engines (experimental): the browser's own print,
   over BiDi (`--engine firefox`) and over a WebDriver server's print

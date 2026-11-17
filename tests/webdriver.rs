@@ -278,6 +278,11 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         json!({ "id": 8, "op": "tab-list" }),
         // A tab its page opens is its own too: listed, and switched to.
         json!({ "id": 10, "op": "tab-select", "index": 0 }),
+        // A frame in its tab is its own: the frame's console line is
+        // heard and the frame's dialog answered.
+        json!({ "id": 16, "op": "eval", "expression": "(document.getElementById('inner').contentWindow.console.log('from the frame'), 1)" }),
+        json!({ "id": 17, "op": "eval", "expression": "(document.getElementById('inner').contentWindow.alert('in the frame'), 2)" }),
+        json!({ "id": 18, "op": "console" }),
         json!({ "id": 11, "op": "eval", "expression": "(document.body.insertAdjacentHTML('beforeend', '<button onclick=\"window.w = window.open(\\'/next.html\\')\">Pop</button>'), 1)" }),
         json!({ "id": 12, "op": "click", "role": "button", "name": "Pop" }),
         json!({ "id": 13, "op": "wait", "js": "!!window.w && window.w.document.title === 'Next'" }),
@@ -300,6 +305,9 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         // Only what it opened counts: its window, not the user's tab.
         let tabs = |id: u64| ok(&a, id).as_array().map(Vec::len);
         assert_eq!((tabs(6), tabs(8)), (Some(1), Some(2)), "{how}: tabs {} then {}", ok(&a, 6), ok(&a, 8));
+        assert_eq!(ok(&a, 17), 2, "{how}: a dialog in a frame");
+        let console = ok(&a, 18).to_string();
+        assert!(console.contains("from the frame"), "{how}: a frame's console line is not heard: {console}");
         assert_eq!(tabs(14), Some(3), "{how}: a tab the page opened is not listed: {}", ok(&a, 14));
         assert_eq!(ok(&a, 15)["title"], "Next", "{how}");
         assert_eq!(ok(&a, 9)["bye"], true, "{how}");
