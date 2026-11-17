@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use crate::cdp::Target;
+use crate::cdp::{Route, Target};
 use crate::protocol::{Command, Outcome, SessionConfig};
 
 /// `--engine` names served here.
@@ -230,6 +230,21 @@ pub trait Wire: Send {
     fn add_init_script(&mut self, source: &str) -> Result<()>;
     /// Take the init scripts away again; how many there were.
     fn clear_init_scripts(&mut self) -> Result<usize>;
+    /// `route`: answer the requests a rule's glob matches the rule's way,
+    /// from now on (a rule with the same glob is replaced).
+    fn add_route(&mut self, _route: Route) -> Result<()> {
+        bail!("classic WebDriver cannot see a page's requests; use --engine firefox or chrome (or --bidi with a server that has it)")
+    }
+    /// Remove the rule for `pattern`, or every rule; how many went.
+    fn remove_routes(&mut self, _pattern: Option<&str>) -> Result<usize> {
+        Ok(0)
+    }
+    fn routes(&self) -> Vec<Route> {
+        Vec::new()
+    }
+    /// Between commands: take what the browser sent meanwhile (a request
+    /// waiting for its rule, a dialog).
+    fn idle(&mut self) {}
     /// Wait for a navigation an action started, if one did.
     fn settle(&mut self, _timeout: Duration) {}
     fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>>;
@@ -458,6 +473,12 @@ impl Driver {
         self.wire.close();
     }
 
+    /// Between commands (the session's tick): requests waiting for a
+    /// `route` rule and dialogs are answered.
+    pub fn idle(&mut self) {
+        self.wire.idle();
+    }
+
     pub fn take_dialogs(&mut self) -> Vec<Value> {
         self.wire.dialogs()
     }
@@ -529,7 +550,7 @@ impl Driver {
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport, route, unroute)",
             op_name(command),
             self.engine
         )
@@ -1265,6 +1286,27 @@ impl Driver {
                     Some(_) => json!({ "viewport": v, "scale": scale }),
                     None => json!({ "viewport": "default" }),
                 })
+            }
+            Command::Route { pattern: None, har: None, .. } => {
+                let routes = self.wire.routes();
+                if routes.is_empty() {
+                    return Ok(json!("(no routes)"));
+                }
+                Ok(json!(routes
+                    .iter()
+                    .map(|r| format!("{} -> {} ({} hits)", r.pattern, r.action.describe(), r.hits))
+                    .collect::<Vec<_>>()
+                    .join("\n")))
+            }
+            Command::Route { .. } => {
+                let route = crate::protocol::route_of(command)?;
+                let (pattern, what) = (route.pattern.clone(), route.action.describe());
+                self.wire.add_route(route).map_err(|e| e.context("route"))?;
+                Ok(json!({ "route": pattern, "action": what }))
+            }
+            Command::Unroute { pattern } => {
+                let removed = self.wire.remove_routes(pattern.as_deref()).map_err(|e| e.context("unroute"))?;
+                Ok(json!({ "removed": removed }))
             }
             Command::Quit { .. } => {
                 self.wire.close();

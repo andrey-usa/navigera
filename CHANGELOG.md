@@ -42,6 +42,17 @@ All notable changes to this project are documented here. The format follows
   The `webdriver` workflow runs them on Firefox, Safari and chromedriver
   over both protocols.
 
+- `route` and `unroute` over WebDriver BiDi (experimental; `--engine
+  firefox`, `--bidi`): a request whose URL matches a rule's glob is
+  answered with the rule's response (`--status`, `--body`,
+  `--body-file`, `--header`), aborted (`--abort`) or replayed from a HAR
+  (`--har`), as on Chrome; `route` lists the rules with their hits.
+  While a rule is set, every request of the session's tabs is held until
+  navigera has looked at it: a session (`start`, `-s`) and the MCP
+  server look between commands too, `serve` on stdin only while a
+  command runs. `--modify` is Chrome's only, and classic WebDriver
+  cannot see requests: both say so.
+
 ### Changed
 
 - `--engine safari`: when safaridriver gives up on a Safari that was slow
@@ -84,6 +95,11 @@ All notable changes to this project are documented here. The format follows
   sixteen times its size in memory.
 
 ### Fixed
+
+- `eval` over a WebDriver server (classic WebDriver) runs several
+  statements on chromedriver too: its syntax error for the expression
+  form ("Unexpected token") was not recognized, so the script failed
+  instead of running as statements.
 
 - A command on a named session was sometimes told "another command was
   running on this session" when none was: the one before it had its

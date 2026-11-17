@@ -601,7 +601,16 @@ impl Wire for Classic {
         // as a function body.
         let as_expr = json!({ "script": format!("return (\n{source}\n);"), "args": [] });
         match self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(as_expr.clone()), timeout)) {
-            Err(e) if format!("{e:#}").to_ascii_lowercase().contains("syntax") => {
+            // (chromedriver words it "Unexpected token", the others
+            // "SyntaxError".)
+            Err(e)
+                if {
+                    let said = format!("{e:#}").to_ascii_lowercase();
+                    said.contains("syntax")
+                        || said.contains("unexpected token")
+                        || said.contains("unexpected identifier")
+                } =>
+            {
                 let body = json!({ "script": source, "args": [] });
                 self.with_dialogs(|s| s.cmd("POST", "/execute/sync", Some(body.clone()), timeout))
             }

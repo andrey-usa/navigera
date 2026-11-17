@@ -231,6 +231,10 @@ fn more_ops(args: &[&str], engine: &str, bidi: bool) {
     std::fs::write(&a_txt, "alpha").unwrap();
     std::fs::write(&b_txt, "be").unwrap();
     let (fa, fb) = (a_txt.display().to_string(), b_txt.display().to_string());
+    // A request the page makes, its outcome kept for the next step.
+    let ask = |path: &str| {
+        format!("window.got = undefined; fetch('{path}').then((r) => r.text().then((t) => {{ window.got = r.status + ' ' + r.headers.get('content-type') + ' ' + t; }}), () => {{ window.got = 'failed'; }}); 0")
+    };
     let files = "[...document.querySelectorAll('input[type=file]')].map((i) => [...i.files].map((f) => f.name + ':' + f.size).join(','))";
     let script: Vec<Value> = vec![
         json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
@@ -262,6 +266,19 @@ fn more_ops(args: &[&str], engine: &str, bidi: bool) {
         json!({ "id": 27, "op": "reload" }),
         json!({ "id": 28, "op": "eval", "expression": "String(window.early)" }),
         json!({ "id": 29, "op": "init-script", "clear": true }),
+        json!({ "id": 31, "op": "route", "pattern": "*/api/data*", "body": "{\"n\":7}" }),
+        json!({ "id": 32, "op": "route", "pattern": "*/api/gone", "abort": true }),
+        json!({ "id": 33, "op": "eval", "expression": ask("/api/data?x=1") }),
+        json!({ "id": 34, "op": "wait", "js": "window.got !== undefined" }),
+        json!({ "id": 35, "op": "eval", "expression": "window.got" }),
+        json!({ "id": 36, "op": "eval", "expression": ask("/api/gone") }),
+        json!({ "id": 37, "op": "wait", "js": "window.got !== undefined" }),
+        json!({ "id": 38, "op": "eval", "expression": "window.got" }),
+        json!({ "id": 39, "op": "route" }),
+        json!({ "id": 40, "op": "unroute" }),
+        json!({ "id": 41, "op": "eval", "expression": ask("/api/data?x=1") }),
+        json!({ "id": 42, "op": "wait", "js": "window.got !== undefined" }),
+        json!({ "id": 43, "op": "eval", "expression": "window.got" }),
         json!({ "id": 30, "op": "quit" }),
     ];
     let a = session(args, &script);
@@ -307,7 +324,26 @@ fn more_ops(args: &[&str], engine: &str, bidi: bool) {
         assert_eq!(ok(&a, 26)["init_scripts"], 1, "{engine}");
         assert_eq!(ok(&a, 28), "before the page", "{engine}: the script ran in the reloaded page");
         assert_eq!(ok(&a, 29)["removed"], 1, "{engine}");
+        // Requests answered by a rule, refused by one, and let through
+        // again once the rules are gone.
+        assert_eq!(ok(&a, 31)["action"], "fulfill 200", "{engine}");
+        assert_eq!(ok(&a, 35), "200 application/json {\"n\":7}", "{engine}: a request answered by its rule");
+        assert_eq!(ok(&a, 38), "failed", "{engine}: a request its rule aborts");
+        let rules = ok(&a, 39).as_str().unwrap();
+        assert!(
+            rules.contains("*/api/data* -> fulfill 200 (1 hits)") && rules.contains("*/api/gone -> abort (1 hits)"),
+            "{engine}: {rules}"
+        );
+        assert_eq!(ok(&a, 40)["removed"], 2, "{engine}");
+        assert!(
+            ok(&a, 43).as_str().unwrap().starts_with("404 "),
+            "{engine}: the server's own answer again: {}",
+            ok(&a, 43)
+        );
     } else {
+        assert!(failed(31).contains("classic WebDriver cannot see a page's requests"), "{engine}: {}", failed(31));
+        // (Several statements in one `eval`, and the server's own answer.)
+        assert!(ok(&a, 35).as_str().unwrap().starts_with("404 "), "{engine}: {}", ok(&a, 35));
         assert!(failed(26).contains("classic WebDriver has no script"), "{engine}: {}", failed(26));
         assert_eq!(ok(&a, 28), "undefined", "{engine}");
     }

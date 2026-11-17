@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::{self, stream::MaybeTlsStream, Message, WebSocket};
 
 use super::{wrap, Wait, Wire, LISTEN};
+use crate::cdp::{Route, RouteAction};
 
 /// Events every session listens to.
 const EVENTS: &[&str] = &[
@@ -72,6 +73,10 @@ pub struct Bidi {
     /// browser itself is left running.
     attached: bool,
     own: Vec<String>,
+    /// `route`: the rules, and the intercept that holds every request for
+    /// them while there is one.
+    routes: Vec<Route>,
+    intercept: Option<String>,
     /// `init-script`: the preload scripts this session added.
     preloads: Vec<String>,
     /// `set viewport`, for the tabs this session opens after it.
@@ -180,6 +185,27 @@ fn tab_of<'a>(own: &'a [String], frames: &'a [(String, String)], context: &str) 
 /// of this session's tabs (or in a frame of one) is noted with its tab,
 /// and a tab one of its pages opened is its own from now, before the
 /// next listing.
+/// A status code's usual words, for a response navigera makes up.
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "",
+    }
+}
+
 fn context_created(own: &mut Vec<String>, frames: &mut Vec<(String, String)>, info: &Value) {
     let Some(id) = info["context"].as_str() else { return };
     if tab_of(own, frames, id).is_some() {
@@ -571,6 +597,8 @@ impl Bidi {
             browser: Value::Null,
             endpoint: shown,
             preloads: Vec::new(),
+            routes: Vec::new(),
+            intercept: None,
             viewport: None,
             child: None,
             _profile: None,
@@ -738,6 +766,10 @@ impl Bidi {
                     "accepted": accept,
                 }));
             }
+            "network.beforeRequestSent" if params["isBlocked"] == true => {
+                let (method, p) = self.route_answer(params);
+                let _ = self.write(method, p);
+            }
             "browsingContext.navigationStarted" => {
                 if params["context"].as_str() == Some(self.context.as_str()) {
                     self.nav = Some((params["url"].as_str().unwrap_or("").to_string(), false));
@@ -750,6 +782,86 @@ impl Bidi {
             }
             _ => {}
         }
+    }
+
+    /// What happens to a held request: the first rule whose glob matches
+    /// its URL answers it, as on Chrome; no rule lets it go on.
+    fn route_answer(&mut self, params: &Value) -> (&'static str, Value) {
+        let request = &params["request"];
+        let id = request["request"].clone();
+        let url = request["url"].as_str().unwrap_or("");
+        let method = request["method"].as_str().unwrap_or("GET");
+        let go_on = ("network.continueRequest", json!({ "request": id }));
+        let fail = ("network.failRequest", json!({ "request": id }));
+        let fulfill = |status: u16, headers: &[(String, String)], body: &str| {
+            let headers: Vec<Value> =
+                headers.iter().map(|(k, v)| json!({ "name": k, "value": { "type": "string", "value": v } })).collect();
+            (
+                "network.provideResponse",
+                json!({ "request": id, "statusCode": status, "reasonPhrase": reason(status), "headers": headers,
+                        "body": { "type": "base64", "value": body } }),
+            )
+        };
+        let Some(route) = self.routes.iter_mut().find(|r| crate::cdp::glob_match(&r.pattern, url)) else {
+            return go_on;
+        };
+        route.hits += 1;
+        match &mut route.action {
+            RouteAction::Abort => fail,
+            RouteAction::Fulfill { status, headers, body_base64 } => fulfill(*status, headers, body_base64),
+            RouteAction::Har { entries, not_found_continue } => {
+                let same = |e: &crate::cdp::HarEntry| e.method.eq_ignore_ascii_case(method) && e.url == url;
+                let pick = entries.iter().position(|e| !e.used && same(e)).or_else(|| entries.iter().rposition(same));
+                match pick {
+                    Some(i) => {
+                        let e = &mut entries[i];
+                        e.used = true;
+                        if e.status == 0 {
+                            fail
+                        } else {
+                            fulfill(e.status, &e.headers, &e.body_base64)
+                        }
+                    }
+                    None if *not_found_continue => go_on,
+                    None => fail,
+                }
+            }
+            // Refused when the rule was asked for.
+            RouteAction::Modify { .. } => go_on,
+        }
+    }
+
+    /// Hold every request of this session's tabs for the rules, or let
+    /// them all go again when the last rule went.
+    fn sync_intercept(&mut self) -> Result<()> {
+        let timeout = Duration::from_secs(30);
+        match (&self.intercept, self.routes.is_empty()) {
+            (None, false) => {
+                let mut subscribe = json!({ "events": ["network.beforeRequestSent"] });
+                let mut intercept = json!({ "phases": ["beforeRequestSent"] });
+                if self.attached {
+                    // In the user's own Firefox: this session's tabs only.
+                    subscribe["contexts"] = json!(self.own);
+                    intercept["contexts"] = json!(self.own);
+                }
+                self.send("session.subscribe", subscribe, timeout)?;
+                let r = self.send("network.addIntercept", intercept, timeout)?;
+                let id = r["intercept"].as_str().ok_or_else(|| anyhow!("the browser named no intercept"))?;
+                self.intercept = Some(id.to_string());
+            }
+            (Some(id), true) => {
+                let id = id.clone();
+                self.send("network.removeIntercept", json!({ "intercept": id }), timeout)?;
+                self.intercept = None;
+                let mut unsubscribe = json!({ "events": ["network.beforeRequestSent"] });
+                if self.attached {
+                    unsubscribe["contexts"] = json!(self.own);
+                }
+                let _ = self.send("session.unsubscribe", unsubscribe, timeout);
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn remote_to_json(v: &Value) -> Value {
@@ -935,6 +1047,45 @@ impl Wire for Bidi {
             self.send("script.removePreloadScript", json!({ "script": id }), Duration::from_secs(30))?;
         }
         Ok(ids.len())
+    }
+
+    fn add_route(&mut self, route: Route) -> Result<()> {
+        if matches!(route.action, RouteAction::Modify { .. }) {
+            bail!("--modify: not over WebDriver BiDi yet (a response's body cannot be read and sent on changed); run it with --engine chrome");
+        }
+        let had = self.routes.clone();
+        self.routes.retain(|r| r.pattern != route.pattern);
+        self.routes.push(route);
+        if let Err(e) = self.sync_intercept() {
+            self.routes = had;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn remove_routes(&mut self, pattern: Option<&str>) -> Result<usize> {
+        let before = self.routes.len();
+        self.routes.retain(|r| pattern.is_some_and(|p| r.pattern != p));
+        self.sync_intercept()?;
+        Ok(before - self.routes.len())
+    }
+
+    fn routes(&self) -> Vec<Route> {
+        self.routes.clone()
+    }
+
+    fn idle(&mut self) {
+        // Only what has already arrived: a read that finds nothing ends it.
+        if self.closed {
+            return;
+        }
+        for _ in 0..256 {
+            match self.read_one(Duration::from_millis(1)) {
+                Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
     }
 
     fn settle(&mut self, timeout: Duration) {

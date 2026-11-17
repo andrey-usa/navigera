@@ -3377,6 +3377,107 @@ pub struct Driver {
     refused_reads: std::collections::HashSet<u64>,
 }
 
+/// The rule a `route` command asks for: its URL glob and what happens to
+/// the requests it matches.
+pub(crate) fn route_of(command: &Command) -> anyhow::Result<crate::cdp::Route> {
+    let Command::Route {
+        pattern,
+        abort,
+        status,
+        body,
+        body_file,
+        content_type,
+        headers,
+        har,
+        not_found,
+        modify,
+        set_headers,
+        replace,
+    } = command
+    else {
+        anyhow::bail!("route: not a route command");
+    };
+    let fulfill = status.is_some() || body.is_some() || body_file.is_some();
+    let kinds = [*abort, fulfill, har.is_some(), *modify].iter().filter(|k| **k).count();
+    if kinds > 1 {
+        anyhow::bail!("route: one of --abort, a response (--status/--body), --har or --modify");
+    }
+    if not_found.is_some() && har.is_none() {
+        anyhow::bail!("route: --not-found goes with --har");
+    }
+    if (!set_headers.is_empty() || !replace.is_empty()) && !*modify {
+        anyhow::bail!("route: --set-header and --replace go with --modify");
+    }
+    let parse_header = |h: &String, flag: &str| {
+        h.split_once(':')
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .filter(|(k, _)| !k.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("route {flag} {h:?}: use 'Name: value'"))
+    };
+    let action = if let Some(path) = har {
+        let not_found_continue = match not_found.as_deref() {
+            None | Some("abort") => false,
+            Some("continue") => true,
+            Some(other) => anyhow::bail!("route --not-found {other:?}: abort or continue"),
+        };
+        let text = std::fs::read(path).map_err(|e| anyhow::Error::from(e).context(format!("route --har {path}")))?;
+        let entries = har_entries(&text).map_err(|e| e.context(format!("route --har {path}")))?;
+        if entries.is_empty() {
+            anyhow::bail!("route --har {path}: no entries");
+        }
+        crate::cdp::RouteAction::Har { entries, not_found_continue }
+    } else if *modify {
+        if set_headers.is_empty() && replace.is_empty() {
+            anyhow::bail!("route --modify: say what changes (--set-header 'Name: value', --replace <from> <to>)");
+        }
+        crate::cdp::RouteAction::Modify {
+            set_headers: set_headers.iter().map(|h| parse_header(h, "--set-header")).collect::<anyhow::Result<_>>()?,
+            replace: replace.clone(),
+        }
+    } else if fulfill {
+        use base64::Engine as _;
+        let bytes = match (body, body_file) {
+            (Some(_), Some(_)) => anyhow::bail!("route: --body or --body-file, not both"),
+            (Some(b), None) => b.clone().into_bytes(),
+            (None, Some(f)) => {
+                std::fs::read(f).map_err(|e| anyhow::Error::from(e).context(format!("route --body-file {f}")))?
+            }
+            (None, None) => Vec::new(),
+        };
+        let mut hs: Vec<(String, String)> =
+            headers.iter().map(|h| parse_header(h, "--header")).collect::<anyhow::Result<_>>()?;
+        let ctype = content_type.clone().unwrap_or_else(|| {
+            let t = String::from_utf8_lossy(&bytes);
+            let t = t.trim_start();
+            if t.starts_with('{') || t.starts_with('[') {
+                "application/json"
+            } else if t.starts_with('<') {
+                "text/html"
+            } else {
+                "text/plain"
+            }
+            .to_string()
+        });
+        if !hs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+            hs.push(("Content-Type".into(), ctype));
+        }
+        crate::cdp::RouteAction::Fulfill {
+            status: status.unwrap_or(200),
+            headers: hs,
+            body_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }
+    } else {
+        crate::cdp::RouteAction::Abort
+    };
+    // `route --har f` with no glob: the HAR answers everything.
+    let pattern = match (pattern, har) {
+        (Some(p), _) => p.clone(),
+        (None, Some(_)) => "*".to_string(),
+        (None, None) => anyhow::bail!("route: which requests? Give a URL glob first"),
+    };
+    Ok(crate::cdp::Route { pattern, action, hits: 0 })
+}
+
 /// The engine a session runs: Chrome over CDP (and Lightpanda, Electron,
 /// an attached browser), or a WebDriver engine ([`crate::wd`]: Firefox over
 /// BiDi, Safari, any WebDriver server).
@@ -3502,8 +3603,9 @@ impl Engine {
     }
 
     pub fn pre_read_if_idle(&mut self) {
-        if let Self::Chrome(d) = self {
-            d.pre_read_if_idle();
+        match self {
+            Self::Chrome(d) => d.pre_read_if_idle(),
+            Self::WebDriver(d) => d.idle(),
         }
     }
 
@@ -6125,107 +6227,10 @@ impl Driver {
                     .collect::<Vec<_>>()
                     .join("\n")))
             }
-            Command::Route {
-                pattern,
-                abort,
-                status,
-                body,
-                body_file,
-                content_type,
-                headers,
-                har,
-                not_found,
-                modify,
-                set_headers,
-                replace,
-            } => {
-                let fulfill = status.is_some() || body.is_some() || body_file.is_some();
-                let kinds = [*abort, fulfill, har.is_some(), *modify].iter().filter(|k| **k).count();
-                if kinds > 1 {
-                    anyhow::bail!("route: one of --abort, a response (--status/--body), --har or --modify");
-                }
-                if not_found.is_some() && har.is_none() {
-                    anyhow::bail!("route: --not-found goes with --har");
-                }
-                if (!set_headers.is_empty() || !replace.is_empty()) && !*modify {
-                    anyhow::bail!("route: --set-header and --replace go with --modify");
-                }
-                let parse_header = |h: &String, flag: &str| {
-                    h.split_once(':')
-                        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-                        .filter(|(k, _)| !k.is_empty())
-                        .ok_or_else(|| anyhow::anyhow!("route {flag} {h:?}: use 'Name: value'"))
-                };
-                let action = if let Some(path) = har {
-                    let not_found_continue = match not_found.as_deref() {
-                        None | Some("abort") => false,
-                        Some("continue") => true,
-                        Some(other) => anyhow::bail!("route --not-found {other:?}: abort or continue"),
-                    };
-                    let text = std::fs::read(path)
-                        .map_err(|e| anyhow::Error::from(e).context(format!("route --har {path}")))?;
-                    let entries = har_entries(&text).map_err(|e| e.context(format!("route --har {path}")))?;
-                    if entries.is_empty() {
-                        anyhow::bail!("route --har {path}: no entries");
-                    }
-                    crate::cdp::RouteAction::Har { entries, not_found_continue }
-                } else if *modify {
-                    if set_headers.is_empty() && replace.is_empty() {
-                        anyhow::bail!(
-                            "route --modify: say what changes (--set-header 'Name: value', --replace <from> <to>)"
-                        );
-                    }
-                    crate::cdp::RouteAction::Modify {
-                        set_headers: set_headers
-                            .iter()
-                            .map(|h| parse_header(h, "--set-header"))
-                            .collect::<anyhow::Result<_>>()?,
-                        replace: replace.clone(),
-                    }
-                } else if fulfill {
-                    use base64::Engine as _;
-                    let bytes = match (body, body_file) {
-                        (Some(_), Some(_)) => anyhow::bail!("route: --body or --body-file, not both"),
-                        (Some(b), None) => b.clone().into_bytes(),
-                        (None, Some(f)) => std::fs::read(f)
-                            .map_err(|e| anyhow::Error::from(e).context(format!("route --body-file {f}")))?,
-                        (None, None) => Vec::new(),
-                    };
-                    let mut hs: Vec<(String, String)> =
-                        headers.iter().map(|h| parse_header(h, "--header")).collect::<anyhow::Result<_>>()?;
-                    let ctype = content_type.clone().unwrap_or_else(|| {
-                        let t = String::from_utf8_lossy(&bytes);
-                        let t = t.trim_start();
-                        if t.starts_with('{') || t.starts_with('[') {
-                            "application/json"
-                        } else if t.starts_with('<') {
-                            "text/html"
-                        } else {
-                            "text/plain"
-                        }
-                        .to_string()
-                    });
-                    if !hs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
-                        hs.push(("Content-Type".into(), ctype));
-                    }
-                    crate::cdp::RouteAction::Fulfill {
-                        status: status.unwrap_or(200),
-                        headers: hs,
-                        body_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                    }
-                } else {
-                    crate::cdp::RouteAction::Abort
-                };
-                // `route --har f` with no glob: the HAR answers everything.
-                let pattern = match (pattern, har) {
-                    (Some(p), _) => p.clone(),
-                    (None, Some(_)) => "*".to_string(),
-                    (None, None) => anyhow::bail!("route: which requests? Give a URL glob first"),
-                };
-                let what = action.describe();
-                self.session
-                    .add_route(crate::cdp::Route { pattern: pattern.clone(), action, hits: 0 })
-                    .map_err(|e| e.context("route"))?;
+            Command::Route { .. } => {
+                let route = route_of(command)?;
+                let (pattern, what) = (route.pattern.clone(), route.action.describe());
+                self.session.add_route(route).map_err(|e| e.context("route"))?;
                 Ok(json!({ "route": pattern, "action": what }))
             }
             Command::Clock { action, value, time, paused } => {
