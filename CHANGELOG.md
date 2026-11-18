@@ -12,10 +12,12 @@ All notable changes to this project are documented here. The format follows
   `set offline` on the WebDriver BiDi engines (Firefox, experimental):
   WebDriver BiDi's `emulation` commands, for every tab of the session and
   the tabs it opens later; in a Firefox you attached to, for its own tabs
-  only. `set media print`, `reduced-motion` and `forced-colors`, and the
-  settings Firefox does not emulate (`cpu`, `network`, `device`), say to
-  run with `--engine chrome`. Classic WebDriver (Safari) has no emulation
-  and says so.
+  only. `set device <name>` there sets the device's viewport, pixel ratio
+  and user agent, and says that touch, `<meta name=viewport>` and a mobile
+  layout are not emulated. `set media print`, `reduced-motion` and
+  `forced-colors`, and the settings Firefox does not emulate (`cpu`,
+  `network`, `geo`), say to run with `--engine chrome`. Classic WebDriver
+  (Safari) has no emulation and says so.
 
 ### Fixed
 

@@ -106,6 +106,20 @@ pub const DEVICES: &[Device] = &[
 ];
 
 /// A device by name, ignoring case and spaces/dashes (`iphone-15`).
+/// The device a `set device` names, `None` for `off`; an empty or unknown
+/// name is an error that lists the known ones.
+pub fn device_named(values: &[String]) -> Result<Option<&'static Device>> {
+    let name = values.join(" ");
+    let known = || DEVICES.iter().map(|d| d.name).collect::<Vec<_>>().join(", ");
+    if name.is_empty() || name == "list" {
+        bail!("set device <name>; known: {}", known());
+    }
+    if off(&name) {
+        return Ok(None);
+    }
+    device(&name).map(Some).ok_or_else(|| anyhow::anyhow!("set device: unknown {name:?}; known: {}", known()))
+}
+
 pub fn device(name: &str) -> Option<&'static Device> {
     let key = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
     DEVICES.iter().find(|d| key(d.name) == key(name))
@@ -233,14 +247,7 @@ pub fn plan(
             }
         }
         "device" => {
-            if first.is_empty() || first == "list" {
-                bail!(
-                    "set device <name>; known: {}",
-                    DEVICES.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
-                );
-            }
-            let name = values.join(" ");
-            if off(&name) {
+            let Some(d) = device_named(values)? else {
                 return Ok(Plan {
                     kind: "viewport",
                     calls: vec![],
@@ -251,13 +258,7 @@ pub fn plan(
                     grant: None,
                     result: json!({ "device": "default" }),
                 });
-            }
-            let d = device(&name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "set device: unknown {name:?}; known: {}",
-                    DEVICES.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
-                )
-            })?;
+            };
             let mut calls = vec![("Emulation.setDeviceMetricsOverride", metrics(d.width, d.height, d.scale, d.mobile))];
             let mut result = json!({ "device": d.name, "viewport": [d.width, d.height], "scale": d.scale, "mobile": d.mobile });
             if lightpanda {
@@ -591,8 +592,8 @@ pub fn bidi_plan(what: &str, values: &[String], engine: &str) -> Result<BidiPlan
             plan("emulation.setUserAgentOverride", json!({ "userAgent": on.then_some(ua) }), json!({ "ua": shown }))
         }
         other => bail!(
-            "set {other}: not on the {engine} engine yet (it emulates viewport, locale, timezone, media dark|light, \
-             offline and ua); run it with --engine chrome"
+            "set {other}: not on the {engine} engine yet (it emulates viewport, device, locale, timezone, \
+             media dark|light, offline and ua); run it with --engine chrome"
         ),
     }
 }

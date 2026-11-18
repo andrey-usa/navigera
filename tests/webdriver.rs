@@ -505,6 +505,9 @@ fn emulate_ops(args: &[&str], engine: &str) {
         set(24, "ua", &["off"]),
         json!({ "id": 25, "op": "reload" }),
         eval(26, state),
+        set(27, "device", &["iPhone", "15"]),
+        eval(28, "[innerWidth, devicePixelRatio, navigator.userAgent.includes('iPhone')]"),
+        set(29, "device", &["off"]),
         json!({ "id": 30, "op": "quit" }),
     ];
     let a = session(args, &script);
@@ -528,6 +531,10 @@ fn emulate_ops(args: &[&str], engine: &str) {
         back[0] != "de-DE" && back[2] != "Asia/Tokyo" && back[4] != "NavigeraTest/1.0 (emulated)",
         "{engine}: {back}"
     );
+    assert_eq!(ok(&a, 27)["device"], "iPhone 15", "{engine}");
+    assert!(ok(&a, 27)["note"].as_str().is_some_and(|n| n.contains("touch")), "{engine}: {}", ok(&a, 27));
+    assert_eq!(ok(&a, 28), &json!([393, 3, true]), "{engine}: the page sees the device");
+    assert_eq!(ok(&a, 29), &json!({ "device": "default" }), "{engine}");
     assert_eq!(ok(&a, 30)["bye"], true);
 }
 

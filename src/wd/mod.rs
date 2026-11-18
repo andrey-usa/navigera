@@ -382,7 +382,8 @@ pub trait Wire: Send {
     /// The viewport's size in CSS pixels and its pixel ratio; `None` is the
     /// browser's own again.
     fn set_viewport(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()>;
-    /// `set locale|timezone|media|offline|ua`: one WebDriver BiDi
+    /// `set locale|timezone|media|offline|ua` (and `device`'s user agent):
+    /// one WebDriver BiDi
     /// `emulation.*` command (see [`crate::emulate::bidi_plan`]) for the
     /// session's tabs, now and later.
     fn emulate(&mut self, _method: &str, _params: Value) -> Result<()> {
@@ -1604,6 +1605,32 @@ impl Driver {
                     Some(_) => json!({ "viewport": v, "scale": scale }),
                     None => json!({ "viewport": "default" }),
                 })
+            }
+            Command::Set { what, values, .. } if what == "device" => {
+                // The viewport, its pixel ratio and the user agent: what
+                // WebDriver BiDi emulates of a device.
+                let Some(d) = crate::emulate::device_named(values)? else {
+                    let ua = json!({ "userAgent": null });
+                    self.wire.emulate("emulation.setUserAgentOverride", ua).map_err(|e| e.context("set device"))?;
+                    self.wire.set_viewport(None, None).map_err(|e| e.context("set device"))?;
+                    return Ok(json!({ "device": "default" }));
+                };
+                // The user agent first: classic WebDriver has none to set,
+                // and its refusal leaves the viewport as it was.
+                let ua = json!({ "userAgent": (!d.ua.is_empty()).then_some(d.ua) });
+                self.wire.emulate("emulation.setUserAgentOverride", ua).map_err(|e| e.context("set device"))?;
+                self.wire
+                    .set_viewport(Some((d.width, d.height)), Some(d.scale))
+                    .map_err(|e| e.context("set device"))?;
+                let mut result = json!({ "device": d.name, "viewport": [d.width, d.height], "scale": d.scale });
+                if d.mobile {
+                    result["note"] = json!(format!(
+                        "the {} engine sets the viewport, pixel ratio and user agent only: touch, \
+                         <meta name=viewport> and a mobile layout are Chrome's emulation (--engine chrome)",
+                        self.engine
+                    ));
+                }
+                Ok(result)
             }
             Command::Set { what, values, .. } if crate::emulate::BIDI_SETTINGS.contains(&what.as_str()) => {
                 let plan = crate::emulate::bidi_plan(what, values, self.engine)?;
