@@ -14,9 +14,12 @@ All notable changes to this project are documented here. The format follows
   the tabs it opens later; in a Firefox you attached to, for its own tabs
   only. `set device <name>` there sets the device's viewport, pixel ratio
   and user agent, and says that touch, `<meta name=viewport>` and a mobile
-  layout are not emulated. `set media print`, `reduced-motion` and
-  `forced-colors`, and the settings Firefox does not emulate (`cpu`,
-  `network`, `geo`), say to run with `--engine chrome`. Classic WebDriver
+  layout are not emulated. `set geo <lat> <lon>` sets the position and
+  grants the geolocation permission to the page's origin, and to each
+  origin the tab goes to after it, never to the whole profile; `set geo
+  off`, or the session's end, takes each grant back. `set media print`,
+  `reduced-motion` and `forced-colors`, and the settings Firefox does not
+  emulate (`cpu`, `network`), say to run with `--engine chrome`. Classic WebDriver
   (Safari) has no emulation and says so.
 
 ### Fixed

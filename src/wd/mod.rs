@@ -382,7 +382,7 @@ pub trait Wire: Send {
     /// The viewport's size in CSS pixels and its pixel ratio; `None` is the
     /// browser's own again.
     fn set_viewport(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()>;
-    /// `set locale|timezone|media|offline|ua` (and `device`'s user agent):
+    /// `set locale|timezone|media|offline|ua|geo` (and `device`'s user agent):
     /// one WebDriver BiDi
     /// `emulation.*` command (see [`crate::emulate::bidi_plan`]) for the
     /// session's tabs, now and later.
@@ -1605,6 +1605,20 @@ impl Driver {
                     Some(_) => json!({ "viewport": v, "scale": scale }),
                     None => json!({ "viewport": "default" }),
                 })
+            }
+            Command::Set { what, values, accuracy, .. }
+                if matches!(what.as_str(), "geo" | "geolocation" | "location") =>
+            {
+                let plan = crate::emulate::plan("geo", values, None, false, *accuracy, false)?;
+                let coordinates = match &plan.result["geo"] {
+                    Value::Array(at) => {
+                        json!({ "latitude": at[0], "longitude": at[1], "accuracy": plan.result["accuracy"] })
+                    }
+                    _ => Value::Null,
+                };
+                let params = json!({ "coordinates": coordinates });
+                self.wire.emulate(bidi::GEO, params).map_err(|e| e.context(format!("set {what}")))?;
+                Ok(plan.result)
             }
             Command::Set { what, values, .. } if what == "device" => {
                 // The viewport, its pixel ratio and the user agent: what

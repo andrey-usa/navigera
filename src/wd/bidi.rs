@@ -85,9 +85,27 @@ pub struct Bidi {
     /// in force (its own parameters), sent again to a tab this session
     /// opens in the user's Firefox.
     emulations: Vec<(String, Value)>,
+    /// `set geo`: the origins granted the geolocation permission while it
+    /// is on (`None`: off); `off`, and the session's end, take each back.
+    geo: Option<Vec<String>>,
     /// The frames inside `own` tabs, each with its tab.
     frames: Vec<(String, String)>,
     closed: bool,
+}
+
+/// The `emulation.*` command of `set geo`, which also grants its permission.
+pub const GEO: &str = "emulation.setGeolocationOverride";
+
+/// `scheme://host[:port]` of an http(s) URL, without its user info; None
+/// for any other (about:blank, data:, file:), which has no origin to grant.
+fn page_origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    (!host.is_empty()).then(|| format!("{}://{}", scheme.to_ascii_lowercase(), host.to_ascii_lowercase()))
 }
 
 /// How to get a Firefox that `--attach firefox` can find.
@@ -605,6 +623,7 @@ impl Bidi {
             intercept: None,
             viewport: None,
             emulations: Vec::new(),
+            geo: None,
             child: None,
             _profile: None,
             classic: None,
@@ -783,7 +802,11 @@ impl Bidi {
             }
             "browsingContext.navigationStarted" => {
                 if params["context"].as_str() == Some(self.context.as_str()) {
-                    self.nav = Some((params["url"].as_str().unwrap_or("").to_string(), false));
+                    let url = params["url"].as_str().unwrap_or("").to_string();
+                    // A link or a redirect to another origin: written now,
+                    // not waited for, as the reader is mid-message here.
+                    let _ = self.geo_grant(&url, false);
+                    self.nav = Some((url, false));
                 }
             }
             "browsingContext.load" if params["context"].as_str() == Some(self.context.as_str()) => {
@@ -913,6 +936,31 @@ impl Bidi {
     fn top_contexts(&mut self) -> Result<Vec<String>> {
         let tree = self.send("browsingContext.getTree", json!({ "maxDepth": 0 }), Duration::from_secs(10))?;
         Ok(self.tops_of(&tree))
+    }
+
+    /// `set geo`: the origin of `url` may read the emulated position
+    /// without a prompt. The permission is per origin (WebDriver BiDi has
+    /// no other kind), so it is never the whole profile's: each origin gets
+    /// it as a navigation reaches it, and [`Self::geo_revoke`] takes it
+    /// back. Nothing while geo is off, or for a URL with no origin.
+    fn geo_grant(&mut self, url: &str, wait: bool) -> Result<()> {
+        let Some(granted) = &mut self.geo else { return Ok(()) };
+        let Some(origin) = page_origin(url).filter(|o| !granted.contains(o)) else { return Ok(()) };
+        granted.push(origin.clone());
+        let params = json!({ "descriptor": { "name": "geolocation" }, "state": "granted", "origin": origin });
+        if wait {
+            self.send("permissions.setPermission", params, Duration::from_secs(10)).map(|_| ())
+        } else {
+            self.write("permissions.setPermission", params).map(|_| ())
+        }
+    }
+
+    /// Every origin [`Self::geo_grant`] granted goes back to asking.
+    fn geo_revoke(&mut self) {
+        for origin in self.geo.take().unwrap_or_default() {
+            let params = json!({ "descriptor": { "name": "geolocation" }, "state": "prompt", "origin": origin });
+            let _ = self.send("permissions.setPermission", params, Duration::from_secs(5));
+        }
     }
 
     /// The top-level contexts of a `getTree` answer.
@@ -1045,6 +1093,8 @@ impl Wire for Bidi {
             Wait::Complete => "complete",
         };
         self.nav = None;
+        // Before the page runs: it may ask for its position as it loads.
+        let _ = self.geo_grant(url, true);
         self.send("browsingContext.navigate", json!({ "context": self.context, "url": url, "wait": wait }), timeout)?;
         Ok(())
     }
@@ -1170,6 +1220,20 @@ impl Wire for Bidi {
             scoped["userContexts"] = json!(["default"]);
         }
         self.send(method, scoped, Duration::from_secs(30))?;
+        if method == GEO {
+            if params["coordinates"].is_null() {
+                self.geo_revoke();
+            } else if self.geo.is_none() {
+                self.geo = Some(Vec::new());
+                let tree = self.send(
+                    "browsingContext.getTree",
+                    json!({ "root": self.context, "maxDepth": 0 }),
+                    Duration::from_secs(10),
+                )?;
+                let url = tree["contexts"][0]["url"].as_str().unwrap_or("").to_string();
+                self.geo_grant(&url, true)?;
+            }
+        }
         self.emulations.retain(|(m, _)| m != method);
         if params.as_object().is_some_and(|o| o.values().any(|v| !v.is_null())) {
             self.emulations.push((method.to_string(), params));
@@ -1481,6 +1545,7 @@ impl Wire for Bidi {
 
     fn close(&mut self) {
         if !self.closed {
+            self.geo_revoke();
             if self.attached {
                 // The user's browser stays: this session's tabs go, and
                 // the session ends so the next client can have one. The
@@ -1657,5 +1722,20 @@ mod tests {
             Err(e) => format!("{e:#}"),
         };
         assert!(err.contains("--remote-debugging-port") && err.contains("--engine firefox"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod geo_tests {
+    use super::page_origin;
+
+    #[test]
+    fn a_page_origin_is_scheme_host_and_port() {
+        assert_eq!(page_origin("http://127.0.0.1:8080/more.html?q=1#x").as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(page_origin("HTTPS://User:pw@Example.COM/a").as_deref(), Some("https://example.com"));
+        assert_eq!(page_origin("https://a.test#frag").as_deref(), Some("https://a.test"));
+        for none in ["about:blank", "data:text/html,x", "file:///tmp/a.html", "https:///nohost", ""] {
+            assert_eq!(page_origin(none), None, "{none}");
+        }
     }
 }

@@ -476,6 +476,11 @@ fn emulate_ops(args: &[&str], engine: &str) {
     let set = |id: u64, what: &str, values: &[&str]| json!({ "id": id, "op": "set", "what": what, "values": values });
     let eval = |id: u64, expression: &str| json!({ "id": id, "op": "eval", "expression": expression });
     let fetch = "window.got = undefined; fetch('/more.html').then((r) => { window.got = r.status; }, () => { window.got = 'failed'; }); 0";
+    // Another server is another origin: the permission follows the tab there.
+    let other = serve();
+    let position = "new Promise((ok) => navigator.geolocation.getCurrentPosition(\
+                    (p) => ok([p.coords.latitude, p.coords.longitude, p.coords.accuracy]), (e) => ok('error ' + e.code), \
+                    { timeout: 5000 }))";
     let state = "[navigator.language, new Intl.NumberFormat().format(1234.5), Intl.DateTimeFormat().resolvedOptions().timeZone, \
                  matchMedia('(prefers-color-scheme: dark)').matches, navigator.userAgent]";
     let script: Vec<Value> = vec![
@@ -508,7 +513,12 @@ fn emulate_ops(args: &[&str], engine: &str) {
         set(27, "device", &["iPhone", "15"]),
         eval(28, "[innerWidth, devicePixelRatio, navigator.userAgent.includes('iPhone')]"),
         set(29, "device", &["off"]),
-        json!({ "id": 30, "op": "quit" }),
+        set(30, "geo", &["52.52", "13.405"]),
+        eval(31, position),
+        json!({ "id": 32, "op": "goto", "url": format!("{other}/more.html") }),
+        eval(33, position),
+        set(34, "geo", &["off"]),
+        json!({ "id": 40, "op": "quit" }),
     ];
     let a = session(args, &script);
     let failed = |id: u64| {
@@ -535,7 +545,16 @@ fn emulate_ops(args: &[&str], engine: &str) {
     assert!(ok(&a, 27)["note"].as_str().is_some_and(|n| n.contains("touch")), "{engine}: {}", ok(&a, 27));
     assert_eq!(ok(&a, 28), &json!([393, 3, true]), "{engine}: the page sees the device");
     assert_eq!(ok(&a, 29), &json!({ "device": "default" }), "{engine}");
-    assert_eq!(ok(&a, 30)["bye"], true);
+    let nums = |v: &Value| v.as_array().map(|n| n.iter().map(Value::as_f64).collect::<Vec<_>>());
+    let berlin = Some(vec![Some(52.52), Some(13.405), Some(50.0)]);
+    assert_eq!(
+        (nums(&ok(&a, 30)["geo"]), ok(&a, 30)["accuracy"].as_f64()),
+        (nums(&json!([52.52, 13.405])), Some(50.0))
+    );
+    assert_eq!(nums(ok(&a, 31)), berlin, "{engine}: the page reads the position, no prompt: {}", ok(&a, 31));
+    assert_eq!(nums(ok(&a, 33)), berlin, "{engine}: and so does the next origin: {}", ok(&a, 33));
+    assert_eq!(ok(&a, 34), &json!({ "geo": "default" }), "{engine}");
+    assert_eq!(ok(&a, 40)["bye"], true);
 }
 
 /// A lone UTF-16 surrogate in a page (half of an emoji pair) reads as

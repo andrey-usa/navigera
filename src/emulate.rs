@@ -592,8 +592,8 @@ pub fn bidi_plan(what: &str, values: &[String], engine: &str) -> Result<BidiPlan
             plan("emulation.setUserAgentOverride", json!({ "userAgent": on.then_some(ua) }), json!({ "ua": shown }))
         }
         other => bail!(
-            "set {other}: not on the {engine} engine yet (it emulates viewport, device, locale, timezone, \
-             media dark|light, offline and ua); run it with --engine chrome"
+            "set {other}: not on the {engine} engine yet (it emulates viewport, device, geo, locale, \
+             timezone, media dark|light, offline and ua); run it with --engine chrome"
         ),
     }
 }
