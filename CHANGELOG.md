@@ -23,8 +23,10 @@ All notable changes to this project are documented here. The format follows
   that cuts text by length can leave) made `ax`, `text` and `eval` on
   Chrome wait for their timeout, 35 s, and fail: Chrome sends it as
   `\ud800`, which JSON in UTF-8 cannot hold, and the whole answer was
-  dropped. It now comes back as U+FFFD at once, and the clickables `ax`
-  finds by style on such a page are kept. An answer navigera cannot read
+  dropped; on the WebDriver engines (Firefox, Safari, chromedriver) the
+  page's own `JSON.stringify` writes it the same way and the command
+  failed. It now comes back as U+FFFD at once on every engine, and the
+  clickables `ax` finds by style on such a page are kept. An answer navigera cannot read
   at all now fails its command at once, saying so, instead of at the
   timeout.
 

@@ -531,6 +531,27 @@ fn emulate_ops(args: &[&str], engine: &str) {
     assert_eq!(ok(&a, 30)["bye"], true);
 }
 
+/// A lone UTF-16 surrogate in a page (half of an emoji pair) reads as
+/// U+FFFD in `text`, `ax` and `eval`, where it failed the command: the
+/// page's and the browser's JSON write it as `\ud800`, which JSON in UTF-8
+/// cannot hold.
+fn lone_surrogates(args: &[&str], engine: &str) {
+    let site = serve();
+    let eval = |id: u64, expression: &str| json!({ "id": id, "op": "eval", "expression": expression });
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        eval(2, "(document.body.innerHTML = '<p>x\\ud800y</p><button>Go\\udc00</button>', 1)"),
+        json!({ "id": 3, "op": "text" }),
+        json!({ "id": 4, "op": "ax", "format": "text" }),
+        eval(5, "'\\ud800' + '\\ud83d\\ude00'"),
+        json!({ "id": 9, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    assert!(ok(&a, 3).as_str().is_some_and(|t| t.contains("x\u{fffd}y")), "{engine}: {}", ok(&a, 3));
+    assert!(ok(&a, 4).as_str().is_some_and(|t| t.contains("Go\u{fffd}")), "{engine}: {}", ok(&a, 4));
+    assert_eq!(ok(&a, 5), "\u{fffd}😀", "{engine}");
+}
+
 /// A list of allowed hosts is held by Chrome's engine only: a WebDriver
 /// engine refuses to start with one, rather than run unrestricted.
 #[test]
@@ -566,6 +587,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     scenario(&["--engine", "firefox", "--executable", &firefox], "firefox");
     more_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
     emulate_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
 
@@ -689,6 +711,7 @@ fn safari_over_safaridriver_reads_acts_and_navigates() {
     scenario(&["--engine", "safari"], "safari");
     more_ops(&["--engine", "safari"], "safari", false);
     nav_clicks(&["--engine", "safari"], "safari");
+    lone_surrogates(&["--engine", "safari"], "safari");
 }
 
 /// chromedriver on a free port, for the `--webdriver` scenarios.
@@ -732,6 +755,8 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     more_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver", true);
     nav_clicks(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     nav_clicks(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
+    lone_surrogates(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
+    lone_surrogates(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
     #[cfg(unix)]
     {
         extern "C" {

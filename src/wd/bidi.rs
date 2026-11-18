@@ -677,7 +677,13 @@ impl Bidi {
         }
         match self.ws.read() {
             Ok(Message::Text(t)) => {
-                Ok(Some(serde_json::from_str(t.as_str()).map_err(|e| anyhow!("the browser sent no JSON ({e})"))?))
+                // Firefox writes a lone UTF-16 surrogate as `\ud800`, which
+                // JSON in UTF-8 cannot hold: read as U+FFFD.
+                let text = t.as_str();
+                let fixed = |e| crate::cdp::lone_surrogates_replaced(text).map_or(Err(e), |f| serde_json::from_str(&f));
+                Ok(Some(
+                    serde_json::from_str(text).or_else(fixed).map_err(|e| anyhow!("the browser sent no JSON ({e})"))?,
+                ))
             }
             Ok(Message::Close(_)) => {
                 self.closed = true;
@@ -1512,7 +1518,7 @@ impl Bidi {
     fn endpoint_page_url(&mut self) -> String {
         self.call(super::URL_TITLE, "[]", Duration::from_secs(10))
             .ok()
-            .and_then(|a| super::ok_text(&a).ok().and_then(|t| serde_json::from_str::<Value>(t).ok()))
+            .and_then(|a| super::ok_text(&a).ok().and_then(|t| super::page_value(&t).ok()))
             .and_then(|v| v[0].as_str().map(str::to_string))
             .unwrap_or_default()
     }

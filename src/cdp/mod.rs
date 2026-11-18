@@ -31,6 +31,7 @@ pub(crate) mod snap;
 pub(crate) mod transport;
 
 pub use browser::{Browser, LaunchOptions, TabView};
+pub(crate) use client::lone_surrogates_replaced;
 pub use client::CdpClient;
 pub use client::CLOSED as CONNECTION_CLOSED;
 pub use client::NEVER_REACHED;

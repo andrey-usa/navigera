@@ -457,13 +457,33 @@ struct Reply<'a> {
 }
 
 /// The `ok` of a [`wrap`]ped answer, as JSON text; its `err` as the error.
-fn ok_text(answer: &str) -> Result<&str> {
-    let reply: Reply = serde_json::from_str(answer).map_err(|e| anyhow!("the page's answer is not JSON ({e})"))?;
-    match (reply.ok, reply.err) {
-        (_, Some(err)) => Err(anyhow!(err)),
-        (Some(ok), None) => Ok(ok.get()),
-        (None, None) => Ok("null"),
+/// A lone UTF-16 surrogate, which the page's `JSON.stringify` writes as
+/// `\ud800` (half of an emoji pair) and JSON in UTF-8 cannot hold, is read
+/// as U+FFFD.
+fn ok_text(answer: &str) -> Result<std::borrow::Cow<'_, str>> {
+    fn read(answer: &str) -> Result<&str> {
+        let reply: Reply = serde_json::from_str(answer).map_err(|e| anyhow!("the page's answer is not JSON ({e})"))?;
+        match (reply.ok, reply.err) {
+            (_, Some(err)) => Err(anyhow!(err)),
+            (Some(ok), None) => Ok(ok.get()),
+            (None, None) => Ok("null"),
+        }
     }
+    match read(answer) {
+        Ok(ok) => Ok(std::borrow::Cow::Borrowed(ok)),
+        Err(e) => match crate::cdp::lone_surrogates_replaced(answer) {
+            Some(fixed) => read(&fixed).map(|ok| std::borrow::Cow::Owned(ok.to_string())),
+            None => Err(e),
+        },
+    }
+}
+
+/// JSON text a page wrote, read. A lone UTF-16 surrogate in it (the
+/// page's `JSON.stringify` writes half of an emoji pair as `\ud800`, which
+/// JSON in UTF-8 cannot hold) is read as U+FFFD.
+fn page_value(text: &str) -> Result<Value> {
+    let fixed = |e| crate::cdp::lone_surrogates_replaced(text).map_or(Err(e), |t| serde_json::from_str(&t));
+    Ok(serde_json::from_str(text).or_else(fixed)?)
 }
 
 /// A WebDriver key value for a key name (`Enter`, `ArrowDown`, `a`).
@@ -667,13 +687,13 @@ impl Driver {
     /// Run `function` in the page with `args`; its answer.
     fn call(&mut self, function: &str, args: Value) -> Result<Value> {
         let answer = self.wire.call(function, &args.to_string(), self.timeout)?;
-        Ok(serde_json::from_str(ok_text(&answer)?)?)
+        page_value(&ok_text(&answer)?)
     }
 
     /// [`Driver::call`] with the session's tabs, read as the call runs.
     fn call_tabs(&mut self, function: &str, args: Value) -> Result<(Value, Vec<String>)> {
         let (answer, tabs) = self.wire.call_and_tabs(function, &args.to_string(), self.timeout)?;
-        Ok((serde_json::from_str(ok_text(&answer)?)?, tabs))
+        Ok((page_value(&ok_text(&answer)?)?, tabs))
     }
 
     fn url_title(&mut self) -> Result<(String, String)> {
@@ -830,7 +850,9 @@ impl Driver {
         crate::timing::record("ax_wd_page", started);
         let text = ok_text(&answer).context("ax")?;
         // The page's own script made this: checked before it is indexed.
-        let snap = crate::cdp::snap::Snap::from_page_json(text).map_err(|why| {
+        let snap = crate::cdp::snap::Snap::from_page_json(&text)
+            .or_else(|why| crate::cdp::lone_surrogates_replaced(&text).map_or(Err(why), |t| crate::cdp::snap::Snap::from_page_json(&t)))
+            .map_err(|why| {
             anyhow!("ax: the page's snapshot {why}; the page may have changed the built-ins its reader uses: try `text`, or --engine chrome")
         })?;
         crate::timing::record("ax_wd_snapshot", started);
@@ -1681,6 +1703,15 @@ mod tests {
         let e = ok_text(r##"{"err":"click: no element matches \"#x\""}"##).unwrap_err();
         assert!(format!("{e}").contains("no element"), "{e}");
         assert!(ok_text("not json").is_err());
+    }
+
+    #[test]
+    fn a_lone_surrogate_in_a_page_answer_reads_as_the_replacement_character() {
+        assert_eq!(page_value(&ok_text(r#"{"ok":"a\ud800b"}"#).unwrap()).unwrap(), "a\u{fffd}b");
+        let e = ok_text(r#"{"err":"no \udc00 here"}"#).unwrap_err();
+        assert!(format!("{e}").contains("no \u{fffd} here"), "{e}");
+        assert_eq!(page_value(r#"["\ud83d\ude00"]"#).unwrap(), json!(["😀"]));
+        assert!(page_value("[1,").is_err());
     }
 
     #[test]
