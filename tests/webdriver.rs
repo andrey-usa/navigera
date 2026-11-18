@@ -538,27 +538,31 @@ fn emulate_ops(args: &[&str], engine: &str) {
 fn lone_surrogates(args: &[&str], engine: &str) {
     let site = serve();
     let eval = |id: u64, expression: &str| json!({ "id": id, "op": "eval", "expression": expression });
-    let script: Vec<Value> = vec![
+    // An `eval` value holding one crosses Firefox's own BiDi server; the
+    // other servers refuse it themselves (chromedriver over BiDi does not
+    // answer at all), and over classic chromedriver the error says what to
+    // do. `text` and `ax` come back on every engine.
+    let firefox = args.contains(&"firefox");
+    let classic_chromedriver = args.contains(&"--webdriver") && !args.contains(&"--bidi");
+    let mut script: Vec<Value> = vec![
         json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
         eval(2, "(document.body.innerHTML = '<p>x\\ud800y</p><button>Go\\udc00</button>', 1)"),
         json!({ "id": 3, "op": "text" }),
         json!({ "id": 4, "op": "ax", "format": "text" }),
-        eval(5, "'\\ud800' + '\\ud83d\\ude00'"),
-        json!({ "id": 9, "op": "quit" }),
     ];
+    if firefox || classic_chromedriver {
+        script.push(eval(5, "'\\ud800' + '\\ud83d\\ude00'"));
+    }
+    script.push(json!({ "id": 9, "op": "quit" }));
     let a = session(args, &script);
     assert!(ok(&a, 3).as_str().is_some_and(|t| t.contains("x\u{fffd}y")), "{engine}: {}", ok(&a, 3));
     assert!(ok(&a, 4).as_str().is_some_and(|t| t.contains("Go\u{fffd}")), "{engine}: {}", ok(&a, 4));
-    // Over classic WebDriver chromedriver itself cannot read such a value
-    // and the error says what to do; every other way it comes back.
-    let x = a.iter().find(|x| x["id"] == 5).unwrap();
-    assert!(
-        x["result"] == "\u{fffd}😀"
-            || (!args.contains(&"--engine")
-                && !args.contains(&"--bidi")
-                && x["error"].to_string().contains(".toWellFormed()")),
-        "{engine}: {x}"
-    );
+    if firefox {
+        assert_eq!(ok(&a, 5), "\u{fffd}😀", "{engine}");
+    } else if classic_chromedriver {
+        let x = a.iter().find(|x| x["id"] == 5).unwrap();
+        assert!(x["error"].to_string().contains(".toWellFormed()"), "{engine}: {x}");
+    }
 }
 
 /// A list of allowed hosts is held by Chrome's engine only: a WebDriver

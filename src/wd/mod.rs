@@ -1136,7 +1136,7 @@ impl Driver {
                     if format!("{e:#}").contains("cannot deserialize the result value") {
                         anyhow!(
                             "{e:#} (a string in the value may hold a lone UTF-16 surrogate, which the WebDriver \
-                             server cannot read: return it with .toWellFormed(), or run with --bidi)"
+                             server cannot read: return it with .toWellFormed())"
                         )
                     } else {
                         e
