@@ -549,7 +549,16 @@ fn lone_surrogates(args: &[&str], engine: &str) {
     let a = session(args, &script);
     assert!(ok(&a, 3).as_str().is_some_and(|t| t.contains("x\u{fffd}y")), "{engine}: {}", ok(&a, 3));
     assert!(ok(&a, 4).as_str().is_some_and(|t| t.contains("Go\u{fffd}")), "{engine}: {}", ok(&a, 4));
-    assert_eq!(ok(&a, 5), "\u{fffd}😀", "{engine}");
+    // Over classic WebDriver chromedriver itself cannot read such a value
+    // and the error says what to do; every other way it comes back.
+    let x = a.iter().find(|x| x["id"] == 5).unwrap();
+    assert!(
+        x["result"] == "\u{fffd}😀"
+            || (!args.contains(&"--engine")
+                && !args.contains(&"--bidi")
+                && x["error"].to_string().contains(".toWellFormed()")),
+        "{engine}: {x}"
+    );
 }
 
 /// A list of allowed hosts is held by Chrome's engine only: a WebDriver

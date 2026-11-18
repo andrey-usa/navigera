@@ -1129,7 +1129,19 @@ impl Driver {
             }
             Command::Eval { expression, timeout_ms, main: _ } => {
                 let timeout = timeout_ms.map_or(self.timeout, |ms| Duration::from_millis(ms.max(1.0) as u64));
-                self.wire.evaluate(expression, timeout).context("eval")
+                self.wire.evaluate(expression, timeout).map_err(|e| {
+                    // chromedriver's own reader refuses a value holding a
+                    // lone UTF-16 surrogate before navigera sees it.
+                    let e = e.context("eval");
+                    if format!("{e:#}").contains("cannot deserialize the result value") {
+                        anyhow!(
+                            "{e:#} (a string in the value may hold a lone UTF-16 surrogate, which the WebDriver \
+                             server cannot read: return it with .toWellFormed(), or run with --bidi)"
+                        )
+                    } else {
+                        e
+                    }
+                })
             }
             Command::Wait { selector, text, url, gone, js, frame, ms, idle: _, timeout_ms, download } => {
                 if frame.is_some() || download.is_some() {

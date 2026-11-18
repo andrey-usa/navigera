@@ -26,7 +26,10 @@ All notable changes to this project are documented here. The format follows
   dropped; on the WebDriver engines (Firefox, Safari, chromedriver) the
   page's own `JSON.stringify` writes it the same way and the command
   failed. It now comes back as U+FFFD at once on every engine, and the
-  clickables `ax` finds by style on such a page are kept. An answer navigera cannot read
+  clickables `ax` finds by style on such a page are kept. One case is
+  left: over classic WebDriver, chromedriver itself cannot read an `eval`
+  value that holds one, and the error now says to return it with
+  `.toWellFormed()` or to run with `--bidi`. An answer navigera cannot read
   at all now fails its command at once, saying so, instead of at the
   timeout.
 
