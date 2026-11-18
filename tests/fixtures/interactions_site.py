@@ -544,6 +544,8 @@ PAGES["/posted"] = ("posted", "", """<p>posted</p>""")
 
 PAGES["/download"] = ("download", "", """
 <a id=dl href="/file.csv">Download CSV</a>
+<a id=slow href="/slow-file.csv?ms=1500">Slow CSV</a>
+<a id=cut href="/cut.csv">Cut CSV</a>
 <button id=blob type=button>Save notes</button>
 <script>
 document.getElementById('blob').addEventListener('click', () => {
@@ -1123,6 +1125,26 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/file.csv":
             return self.send("id,name\n1,Ada\n2,Grace\n", "text/csv",
                              [("Content-Disposition", 'attachment; filename="report.csv"')])
+        if u.path in ("/slow-file.csv", "/cut.csv"):
+            # Half the file now; the rest after ms (slow), or never: the
+            # connection is cut and the browser cancels the download.
+            import socket, time
+            data = ("id,name\n" + "9,Slow\n" * 2000).encode()
+            name = "slow.csv" if u.path == "/slow-file.csv" else "cut.csv"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.end_headers()
+            self.wfile.write(data[: len(data) // 2])
+            self.wfile.flush()
+            if u.path == "/cut.csv":
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            time.sleep(int(q.get("ms", ["1500"])[0]) / 1000)
+            self.wfile.write(data[len(data) // 2 :])
+            return
         if u.path == "/no-content":
             self.send_response(204)
             self.end_headers()

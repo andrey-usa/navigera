@@ -1449,30 +1449,37 @@ impl BrowserSession {
         out
     }
 
-    /// Wait for a finished download whose file name matches `glob`
-    /// (`*`, `?`; empty: any). A canceled match is an error.
+    /// `wait --download`: the oldest download whose file name matches `glob`
+    /// (`*`, `?`; empty: any) that no earlier wait took, once it finishes
+    /// (see [`cdp::downloads::next_for_wait`]). A canceled one is an error,
+    /// and the next wait takes the one after it.
     pub fn wait_download(&self, glob: &str, timeout_ms: Option<f64>) -> Result<cdp::downloads::Download> {
         let (wait, _) = self.element_budget(timeout_ms.or(Some(self.timeout_ms)));
         let deadline = std::time::Instant::now() + wait;
-        let matches = |d: &cdp::downloads::Download| glob.is_empty() || cdp::glob_match(glob, &d.suggested);
         loop {
             let items = self.downloads(false);
-            if let Some(d) = items.iter().rev().find(|d| matches(d) && d.state == "completed") {
+            if let cdp::downloads::Wait::Done(i) | cdp::downloads::Wait::Canceled(i) =
+                cdp::downloads::next_for_wait(&items, glob)
+            {
+                let d = &items[i];
+                self.take_download(d.n);
+                if d.state == "canceled" {
+                    bail!("{}", cdp::downloads::canceled_text(d));
+                }
                 return Ok(d.clone());
             }
-            if let Some(d) = items.iter().rev().find(|d| matches(d) && d.state == "canceled") {
-                bail!("download {} was canceled ({})", d.suggested, d.url);
-            }
             if std::time::Instant::now() >= deadline {
-                let seen: Vec<String> = items.iter().map(|d| format!("{} ({})", d.suggested, d.state)).collect();
-                bail!(
-                    "no finished download{} within {} ms (seen: {})",
-                    if glob.is_empty() { String::new() } else { format!(" matching {glob:?}") },
-                    wait.as_millis(),
-                    if seen.is_empty() { "none".to_string() } else { seen.join(", ") }
-                );
+                bail!("{}", cdp::downloads::none_text(&items, glob, wait));
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// A download a wait answered with is not the answer to the next one.
+    fn take_download(&self, n: u64) {
+        let mut d = self.browser.shared().downloads.lock().unwrap();
+        if let Some(item) = d.items.iter_mut().find(|x| x.n == n) {
+            item.taken = true;
         }
     }
 

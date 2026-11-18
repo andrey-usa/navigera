@@ -509,6 +509,39 @@ fn the_element_wait_is_the_one_asked_for() {
 }
 
 #[test]
+fn each_download_wait_answers_with_its_own_file() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("download-order", &[]);
+    s.ok(&["goto", &format!("{}/download", site.url)]);
+    s.ok(&["click", "--selector", "#dl"]);
+    let r = s.ok(&["wait", "--download", "*.csv"]);
+    assert_eq!(r["download"]["file"], "report.csv", "{r}");
+    // A second file, still coming: the wait is for it, not the finished
+    // report.csv (which it answered with at once before).
+    s.ok(&["click", "--selector", "#slow"]);
+    let r = s.ok(&["wait", "--download", "*.csv", "--timeout-ms", "15000"]);
+    assert_eq!(
+        (&r["download"]["file"], &r["download"]["state"]),
+        (&serde_json::json!("slow.csv"), &serde_json::json!("completed")),
+        "{r}"
+    );
+    // A canceled one fails its own wait only.
+    s.ok(&["click", "--selector", "#cut"]);
+    let err = s.fails(&["wait", "--download", "*.csv", "--timeout-ms", "15000"]);
+    assert!(err.contains("cut.csv was canceled"), "{err}");
+    s.ok(&["click", "--selector", "#dl"]);
+    let r = s.ok(&["wait", "--download", "*.csv", "--timeout-ms", "15000"]);
+    assert_eq!(
+        (&r["download"]["file"], &r["download"]["state"]),
+        (&serde_json::json!("report.csv"), &serde_json::json!("completed")),
+        "{r}"
+    );
+    // Nothing left: the error says the files it saw were taken.
+    let err = s.fails(&["wait", "--download", "--timeout-ms", "300"]);
+    assert!(err.contains("report.csv (completed, taken by an earlier wait)"), "{err}");
+}
+
+#[test]
 fn downloads_are_saved_and_waited_for() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("downloads", &[]);

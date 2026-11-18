@@ -1344,7 +1344,7 @@ const OPS: &[(&str, &str, &str)] = &[
         "scroll the page, or an element into view",
     ),
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
-    ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
+    ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: the next download no earlier wait took, once it finishes"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
     ("eval", "<js> | --file <path.js> | - [--main]", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin; --main (Electron) runs it in the app's main process, a function getting the electron module"),
     ("text", "[--selector <css>] [--grep <words> [--context <lines>] [--limit <passages>]]", "the first match's text as it reads (innerText; textContent when it is not rendered); with no selector, the whole page's. --grep: only the passages that mention the words, each with the lines around it (1) and its line number; the first 5, letter case aside"),

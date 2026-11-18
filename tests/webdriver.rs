@@ -578,9 +578,6 @@ fn download_ops(args: &[&str], engine: &str) {
         json!({ "id": 3, "op": "eval", "expression": start }),
         json!({ "id": 4, "op": "wait", "download": "*.csv" }),
         json!({ "id": 5, "op": "downloads", "dir": dir.path().display().to_string() }),
-        // As on Chrome, `wait --download` takes the newest finished one:
-        // the first is forgotten so the wait is for the next.
-        json!({ "id": 11, "op": "downloads", "clear": true }),
         json!({ "id": 6, "op": "eval", "expression": start }),
         json!({ "id": 7, "op": "wait", "download": "" }),
         json!({ "id": 8, "op": "downloads", "format": "json" }),
@@ -602,7 +599,9 @@ fn download_ops(args: &[&str], engine: &str) {
     let parent = saved.parent().and_then(|p| p.canonicalize().ok());
     assert_eq!(parent, dir.path().canonicalize().ok(), "{engine}: {second}");
     assert_eq!(std::fs::read_to_string(saved).unwrap(), CSV, "{engine}");
-    assert_eq!(ok(&a, 8).as_array().map(Vec::len), Some(1), "{engine}: {}", ok(&a, 8));
+    // The second wait took the second file, though the first was in the
+    // list, finished.
+    assert_eq!(ok(&a, 8).as_array().map(Vec::len), Some(2), "{engine}: {}", ok(&a, 8));
     let x = a.iter().find(|x| x["id"] == 9).unwrap();
     assert!(
         x["error"].as_str().is_some_and(|e| e.contains("no finished download matching \"*.pdf\"")),

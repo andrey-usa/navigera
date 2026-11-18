@@ -823,6 +823,7 @@ impl Bidi {
                     path: None,
                     scope: String::new(),
                     dir: None,
+                    taken: false,
                 });
             }
             "browsingContext.downloadEnd" => {
@@ -1346,25 +1347,20 @@ impl Wire for Bidi {
     }
 
     fn wait_download(&mut self, glob: &str, timeout: Duration) -> Result<Download> {
+        use crate::cdp::downloads::{next_for_wait, Wait};
         let deadline = Instant::now() + timeout;
-        let matches = |d: &&Download| glob.is_empty() || crate::cdp::glob_match(glob, &d.suggested);
         loop {
-            if let Some(d) = self.downloads.iter().rev().filter(matches).find(|d| d.state == "completed") {
+            if let Wait::Done(i) | Wait::Canceled(i) = next_for_wait(&self.downloads, glob) {
+                self.downloads[i].taken = true;
+                let d = &self.downloads[i];
+                if d.state == "canceled" {
+                    bail!("{}", crate::cdp::downloads::canceled_text(d));
+                }
                 return Ok(d.clone());
-            }
-            if let Some(d) = self.downloads.iter().rev().filter(matches).find(|d| d.state == "canceled") {
-                bail!("download {} was canceled ({})", d.suggested, d.url);
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                let seen: Vec<String> =
-                    self.downloads.iter().map(|d| format!("{} ({})", d.suggested, d.state)).collect();
-                bail!(
-                    "no finished download{} within {} ms (seen: {})",
-                    if glob.is_empty() { String::new() } else { format!(" matching {glob:?}") },
-                    timeout.as_millis(),
-                    if seen.is_empty() { "none".to_string() } else { seen.join(", ") }
-                );
+                bail!("{}", crate::cdp::downloads::none_text(&self.downloads, glob, timeout));
             }
             // Read until something arrives (or the deadline): no polling.
             if let Some(v) = self.read_one(left.min(READ_SLICE))? {

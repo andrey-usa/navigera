@@ -32,6 +32,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `wait --download` answered with the newest finished download however
+  old: after one download, a click and `wait --download` gave the earlier
+  file at once (the second still coming), and an earlier canceled download
+  failed the wait for a newer one. Now each wait takes the oldest matching
+  download that no earlier wait took, and waits for it to finish; a
+  canceled one fails only its own wait, and the next takes the one after
+  it. A wait that finds nothing names the files earlier waits took. On
+  Chrome and the WebDriver BiDi engines (Firefox).
 - A lone UTF-16 surrogate in a page (half of an emoji pair, as a script
   that cuts text by length can leave) made `ax`, `text` and `eval` on
   Chrome wait for their timeout, 35 s, and fail: Chrome sends it as
