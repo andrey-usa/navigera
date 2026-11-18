@@ -4151,12 +4151,6 @@ impl BrowserSession {
                     _ => break,
                 }
                 eprintln!("[screenshot] --annotate: the capture came without the labels; taking it again ({again})");
-                // Retakes alone did not bring them (macOS, 1 session in 300:
-                // three retakes, all without): a tab the window does not
-                // show keeps its last frame. Brought to the front first.
-                if again == 1 && self.bring_to_front().is_ok() {
-                    eprintln!("[screenshot] --annotate: the tab brought to the front before the retake");
-                }
                 let _ = tab.evaluate(crate::annotate::NEXT_FRAME, timeout);
                 shot = tab.screenshot_as(timeout, full_page, quality);
             }
