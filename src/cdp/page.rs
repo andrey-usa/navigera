@@ -994,6 +994,51 @@ fn promise_marked(expression: &str) -> String {
 /// Puts back the timer functions [`SETTLE_ARM`] wrapped.
 const SETTLE_UNHOOK: &str = "(() => { const c = window.__nvMut; if (c && c.unT) c.unT(); return 0; })()";
 
+/// The mark on a string a page sent as the base64 of its UTF-8 (see
+/// [`ascii_safe`]).
+const B64_MARK: &str = "\u{1}nv:b64:";
+
+/// Below this many UTF-16 units a string comes back as it is.
+const B64_MIN: usize = 16 * 1024;
+
+/// `expression` (a string's), sent back so Chrome keeps to its fast path.
+/// Chrome writes every non-ASCII character of a result as a six-byte
+/// `\uXXXX` escape and leaves its ASCII fast path for the whole string, so
+/// one curly quote or `é` makes a page's text several times slower to come
+/// back (2.8 MB, local Chrome 153, raw CDP, medians of 12: ASCII 53 ms, one
+/// `é` in 20 143 ms, all `é` 302 ms, all CJK 318 ms). Above [`B64_MIN`] a
+/// string with any non-ASCII character comes as the base64 of its UTF-8
+/// instead (94, 172 and 278 ms there, the encoding included); the ASCII
+/// test costs 1.9 ms on 2.8 MB of ASCII and stops at the first character
+/// that isn't. A string that starts with the mark is always encoded, so
+/// every string comes back as it was. Browsers without
+/// `Uint8Array.prototype.toBase64` (Chrome before 140) send it as before.
+fn ascii_safe(expression: &str) -> String {
+    format!(
+        "(() => {{ const s = ({expression}); \
+         if (typeof s !== 'string' || typeof Uint8Array.prototype.toBase64 !== 'function') return s; \
+         if (s.startsWith({mark}) || (s.length >= {min} && /[^\\x00-\\x7f]/.test(s))) \
+         return {mark} + new TextEncoder().encode(s).toBase64(); \
+         return s; }})()",
+        mark = json!(B64_MARK),
+        min = B64_MIN,
+    )
+}
+
+/// A value [`ascii_safe`] sent, as the page had it.
+fn from_ascii_safe(value: Value) -> Result<Value> {
+    match value {
+        Value::String(s) if s.starts_with(B64_MARK) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&s[B64_MARK.len()..])
+                .context("the page's text, base64")?;
+            // TextEncoder writes UTF-8 (a lone surrogate becomes U+FFFD).
+            Ok(Value::String(String::from_utf8(bytes).context("the page's text, UTF-8")?))
+        }
+        other => Ok(other),
+    }
+}
+
 /// The change journal, armed in the top document just before a tree read
 /// so that a later text entry can be shown to have changed nothing else
 /// the tree shows, and the read need not be taken again (see
@@ -6845,8 +6890,9 @@ impl Page {
 
     /// The page's whole text as it reads (`innerText` of the body).
     pub fn page_text(&self, timeout: Duration) -> Result<String> {
-        let value = self.evaluate_raw("(document.body || document.documentElement || {}).innerText ?? ''", timeout)?;
-        Ok(value.as_str().unwrap_or_default().to_string())
+        let value = self
+            .evaluate_raw(&ascii_safe("(document.body || document.documentElement || {}).innerText ?? ''"), timeout)?;
+        Ok(from_ascii_safe(value)?.as_str().unwrap_or_default().to_string())
     }
 
     /// The first match's text as it reads (`innerText`: a list reads as
@@ -6857,17 +6903,17 @@ impl Page {
         // Code and styles inside the element aren't text a user reads (an
         // element that is itself a script, e.g. a JSON blob, keeps its own).
         let value = self.evaluate_raw(
-            &format!(
+            &ascii_safe(&format!(
                 "(() => {{ const el = {DEEP}.first({sel}); if (!el) return null; \
                  if (typeof el.innerText === 'string' && el.getClientRects().length) return el.innerText; \
                  if (!el.querySelector || !el.querySelector('script, style, template, noscript')) return el.textContent; \
                  const c = el.cloneNode(true); \
                  for (const n of c.querySelectorAll('script, style, template, noscript')) n.remove(); \
                  return c.textContent; }})()"
-            ),
+            )),
             timeout,
         )?;
-        Ok(value.as_str().map(str::to_string))
+        Ok(from_ascii_safe(value)?.as_str().map(str::to_string))
     }
 
     /// One poll of a `wait` condition; true when satisfied.

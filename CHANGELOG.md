@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Performance
+
+- `text` on Chrome (the whole page, `--selector`, `--grep`) brings a big
+  text with any character outside ASCII back as the base64 of its UTF-8.
+  Chrome writes each such character as a six-byte escape and leaves its
+  fast path for the whole text, so one curly quote or accented letter
+  made a page's text several times slower to read. ASCII text, and text
+  under 16,384 characters, come back as before; Chrome before 140 (no
+  `Uint8Array.prototype.toBase64`) too.
+
 ## [0.15.0] - 2026-11-17
 
 ### Behaviour changes

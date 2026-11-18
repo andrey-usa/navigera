@@ -263,6 +263,38 @@ fn text_target_ignores_the_document_title() {
     assert!(state["url"].as_str().unwrap_or_default().ends_with("/landed"), "{state}");
 }
 
+/// Text with characters outside ASCII comes back exactly: a big text is sent
+/// as base64 of its UTF-8 (Chrome escapes each such character otherwise),
+/// and a short one that happens to start with that encoding's mark too.
+#[test]
+fn text_outside_ascii_comes_back_exactly() {
+    if !chrome_available() {
+        return;
+    }
+    let s = Session::start("utf8text");
+    let unit = "é日😀a";
+    s.ok(&[
+        "eval",
+        &format!(
+            "() => {{ document.body.textContent = {}.repeat(20000); \
+             const m = document.createElement('div'); m.id = 'm'; m.hidden = true; \
+             m.textContent = '\\u0001nv:b64:' + 'x'; document.body.append(m); return 1; }}",
+            serde_json::to_string(unit).unwrap()
+        ),
+    ]);
+    let all = s.ok(&["text"]);
+    let all = all.as_str().unwrap_or_default();
+    assert!(
+        all.starts_with(&unit.repeat(20000)),
+        "{} chars, starts {:?}",
+        all.chars().count(),
+        all.chars().take(10).collect::<String>()
+    );
+    assert_eq!(s.ok(&["text", "--selector", "#m"]), "\u{1}nv:b64:x");
+    let hits = s.ok(&["text", "--grep", "😀a"]).to_string();
+    assert!(hits.contains("😀a"), "{hits}");
+}
+
 /// A styled checkbox (input covered by its own label's box) gets a trusted
 /// click through the label, without the 3 s covered-element wait.
 #[test]
