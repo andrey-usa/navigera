@@ -604,7 +604,10 @@ fn download_ops(args: &[&str], engine: &str) {
     assert_eq!(std::fs::read_to_string(saved).unwrap(), CSV, "{engine}");
     assert_eq!(ok(&a, 8).as_array().map(Vec::len), Some(1), "{engine}: {}", ok(&a, 8));
     let x = a.iter().find(|x| x["id"] == 9).unwrap();
-    assert!(x["error"].to_string().contains("no finished download matching \"*.pdf\""), "{engine}: {x}");
+    assert!(
+        x["error"].as_str().is_some_and(|e| e.contains("no finished download matching \"*.pdf\"")),
+        "{engine}: {x}"
+    );
 }
 
 /// A lone UTF-16 surrogate in a page (half of an emoji pair) reads as
