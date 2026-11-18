@@ -996,7 +996,8 @@ fn a_click_before_the_page_wired_the_element_is_sent_again() {
         // A page that replays a recorded click does it after the click
         // returned; navigera's own clicks are all done by then.
         if hits > 0 {
-            s.ok(&["wait", "--js", "window.hits > 0"]);
+            let (waited, w) = s.run(&["wait", "--js", "window.hits > 0"]);
+            assert!(waited && w["ok"] == true, "{query}: the click never counted: {w}\nclick: {r}");
         }
         assert_eq!(s.text(&["get", "text", "--selector", "#out"]), out, "{query}: {r}");
         assert_eq!(s.ok(&["eval", "window.hits"]), hits, "{query}: {r}");
