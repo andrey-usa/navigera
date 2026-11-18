@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `set locale`, `set timezone`, `set media dark|light`, `set ua` and
+  `set offline` on the WebDriver BiDi engines (Firefox, experimental):
+  WebDriver BiDi's `emulation` commands, for every tab of the session and
+  the tabs it opens later; in a Firefox you attached to, for its own tabs
+  only. `set media print`, `reduced-motion` and `forced-colors`, and the
+  settings Firefox does not emulate (`cpu`, `network`, `device`), say to
+  run with `--engine chrome`. Classic WebDriver (Safari) has no emulation
+  and says so.
+
 ### Performance
 
 - `text` on Chrome (the whole page, `--selector`, `--grep`) brings a big

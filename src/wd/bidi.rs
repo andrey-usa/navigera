@@ -81,6 +81,10 @@ pub struct Bidi {
     preloads: Vec<String>,
     /// `set viewport`, for the tabs this session opens after it.
     viewport: Option<Value>,
+    /// `set locale|timezone|media|offline|ua`: each `emulation.*` command
+    /// in force (its own parameters), sent again to a tab this session
+    /// opens in the user's Firefox.
+    emulations: Vec<(String, Value)>,
     /// The frames inside `own` tabs, each with its tab.
     frames: Vec<(String, String)>,
     closed: bool,
@@ -600,6 +604,7 @@ impl Bidi {
             routes: Vec::new(),
             intercept: None,
             viewport: None,
+            emulations: Vec::new(),
             child: None,
             _profile: None,
             classic: None,
@@ -1149,6 +1154,23 @@ impl Wire for Bidi {
         Ok(())
     }
 
+    fn emulate(&mut self, method: &str, params: Value) -> Result<()> {
+        let mut scoped = params.clone();
+        if self.attached {
+            // In the user's own Firefox: this session's tabs only.
+            scoped["contexts"] = json!(self.own);
+        } else {
+            // Navigera's own Firefox: every tab, and the ones opened later.
+            scoped["userContexts"] = json!(["default"]);
+        }
+        self.send(method, scoped, Duration::from_secs(30))?;
+        self.emulations.retain(|(m, _)| m != method);
+        if params.as_object().is_some_and(|o| o.values().any(|v| !v.is_null())) {
+            self.emulations.push((method.to_string(), params));
+        }
+        Ok(())
+    }
+
     fn add_init_script(&mut self, source: &str) -> Result<()> {
         let mut params = json!({ "functionDeclaration": format!("() => {{\n{source}\n}}") });
         if self.attached {
@@ -1326,6 +1348,11 @@ impl Wire for Bidi {
         }
         if self.attached {
             self.own.push(id.clone());
+            for (method, params) in self.emulations.clone() {
+                let mut params = params;
+                params["contexts"] = json!([id]);
+                let _ = self.send(&method, params, Duration::from_secs(30));
+            }
             let was = std::mem::replace(&mut self.context, id.clone());
             self.listen_in(&id, Duration::from_secs(10));
             self.context = was;

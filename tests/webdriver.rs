@@ -395,6 +395,7 @@ fn more_ops(args: &[&str], engine: &str, bidi: bool) {
         json!({ "id": 41, "op": "eval", "expression": ask("/api/data?x=1") }),
         json!({ "id": 42, "op": "wait", "js": "window.got !== undefined" }),
         json!({ "id": 43, "op": "eval", "expression": "window.got" }),
+        json!({ "id": 44, "op": "set", "what": "locale", "values": ["de-DE"] }),
         json!({ "id": 30, "op": "quit" }),
     ];
     let a = session(args, &script);
@@ -461,8 +462,72 @@ fn more_ops(args: &[&str], engine: &str, bidi: bool) {
         // (Several statements in one `eval`, and the server's own answer.)
         assert!(ok(&a, 35).as_str().unwrap().starts_with("404 "), "{engine}: {}", ok(&a, 35));
         assert!(failed(26).contains("classic WebDriver has no script"), "{engine}: {}", failed(26));
+        assert!(failed(44).contains("classic WebDriver has no emulation"), "{engine}: {}", failed(44));
         assert_eq!(ok(&a, 28), "undefined", "{engine}");
     }
+    assert_eq!(ok(&a, 30)["bye"], true);
+}
+
+/// `set` over WebDriver BiDi's `emulation.*` (Firefox): locale, timezone,
+/// the color scheme, the user agent and offline, for every tab, a new one
+/// too; what Firefox cannot emulate is refused with the engine to use.
+fn emulate_ops(args: &[&str], engine: &str) {
+    let site = serve();
+    let set = |id: u64, what: &str, values: &[&str]| json!({ "id": id, "op": "set", "what": what, "values": values });
+    let eval = |id: u64, expression: &str| json!({ "id": id, "op": "eval", "expression": expression });
+    let fetch = "window.got = undefined; fetch('/more.html').then((r) => { window.got = r.status; }, () => { window.got = 'failed'; }); 0";
+    let state = "[navigator.language, new Intl.NumberFormat().format(1234.5), Intl.DateTimeFormat().resolvedOptions().timeZone, \
+                 matchMedia('(prefers-color-scheme: dark)').matches, navigator.userAgent]";
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        set(2, "locale", &["de-DE"]),
+        set(3, "timezone", &["Asia/Tokyo"]),
+        set(4, "media", &["dark"]),
+        set(5, "ua", &["NavigeraTest/1.0", "(emulated)"]),
+        json!({ "id": 6, "op": "reload" }),
+        eval(7, state),
+        set(8, "media", &["print"]),
+        set(9, "cpu", &["4"]),
+        set(10, "offline", &[]),
+        eval(11, fetch),
+        json!({ "id": 12, "op": "wait", "js": "window.got !== undefined" }),
+        eval(13, "window.got"),
+        set(14, "offline", &["off"]),
+        eval(15, fetch),
+        json!({ "id": 16, "op": "wait", "js": "window.got !== undefined" }),
+        eval(17, "window.got"),
+        json!({ "id": 18, "op": "tab-new" }),
+        json!({ "id": 19, "op": "goto", "url": format!("{site}/more.html") }),
+        eval(20, state),
+        set(21, "locale", &["off"]),
+        set(22, "timezone", &["off"]),
+        set(23, "media", &["off"]),
+        set(24, "ua", &["off"]),
+        json!({ "id": 25, "op": "reload" }),
+        eval(26, state),
+        json!({ "id": 30, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    let failed = |id: u64| {
+        let x = a.iter().find(|x| x["id"] == id).unwrap();
+        assert_eq!(x["ok"], false, "{engine}: step {id} should fail: {x}");
+        x["error"].to_string()
+    };
+    assert_eq!(ok(&a, 2), &json!({ "locale": "de-DE" }), "{engine}");
+    assert_eq!(ok(&a, 4), &json!({ "media": "dark" }), "{engine}");
+    let emulated = json!(["de-DE", "1.234,5", "Asia/Tokyo", true, "NavigeraTest/1.0 (emulated)"]);
+    assert_eq!(ok(&a, 7), &emulated, "{engine}: the page sees every override");
+    assert!(failed(8).contains("--engine chrome"), "{engine}: {}", failed(8));
+    assert!(failed(9).contains("--engine chrome"), "{engine}: {}", failed(9));
+    assert_eq!(ok(&a, 10), &json!({ "offline": true }), "{engine}");
+    assert_eq!(ok(&a, 13), "failed", "{engine}: a request while offline");
+    assert_eq!(ok(&a, 17), 200, "{engine}: online again");
+    assert_eq!(ok(&a, 20), &emulated, "{engine}: a tab opened after the overrides has them too");
+    let back = ok(&a, 26);
+    assert!(
+        back[0] != "de-DE" && back[2] != "Asia/Tokyo" && back[4] != "NavigeraTest/1.0 (emulated)",
+        "{engine}: {back}"
+    );
     assert_eq!(ok(&a, 30)["bye"], true);
 }
 
@@ -500,6 +565,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     };
     scenario(&["--engine", "firefox", "--executable", &firefox], "firefox");
     more_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
+    emulate_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
 

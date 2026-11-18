@@ -6806,7 +6806,7 @@ impl Command {
 }
 
 /// What `set` sets, with the other names each goes by.
-const SETTINGS: &[&str] = &[
+pub(crate) const SETTINGS: &[&str] = &[
     "viewport",
     "device",
     "media",

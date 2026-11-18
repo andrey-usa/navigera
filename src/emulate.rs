@@ -519,12 +519,115 @@ pub fn plan(
     })
 }
 
+/// One WebDriver BiDi `emulation.*` command for a `set` (Firefox 160:
+/// locale, timezone, a light or dark color scheme, offline, the user
+/// agent; `null` takes the override away). The session adds the tabs it
+/// applies to.
+pub struct BidiPlan {
+    pub method: &'static str,
+    pub params: Value,
+    pub result: Value,
+}
+
+/// The settings [`bidi_plan`] knows.
+pub const BIDI_SETTINGS: &[&str] = &["locale", "timezone", "tz", "media", "offline", "ua", "user-agent", "useragent"];
+
+pub fn bidi_plan(what: &str, values: &[String], engine: &str) -> Result<BidiPlan> {
+    let first = values.first().map(String::as_str).unwrap_or("");
+    let plan = |method, params, result| Ok(BidiPlan { method, params, result });
+    match what {
+        "locale" => {
+            if first.is_empty() {
+                bail!("set locale <BCP 47 tag, e.g. de-DE> (or `off`)");
+            }
+            let on = !off(first);
+            plan(
+                "emulation.setLocaleOverride",
+                json!({ "locale": on.then_some(first) }),
+                json!({ "locale": if on { first } else { "default" } }),
+            )
+        }
+        "timezone" | "tz" => {
+            if first.is_empty() {
+                bail!("set timezone <IANA zone, e.g. Europe/Berlin> (or `off`)");
+            }
+            let on = !off(first);
+            plan(
+                "emulation.setTimezoneOverride",
+                json!({ "timezone": on.then_some(first) }),
+                json!({ "timezone": if on { first } else { "default" } }),
+            )
+        }
+        "media" => {
+            let scheme = match first.to_ascii_lowercase().as_str() {
+                v if off(v) => None,
+                v @ ("dark" | "light") if values.len() == 1 => Some(v.to_string()),
+                _ => bail!(
+                    "set media {}: the {engine} engine emulates the color scheme only (dark, light or off); \
+                     print, reduced-motion and forced-colors are Chrome's: run it with --engine chrome",
+                    values.join(" ")
+                ),
+            };
+            let features = scheme.as_ref().map(|v| json!({ "prefers-color-scheme": v }));
+            let shown = scheme.clone().unwrap_or_else(|| "default".into());
+            plan("emulation.setMediaFeaturesOverride", json!({ "features": features }), json!({ "media": shown }))
+        }
+        "offline" => {
+            let on = match first.to_ascii_lowercase().as_str() {
+                "" | "on" | "true" | "1" => true,
+                "off" | "false" | "0" => false,
+                other => bail!("set offline takes on|off, got {other:?}"),
+            };
+            let conditions = on.then(|| json!({ "type": "offline" }));
+            plan("emulation.setNetworkConditions", json!({ "networkConditions": conditions }), json!({ "offline": on }))
+        }
+        "ua" | "user-agent" | "useragent" => {
+            let ua = values.join(" ");
+            if ua.is_empty() {
+                bail!("set ua <user agent string> (or `off`)");
+            }
+            let on = !off(&ua);
+            let shown = if on { ua.clone() } else { "default".into() };
+            plan("emulation.setUserAgentOverride", json!({ "userAgent": on.then_some(ua) }), json!({ "ua": shown }))
+        }
+        other => bail!(
+            "set {other}: not on the {engine} engine yet (it emulates viewport, locale, timezone, media dark|light, \
+             offline and ua); run it with --engine chrome"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn bidi_plans_say_what_firefox_takes() {
+        let p = bidi_plan("media", &v(&["dark"]), "firefox").unwrap();
+        assert_eq!(p.params, json!({ "features": { "prefers-color-scheme": "dark" } }));
+        assert_eq!(bidi_plan("media", &v(&["off"]), "firefox").unwrap().params, json!({ "features": null }));
+        assert!(bidi_plan("media", &v(&["print"]), "firefox").err().unwrap().to_string().contains("--engine chrome"));
+        assert!(bidi_plan("media", &v(&["dark", "print"]), "firefox").is_err());
+        assert_eq!(
+            bidi_plan("tz", &v(&["Asia/Tokyo"]), "firefox").unwrap().params,
+            json!({ "timezone": "Asia/Tokyo" })
+        );
+        assert_eq!(bidi_plan("locale", &v(&["reset"]), "firefox").unwrap().params, json!({ "locale": null }));
+        let ua = bidi_plan("ua", &v(&["Bot/1.0", "(x)"]), "firefox").unwrap();
+        assert_eq!((ua.params, ua.result), (json!({ "userAgent": "Bot/1.0 (x)" }), json!({ "ua": "Bot/1.0 (x)" })));
+        assert_eq!(
+            bidi_plan("offline", &v(&[]), "firefox").unwrap().params,
+            json!({ "networkConditions": { "type": "offline" } })
+        );
+        assert_eq!(bidi_plan("offline", &v(&["off"]), "firefox").unwrap().params, json!({ "networkConditions": null }));
+        assert!(bidi_plan("cpu", &v(&["4"]), "firefox").is_err());
+        for what in BIDI_SETTINGS {
+            assert!(crate::protocol::SETTINGS.contains(what), "{what}");
+        }
     }
 
     #[test]

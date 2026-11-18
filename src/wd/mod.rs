@@ -382,6 +382,14 @@ pub trait Wire: Send {
     /// The viewport's size in CSS pixels and its pixel ratio; `None` is the
     /// browser's own again.
     fn set_viewport(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()>;
+    /// `set locale|timezone|media|offline|ua`: one WebDriver BiDi
+    /// `emulation.*` command (see [`crate::emulate::bidi_plan`]) for the
+    /// session's tabs, now and later.
+    fn emulate(&mut self, _method: &str, _params: Value) -> Result<()> {
+        bail!(
+            "classic WebDriver has no emulation; use --engine firefox or chrome (or --bidi with a server that has it)"
+        )
+    }
     /// A script every new document runs before its own.
     fn add_init_script(&mut self, source: &str) -> Result<()>;
     /// Take the init scripts away again; how many there were.
@@ -790,7 +798,7 @@ impl Driver {
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport, route, unroute)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|locale|timezone|media|offline|ua, route, unroute)",
             op_name(command),
             self.engine
         )
@@ -1562,6 +1570,11 @@ impl Driver {
                     Some(_) => json!({ "viewport": v, "scale": scale }),
                     None => json!({ "viewport": "default" }),
                 })
+            }
+            Command::Set { what, values, .. } if crate::emulate::BIDI_SETTINGS.contains(&what.as_str()) => {
+                let plan = crate::emulate::bidi_plan(what, values, self.engine)?;
+                self.wire.emulate(plan.method, plan.params).map_err(|e| e.context(format!("set {what}")))?;
+                Ok(plan.result)
             }
             Command::Route { pattern: None, har: None, .. } => {
                 let routes = self.wire.routes();
