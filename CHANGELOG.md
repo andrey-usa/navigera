@@ -14,7 +14,11 @@ All notable changes to this project are documented here. The format follows
   fast path for the whole text, so one curly quote or accented letter
   made a page's text several times slower to read. ASCII text, and text
   under 16,384 characters, come back as before; Chrome before 140 (no
-  `Uint8Array.prototype.toBase64`) too.
+  `Uint8Array.prototype.toBase64`) too. `text --grep` on 2.8 MB of
+  accented text in 20,000 lines: 115.5 ms in 0.15.0, 74.6 ms now; the
+  same page in plain ASCII 39.4 ms then, 42.2 ms now (the check for a
+  character outside ASCII), on one runner, medians of 20
+  ([run 44362320763](https://github.com/andrey-usa/navigera/actions/runs/44362320763)).
 
 ## [0.15.0] - 2026-11-17
 
