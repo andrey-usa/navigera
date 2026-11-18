@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::{self, stream::MaybeTlsStream, Message, WebSocket};
 
 use super::{wrap, Wait, Watch, Wire, LISTEN};
+use crate::cdp::downloads::Download;
 use crate::cdp::{Route, RouteAction};
 
 /// Events every session listens to.
@@ -26,6 +27,10 @@ const EVENTS: &[&str] = &[
     "browsingContext.domContentLoaded",
     "browsingContext.load",
 ];
+
+/// The downloads a page starts, subscribed apart: a server without them
+/// still drives pages, and `downloads` then lists none.
+const DOWNLOAD_EVENTS: &[&str] = &["browsingContext.downloadWillBegin", "browsingContext.downloadEnd"];
 
 /// In the user's browser (`--attach`), also which frames and opened tabs
 /// belong to this session's tabs: their console lines and dialogs are its
@@ -88,6 +93,9 @@ pub struct Bidi {
     /// `set geo`: the origins granted the geolocation permission while it
     /// is on (`None`: off); `off`, and the session's end, take each back.
     geo: Option<Vec<String>>,
+    /// `downloads`: what this session's pages downloaded, oldest first
+    /// (`guid` is the download's navigation id).
+    downloads: Vec<Download>,
     /// The frames inside `own` tabs, each with its tab.
     frames: Vec<(String, String)>,
     closed: bool,
@@ -624,6 +632,7 @@ impl Bidi {
             viewport: None,
             emulations: Vec::new(),
             geo: None,
+            downloads: Vec::new(),
             child: None,
             _profile: None,
             classic: None,
@@ -638,6 +647,7 @@ impl Bidi {
     /// pick the first tab.
     fn start(&mut self, timeout: Duration) -> Result<()> {
         self.send("session.subscribe", json!({ "events": EVENTS }), timeout)?;
+        let _ = self.send("session.subscribe", json!({ "events": DOWNLOAD_EVENTS }), timeout);
         if self.attached {
             // A browser without these events still works: a frame's
             // console lines are then not heard.
@@ -799,6 +809,38 @@ impl Bidi {
             "network.beforeRequestSent" if params["isBlocked"] == true => {
                 let (method, p) = self.route_answer(params);
                 let _ = self.write(method, p);
+            }
+            "browsingContext.downloadWillBegin" if self.heard(params["context"].as_str()) => {
+                let text = |key: &str| params[key].as_str().unwrap_or("").to_string();
+                self.downloads.push(Download {
+                    n: self.downloads.last().map_or(1, |d| d.n + 1),
+                    guid: text("navigation"),
+                    url: text("url"),
+                    suggested: text("suggestedFilename"),
+                    state: "inProgress".into(),
+                    received: 0,
+                    total: 0,
+                    path: None,
+                    scope: String::new(),
+                    dir: None,
+                });
+            }
+            "browsingContext.downloadEnd" => {
+                let (nav, url) = (params["navigation"].as_str().unwrap_or(""), params["url"].as_str().unwrap_or(""));
+                let started = |d: &&mut Download| {
+                    d.state == "inProgress" && if nav.is_empty() { d.url == url } else { d.guid == nav }
+                };
+                if let Some(d) = self.downloads.iter_mut().rev().find(started) {
+                    if params["status"] == "complete" {
+                        d.state = "completed".into();
+                        // The browser's own path (Firefox: no size in the event).
+                        d.path = params["filepath"].as_str().map(std::path::PathBuf::from);
+                        d.received = d.path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
+                        d.total = d.received;
+                    } else {
+                        d.state = "canceled".into();
+                    }
+                }
             }
             "browsingContext.navigationStarted" => {
                 if params["context"].as_str() == Some(self.context.as_str()) {
@@ -1286,6 +1328,53 @@ impl Wire for Bidi {
         self.routes.clone()
     }
 
+    fn downloads(&mut self, clear: bool) -> Result<Vec<Download>> {
+        self.idle();
+        Ok(if clear { std::mem::take(&mut self.downloads) } else { self.downloads.clone() })
+    }
+
+    fn set_downloads_dir(&mut self, dir: &std::path::Path) -> Result<()> {
+        if self.attached {
+            bail!(
+                "in a Firefox you attached to, downloads go where it saves them: WebDriver BiDi would change that \
+                 for every tab of it; `--engine firefox` starts one of navigera's own"
+            );
+        }
+        let behavior = json!({ "type": "allowed", "destinationFolder": dir.display().to_string() });
+        self.send("browser.setDownloadBehavior", json!({ "downloadBehavior": behavior }), Duration::from_secs(10))?;
+        Ok(())
+    }
+
+    fn wait_download(&mut self, glob: &str, timeout: Duration) -> Result<Download> {
+        let deadline = Instant::now() + timeout;
+        let matches = |d: &&Download| glob.is_empty() || crate::cdp::glob_match(glob, &d.suggested);
+        loop {
+            if let Some(d) = self.downloads.iter().rev().filter(matches).find(|d| d.state == "completed") {
+                return Ok(d.clone());
+            }
+            if let Some(d) = self.downloads.iter().rev().filter(matches).find(|d| d.state == "canceled") {
+                bail!("download {} was canceled ({})", d.suggested, d.url);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                let seen: Vec<String> =
+                    self.downloads.iter().map(|d| format!("{} ({})", d.suggested, d.state)).collect();
+                bail!(
+                    "no finished download{} within {} ms (seen: {})",
+                    if glob.is_empty() { String::new() } else { format!(" matching {glob:?}") },
+                    timeout.as_millis(),
+                    if seen.is_empty() { "none".to_string() } else { seen.join(", ") }
+                );
+            }
+            // Read until something arrives (or the deadline): no polling.
+            if let Some(v) = self.read_one(left.min(READ_SLICE))? {
+                if v["type"] == "event" {
+                    self.on_event(v);
+                }
+            }
+        }
+    }
+
     fn idle(&mut self) {
         // Only what has already arrived: a read that finds nothing ends it.
         if self.closed {
@@ -1545,8 +1634,10 @@ impl Wire for Bidi {
 
     fn close(&mut self) {
         if !self.closed {
-            self.geo_revoke();
             if self.attached {
+                // The user's own profile keeps a grant; navigera's own goes
+                // with its profile.
+                self.geo_revoke();
                 // The user's browser stays: this session's tabs go, and
                 // the session ends so the next client can have one. The
                 // tabs its pages opened since the last look go with them.

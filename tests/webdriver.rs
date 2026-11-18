@@ -54,6 +54,9 @@ const NAV: &str = r##"<!doctype html><html><head><title>Nav</title></head><body>
 
 const FRAME: &str = r#"<!doctype html><html><head><title>Inner</title></head><body><button onclick="this.textContent = 'pressed'">In frame</button></body></html>"#;
 
+/// A file the server sends as a download.
+const CSV: &str = "a,b\n1,2\n";
+
 const MORE: &str = r#"<!doctype html><html><head><title>More</title></head><body style="margin:0;user-select:none;-webkit-user-select:none">
 <input type="file" id="one"> <input type="file" id="many" multiple>
 <div id="card" draggable="true" style="width:80px;height:30px;background:#cde">Card</div>
@@ -103,10 +106,16 @@ fn serve() -> String {
                         "/frame.html" => ("200 OK", FRAME),
                         "/more.html" => ("200 OK", MORE),
                         "/nav.html" => ("200 OK", NAV),
+                        "/report.csv" => ("200 OK", CSV),
                         _ => ("404 Not Found", "not found"),
                     };
+                    let kind = if body == CSV {
+                        "text/csv\r\nContent-Disposition: attachment; filename=\"report.csv\""
+                    } else {
+                        "text/html; charset=utf-8"
+                    };
                     let head = format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n\r\n",
                         body.len()
                     );
                     if s.write_all(head.as_bytes()).and_then(|_| s.write_all(body.as_bytes())).is_err() {
@@ -557,6 +566,44 @@ fn emulate_ops(args: &[&str], engine: &str) {
     assert_eq!(ok(&a, 40)["bye"], true);
 }
 
+/// A file a page downloads is listed, waited for and saved where
+/// `downloads --dir` says.
+fn download_ops(args: &[&str], engine: &str) {
+    let site = serve();
+    let dir = tempfile::tempdir().unwrap();
+    let start = "(() => { const a = document.createElement('a'); a.href = '/report.csv'; document.body.append(a); a.click(); return 1; })()";
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        json!({ "id": 2, "op": "downloads" }),
+        json!({ "id": 3, "op": "eval", "expression": start }),
+        json!({ "id": 4, "op": "wait", "download": "*.csv" }),
+        json!({ "id": 5, "op": "downloads", "dir": dir.path().display().to_string() }),
+        json!({ "id": 6, "op": "eval", "expression": start }),
+        json!({ "id": 7, "op": "wait", "download": "" }),
+        json!({ "id": 8, "op": "downloads", "format": "json" }),
+        json!({ "id": 9, "op": "wait", "download": "*.pdf", "timeout_ms": 300 }),
+        json!({ "id": 10, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    assert_eq!(ok(&a, 2), "(no downloads)", "{engine}");
+    let first = &ok(&a, 4)["download"];
+    assert_eq!(
+        (&first["state"], &first["file"], &first["bytes"]),
+        (&json!("completed"), &json!("report.csv"), &json!(CSV.len())),
+        "{engine}: {first}"
+    );
+    let second = &ok(&a, 7)["download"];
+    let saved = std::path::Path::new(second["path"].as_str().unwrap_or(""));
+    // Both sides canonical: a temporary directory may be named through a
+    // link (macOS) or by its short name (Windows).
+    let parent = saved.parent().and_then(|p| p.canonicalize().ok());
+    assert_eq!(parent, dir.path().canonicalize().ok(), "{engine}: {second}");
+    assert_eq!(std::fs::read_to_string(saved).unwrap(), CSV, "{engine}");
+    assert_eq!(ok(&a, 8).as_array().map(Vec::len), Some(2), "{engine}: {}", ok(&a, 8));
+    let x = a.iter().find(|x| x["id"] == 9).unwrap();
+    assert!(x["error"].to_string().contains("no finished download matching \"*.pdf\""), "{engine}: {x}");
+}
+
 /// A lone UTF-16 surrogate in a page (half of an emoji pair) reads as
 /// U+FFFD in `text`, `ax` and `eval`, where it failed the command: the
 /// page's and the browser's JSON write it as `\ud800`, which JSON in UTF-8
@@ -627,6 +674,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     more_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
     emulate_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    download_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
 

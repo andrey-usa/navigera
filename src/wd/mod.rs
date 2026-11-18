@@ -391,6 +391,20 @@ pub trait Wire: Send {
             "classic WebDriver has no emulation; use --engine firefox or chrome (or --bidi with a server that has it)"
         )
     }
+    /// `downloads`: the files this session's pages downloaded, oldest
+    /// first (`clear`: and forget them).
+    fn downloads(&mut self, _clear: bool) -> Result<Vec<crate::cdp::downloads::Download>> {
+        bail!("classic WebDriver does not report downloads; use --engine firefox or chrome (or --bidi with a server that has them)")
+    }
+    /// `downloads --dir`: where the session's downloads go from now on.
+    fn set_downloads_dir(&mut self, _dir: &std::path::Path) -> Result<()> {
+        bail!("classic WebDriver cannot choose where downloads go; use --engine firefox or chrome (or --bidi with a server that has it)")
+    }
+    /// `wait --download`: a finished download whose file name matches
+    /// `glob` (empty: any) by `timeout`; a canceled one is an error.
+    fn wait_download(&mut self, _glob: &str, _timeout: Duration) -> Result<crate::cdp::downloads::Download> {
+        bail!("classic WebDriver does not report downloads; use --engine firefox or chrome (or --bidi with a server that has them)")
+    }
     /// A script every new document runs before its own.
     fn add_init_script(&mut self, source: &str) -> Result<()>;
     /// Take the init scripts away again; how many there were.
@@ -819,7 +833,7 @@ impl Driver {
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|locale|timezone|media|offline|ua, route, unroute)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|device|geo|locale|timezone|media|offline|ua, route, unroute, downloads, wait --download)",
             op_name(command),
             self.engine
         )
@@ -1145,7 +1159,19 @@ impl Driver {
                 })
             }
             Command::Wait { selector, text, url, gone, js, frame, ms, idle: _, timeout_ms, download } => {
-                if frame.is_some() || download.is_some() {
+                if let Some(glob) = download.as_deref().filter(|_| frame.is_none()) {
+                    if selector.is_some() || text.is_some() || url.is_some() || gone.is_some() || js.is_some() {
+                        bail!(
+                            "wait --download: alone on the {} engine (wait for the page first, then the file)",
+                            self.engine
+                        );
+                    }
+                    let timeout = timeout_ms
+                        .map_or_else(crate::browser::element_wait, |ms| Duration::from_millis(ms.max(1.0) as u64));
+                    let d = self.wire.wait_download(glob, timeout).map_err(|e| e.context("wait"))?;
+                    return Ok(json!({ "download": d.to_json() }));
+                }
+                if frame.is_some() {
                     return Err(self.not_here(command));
                 }
                 // As on Chrome: the element wait (5 s unless set), not the
@@ -1605,6 +1631,18 @@ impl Driver {
                     Some(_) => json!({ "viewport": v, "scale": scale }),
                     None => json!({ "viewport": "default" }),
                 })
+            }
+            Command::Downloads { dir: Some(dir), .. } => {
+                let dir = std::path::Path::new(dir);
+                std::fs::create_dir_all(dir).with_context(|| format!("downloads --dir {}", dir.display()))?;
+                // Not `canonicalize`, as on Chrome (see `browser::download_dir`).
+                let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+                self.wire.set_downloads_dir(&dir).map_err(|e| e.context("downloads --dir"))?;
+                Ok(json!({ "dir": dir.display().to_string() }))
+            }
+            Command::Downloads { clear, format, dir: None } => {
+                let items = self.wire.downloads(*clear).map_err(|e| e.context("downloads"))?;
+                Ok(crate::protocol::downloads_answer(&items, format.as_deref() == Some("json")))
             }
             Command::Set { what, values, accuracy, .. }
                 if matches!(what.as_str(), "geo" | "geolocation" | "location") =>

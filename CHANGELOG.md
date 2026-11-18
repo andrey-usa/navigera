@@ -17,10 +17,18 @@ All notable changes to this project are documented here. The format follows
   layout are not emulated. `set geo <lat> <lon>` sets the position and
   grants the geolocation permission to the page's origin, and to each
   origin the tab goes to after it, never to the whole profile; `set geo
-  off`, or the session's end, takes each grant back. `set media print`,
+  off` takes each grant back, and so does the session's end in a Firefox
+  you attached to (navigera's own profile goes with the session). `set media print`,
   `reduced-motion` and `forced-colors`, and the settings Firefox does not
   emulate (`cpu`, `network`), say to run with `--engine chrome`. Classic WebDriver
   (Safari) has no emulation and says so.
+- `downloads` (`--clear`, `--json`, `--dir <path>`) and `wait --download
+  [<glob>]` on the WebDriver BiDi engines (Firefox): the files the
+  session's pages download, from BiDi's download events, with the path and
+  size of each finished one; `wait --download` reads the browser's events
+  until one finishes, as on Chrome, and a canceled one is an error. In a
+  Firefox you attached to, `--dir` is refused (it would change where every
+  tab of it saves). Classic WebDriver says it has no downloads.
 
 ### Fixed
 

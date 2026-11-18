@@ -5895,28 +5895,7 @@ impl Driver {
                 Ok(json!({ "dir": dir.display().to_string() }))
             }
             Command::Downloads { clear, format, dir: None } => {
-                let items = s.downloads(*clear);
-                if format.as_deref() == Some("json") {
-                    return Ok(json!(items.iter().map(|d| d.to_json()).collect::<Vec<_>>()));
-                }
-                if items.is_empty() {
-                    return Ok(json!("(no downloads)"));
-                }
-                let lines: Vec<String> = items
-                    .iter()
-                    .map(|d| {
-                        let j = d.to_json();
-                        format!(
-                            "#{} {} {} B {}  ({})",
-                            d.n,
-                            j["state"].as_str().unwrap_or(""),
-                            j["bytes"],
-                            j["path"].as_str().unwrap_or(&d.suggested),
-                            d.url
-                        )
-                    })
-                    .collect();
-                Ok(json!(lines.join("\n")))
+                Ok(downloads_answer(&s.downloads(*clear), format.as_deref() == Some("json")))
             }
             Command::Dialog { accept, prompt_text } => {
                 let accept = accept.unwrap_or(true);
@@ -7213,6 +7192,32 @@ fn cookies_text(cookies: &Value, values: bool) -> String {
     } else {
         lines.join("\n")
     }
+}
+
+/// What `downloads` answers: `#n state bytes path (url)` lines, or the
+/// items as JSON.
+pub(crate) fn downloads_answer(items: &[crate::cdp::downloads::Download], as_json: bool) -> Value {
+    if as_json {
+        return json!(items.iter().map(|d| d.to_json()).collect::<Vec<_>>());
+    }
+    if items.is_empty() {
+        return json!("(no downloads)");
+    }
+    let lines: Vec<String> = items
+        .iter()
+        .map(|d| {
+            let j = d.to_json();
+            format!(
+                "#{} {} {} B {}  ({})",
+                d.n,
+                j["state"].as_str().unwrap_or(""),
+                j["bytes"],
+                j["path"].as_str().unwrap_or(&d.suggested),
+                d.url
+            )
+        })
+        .collect();
+    json!(lines.join("\n"))
 }
 
 /// `scheme://host[:port]` of a URL ("" when it has none).
