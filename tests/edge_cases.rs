@@ -295,6 +295,60 @@ fn text_outside_ascii_comes_back_exactly() {
     assert!(hits.contains("😀a"), "{hits}");
 }
 
+/// A page that cannot encode its text (no `Uint8Array.prototype.toBase64`,
+/// as before Chrome 140, or a `TextEncoder` the page replaced) still gives
+/// it back as it is, a text that looks like navigera's mark included; a
+/// lone UTF-16 surrogate comes back as U+FFFD at once, short or long, where
+/// a short one used to leave the command waiting for its timeout.
+#[test]
+fn text_comes_back_as_the_page_had_it_when_it_cannot_be_encoded() {
+    if !chrome_available() {
+        return;
+    }
+    let s = Session::start("rawtext");
+    let set = |setup: &str, text: &str| {
+        s.ok(&["goto", "about:blank"]);
+        s.ok(&["eval", &format!("() => {{ {setup}; document.body.textContent = {text}; return 1; }}")]);
+    };
+    let long = "é".repeat(20000);
+    for (setup, why) in [
+        ("delete Uint8Array.prototype.toBase64", "no toBase64"),
+        ("globalThis.TextEncoder = undefined", "no TextEncoder"),
+    ] {
+        for text in ["\u{1}nv:b64:SGk=", "\u{1}nv:b64:x", "\u{1}nv:raw:x", &long] {
+            set(setup, &serde_json::to_string(text).unwrap());
+            let got = s.ok(&["text"]);
+            let got = got.as_str().unwrap_or_default();
+            assert!(
+                got == text,
+                "{why}: {} chars back, starts {:?}",
+                got.chars().count(),
+                got.chars().take(12).collect::<String>()
+            );
+        }
+    }
+    let started = Instant::now();
+    set("", "'a\\ud800b'");
+    assert_eq!(s.ok(&["text"]), "a\u{fffd}b");
+    assert_eq!(s.ok(&["eval", "'\\udc00' + '\\ud83d\\ude00'"]), "\u{fffd}😀");
+    set("", "'a'.repeat(16383) + '\\ud800é'");
+    let got = s.ok(&["text"]);
+    assert!(
+        got.as_str().is_some_and(|t| t.ends_with("a\u{fffd}é") && t.len() == 16383 + 3 + 2),
+        "{:?}",
+        got.as_str().map(str::len)
+    );
+    // The page's tree too, and what only its styles make clickable.
+    set("", "''");
+    s.ok(&[
+        "eval",
+        "() => { document.body.innerHTML = '<div style=cursor:pointer onclick=1>Go</div><p>x\\ud800</p>'; return 1; }",
+    ]);
+    let ax = s.ok(&["ax"]);
+    assert!(ax.as_str().is_some_and(|t| t.contains("clickable [ref=") && t.contains("x\u{fffd}")), "{ax}");
+    assert!(started.elapsed() < Duration::from_secs(10), "lone surrogates took {:?}", started.elapsed());
+}
+
 /// A styled checkbox (input covered by its own label's box) gets a trusted
 /// click through the label, without the 3 s covered-element wait.
 #[test]

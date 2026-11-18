@@ -17,6 +17,17 @@ All notable changes to this project are documented here. The format follows
   run with `--engine chrome`. Classic WebDriver (Safari) has no emulation
   and says so.
 
+### Fixed
+
+- A lone UTF-16 surrogate in a page (half of an emoji pair, as a script
+  that cuts text by length can leave) made `ax`, `text` and `eval` on
+  Chrome wait for their timeout, 35 s, and fail: Chrome sends it as
+  `\ud800`, which JSON in UTF-8 cannot hold, and the whole answer was
+  dropped. It now comes back as U+FFFD at once, and the clickables `ax`
+  finds by style on such a page are kept. An answer navigera cannot read
+  at all now fails its command at once, saying so, instead of at the
+  timeout.
+
 ### Performance
 
 - `text` on Chrome (the whole page, `--selector`, `--grep`) brings a big
@@ -25,7 +36,9 @@ All notable changes to this project are documented here. The format follows
   fast path for the whole text, so one curly quote or accented letter
   made a page's text several times slower to read. ASCII text, and text
   under 16,384 characters, come back as before; Chrome before 140 (no
-  `Uint8Array.prototype.toBase64`) too. `text --grep` on 2.8 MB of
+  `Uint8Array.prototype.toBase64`), or a page that replaced it or
+  `TextEncoder`, too, a text that starts like navigera's own mark
+  included. `text --grep` on 2.8 MB of
   accented text in 20,000 lines: 115.5 ms in 0.15.0, 74.6 ms now; the
   same page in plain ASCII 39.4 ms then, 42.2 ms now (the check for a
   character outside ASCII), on one runner, medians of 20

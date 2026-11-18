@@ -994,9 +994,18 @@ fn promise_marked(expression: &str) -> String {
 /// Puts back the timer functions [`SETTLE_ARM`] wrapped.
 const SETTLE_UNHOOK: &str = "(() => { const c = window.__nvMut; if (c && c.unT) c.unT(); return 0; })()";
 
-/// The mark on a string a page sent as the base64 of its UTF-8 (see
-/// [`ascii_safe`]).
+/// What starts every string [`ascii_safe`] marked; a page's own string
+/// that starts with it is always marked, so none is taken for one.
+const SAFE_TAG: &str = "\u{1}nv:";
+
+/// The mark on a string a page sent as the base64 of its UTF-8.
 const B64_MARK: &str = "\u{1}nv:b64:";
+
+/// The mark on a string a page sent as it was, because it starts with
+/// [`SAFE_TAG`] or could not be encoded (Chrome before 140 has no
+/// `Uint8Array.prototype.toBase64`; a page may have replaced it or
+/// `TextEncoder`).
+const RAW_MARK: &str = "\u{1}nv:raw:";
 
 /// Below this many UTF-16 units a string comes back as it is.
 const B64_MIN: usize = 16 * 1024;
@@ -1010,17 +1019,24 @@ const B64_MIN: usize = 16 * 1024;
 /// string with any non-ASCII character comes as the base64 of its UTF-8
 /// instead (94, 172 and 278 ms there, the encoding included); the ASCII
 /// test costs 1.9 ms on 2.8 MB of ASCII and stops at the first character
-/// that isn't. A string that starts with the mark is always encoded, so
-/// every string comes back as it was. Browsers without
-/// `Uint8Array.prototype.toBase64` (Chrome before 140) send it as before.
+/// that isn't. A string that starts with [`SAFE_TAG`] is always marked, and
+/// one the page cannot encode, or anything in the test that throws (the
+/// page's own globals are used), sends it as it was behind [`RAW_MARK`]:
+/// every string comes back as the page had it, except that a lone UTF-16
+/// surrogate, which UTF-8 cannot hold, comes back as U+FFFD.
 fn ascii_safe(expression: &str) -> String {
     format!(
         "(() => {{ const s = ({expression}); \
-         if (typeof s !== 'string' || typeof Uint8Array.prototype.toBase64 !== 'function') return s; \
-         if (s.startsWith({mark}) || (s.length >= {min} && /[^\\x00-\\x7f]/.test(s))) \
-         return {mark} + new TextEncoder().encode(s).toBase64(); \
-         return s; }})()",
-        mark = json!(B64_MARK),
+         if (typeof s !== 'string') return s; \
+         try {{ \
+         if (!s.startsWith({tag}) && (s.length < {min} || !/[^\\x00-\\x7f]/.test(s))) return s; \
+         const b = new TextEncoder().encode(s).toBase64(); \
+         if (typeof b === 'string') return {b64} + b; \
+         }} catch {{}} \
+         return {raw} + s; }})()",
+        tag = json!(SAFE_TAG),
+        b64 = json!(B64_MARK),
+        raw = json!(RAW_MARK),
         min = B64_MIN,
     )
 }
@@ -1029,11 +1045,16 @@ fn ascii_safe(expression: &str) -> String {
 fn from_ascii_safe(value: Value) -> Result<Value> {
     match value {
         Value::String(s) if s.starts_with(B64_MARK) => {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(&s[B64_MARK.len()..])
-                .context("the page's text, base64")?;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(&s[B64_MARK.len()..]).context(
+                "the page's text came back marked as base64 and is not: has the page replaced \
+                 Uint8Array.prototype.toBase64? Read it with `eval` instead",
+            )?;
             // TextEncoder writes UTF-8 (a lone surrogate becomes U+FFFD).
             Ok(Value::String(String::from_utf8(bytes).context("the page's text, UTF-8")?))
+        }
+        Value::String(mut s) if s.starts_with(RAW_MARK) => {
+            s.replace_range(..RAW_MARK.len(), "");
+            Ok(Value::String(s))
         }
         other => Ok(other),
     }
@@ -7099,9 +7120,11 @@ impl Page {
 
 /// A capture's columns from its JSON text: read straight into them, or,
 /// if Chrome's answer has a shape the typed read doesn't take, through
-/// JSON values as before.
+/// JSON values as before; a page text with a lone surrogate is read with
+/// U+FFFD in its place.
 fn snap_from_text(text: &str) -> Option<Snap> {
-    Snap::from_json(text).or_else(|| Snap::from_value(&serde_json::from_str(text).ok()?))
+    let read = |text: &str| Snap::from_json(text).or_else(|| Snap::from_value(&serde_json::from_str(text).ok()?));
+    read(text).or_else(|| read(&super::client::lone_surrogates_replaced(text)?))
 }
 
 /// Whether a DOM snapshot holds a closed shadow root: the page's scripts
