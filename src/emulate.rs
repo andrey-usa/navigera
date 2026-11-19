@@ -157,6 +157,28 @@ pub struct Plan {
     pub result: Value,
 }
 
+/// What a `set device` does to the user agent. A session has one user agent,
+/// whoever sets it, and the last write wins in open tabs and in new ones: a
+/// device with a user agent sets it; a device without one (a laptop) and
+/// `set device off` take back a user agent only a device set, so one from
+/// `set ua` stays. Chrome and the WebDriver engines both go by this.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UaStep {
+    Set(&'static str),
+    Clear,
+    Keep,
+}
+
+/// [`UaStep`] for a device with user agent `ua` (`None`: `set device off`),
+/// given whether the user agent in force is a device's.
+pub fn device_ua_step(ua: Option<&'static str>, set_by_device: bool) -> UaStep {
+    match ua.filter(|ua| !ua.is_empty()) {
+        Some(ua) => UaStep::Set(ua),
+        None if set_by_device => UaStep::Clear,
+        None => UaStep::Keep,
+    }
+}
+
 fn off(v: &str) -> bool {
     matches!(v.to_ascii_lowercase().as_str(), "off" | "reset" | "none" | "clear" | "default")
 }
@@ -219,11 +241,16 @@ pub fn plan(
             });
         }
     }
+    // `viewport` is one kind with `device`: a viewport replaces a device's
+    // touch in open tabs as it does in tabs opened later.
     let reset_metrics = vec![("Emulation.clearDeviceMetricsOverride", json!({}))];
+    let reset_touch: Vec<(&str, Value)> =
+        if lightpanda { vec![] } else { vec![("Emulation.setTouchEmulationEnabled", json!({ "enabled": false }))] };
     Ok(match what {
         "viewport" => {
             if off(first) {
-                return Ok(Plan { kind: "viewport", calls: vec![], reset: reset_metrics, grant: None, result: json!({ "viewport": "default" }) });
+                let reset = [reset_metrics, reset_touch].concat();
+                return Ok(Plan { kind: "viewport", calls: vec![], reset, grant: None, result: json!({ "viewport": "default" }) });
             }
             let (w, h) = match values {
                 [w, h] => (num(w, "width")? as u32, num(h, "height")? as u32),
@@ -241,7 +268,7 @@ pub fn plan(
             Plan {
                 kind: "viewport",
                 calls: vec![("Emulation.setDeviceMetricsOverride", metrics(w, h, scale, mobile))],
-                reset: vec![],
+                reset: reset_touch,
                 grant: None,
                 result: json!({ "viewport": [w, h], "scale": scale, "mobile": mobile }),
             }
@@ -268,11 +295,10 @@ pub fn plan(
             } else {
                 // Chrome refuses `maxTouchPoints: 0` ("must be between 1 and
                 // 16"), so a desktop device turns touch off with no count.
+                // Its user agent goes through the session's one slot
+                // ([`device_ua_step`]), not this kind.
                 let touch = if d.mobile { json!({ "enabled": true, "maxTouchPoints": 5 }) } else { json!({ "enabled": false }) };
                 calls.push(("Emulation.setTouchEmulationEnabled", touch));
-                if !d.ua.is_empty() {
-                    calls.push(("Emulation.setUserAgentOverride", json!({ "userAgent": d.ua })));
-                }
             }
             Plan { kind: "viewport", calls, reset: vec![], grant: None, result }
         }
@@ -607,6 +633,21 @@ mod tests {
     }
 
     #[test]
+    fn a_device_takes_back_only_a_user_agent_a_device_set() {
+        let phone = Some("Mozilla/5.0 (iPhone)");
+        assert_eq!(device_ua_step(phone, false), UaStep::Set("Mozilla/5.0 (iPhone)"), "over a `set ua` too");
+        assert_eq!(device_ua_step(phone, true), UaStep::Set("Mozilla/5.0 (iPhone)"));
+        for laptop_or_off in [Some(""), None] {
+            assert_eq!(device_ua_step(laptop_or_off, true), UaStep::Clear, "a device's goes");
+            assert_eq!(device_ua_step(laptop_or_off, false), UaStep::Keep, "a `set ua` stays");
+        }
+        let laptop = device_named(&v(&["Laptop"])).unwrap().unwrap();
+        let plan = plan("device", &v(&["iPhone 15"]), None, false, None, false).unwrap();
+        assert!(plan.calls.iter().all(|(m, _)| *m != "Emulation.setUserAgentOverride"), "{:?}", plan.calls);
+        assert_eq!(device_ua_step(Some(laptop.ua), true), UaStep::Clear);
+    }
+
+    #[test]
     fn bidi_plans_say_what_firefox_takes() {
         let p = bidi_plan("media", &v(&["dark"]), "firefox").unwrap();
         assert_eq!(p.params, json!({ "features": { "prefers-color-scheme": "dark" } }));
@@ -671,7 +712,7 @@ mod tests {
         assert_eq!(plan("viewport", &v(&["1280x720"]), None, false, None, false).unwrap().calls[0].1["height"], 720);
         let p = plan("device", &v(&["iPhone", "15"]), None, false, None, false).unwrap();
         assert_eq!(p.kind, "viewport");
-        assert_eq!(p.calls.len(), 3);
+        assert_eq!(p.calls.len(), 2, "metrics and touch; its user agent goes through the `ua` slot");
         let p = plan("network", &v(&["slow-3g"]), None, false, None, false).unwrap();
         assert_eq!(p.kind, "offline", "one network setting with offline");
         assert_eq!(p.calls[0].1["matchedNetworkConditions"][0]["latency"], 2000.0);

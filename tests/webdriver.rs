@@ -584,7 +584,19 @@ fn emulate_ops(args: &[&str], engine: &str) {
         json!({ "id": 32, "op": "goto", "url": format!("{other}/more.html") }),
         eval(33, position),
         set(34, "geo", &["off"]),
-        json!({ "id": 40, "op": "quit" }),
+        // One user agent, the one set last: a device without one (a
+        // laptop) and `device off` leave a `set ua` alone, and take back
+        // a device's.
+        set(35, "ua", &["Bot/1.0"]),
+        set(36, "device", &["Laptop"]),
+        set(37, "device", &["off"]),
+        json!({ "id": 38, "op": "reload" }),
+        eval(39, "navigator.userAgent"),
+        set(41, "device", &["iPhone", "15"]),
+        set(42, "device", &["Laptop"]),
+        json!({ "id": 43, "op": "reload" }),
+        eval(44, "[navigator.userAgent.includes('iPhone'), navigator.userAgent.startsWith('Bot/')]"),
+        json!({ "id": 50, "op": "quit" }),
     ];
     let a = session(args, &script);
     let failed = |id: u64| {
@@ -620,7 +632,9 @@ fn emulate_ops(args: &[&str], engine: &str) {
     assert_eq!(nums(ok(&a, 31)), berlin, "{engine}: the page reads the position, no prompt: {}", ok(&a, 31));
     assert_eq!(nums(ok(&a, 33)), berlin, "{engine}: and so does the next origin: {}", ok(&a, 33));
     assert_eq!(ok(&a, 34), &json!({ "geo": "default" }), "{engine}");
-    assert_eq!(ok(&a, 40)["bye"], true);
+    assert_eq!(ok(&a, 39), "Bot/1.0", "{engine}: a laptop and `device off` leave a `set ua` alone");
+    assert_eq!(ok(&a, 44), &json!([false, false]), "{engine}: a laptop takes back the phone's user agent");
+    assert_eq!(ok(&a, 50)["bye"], true);
 }
 
 /// A file a page downloads is listed, waited for and saved where

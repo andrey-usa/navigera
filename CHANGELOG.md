@@ -58,6 +58,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The user agent around `set device` is the one set last, in the open tab
+  and in each new one, on Chrome and Firefox alike. On Chrome, `set device
+  off` left the device's user agent in the tabs already open (a reload
+  still said iPhone), and after `set device <phone>` then `set ua <string>`
+  a tab opened later had the phone's again; on Firefox, `set device Laptop`
+  (a device with no user agent of its own) and `set device off` wiped an
+  earlier `set ua`. Now a device without one, and `set device off`, take
+  back only a user agent a device set. And `set viewport` after a device
+  turns the device's touch off in the open tabs, as in tabs opened later
+  (Chrome).
 - `press Enter` on a link to a fragment of the page (a hash-routed app's
   `#/completed`, or a bare `#`) answers once the page has handled `hashchange`, as a
   click on it has since this release: a read right after the press saw the

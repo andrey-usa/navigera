@@ -560,6 +560,45 @@ fn permissions_are_granted_denied_and_reset_and_more_devices_are_known() {
     }
 }
 
+/// One user agent per session, whoever sets it: the one set last, in the
+/// open tab and in a new one. A device without a user agent (a laptop) and
+/// `set device off` take back only a device's, so a `set ua` stays.
+#[test]
+fn the_user_agent_is_the_one_set_last_in_open_tabs_and_new_ones() {
+    let Some(site) = edge_site() else { return };
+    for (engine, bin) in engines() {
+        if engine != "chrome" {
+            continue;
+        }
+        let a = Agent::new("ua-slot", engine, bin);
+        let page = format!("{}/form", site.base);
+        a.ok(&["goto", &page]);
+        let ua = || {
+            a.ok(&["reload"]);
+            a.text(&["eval", "navigator.userAgent"])
+        };
+        let own = ua();
+        a.ok(&["set", "device", "iPhone 15"]);
+        assert!(ua().contains("iPhone"), "the device's user agent");
+        a.ok(&["set", "device", "off"]);
+        assert_eq!(ua(), own, "set device off takes it back in the open tab too");
+        a.ok(&["set", "device", "iPhone 15"]);
+        a.ok(&["set", "ua", "Bot/1.0"]);
+        assert_eq!(ua(), "Bot/1.0");
+        a.ok(&["tab-new", &page]);
+        assert_eq!(ua(), "Bot/1.0", "a new tab has the user agent set last, not the device's");
+        a.ok(&["set", "device", "Laptop"]);
+        a.ok(&["set", "device", "off"]);
+        assert_eq!(ua(), "Bot/1.0", "a device without a user agent, and off, leave a `set ua` alone");
+        a.ok(&["set", "device", "iPhone 15"]);
+        assert!(ua().contains("iPhone"), "a device after `set ua`: the last one wins");
+        a.ok(&["set", "device", "Laptop"]);
+        assert_eq!(ua(), own, "a laptop takes back the phone's user agent");
+        a.ok(&["tab-new", &page]);
+        assert_eq!(ua(), own, "in a tab opened after it too");
+    }
+}
+
 #[test]
 fn http_sends_the_browsers_cookies_and_keeps_what_it_sets() {
     let Some(site) = edge_site() else { return };

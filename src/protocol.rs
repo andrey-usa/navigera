@@ -6335,13 +6335,18 @@ impl Driver {
                 Ok(json!({ "network-quiet-ms": ms }))
             }
             Command::Set { what, values, scale, mobile, accuracy } => {
-                let plan = crate::emulate::plan(what, values, *scale, *mobile, *accuracy, s.is_lightpanda())?;
+                let lightpanda = s.is_lightpanda();
+                let plan = crate::emulate::plan(what, values, *scale, *mobile, *accuracy, lightpanda)?;
                 if let Some(permission) = plan.grant {
                     self.session.grant(permission);
                 }
                 self.session
                     .set_override(plan.kind, plan.calls, plan.reset)
                     .map_err(|e| e.context(format!("set {what}")))?;
+                if what == "device" && !lightpanda {
+                    let ua = crate::emulate::device_named(values)?.map(|d| d.ua);
+                    self.session.set_device_ua(ua).map_err(|e| e.context("set device"))?;
+                }
                 Ok(plan.result)
             }
             Command::Get { what, name_of, target, timeout_ms } => {

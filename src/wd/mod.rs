@@ -645,6 +645,9 @@ pub struct Driver {
     init_scripts: Vec<String>,
     /// How many tabs the last look found.
     tabs_seen: usize,
+    /// The user agent in force is a device's (see
+    /// [`crate::emulate::device_ua_step`]).
+    ua_by_device: bool,
 }
 
 impl Driver {
@@ -695,6 +698,7 @@ impl Driver {
             keys: Vec::new(),
             init_scripts: Vec::new(),
             tabs_seen: usize::MAX,
+            ua_by_device: false,
         })
     }
 
@@ -1689,17 +1693,25 @@ impl Driver {
             }
             Command::Set { what, values, .. } if what == "device" => {
                 // The viewport, its pixel ratio and the user agent: what
-                // WebDriver BiDi emulates of a device.
-                let Some(d) = crate::emulate::device_named(values)? else {
-                    let ua = json!({ "userAgent": null });
+                // WebDriver BiDi emulates of a device. The user agent first:
+                // classic WebDriver has none to set, and its refusal leaves
+                // the viewport as it was; a device without one (a laptop)
+                // and `off` touch it only to take back a device's.
+                let d = crate::emulate::device_named(values)?;
+                let ua = match crate::emulate::device_ua_step(d.map(|d| d.ua), self.ua_by_device) {
+                    crate::emulate::UaStep::Set(ua) => Some(json!({ "userAgent": ua })),
+                    crate::emulate::UaStep::Clear => Some(json!({ "userAgent": null })),
+                    crate::emulate::UaStep::Keep => None,
+                };
+                if let Some(ua) = ua {
+                    let set = !ua["userAgent"].is_null();
                     self.wire.emulate("emulation.setUserAgentOverride", ua).map_err(|e| e.context("set device"))?;
+                    self.ua_by_device = set;
+                }
+                let Some(d) = d else {
                     self.wire.set_viewport(None, None).map_err(|e| e.context("set device"))?;
                     return Ok(json!({ "device": "default" }));
                 };
-                // The user agent first: classic WebDriver has none to set,
-                // and its refusal leaves the viewport as it was.
-                let ua = json!({ "userAgent": (!d.ua.is_empty()).then_some(d.ua) });
-                self.wire.emulate("emulation.setUserAgentOverride", ua).map_err(|e| e.context("set device"))?;
                 self.wire
                     .set_viewport(Some((d.width, d.height)), Some(d.scale))
                     .map_err(|e| e.context("set device"))?;
@@ -1715,7 +1727,12 @@ impl Driver {
             }
             Command::Set { what, values, .. } if crate::emulate::BIDI_SETTINGS.contains(&what.as_str()) => {
                 let plan = crate::emulate::bidi_plan(what, values, self.engine)?;
+                let ua = plan.method == "emulation.setUserAgentOverride";
                 self.wire.emulate(plan.method, plan.params).map_err(|e| e.context(format!("set {what}")))?;
+                if ua {
+                    // `set ua`: the user's now, which no device takes back.
+                    self.ua_by_device = false;
+                }
                 Ok(plan.result)
             }
             Command::Route { pattern: None, har: None, .. } => {

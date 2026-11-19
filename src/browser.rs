@@ -989,6 +989,10 @@ pub struct BrowserSession {
     /// `set …` overrides (keyed by what they set): applied to every open
     /// tab and replayed on tabs opened later.
     overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
+    /// The `ua` override is a device's (`set device`), which a device
+    /// without a user agent or `set device off` takes back
+    /// ([`crate::emulate::device_ua_step`]); one from `set ua` stays.
+    ua_by_device: bool,
     /// `passkey on`: the virtual authenticator every tab gets.
     passkeys: crate::passkey::Passkeys,
     /// The browser answered -32601 to `Network.emulateNetworkConditionsByRule`
@@ -1127,6 +1131,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -1211,6 +1216,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -1398,6 +1404,7 @@ impl BrowserSession {
             profile_exe,
             downloads_dir: None,
             overrides: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -1520,6 +1527,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -1752,6 +1760,7 @@ impl BrowserSession {
             self.browser.shared().move_scope(&self.scope(), &context, !all);
             if all {
                 self.overrides.clear();
+                self.ua_by_device = false;
                 self.init_scripts.clear();
                 self.init_ids.clear();
             }
@@ -1850,6 +1859,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -2484,6 +2494,27 @@ impl BrowserSession {
             self.overrides.remove(kind);
         } else {
             self.overrides.insert(kind, calls);
+        }
+        if kind == "ua" {
+            self.ua_by_device = false;
+        }
+        Ok(())
+    }
+
+    /// `set device`'s user agent (`None`: `set device off`), in the one
+    /// `ua` slot `set ua` writes too, so the last of them is the one every
+    /// tab has, open or new.
+    pub fn set_device_ua(&mut self, ua: Option<&'static str>) -> Result<()> {
+        use crate::emulate::UaStep;
+        let call = "Emulation.setUserAgentOverride";
+        match crate::emulate::device_ua_step(ua, self.ua_by_device) {
+            UaStep::Set(ua) => {
+                self.set_override("ua", vec![(call, serde_json::json!({ "userAgent": ua }))], vec![])?;
+                self.ua_by_device = true;
+            }
+            // Chrome has no "clear": an empty string restores its own.
+            UaStep::Clear => self.set_override("ua", vec![], vec![(call, serde_json::json!({ "userAgent": "" }))])?,
+            UaStep::Keep => {}
         }
         Ok(())
     }
@@ -4522,6 +4553,7 @@ impl BrowserSession {
             }
         }
         self.overrides = old.overrides.clone();
+        self.ua_by_device = old.ua_by_device;
         self.init_scripts = old.init_scripts.clone();
         // Its passkeys come back with the state it saved, if any.
         self.passkeys = crate::passkey::Passkeys { ids: Default::default(), ..old.passkeys.clone() };
