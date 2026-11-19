@@ -2692,6 +2692,11 @@ fn a_cover_that_stays_is_said_quickly_and_a_loading_one_is_waited_for() {
     s.ok(&["goto", &format!("{}/loading-cover", site.url)]);
     s.ok(&["click", "--selector", "#save"]);
     assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "saved");
+    // The page takes the overlay away a moment after its fetch is in (a
+    // loaded machine runs the page's own handler late): one more look.
+    s.ok(&["goto", &format!("{}/loading-cover?late=900", site.url)]);
+    s.ok(&["click", "--selector", "#save"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "saved");
 }
 
 /// A control with no name or text says what the page marks it with: a

@@ -44,6 +44,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A click on a button under a loading overlay was refused as covered on
+  a second visit to the page: a request that once took over a second (a
+  slow search, a 2.5 s save) was taken for a long poll on every later
+  visit, and its overlay for a cover that stays (`click --text "Cancel"`
+  suggested). Requests to such URLs now count while a click waits on an
+  overlay, as on the first visit; they still hold no read. And once the
+  fetches an overlay waited on are in, the click looks once more: the
+  page takes it away in a task after the response, which a loaded
+  machine runs late (macOS CI refused one at 2.6 s on a 2.5 s fetch).
+  A cover with controls that stays is still reported after a second.
 - `wait --download` answered with the newest finished download however
   old: after one download, a click and `wait --download` gave the earlier
   file at once (the second still coming), and an earlier canceled download

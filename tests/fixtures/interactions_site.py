@@ -62,7 +62,7 @@ getting wrong, one page each, built the way those sites behave:
 /long-text      a <div> and a <p> of 1,120 characters each
 /cookie-banner  a button under a banner with Accept and Reject that stays
 /loading-cover  a button under an overlay with a Cancel button, removed when
-                a 2.5 s fetch returns
+                a 2.5 s fetch returns (?late=N: N ms after it returns)
 /wired-late     a button wired only after load: by a timer (?ms=N), by a
                 script the page loads then (?script=N), by a listener its
                 container gets (?root=N) or the document gets (?doc=N);
@@ -183,7 +183,9 @@ PAGES["/loading-cover"] = ("loading cover", "", """
   <p>Loading...</p><button>Cancel</button>
 </div>
 <script>
-fetch('/hold?ms=2500').then(() => document.getElementById('cover').remove());
+const late = +new URLSearchParams(location.search).get('late');
+const uncover = () => document.getElementById('cover').remove();
+fetch('/hold?ms=2500').then(() => late ? setTimeout(uncover, late) : uncover());
 </script>""")
 
 PAGES["/moving-target"] = ("moving target", "", """

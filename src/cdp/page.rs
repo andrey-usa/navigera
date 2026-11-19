@@ -5697,9 +5697,17 @@ impl Page {
         // A cover with controls that stayed put is reported early, unless
         // the page is still fetching: then it may be a loading overlay
         // about to go, and the rest of the element wait is spent on it.
-        while point.get("persistent").and_then(Value::as_bool) == Some(true)
-            && self.shared.fetching(&self.session_id) > 0
-        {
+        // Once the fetches it waited on are in, one more look: the page's
+        // own handler takes the overlay away in a task after the response,
+        // which a loaded machine runs after navigera saw the response end
+        // (a macOS runner: refused at 2.6 s on a 2.5 s fetch).
+        let mut look_again = false;
+        while point.get("persistent").and_then(Value::as_bool) == Some(true) {
+            if self.shared.fetching(&self.session_id) > 0 {
+                look_again = true;
+            } else if !std::mem::take(&mut look_again) {
+                break;
+            }
             let Some(left) = wait.checked_sub(started.elapsed()).filter(|l| *l > Duration::from_millis(200)) else {
                 break;
             };

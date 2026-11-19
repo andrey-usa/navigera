@@ -89,6 +89,11 @@ pub struct NetState {
     /// server answered 202/204, no content (an analytics beacon). Their
     /// requests neither hold a snapshot nor move the quiet clock.
     pub background: std::collections::HashSet<String>,
+    /// Requests to those URLs in flight: request id -> when it started. No
+    /// wait holds on them, but a cover over the page may be a loading
+    /// overlay waiting on one (see [`Shared::fetching`]): a request that was
+    /// long once (a slow search) is background on every later visit.
+    pub background_pending: HashMap<String, std::time::Instant>,
     /// When the last fetch/XHR started or ended, background traffic left
     /// out (see [`NetState::clock_moves`]).
     pub last: Option<std::time::Instant>,
@@ -855,15 +860,19 @@ impl Shared {
     }
 
     /// Data requests in flight that started in the last 10 s, long ones
-    /// included: whether a cover over the page may be a loading overlay
-    /// about to go (a click waits for one; see `Page::click`).
+    /// and those to URLs known as background included: whether a cover over
+    /// the page may be a loading overlay about to go (a click waits for one;
+    /// see `Page::click`).
     pub fn fetching(&self, session_id: &str) -> usize {
         let recent = |t: &std::time::Instant| t.elapsed() < Duration::from_secs(10);
         self.net
             .lock()
             .unwrap()
             .get(session_id)
-            .map(|n| n.pending.values().filter(|p| recent(&p.0)).count())
+            .map(|n| {
+                n.pending.values().filter(|p| recent(&p.0)).count()
+                    + n.background_pending.values().filter(|t| recent(t)).count()
+            })
             .unwrap_or(0)
     }
 
@@ -1147,7 +1156,9 @@ fn note_network(shared: &Shared, method: &str, params: &Value, session: &str) {
                         starts.remove(0);
                     }
                 }
-                if !poll {
+                if poll {
+                    state.background_pending.insert(id.to_string(), now);
+                } else {
                     state.seq += 1;
                     let before = state.last;
                     state.pending.entry(id.to_string()).or_insert((now, target.clone(), before));
@@ -1179,6 +1190,7 @@ fn note_network(shared: &Shared, method: &str, params: &Value, session: &str) {
             if let Some(id) = params.get("requestId").and_then(Value::as_str) {
                 let mut net = shared.net.lock().unwrap();
                 if let Some(state) = net.get_mut(session) {
+                    state.background_pending.remove(id);
                     if let Some((started, key, _)) = state.pending.remove(id) {
                         if started.elapsed() >= LONG_REQUEST && !key.is_empty() {
                             state.background.insert(key.clone());
@@ -1488,6 +1500,7 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
                     // The old document's requests die with it.
                     if let Some(net) = shared.net.lock().unwrap().get_mut(session) {
                         net.pending.clear();
+                        net.background_pending.clear();
                         // A new document's requests are not the old one's polls,
                         // and a wait on the old document does not sync the new one.
                         net.starts.clear();
