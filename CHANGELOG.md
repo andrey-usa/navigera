@@ -53,6 +53,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `press Enter` on a link to a fragment of the page (a hash-routed app's
+  `#/completed`) answers once the page has handled `hashchange`, as a
+  click on it has since this release: a read right after the press saw the
+  old view (25 in 39 locally, 0 after). No round trip more for any other key
+  or element.
 - A script run by its `#!` line that reads an answer through a subshell
   (`out=$(navigera ...)`) was taken for two processes sharing the session:
   its commands said "another process used this session" and to give each

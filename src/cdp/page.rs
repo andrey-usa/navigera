@@ -3295,7 +3295,34 @@ const ENTER_MAY_NAVIGATE: &str = r#"(() => {
         break;
     }
     if (!e || e === document.body) return false;
-    return !!(e.form || e.closest('a[href], button, [role=button], [role=link]'));
+    const nav = !!(e.form || e.closest('a[href], button, [role=button], [role=link]'));
+    // Enter on a link to a fragment of its own document: armed as a
+    // click's is (CLICK_PREP's `__nvHash`), and "hash" says so, for
+    // `Page::press` to wait until the page's `hashchange` listeners ran.
+    const a = e.closest('a[href], area[href]');
+    const w = e.ownerDocument.defaultView, top = w && w.top, wn = w && w.navigation;
+    if (!a || !a.hash || !wn || !wn.addEventListener) return nav;
+    if (a.href.split('#')[0] !== w.location.href.split('#')[0]) return nav;
+    const hash = { want: false, seen: false, end: null };
+    const onNav = (ev) => { if (ev.hashChange) hash.want = true; };
+    const onHash = () => { hash.seen = true; if (hash.end) hash.end(); };
+    onHash.__nv = true;
+    wn.addEventListener('navigate', onNav);
+    w.addEventListener('hashchange', onHash);
+    hash.off = () => {
+        wn.removeEventListener('navigate', onNav);
+        w.removeEventListener('hashchange', onHash);
+        if (top.__nvHash === hash) delete top.__nvHash;
+    };
+    hash.pending = () => hash.want && !hash.seen;
+    hash.wait = (ms) => new Promise((res) => {
+        if (!hash.pending()) { hash.off(); res(true); return; }
+        const t = setTimeout(() => { hash.off(); res(false); }, ms);
+        hash.end = () => { clearTimeout(t); hash.off(); res(true); };
+    });
+    Object.defineProperty(top, '__nvHash', { value: hash, configurable: true, enumerable: false, writable: true });
+    setTimeout(hash.off, 10000);
+    return 'hash';
 })()"#;
 
 fn modifier_bit(name: &str) -> Option<u32> {
@@ -6985,8 +7012,15 @@ impl Page {
         let enter = matches!(chord.to_ascii_lowercase().as_str(), "enter" | "return");
         // Enter navigates only from a form control, a link or a button.
         // (Cross-origin frames hide their focus: assume it might.)
-        let may_navigate =
-            enter && self.evaluate_raw(ENTER_MAY_NAVIGATE, timeout).ok().and_then(|v| v.as_bool()).unwrap_or(true);
+        let (may_navigate, hash) = if enter {
+            match self.evaluate_raw(ENTER_MAY_NAVIGATE, timeout).ok() {
+                Some(Value::Bool(b)) => (b, false),
+                Some(Value::String(s)) if s == "hash" => (true, true),
+                _ => (true, false),
+            }
+        } else {
+            (false, false)
+        };
         let parts: Vec<&str> = chord.split('+').filter(|p| !p.is_empty()).collect();
         let parts = if chord.ends_with("++") || chord == "+" {
             let mut p = parts;
@@ -7031,6 +7065,12 @@ impl Page {
             json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers }),
             timeout,
         )?;
+        // A hash-routed page renders the view the link names in its
+        // `hashchange` listener, a task after the URL changed: a read right
+        // after the press saw the old view (25 reads in 39 here).
+        if hash {
+            self.hash_settled(timeout);
+        }
         Ok(may_navigate)
     }
 

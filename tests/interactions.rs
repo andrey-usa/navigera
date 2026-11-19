@@ -2669,6 +2669,25 @@ fn a_click_on_a_fragment_link_answers_after_the_page_saw_the_hash_change() {
     assert!(tree.contains("Write tests") && !tree.contains("Ship it"), "{tree}");
 }
 
+/// The same with Enter on the focused link: the key path answers once the
+/// page's `hashchange` listeners have run (25 reads in 39 saw the old view
+/// before).
+#[test]
+fn enter_on_a_fragment_link_answers_after_the_page_saw_the_hash_change() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("hash-router-enter", &[]);
+    s.ok(&["goto", &format!("{}/hash-router", site.url)]);
+    for round in 0..4 {
+        for (href, filter, shown) in
+            [("#/completed", "completed", "1 shown"), ("#/active", "active", "2 shown"), ("#/", "all", "3 shown")]
+        {
+            let r = s.ok(&["press", "Enter", "--selector", &format!("a[href=\"{href}\"]")]);
+            assert_eq!(s.ok(&["eval", "filter"]), filter, "round {round}, {href}: {r}");
+            assert_eq!(s.text(&["get", "text", "--selector", "#shown"]), shown, "round {round}, {href}: {r}");
+        }
+    }
+}
+
 /// A banner with controls of its own that stays over the button is said
 /// after about a second, naming its controls; an overlay over a page that
 /// is still fetching is waited for, as long as the element wait.
