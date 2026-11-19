@@ -293,6 +293,20 @@ pub(crate) fn launch_flags(headless: bool) -> Vec<String> {
     flags
 }
 
+/// [`launch_flags`] for the browser `exe`. Edge's default for its network
+/// service sandbox is its own ("may vary depending on Microsoft Edge
+/// release, currently running field trials, and platform", its policy
+/// page) and unmeasured, so there the service keeps its own process.
+fn launch_flags_for(exe: &str, headless: bool) -> Vec<String> {
+    let mut flags = launch_flags(headless);
+    if is_edge(exe) {
+        for flag in &mut flags {
+            *flag = without_feature(flag, "NetworkServiceInProcess2");
+        }
+    }
+    flags
+}
+
 /// One `--enable-features` and one `--disable-features` holding every
 /// feature the flags name: Chrome keeps only the last of each, so a feature
 /// added through `NAVIGERA_EXTRA_FLAGS` would otherwise drop navigera's own.
@@ -449,10 +463,14 @@ fn windowed_user_agent(exe: &str, major: u32) -> String {
     } else {
         "X11; Linux x86_64"
     };
-    let file = Path::new(exe).file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    let edge =
-        if file.contains("msedge") || file.contains("edge") { format!(" Edg/{major}.0.0.0") } else { String::new() };
+    let edge = if is_edge(exe) { format!(" Edg/{major}.0.0.0") } else { String::new() };
     format!("Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36{edge}")
+}
+
+/// Whether `exe` is Microsoft Edge (`msedge.exe`, `microsoft-edge`, the
+/// macOS app's `Microsoft Edge`).
+fn is_edge(exe: &str) -> bool {
+    Path::new(exe).file_name().is_some_and(|f| f.to_string_lossy().to_ascii_lowercase().contains("edge"))
 }
 
 /// The major version of a Chrome-family executable: from the version
@@ -872,7 +890,7 @@ fn launch_chrome(
         }
         Ok(browser)
     };
-    let mut flags = launch_flags(headless);
+    let mut flags = launch_flags_for(&exe, headless);
     if natural() {
         flags.extend(natural_flags(&exe, headless)?);
     }
@@ -4599,6 +4617,18 @@ mod tests {
             "--enable-features=WebMCP"
         );
         assert_eq!(without_feature("--disable-features=A,B", "A"), "--disable-features=A,B");
+    }
+
+    /// Edge keeps its network service in a process of its own (its sandbox
+    /// default is unmeasured); Chrome's launch flags are left as they are.
+    #[test]
+    fn edge_keeps_its_network_service_apart() {
+        for edge in [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "/usr/bin/microsoft-edge"] {
+            let flags = launch_flags_for(edge, true);
+            assert!(!flags.iter().any(|f| f.contains("NetworkServiceInProcess2")), "{edge}: {flags:?}");
+            assert!(flags.iter().any(|f| f.starts_with("--enable-features=") && f.contains("WebMCP")), "{flags:?}");
+        }
+        assert_eq!(launch_flags_for("/usr/bin/google-chrome", true), launch_flags(true));
     }
 
     /// The registry read finds the policy as a nonzero DWORD under

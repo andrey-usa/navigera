@@ -53,7 +53,8 @@ All notable changes to this project are documented here. The format follows
   turned that sandbox on with the `NetworkServiceSandboxEnabled` policy
   (a managed policy file on Linux, the registry on Windows, for Chrome,
   Chromium, Edge or Brave): Chrome applies it only to a network service in a
-  process of its own.
+  process of its own. Edge keeps it apart too: whether Edge sandboxes that
+  process by default is Edge's own setting and not measured yet.
 
 ### Fixed
 
