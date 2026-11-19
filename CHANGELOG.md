@@ -53,8 +53,10 @@ All notable changes to this project are documented here. The format follows
   turned that sandbox on with the `NetworkServiceSandboxEnabled` policy
   (a managed policy file on Linux, the registry on Windows, for Chrome,
   Chromium, Edge or Brave): Chrome applies it only to a network service in a
-  process of its own. Edge keeps it apart too: whether Edge sandboxes that
-  process by default is Edge's own setting and not measured yet.
+  process of its own. Edge, Chrome for Testing and chrome-headless-shell
+  run it unsandboxed by default too (Edge 157 on Linux and Windows), and get
+  the same; a test asks the browser on every CI machine whether the service
+  would have had a sandbox.
 
 ### Fixed
 

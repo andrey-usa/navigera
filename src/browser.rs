@@ -111,7 +111,9 @@ const CHROME_FLAGS: &[&str] = &[
 /// process by default (`IsNetworkSandboxEnabled`): there it stays apart.
 /// On Linux and Windows the sandbox is a feature that is off unless a
 /// field trial turns it on, and navigera's fresh profiles fetch none; there
-/// the process runs with `--service-sandbox-type=none`. An administrator can
+/// the process runs with `--service-sandbox-type=none`, Edge's too (Chrome
+/// 155-159, chrome-headless-shell 158 and Edge 157 on CI's Linux and
+/// Windows; `tests/network_service.rs` asks the browser on every run). An administrator can
 /// turn it on there with the `NetworkServiceSandboxEnabled` policy, which
 /// Chrome applies only to a network service in a process of its own: when a
 /// policy asks for it, the feature is left out ([`network_sandbox_by_policy`]).
@@ -289,20 +291,6 @@ pub(crate) fn launch_flags(headless: bool) -> Vec<String> {
     if headless {
         flags.push(HEADLESS_DISABLED_FEATURES.into());
         flags = merge_feature_flags(flags);
-    }
-    flags
-}
-
-/// [`launch_flags`] for the browser `exe`. Edge's default for its network
-/// service sandbox is its own ("may vary depending on Microsoft Edge
-/// release, currently running field trials, and platform", its policy
-/// page) and unmeasured, so there the service keeps its own process.
-fn launch_flags_for(exe: &str, headless: bool) -> Vec<String> {
-    let mut flags = launch_flags(headless);
-    if is_edge(exe) {
-        for flag in &mut flags {
-            *flag = without_feature(flag, "NetworkServiceInProcess2");
-        }
     }
     flags
 }
@@ -890,7 +878,7 @@ fn launch_chrome(
         }
         Ok(browser)
     };
-    let mut flags = launch_flags_for(&exe, headless);
+    let mut flags = launch_flags(headless);
     if natural() {
         flags.extend(natural_flags(&exe, headless)?);
     }
@@ -4649,18 +4637,6 @@ mod tests {
             "--enable-features=WebMCP"
         );
         assert_eq!(without_feature("--disable-features=A,B", "A"), "--disable-features=A,B");
-    }
-
-    /// Edge keeps its network service in a process of its own (its sandbox
-    /// default is unmeasured); Chrome's launch flags are left as they are.
-    #[test]
-    fn edge_keeps_its_network_service_apart() {
-        for edge in [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "/usr/bin/microsoft-edge"] {
-            let flags = launch_flags_for(edge, true);
-            assert!(!flags.iter().any(|f| f.contains("NetworkServiceInProcess2")), "{edge}: {flags:?}");
-            assert!(flags.iter().any(|f| f.starts_with("--enable-features=") && f.contains("WebMCP")), "{flags:?}");
-        }
-        assert_eq!(launch_flags_for("/usr/bin/google-chrome", true), launch_flags(true));
     }
 
     /// The registry read finds the policy as a nonzero DWORD under
