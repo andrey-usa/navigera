@@ -862,7 +862,7 @@ if (q.has('banner')) go.onpointerdown = () => {
 
 PAGES["/hash-router"] = ("hash router", "", """
 <ul id=todos><li class=done>Write tests</li><li>Ship it</li><li>Rest</li></ul>
-<p><a href="#/">All</a> <a href="#/active">Active</a> <a href="#/completed">Completed</a></p>
+<p><a href="#/">All</a> <a href="#/active">Active</a> <a href="#/completed">Completed</a> <a href="#">Top</a></p>
 <p id=shown>3 shown</p>
 <script>
 // A TodoMVC-style router: the view follows the fragment, and only once the

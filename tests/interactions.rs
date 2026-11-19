@@ -2678,9 +2678,12 @@ fn enter_on_a_fragment_link_answers_after_the_page_saw_the_hash_change() {
     let s = Session::start("hash-router-enter", &[]);
     s.ok(&["goto", &format!("{}/hash-router", site.url)]);
     for round in 0..4 {
-        for (href, filter, shown) in
-            [("#/completed", "completed", "1 shown"), ("#/active", "active", "2 shown"), ("#/", "all", "3 shown")]
-        {
+        for (href, filter, shown) in [
+            ("#/completed", "completed", "1 shown"),
+            ("#", "all", "3 shown"),
+            ("#/active", "active", "2 shown"),
+            ("#/", "all", "3 shown"),
+        ] {
             let r = s.ok(&["press", "Enter", "--selector", &format!("a[href=\"{href}\"]")]);
             assert_eq!(s.ok(&["eval", "filter"]), filter, "round {round}, {href}: {r}");
             assert_eq!(s.text(&["get", "text", "--selector", "#shown"]), shown, "round {round}, {href}: {r}");

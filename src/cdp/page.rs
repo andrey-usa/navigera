@@ -3301,7 +3301,8 @@ const ENTER_MAY_NAVIGATE: &str = r#"(() => {
     // `Page::press` to wait until the page's `hashchange` listeners ran.
     const a = e.closest('a[href], area[href]');
     const w = e.ownerDocument.defaultView, top = w && w.top, wn = w && w.navigation;
-    if (!a || !a.hash || !wn || !wn.addEventListener) return nav;
+    // `a.href`, not `a.hash`: a link to a bare # has an empty hash.
+    if (!a || !a.href.includes('#') || !wn || !wn.addEventListener) return nav;
     if (a.href.split('#')[0] !== w.location.href.split('#')[0]) return nav;
     const hash = { want: false, seen: false, end: null };
     const onNav = (ev) => { if (ev.hashChange) hash.want = true; };

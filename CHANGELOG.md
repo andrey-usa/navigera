@@ -59,7 +59,7 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 
 - `press Enter` on a link to a fragment of the page (a hash-routed app's
-  `#/completed`) answers once the page has handled `hashchange`, as a
+  `#/completed`, or a bare `#`) answers once the page has handled `hashchange`, as a
   click on it has since this release: a read right after the press saw the
   old view (25 in 39 locally, 0 after). No round trip more for any other key
   or element. The same on the WebDriver engines, for a click and for Enter:
