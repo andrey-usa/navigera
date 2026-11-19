@@ -49,7 +49,11 @@ All notable changes to this project are documented here. The format follows
   an `ax` leave the browser at 262.5 MiB PSS instead of 280.4 (Chrome 153)
   and 171.1 instead of 181.0 (chrome-headless-shell 158), Linux, medians of
   16; no change in time. macOS keeps it apart: only there does Chrome
-  sandbox that process by default.
+  sandbox that process by default. So does a machine whose administrator
+  turned that sandbox on with the `NetworkServiceSandboxEnabled` policy
+  (a managed policy file on Linux, the registry on Windows, for Chrome,
+  Chromium, Edge or Brave): Chrome applies it only to a network service in a
+  process of its own.
 
 ### Fixed
 

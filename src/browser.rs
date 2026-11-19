@@ -110,11 +110,136 @@ const CHROME_FLAGS: &[&str] = &[
 /// no range overlapping; the times overlap. Not on macOS, the one desktop where Chrome sandboxes that
 /// process by default (`IsNetworkSandboxEnabled`): there it stays apart.
 /// On Linux and Windows the sandbox is a feature that is off unless a
-/// field trial turns it on, and navigera's fresh profiles fetch none.
+/// field trial turns it on, and navigera's fresh profiles fetch none; there
+/// the process runs with `--service-sandbox-type=none`. An administrator can
+/// turn it on there with the `NetworkServiceSandboxEnabled` policy, which
+/// Chrome applies only to a network service in a process of its own: when a
+/// policy asks for it, the feature is left out ([`network_sandbox_by_policy`]).
 #[cfg(target_os = "macos")]
 const ENABLE_FEATURES: &str = "--enable-features=WebMCP";
 #[cfg(not(target_os = "macos"))]
 const ENABLE_FEATURES: &str = "--enable-features=NetworkServiceInProcess2,WebMCP";
+
+/// The policy that sandboxes Chrome's network service, and the largest
+/// policy file read for it (a policy file is a few hundred bytes).
+#[cfg(any(test, not(target_os = "macos")))]
+const NETWORK_SANDBOX_POLICY: &str = "NetworkServiceSandboxEnabled";
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+const POLICY_FILE_MAX: u64 = 1 << 20;
+
+/// Managed policy directories of the Chromium browsers navigera may launch
+/// on Linux (Chromium's `policy_paths.cc`; Edge's and Brave's own).
+#[cfg(all(unix, not(target_os = "macos")))]
+const POLICY_DIRS: &[&str] = &[
+    "/etc/opt/chrome/policies/managed",
+    "/etc/opt/chrome_for_testing/policies/managed",
+    "/etc/chromium/policies/managed",
+    "/etc/opt/edge/policies/managed",
+    "/etc/brave/policies/managed",
+];
+
+/// Policy keys of the same browsers on Windows, read under both
+/// HKEY_LOCAL_MACHINE and HKEY_CURRENT_USER.
+#[cfg(windows)]
+const POLICY_KEYS: &[&str] = &[
+    r"SOFTWARE\Policies\Google\Chrome",
+    r"SOFTWARE\Policies\Google\Chrome for Testing",
+    r"SOFTWARE\Policies\Chromium",
+    r"SOFTWARE\Policies\Microsoft\Edge",
+    r"SOFTWARE\Policies\BraveSoftware\Brave",
+];
+
+/// Whether an administrator's policy asks a Chromium browser on this machine
+/// to sandbox its network service. Any one of them saying so counts, whichever
+/// browser is launched: the cost of a wrong yes is the ~10 MiB the feature
+/// saves, the cost of a wrong no is the sandbox the administrator asked for.
+fn network_sandbox_by_policy() -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dirs: Vec<&Path> = POLICY_DIRS.iter().map(Path::new).collect();
+        policy_files_ask_for_network_sandbox(&dirs)
+    }
+    #[cfg(windows)]
+    {
+        registry_asks_for_network_sandbox(POLICY_KEYS)
+    }
+    #[cfg(not(any(all(unix, not(target_os = "macos")), windows)))]
+    {
+        false
+    }
+}
+
+/// Whether a JSON policy file in one of `dirs` sets the network sandbox
+/// policy to true (Chrome reads every file in a managed directory).
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn policy_files_ask_for_network_sandbox(dirs: &[&Path]) -> bool {
+    dirs.iter().filter_map(|dir| std::fs::read_dir(dir).ok()).flatten().flatten().any(|entry| {
+        let path = entry.path();
+        std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= POLICY_FILE_MAX)
+            && std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|policy| policy.get(NETWORK_SANDBOX_POLICY) == Some(&serde_json::Value::Bool(true)))
+    })
+}
+
+/// Whether one of `keys`, under HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER,
+/// holds the network sandbox policy as a nonzero DWORD.
+#[cfg(windows)]
+fn registry_asks_for_network_sandbox(keys: &[&str]) -> bool {
+    use std::ffi::c_void;
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegGetValueW(
+            key: *mut c_void,
+            sub_key: *const u16,
+            value: *const u16,
+            flags: u32,
+            kind: *mut u32,
+            data: *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+    }
+    const RRF_RT_REG_DWORD: u32 = 0x10;
+    // The predefined HKEY_CURRENT_USER and HKEY_LOCAL_MACHINE, sign-extended
+    // as Windows defines them.
+    let roots = [0x8000_0002u32 as i32 as isize as *mut c_void, 0x8000_0001u32 as i32 as isize as *mut c_void];
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let value = wide(NETWORK_SANDBOX_POLICY);
+    keys.iter().map(|key| wide(key)).any(|key| {
+        roots.iter().any(|&root| {
+            let mut data = 0u32;
+            let mut size = std::mem::size_of::<u32>() as u32;
+            // SAFETY: `key` and `value` are NUL-terminated UTF-16 that live past
+            // the call; `data` is the 4 bytes `size` says it is, and
+            // RRF_RT_REG_DWORD makes the call fail instead of writing a value of
+            // any other type or length.
+            let status = unsafe {
+                RegGetValueW(
+                    root,
+                    key.as_ptr(),
+                    value.as_ptr(),
+                    RRF_RT_REG_DWORD,
+                    std::ptr::null_mut(),
+                    (&mut data as *mut u32).cast(),
+                    &mut size,
+                )
+            };
+            status == 0 && data != 0
+        })
+    })
+}
+
+/// `flag` (an `--enable-features=` list) without the feature `name`.
+fn without_feature(flag: &str, name: &str) -> String {
+    match flag.strip_prefix("--enable-features=") {
+        Some(list) => {
+            let kept: Vec<&str> = list.split(',').filter(|f| *f != name).collect();
+            format!("--enable-features={}", kept.join(","))
+        }
+        None => flag.to_string(),
+    }
+}
 
 /// [`CHROME_FLAGS`] adjusted by two diagnostic knobs, for bisecting a
 /// browser-version-specific failure in CI without a rebuild:
@@ -129,6 +254,11 @@ pub(crate) fn chrome_flags() -> Vec<String> {
         .filter(|f| !drop.iter().any(|d| f.starts_with(d.as_str())))
         .map(|f| f.to_string())
         .collect();
+    if !cfg!(target_os = "macos") && network_sandbox_by_policy() {
+        for flag in &mut flags {
+            *flag = without_feature(flag, "NetworkServiceInProcess2");
+        }
+    }
     if no_sandbox_wanted(crate::proc::running_as_root(), std::env::var("NAVIGERA_NO_SANDBOX").ok().as_deref()) {
         flags.push(NO_SANDBOX.into());
     }
@@ -4438,7 +4568,62 @@ mod tests {
         let features = chrome_flags().into_iter().find(|f| f.starts_with("--enable-features=")).unwrap();
         let names: Vec<&str> = features["--enable-features=".len()..].split(',').collect();
         assert!(!names.contains(&"NetworkServiceInProcess") && !names.contains(&"NetworkService"), "{features}");
-        assert_eq!(names.contains(&"NetworkServiceInProcess2"), !cfg!(target_os = "macos"), "{features}");
+        let unsandboxed = !cfg!(target_os = "macos") && !network_sandbox_by_policy();
+        assert_eq!(names.contains(&"NetworkServiceInProcess2"), unsandboxed, "{features}");
+        assert!(names.contains(&"WebMCP"), "{features}");
+    }
+
+    /// A managed policy file that turns the network sandbox on is found in
+    /// any of the directories; one that turns it off, or says something
+    /// else, or is not JSON, or is too large to be a policy, is not.
+    #[test]
+    fn a_policy_file_that_sandboxes_the_network_service_is_found() {
+        let root = tempfile::tempdir().unwrap();
+        let (chrome, edge) = (root.path().join("chrome"), root.path().join("edge"));
+        std::fs::create_dir_all(&chrome).unwrap();
+        std::fs::create_dir_all(edge.join("sub.json")).unwrap();
+        let dirs = [chrome.as_path(), edge.as_path(), Path::new("/nonexistent/navigera/policies")];
+        assert!(!policy_files_ask_for_network_sandbox(&dirs));
+        std::fs::write(chrome.join("certs.json"), r#"{"XSLTEnabled": false}"#).unwrap();
+        std::fs::write(chrome.join("broken.json"), "{NetworkServiceSandboxEnabled: true").unwrap();
+        std::fs::write(edge.join("off.json"), r#"{"NetworkServiceSandboxEnabled": false}"#).unwrap();
+        std::fs::write(edge.join("string.json"), r#"{"NetworkServiceSandboxEnabled": "true"}"#).unwrap();
+        let big =
+            format!(r#"{{"NetworkServiceSandboxEnabled": true, "pad": "{}"}}"#, "x".repeat(POLICY_FILE_MAX as usize));
+        std::fs::write(edge.join("big.json"), big).unwrap();
+        assert!(!policy_files_ask_for_network_sandbox(&dirs));
+        std::fs::write(edge.join("sandbox"), r#"{"NetworkServiceSandboxEnabled": true}"#).unwrap();
+        assert!(policy_files_ask_for_network_sandbox(&dirs));
+        assert_eq!(
+            without_feature("--enable-features=NetworkServiceInProcess2,WebMCP", "NetworkServiceInProcess2"),
+            "--enable-features=WebMCP"
+        );
+        assert_eq!(without_feature("--disable-features=A,B", "A"), "--disable-features=A,B");
+    }
+
+    /// The registry read finds the policy as a nonzero DWORD under
+    /// HKEY_CURRENT_USER, and nothing for a zero, a string, or no value.
+    #[cfg(windows)]
+    #[test]
+    fn a_registry_policy_that_sandboxes_the_network_service_is_found() {
+        let key = format!(r"SOFTWARE\navigera-test-{}", std::process::id());
+        let reg = |args: &[&str]| {
+            let status = std::process::Command::new("reg").args(args).status().unwrap();
+            assert!(status.success(), "reg {args:?}");
+        };
+        let full = format!(r"HKCU\{key}");
+        let set = |kind: &str, data: &str| {
+            reg(&["add", &full, "/v", NETWORK_SANDBOX_POLICY, "/t", kind, "/d", data, "/f"]);
+        };
+        assert!(!registry_asks_for_network_sandbox(&[&key]));
+        set("REG_DWORD", "0");
+        let zero = registry_asks_for_network_sandbox(&[&key]);
+        set("REG_SZ", "1");
+        let string = registry_asks_for_network_sandbox(&[&key]);
+        set("REG_DWORD", "1");
+        let one = registry_asks_for_network_sandbox(&[r"SOFTWARE\navigera-test-none", &key]);
+        reg(&["delete", &full, "/f"]);
+        assert!(!zero && !string && one, "zero {zero}, string {string}, one {one}");
     }
 
     #[test]
