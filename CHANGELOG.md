@@ -40,6 +40,14 @@ All notable changes to this project are documented here. The format follows
   canceled one fails only its own wait, and the next takes the one after
   it. A wait that finds nothing names the files earlier waits took. On
   Chrome and the WebDriver BiDi engines (Firefox).
+- A click on a link to a fragment of the page (a hash-routed app's
+  `#/completed`) answered before the page's `hashchange` listeners ran:
+  the browser fires `hashchange` in a task of its own after the URL
+  changed, and a command right after the click (`eval`, `ax`, `get text`)
+  often read the old view with the new URL (a report on 0.15.0: 6 reads in
+  20 on a TodoMVC-style page). The click now answers once the page has
+  handled `hashchange`, up to 250 ms; a URL a script pushes, which gets no
+  `hashchange`, waits for nothing. On Chrome.
 - A click on a page that had just loaded, before the page wired the
   element up, was not sent again when the page wired it a moment after
   the press but before navigera looked at what had listened (a timer on a

@@ -71,6 +71,9 @@ getting wrong, one page each, built the way those sites behave:
                 once it is (&late: 50 ms after; &invisible: the replayed
                 click shows nothing); ?quiet: a button that works
                 from the start and shows nothing, beside a late listener
+/hash-router    a to-do list routed by the URL's fragment: its filter links
+                (#/, #/active, #/completed) change the view only in the
+                page's `hashchange` listener
 /hover-cover    a button whose first mouse move opens an overlay over it, with
                 a Subscribe button, for 300 ms: the press that follows the
                 move lands on the overlay
@@ -852,6 +855,27 @@ if (q.has('replace')) go.onmousedown = function () {
 if (q.has('banner')) go.onpointerdown = () => {
   document.getElementById('w').insertAdjacentHTML('afterbegin', '<div style="height:80px">banner</div>');
 };
+</script>""")
+
+
+PAGES["/hash-router"] = ("hash router", "", """
+<ul id=todos><li class=done>Write tests</li><li>Ship it</li><li>Rest</li></ul>
+<p><a href="#/">All</a> <a href="#/active">Active</a> <a href="#/completed">Completed</a></p>
+<p id=shown>3 shown</p>
+<script>
+// A TodoMVC-style router: the view follows the fragment, and only once the
+// browser fires `hashchange`, a task of its own after the URL changed.
+window.filter = 'all';
+const render = () => {
+  let n = 0;
+  for (const li of document.querySelectorAll('#todos li')) {
+    const show = filter === 'all' || (filter === 'completed') === li.classList.contains('done');
+    li.hidden = !show;
+    if (show) n++;
+  }
+  document.getElementById('shown').textContent = n + ' shown';
+};
+addEventListener('hashchange', () => { filter = location.hash.replace('#/', '') || 'all'; render(); });
 </script>""")
 
 

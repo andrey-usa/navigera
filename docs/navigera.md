@@ -301,7 +301,10 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     stands for it (its label, or the clickable card around it). `--force`
     sends DOM events to it.
   - If the click starts a navigation, the command returns once the new
-    document is parsed.
+    document is parsed. A link to a fragment of the same page (a
+    hash-routed app's `#/completed`) returns once the page has handled
+    `hashchange`, which the browser fires a moment after the URL changes
+    (up to 250 ms).
   - A click that changes nothing says so. From just before the press,
     navigera watches the page's DOM (the document, the element's frame and
     every open shadow root), events a DOM observer can't see (input,

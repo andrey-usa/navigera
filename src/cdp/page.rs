@@ -557,6 +557,36 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 nav.addEventListener('navigate', onEvent);
                 fx.offs.push(() => nav.removeEventListener('navigate', onEvent));
             }
+            // A link to a fragment of this document (a hash-routed page's
+            // `#/completed`): the URL changes with the click, and the page
+            // learns of it from `hashchange`, a task of its own the browser
+            // runs after it, where such a page renders the view. The click
+            // is answered once that has run (`__nvHash`, see
+            // `Page::click_effect`). Told by the navigation's `hashChange`:
+            // a URL a script pushed gets no `hashchange`, and waits for none.
+            const wn = w.navigation;
+            if (wn && wn.addEventListener) {
+                const hash = { want: false, seen: false, end: null };
+                const onNav = (e) => { if (e.hashChange) hash.want = true; };
+                // On the window, after the page's own listeners there.
+                const onHash = ours(() => { hash.seen = true; if (hash.end) hash.end(); });
+                wn.addEventListener('navigate', onNav);
+                w.addEventListener('hashchange', onHash);
+                hash.off = () => {
+                    wn.removeEventListener('navigate', onNav);
+                    w.removeEventListener('hashchange', onHash);
+                    if (top.__nvHash === hash) delete top.__nvHash;
+                };
+                hash.pending = () => hash.want && !hash.seen;
+                hash.wait = (ms) => new Promise((res) => {
+                    if (!hash.pending()) { hash.off(); res(true); return; }
+                    const t = setTimeout(() => { hash.off(); res(false); }, ms);
+                    hash.end = () => { clearTimeout(t); hash.off(); res(true); };
+                });
+                fx.hash = hash;
+                Object.defineProperty(top, '__nvHash', { value: hash, configurable: true, enumerable: false, writable: true });
+                setTimeout(hash.off, 10000);
+            }
             // A clipboard write ("Copy link") changes nothing a page shows.
             for (const v of wins) {
                 const C = v.Clipboard && v.Clipboard.prototype;
@@ -598,6 +628,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         const done = (keepPath) => {
             for (const o of fx.obs) o.disconnect();
             for (const off of fx.offs) off();
+            if (fx.hash && !fx.hash.pending()) fx.hash.off();
             try { delete top.__nvFx; delete top.__nvSeen; if (!keepPath && top.__nvPath) top.__nvPath.end(); } catch (_) {}
         };
         fx.check = (last) => {
@@ -610,7 +641,7 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
             if (!what && !skip && state() !== before) what = 'state';
             const unsure = !what && !skip && !!last && unwatched();
             if (what || skip || last) done(!what && !skip && !unsure);
-            return { what, skip, unsure };
+            return { what, skip, unsure, hash: !!(fx.hash && fx.hash.pending()) };
         };
         Object.defineProperty(top, '__nvFx', { value: fx, configurable: true, enumerable: false, writable: true });
     };
@@ -2072,6 +2103,11 @@ const YOUNG_PAGE: Duration = Duration::from_secs(10);
 /// past the element wait).
 const WIRING_QUIET: Duration = Duration::from_millis(500);
 const WIRING_MAX: Duration = Duration::from_secs(5);
+
+/// How long a click that went to a fragment of its document waits for the
+/// page's `hashchange` (it came 1-16 ms after the URL changed in a report
+/// on 0.15.0).
+const HASH_WAIT: Duration = Duration::from_millis(250);
 
 /// Tests only: how long after a press its arrival is read
 /// (`NAVIGERA_TEST_CLICK_READ_DELAY_MS`), as on a loaded machine, so that a
@@ -5927,6 +5963,19 @@ impl Page {
     /// isn't an effect, and a first-party one that reads like reporting
     /// (`/event/…`) is waited for ([`REQUEST_WAIT`]), then judged by what
     /// the page does with the answer ([`AFTER_RESPONSE`]).
+    /// After a click that went to a fragment of its document: until the
+    /// page's `hashchange` listeners have run, up to [`HASH_WAIT`] (see
+    /// CLICK_PREP's `__nvHash`). Read before then, a hash-routed page still
+    /// showed the old view (TodoMVC's filters: 34 reads in 40 locally).
+    fn hash_settled(&self, timeout: Duration) {
+        let expression = format!("window.__nvHash ? window.__nvHash.wait({}) : true", HASH_WAIT.as_millis());
+        let _ = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": expression, "awaitPromise": true, "returnByValue": true }),
+            timeout,
+        );
+    }
+
     fn click_effect(&self, before: &([u64; 5], u64), mut first: Option<Value>, timeout: Duration) -> Effect {
         let started = Instant::now();
         let mut deadline = started + EFFECT_WINDOW;
@@ -5974,6 +6023,9 @@ impl Page {
                     v
                 }
             };
+            if v.get("hash").and_then(Value::as_bool) == Some(true) {
+                self.hash_settled(timeout);
+            }
             if let Some(what) = v.get("what").and_then(Value::as_str).filter(|w| !w.is_empty()) {
                 return Effect::Changed(what.to_string());
             }

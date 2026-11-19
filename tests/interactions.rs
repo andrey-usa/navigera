@@ -2644,6 +2644,31 @@ fn a_redrawn_element_is_found_again_by_its_ref() {
     assert!(!ok && r.to_string().contains("that ref is stale"), "{r}");
 }
 
+/// A click on a link to a fragment of the page (a hash-routed app's
+/// filters) answers once the page's `hashchange` listeners have run: the
+/// browser fires it in a task of its own after the URL changed, and a
+/// command right after the click read the old view (a report on 0.15.0:
+/// 6 reads in 20; 34 in 40 here before the fix).
+#[test]
+fn a_click_on_a_fragment_link_answers_after_the_page_saw_the_hash_change() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("hash-router", &[]);
+    s.ok(&["goto", &format!("{}/hash-router", site.url)]);
+    for round in 0..3 {
+        for (link, filter, shown) in
+            [("Completed", "completed", "1 shown"), ("Active", "active", "2 shown"), ("All", "all", "3 shown")]
+        {
+            let r = s.ok(&["click", "--text", link]);
+            assert_eq!(s.ok(&["eval", "filter"]), filter, "round {round}, {link}: {r}");
+            assert_eq!(s.text(&["get", "text", "--selector", "#shown"]), shown, "round {round}, {link}: {r}");
+        }
+    }
+    // A snapshot right after the click shows the view the URL names.
+    s.ok(&["click", "--text", "Completed"]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Write tests") && !tree.contains("Ship it"), "{tree}");
+}
+
 /// A banner with controls of its own that stays over the button is said
 /// after about a second, naming its controls; an overlay over a page that
 /// is still fetching is waited for, as long as the element wait.
