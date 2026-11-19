@@ -216,6 +216,19 @@ const ARM_NAV: &str = r#"function (el, key) {
     on(w, 'click', (e) => { if (!n.click && e.isTrusted) n.click = e; });
     on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
     on(w, 'invalid', () => { n.invalid = true; });
+    // A link to a fragment of this document, or a handler that sets
+    // `location.hash`: the URL changes with the action, and the page learns
+    // of it from `hashchange`, a task of its own after it, where a
+    // hash-routed page renders its view. The verdict waits for that
+    // (`n.hashed`), as a click on Chrome does. Told by the Navigation API's
+    // `hashChange`, or where there is none by a URL that changed in its
+    // fragment only; a URL a script pushed gets no `hashchange`.
+    const from = w.location.href;
+    const hash = { want: false, seen: false, end: null };
+    // Not a capturing listener: it runs after the page's own on the window.
+    const onHash = () => { hash.seen = true; if (hash.end) hash.end(); };
+    w.addEventListener('hashchange', onHash);
+    n.offs.push(() => w.removeEventListener('hashchange', onHash));
     // A handler that navigates by script (`location`, `form.submit()`),
     // this window or the tab's.
     let told = 0;
@@ -223,9 +236,24 @@ const ARM_NAV: &str = r#"function (el, key) {
         const api = v.navigation;
         if (api && api.addEventListener) {
             told++;
-            on(api, 'navigate', (e) => { if (!(e.destination && e.destination.sameDocument)) n.planned = true; });
+            on(api, 'navigate', (e) => {
+                if (!(e.destination && e.destination.sameDocument)) n.planned = true;
+                else if (v === w && e.hashChange) hash.want = true;
+            });
         }
     }
+    const navApi = !!(w.navigation && w.navigation.addEventListener);
+    n.hashed = (ms) => new Promise((res) => {
+        try {
+            if (!navApi) {
+                const at = w.location.href;
+                hash.want = at !== from && at.split('#')[0] === from.split('#')[0];
+            }
+        } catch (_) {}
+        if (!hash.want || hash.seen) { res(true); return; }
+        const t = setTimeout(() => res(false), ms);
+        hash.end = () => { clearTimeout(t); res(true); };
+    });
     const F = w.HTMLFormElement && w.HTMLFormElement.prototype, submit = F && F.submit;
     if (typeof submit === 'function') {
         // Put back only while ours is there: a method the page put in
@@ -273,8 +301,11 @@ const ARM_NAV: &str = r#"function (el, key) {
 }"#;
 
 /// After the click: the verdict of [`ARM_NAV`], and the page's URL and
-/// title (the page's state when no navigation follows).
-const NAV_VERDICT: &str = "() => { const K = Symbol.for('navigera.nav'); const n = window[K]; delete window[K]; \
+/// title (the page's state when no navigation follows), read once the
+/// `hashchange` of a fragment navigation has run, up to 250 ms (Chrome's
+/// `HASH_WAIT`).
+const NAV_VERDICT: &str = "async () => { const K = Symbol.for('navigera.nav'); const n = window[K]; delete window[K]; \
+    if (n && n.hashed) await n.hashed(250); \
     return [n ? n.verdict() : null, location.href, document.title]; }";
 
 /// The page expression for the element an op kept for the protocol's own

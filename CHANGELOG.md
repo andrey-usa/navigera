@@ -62,7 +62,11 @@ All notable changes to this project are documented here. The format follows
   `#/completed`) answers once the page has handled `hashchange`, as a
   click on it has since this release: a read right after the press saw the
   old view (25 in 39 locally, 0 after). No round trip more for any other key
-  or element.
+  or element. The same on the WebDriver engines, for a click and for Enter:
+  through chromedriver over classic WebDriver a read right after saw the old
+  view 11 to 18 times in 24 (Linux, macOS, Windows); Firefox and Safari
+  already saw the new one. The wait is in the page, up to 250 ms, and only
+  when the URL changed in its fragment.
 - A script run by its `#!` line that reads an answer through a subshell
   (`out=$(navigera ...)`) was taken for two processes sharing the session:
   its commands said "another process used this session" and to give each
