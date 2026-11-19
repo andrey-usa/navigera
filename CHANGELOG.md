@@ -40,6 +40,13 @@ All notable changes to this project are documented here. The format follows
   canceled one fails only its own wait, and the next takes the one after
   it. A wait that finds nothing names the files earlier waits took. On
   Chrome and the WebDriver BiDi engines (Firefox).
+- A click on a page that had just loaded, before the page wired the
+  element up, was not sent again when the page wired it a moment after
+  the press but before navigera looked at what had listened (a timer on a
+  loaded machine): the new listener passed for one that heard the click,
+  and the click said it did nothing. What listened is now counted in the
+  page as each event of the press arrives, so such a click is sent again
+  once the page wires the element, as when it wires it later. On Chrome.
 - A lone UTF-16 surrogate in a page (half of an emoji pair, as a script
   that cuts text by length can leave) made `ax`, `text` and `eval` on
   Chrome wait for their timeout, 35 s, and fail: Chrome sends it as

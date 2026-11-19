@@ -57,6 +57,11 @@ struct Session {
 
 impl Session {
     fn start(test: &str, extra: &[&str]) -> Session {
+        Self::start_with(test, extra, &[])
+    }
+
+    /// [`Self::start`] with variables for the session's process.
+    fn start_with(test: &str, extra: &[&str], env: &[(&str, &str)]) -> Session {
         let name = std::env::temp_dir()
             .join(format!("nv-interactions-{test}-{}.sock", std::process::id()))
             .display()
@@ -66,17 +71,23 @@ impl Session {
         let mut args = vec!["start", "--download-dir", &dir];
         args.extend_from_slice(extra);
         let s = Session { name, _downloads: Some(downloads) };
-        s.ok(&args);
+        let (success, r) = s.run_with(&args, env);
+        assert!(success && r["ok"] == true, "{args:?} failed: {r}");
         s
     }
 
     fn run(&self, args: &[&str]) -> (bool, Value) {
+        self.run_with(args, &[])
+    }
+
+    fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> (bool, Value) {
         let out = Command::new(tool_exe())
             .arg("--session")
             .arg(&self.name)
             .args(args)
             // Clicks say what they saw change (`effect_trace`): failures show it.
             .env("NAVIGERA_TRACE_EFFECT", "1")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .output()
             .expect("run navigera");
@@ -981,7 +992,9 @@ fn a_toggle_an_earlier_click_queued_is_not_the_next_clicks_effect() {
 /// page adds a listener later, not when analytics on the document heard it,
 /// and not when a script there recorded it to replay once the button is
 /// wired, even a replay that shows nothing. A button never wired still says
-/// the click did nothing.
+/// the click did nothing. What listened is what was there as the press
+/// came: on a loaded machine, a listener the page adds between the press
+/// and navigera's look at it heard nothing.
 #[test]
 fn a_click_before_the_page_wired_the_element_is_sent_again() {
     let (true, Some(site)) = (chrome(), site()) else { return };
@@ -1035,6 +1048,15 @@ fn a_click_before_the_page_wired_the_element_is_sent_again() {
         assert_eq!(s.text(&["get", "text", "--selector", "#out"]), out, "{query}: {r}");
         assert_eq!(s.ok(&["eval", "window.hits"]), hits, "{query}: {r}");
     }
+    // The press's arrival read 1 s late, as a loaded runner did (macOS, ci
+    // run 44422037582): the 150 ms timer wires the button in between, and
+    // the click was taken for one the button heard, never sent again.
+    let late = Session::start_with("wired-late-read", &[], &[("NAVIGERA_TEST_CLICK_READ_DELAY_MS", "1000")]);
+    std::fs::write(&steps, format!("goto {}/wired-late?ms=150\nclick --selector #go\n", site.url)).unwrap();
+    let r = late.ok(&["batch", &steps_arg]);
+    let (waited, w) = late.run(&["wait", "--js", "window.hits > 0"]);
+    assert!(waited && w["ok"] == true, "ms=150, read late: the click never counted: {w}\nclick: {r}");
+    assert_eq!(late.ok(&["eval", "window.hits"]), 1, "ms=150, read late: {r}");
     let _ = std::fs::remove_file(&steps);
 }
 

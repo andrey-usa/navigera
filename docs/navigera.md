@@ -326,7 +326,9 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
     also counts what listens for it (click, mouse, pointer and touch
     listeners, handlers set as properties or attributes included,
     navigera's own left out) on the element, its ancestors, its document
-    and its window. When nothing did and the click changed nothing, no
+    and its window, in the page as each event of the press arrives (a
+    listener added a moment after the press did not hear it). When
+    nothing did and the click changed nothing, no
     script of the page ran for it: navigera watches the page while it has
     scripts or data requests in flight, and until 500 ms after the click
     without any (never past the element wait, at most 5 s), and if the

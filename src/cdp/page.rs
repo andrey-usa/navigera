@@ -330,8 +330,9 @@ pub const DEEP: &str = r#"(() => {
 /// With `effects`, it also starts watching what the click will change (see
 /// [`Page::click_effect`]), and on a page younger than `youngMs` keeps the
 /// element and its ancestors (`__nvPath`), to tell whether anything
-/// listened for the click (see [`Page::wired_later`]).
-const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects, youngMs) {
+/// listened for the click (see [`Page::wired_later`]); with `gel` (see
+/// [`GEL`]), counted as the press comes.
+const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects, youngMs, gel) {
     const deadline = Date.now() + (force ? 0 : settleMs);
     // navigera's own listeners, told from the page's by PATH_LISTENERS.
     const ours = (f) => { f.__nv = true; return f; };
@@ -843,7 +844,41 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                     for (let n = el; n; n = n.parentNode || (n.nodeType === 11 && n.host) || null) nodes.push(n);
                     nodes.push(w);
                     const path = { nodes };
-                    path.end = () => { if (w.top.__nvPath === path) delete w.top.__nvPath; };
+                    // The page's listeners on the path for a click's events,
+                    // with DevTools' getEventListeners (`gel`); navigera's
+                    // own don't count.
+                    path.count = (gel) => {
+                        let n = 0;
+                        for (const node of nodes) {
+                            const l = gel(node);
+                            for (const t of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend'])
+                                for (const x of l[t] || []) if (!(x.listener && x.listener.__nv)) n++;
+                        }
+                        return n;
+                    };
+                    // Counted as each event of the press comes (`heard`; all
+                    // of it once `done`): read after the press, a listener
+                    // the page adds a moment later (a timer that wires the
+                    // element, on a loaded machine) passed for one that
+                    // heard it, and the click was never sent again. The
+                    // press and its release are two tasks of the page: a
+                    // listener added between them hears the click.
+                    const armed = [];
+                    if (typeof gel === 'function') {
+                        path.heard = 0;
+                        for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                            const f = ours(() => {
+                                if (!path.heard) path.heard = path.count(gel);
+                                if (t !== 'pointerdown' && t !== 'mousedown') path.done = true;
+                            });
+                            armed.push([t, f]);
+                            w.addEventListener(t, f, { capture: true, once: true });
+                        }
+                    }
+                    path.end = () => {
+                        for (const [t, f] of armed.splice(0)) w.removeEventListener(t, f, true);
+                        if (w.top.__nvPath === path) delete w.top.__nvPath;
+                    };
                     Object.defineProperty(w.top, '__nvPath', { value: path, configurable: true, enumerable: false, writable: true });
                     setTimeout(path.end, 10000);
                 }
@@ -2038,6 +2073,17 @@ const YOUNG_PAGE: Duration = Duration::from_secs(10);
 const WIRING_QUIET: Duration = Duration::from_millis(500);
 const WIRING_MAX: Duration = Duration::from_secs(5);
 
+/// Tests only: how long after a press its arrival is read
+/// (`NAVIGERA_TEST_CLICK_READ_DELAY_MS`), as on a loaded machine, so that a
+/// page's timer lands between the two.
+fn click_read_delay() -> Option<Duration> {
+    static LATE: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *LATE.get_or_init(|| {
+        let ms = std::env::var("NAVIGERA_TEST_CLICK_READ_DELAY_MS").ok()?.trim().parse().ok()?;
+        Some(Duration::from_millis(ms))
+    })
+}
+
 /// How many times a click nothing listened for is sent again. The second
 /// click is heard by whatever the page wired, so it is never sent again.
 const CLICK_AGAIN: u8 = 1;
@@ -2055,27 +2101,73 @@ fn wiring_check() -> bool {
 /// `getEventListeners` (needs `includeCommandLineAPI`), so a handler set as
 /// a property or an attribute counts too, and navigera's own don't. Null
 /// when there is no path, its element left the page, or the page has a
-/// `getEventListeners` of its own. `DROP` ends the path when anything
-/// listens: a click something heard is never sent again.
-const PATH_LISTENERS: &str = r#"((drop) => {
+/// `getEventListeners` of its own. `PRESS`: what listened as the press
+/// came, when the page counted all of it (CLICK_PREP's `gel`), else what
+/// listens now; and the path ends when anything did: a click something
+/// heard is never sent again. Without it: what listens now.
+const PATH_LISTENERS: &str = r#"((press) => {
     const p = window.__nvPath;
     if (!p) return null;
     // A page's own global of that name hides DevTools' one: no count then.
     if (typeof getEventListeners !== 'function' || !String(getEventListeners).includes('[Command Line API]')) { p.end(); return null; }
     if (!p.nodes[0].isConnected) { p.end(); return null; }
-    let n = 0;
-    for (const node of p.nodes) {
-        const l = getEventListeners(node);
-        for (const t of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend'])
-            for (const x of l[t] || []) if (!(x.listener && x.listener.__nv)) n++;
-    }
-    if (drop && n) p.end();
+    const n = press && p.done ? p.heard : p.count(getEventListeners);
+    if (press && n) p.end();
     return n;
-})(DROP)"#;
+})(PRESS)"#;
 
 /// [`PATH_LISTENERS`] with its flag.
-fn path_listeners(drop: bool) -> String {
-    PATH_LISTENERS.replace("DROP", &drop.to_string())
+fn path_listeners(press: bool) -> String {
+    PATH_LISTENERS.replace("PRESS", &press.to_string())
+}
+
+/// DevTools' `getEventListeners` as an object of the document, asked for
+/// with its global object (see [`Page::kept_global`]): CLICK_PREP takes it
+/// as an argument, so that a young page's path counts what listens as each
+/// event of the press comes. Null where a page's own global of that name
+/// hides it.
+const GEL: &str = "(typeof getEventListeners === 'function' && String(getEventListeners).includes('[Command Line API]')) ? getEventListeners : null";
+
+/// [`GEL`]'s object, if the page gave one, with the navigation generation
+/// it was asked for in.
+type KeptGel = Option<(u64, Option<String>)>;
+
+/// The request for [`GEL`].
+fn gel_params() -> Value {
+    json!({ "expression": GEL, "includeCommandLineAPI": true, "objectGroup": "nv-global" })
+}
+
+/// The object an evaluation answered with, if any.
+fn object_id(answer: Result<Value>) -> Option<String> {
+    answer.ok().and_then(|r| r.pointer("/result/objectId").and_then(Value::as_str).map(str::to_string))
+}
+
+/// A call argument that is a page object navigera holds (its id), not a
+/// value (see [`call_arg`]): passed by reference to a call on the
+/// document's global or a function object of it, null anywhere else.
+const OBJECT_ARG: &str = "\u{0}nv-object";
+
+fn object_arg(id: &str) -> Value {
+    json!({ OBJECT_ARG: id })
+}
+
+/// An argument of `Runtime.callFunctionOn` on the top document's main
+/// world: a value, or an object of it ([`object_arg`]).
+fn call_arg(v: &Value) -> Value {
+    match v.get(OBJECT_ARG).and_then(Value::as_str) {
+        Some(id) => json!({ "objectId": id }),
+        None => json!({ "value": v }),
+    }
+}
+
+/// An argument written as text, or sent to another world: an object
+/// argument is null there.
+fn plain_arg(v: &Value) -> Value {
+    if v.get(OBJECT_ARG).is_some() {
+        Value::Null
+    } else {
+        v.clone()
+    }
 }
 
 /// What [`Page::wired_later`] watches for after a click: since the press,
@@ -3502,6 +3594,9 @@ pub struct Page {
     /// on (see [`Page::call_fn`]): the navigation generation it was asked
     /// for in, and its object id.
     global: Arc<std::sync::Mutex<Option<(u64, String)>>>,
+    /// DevTools' `getEventListeners` as an object, with the navigation
+    /// generation it was asked for in (see [`Page::kept_gel`]).
+    gel: Arc<std::sync::Mutex<KeptGel>>,
     /// The top document itself, kept the same way, to ask for its event
     /// listeners (see [`Page::listeners`]).
     document: Arc<std::sync::Mutex<Option<(u64, String)>>>,
@@ -3663,6 +3758,7 @@ impl Page {
             pointer: Default::default(),
             stalled: Default::default(),
             global: Default::default(),
+            gel: Default::default(),
             document: Default::default(),
             prime_started: Default::default(),
             listeners_started: Default::default(),
@@ -4433,7 +4529,7 @@ impl Page {
     /// be had, the call is written out as text, as before.
     fn call_fn(&self, function: &str, args: &[Value], await_promise: bool, timeout: Duration) -> Result<Value> {
         let written = |page: &Self| {
-            let list: Vec<String> = args.iter().map(Value::to_string).collect();
+            let list: Vec<String> = args.iter().map(|v| plain_arg(v).to_string()).collect();
             page.send(
                 "Runtime.evaluate",
                 json!({
@@ -4447,7 +4543,7 @@ impl Page {
         if !const_calls() || self.shared.is_single_target() {
             return written(self);
         }
-        let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
+        let arguments: Vec<Value> = args.iter().map(call_arg).collect();
         let key = text_key(function);
         if let Some(object) = self.function_object(key) {
             let answer = self.send(
@@ -4462,12 +4558,16 @@ impl Page {
                 timeout,
             );
             match answer {
-                Err(e) if global_gone(&e) => drop(self.functions.lock().unwrap().1.remove(&key)),
+                Err(e) if global_gone(&e) => {
+                    // The function, or an object passed to it, is gone.
+                    drop(self.functions.lock().unwrap().1.remove(&key));
+                    *self.gel.lock().unwrap() = None;
+                }
                 other => return other,
             }
         }
         for _ in 0..2 {
-            let Some(global) = self.kept_object(&self.global, "globalThis", timeout)? else { break };
+            let Some(global) = self.kept_global(false, timeout)? else { break };
             let answer = self.send(
                 "Runtime.callFunctionOn",
                 json!({
@@ -4480,7 +4580,7 @@ impl Page {
                 timeout,
             );
             match answer {
-                Err(e) if global_gone(&e) => *self.global.lock().unwrap() = None,
+                Err(e) if global_gone(&e) => self.forget_global(),
                 other => {
                     if other.is_ok() {
                         self.function_used(key, function, timeout);
@@ -4560,6 +4660,51 @@ impl Page {
         }
     }
 
+    /// The document's global object ([`Self::kept_object`]); with `gel`,
+    /// DevTools' `getEventListeners` ([`GEL`]) is asked for in the same
+    /// round trip and kept beside it ([`Self::kept_gel`]).
+    fn kept_global(&self, gel: bool, timeout: Duration) -> Result<Option<String>> {
+        let generation = self.nav_generation();
+        if let Some((_, id)) = self.global.lock().unwrap().clone().filter(|(g, _)| *g == generation) {
+            return Ok(Some(id));
+        }
+        let asked = gel.then(|| self.start("Runtime.evaluate", gel_params(), timeout));
+        let global = self.kept_object(&self.global, "globalThis", timeout);
+        if let Some(asked) = asked {
+            *self.gel.lock().unwrap() = Some((generation, object_id(self.finish(asked))));
+        }
+        global
+    }
+
+    /// The document's objects navigera kept are gone ([`global_gone`]):
+    /// asked for again when next needed.
+    fn forget_global(&self) {
+        *self.global.lock().unwrap() = None;
+        *self.gel.lock().unwrap() = None;
+    }
+
+    /// DevTools' `getEventListeners` in the top document, as an object
+    /// (see [`GEL`]), asked for once per document a click needs it in:
+    /// with the document's global object when that is not at hand yet.
+    /// None where the engine or the page gives none.
+    fn kept_gel(&self, timeout: Duration) -> Option<String> {
+        if !const_calls() || self.shared.is_single_target() {
+            return None;
+        }
+        let generation = self.nav_generation();
+        let kept = || self.gel.lock().unwrap().clone().filter(|(g, _)| *g == generation);
+        if kept().is_none() {
+            let has_global = self.global.lock().unwrap().as_ref().is_some_and(|(g, _)| *g == generation);
+            if has_global {
+                let asked = self.send("Runtime.evaluate", gel_params(), timeout);
+                *self.gel.lock().unwrap() = Some((generation, object_id(asked)));
+            } else {
+                self.kept_global(true, timeout).ok()?;
+            }
+        }
+        kept().and_then(|(_, id)| id)
+    }
+
     /// The object `expression` names in the top document (its global
     /// object, the document), asked for once per document and kept in
     /// `slot` with the navigation generation it was asked for in. None
@@ -4610,7 +4755,7 @@ impl Page {
             return None;
         }
         let generation = self.nav_generation();
-        let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
+        let arguments: Vec<Value> = args.iter().map(call_arg).collect();
         let key = text_key(function);
         let (object, declaration) = match self.function_object(key) {
             Some(object) => (object, CALL_THIS),
@@ -5103,7 +5248,7 @@ impl Page {
         wait: Duration,
         timeout: Duration,
     ) -> Result<Value> {
-        let arg_list: Vec<String> = args.iter().map(Value::to_string).collect();
+        let arg_list: Vec<String> = args.iter().map(|v| plain_arg(v).to_string()).collect();
         let extra = if arg_list.is_empty() { String::new() } else { format!(", {}", arg_list.join(", ")) };
         let wait_ms = wait_budget_ms(wait, timeout);
         let finder = match target {
@@ -5400,7 +5545,7 @@ impl Page {
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("that element is gone from the page; run `ax` for fresh refs"))?
                 .to_string();
-            let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": v })).collect();
+            let arguments: Vec<Value> = args.iter().map(|v| json!({ "value": plain_arg(v) })).collect();
             let res = self
                 .client
                 .send(
@@ -5483,12 +5628,31 @@ impl Page {
         let effects = !self.shared.is_single_target() && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none();
         let young_ms = if again > 0 && wiring_check() { YOUNG_PAGE.as_millis() as u64 } else { 0 };
         let started = std::time::Instant::now();
+        // What listens is counted in the page as the press comes (see
+        // CLICK_PREP): on an element of the top document, the page's own
+        // world (a ref may be in a frame, another world), of a document
+        // that may still be young (the page tells for sure).
+        let young_doc = self.shared.nav_state(&self.session_id).committed_at.is_none_or(|t| t.elapsed() < YOUNG_PAGE);
+        let gel = match target {
+            Target::Ref(_) | Target::InFrame(..) => None,
+            _ if effects && young_ms > 0 && young_doc => self.kept_gel(timeout),
+            _ => None,
+        };
+        let gel = gel.as_deref().map_or(Value::Null, object_arg);
         let prep = |settle: &Value| {
             self.on_element(
                 target,
                 "click",
                 CLICK_PREP,
-                &[json!(false), settle.clone(), strict.clone(), button.clone(), json!(effects), json!(young_ms)],
+                &[
+                    json!(false),
+                    settle.clone(),
+                    strict.clone(),
+                    button.clone(),
+                    json!(effects),
+                    json!(young_ms),
+                    gel.clone(),
+                ],
                 wait,
                 timeout,
             )
@@ -5597,11 +5761,14 @@ impl Page {
                 return dom(self);
             }
         }
+        if let Some(late) = click_read_delay() {
+            std::thread::sleep(late);
+        }
         // What listened for the click (the element, its ancestors, its
         // document and window), read with the press's arrival in the same
-        // round trip: the press has been handled by then, so a listener
-        // the page adds later isn't counted. A handler the click itself
-        // added is, which only ever stops another click.
+        // round trip: counted in the page as the press came (CLICK_PREP), so
+        // a listener the page adds after it isn't. A handler the click
+        // itself added is, which only ever stops another click.
         let check = point.get("check").and_then(Value::as_bool) == Some(true)
             && std::env::var_os("NAVIGERA_NO_CLICK_CHECK").is_none(); // diagnostic knob
         let Arrival { arrived, heard, missed, mut off, nav: nav_read, effect: first_effect } = if check {
@@ -8248,7 +8415,7 @@ impl Page {
                 early = (0..EARLY_ROOTS).map(|i| self.root_start(i, timeout)).collect();
                 match self.finish(started) {
                     Err(e) if global_gone(&e) => {
-                        *self.global.lock().unwrap() = None;
+                        self.forget_global();
                         early.clear();
                         self.call_fn(delta_fn(), &delta_args, false, timeout)
                     }
