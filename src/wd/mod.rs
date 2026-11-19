@@ -896,10 +896,7 @@ impl Driver {
                 return Ok(Ok(flat_list(&built, opts.limit)));
             }
             let url = built.url.clone();
-            let origin = url
-                .find("://")
-                .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
-                .unwrap_or_default();
+            let (origin, page) = crate::cdp::ax::origin_and_page(&url);
             let header = format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default());
             let render_opts = crate::cdp::ax::Options {
                 full_text: opts.full_text,
@@ -907,6 +904,7 @@ impl Driver {
                 limit: opts.limit,
                 root_backend_id: root,
                 origin,
+                page,
                 clicks: crate::cdp::page::clickables_of(&snap),
                 lazy_budget: None,
             };

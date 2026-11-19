@@ -202,7 +202,9 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 - States are shown in brackets: `checked`, `disabled`, `expanded` or
   `collapsed`, `selected`, `required`, `invalid`, `level=N`.
 - Inputs show `value="…"`, links show `url=` (shortened to the path on the
-  same origin), and `<select>` lists its `options:` inline.
+  same origin, and to `#fragment` for a link to a part of the page itself,
+  read against the URL on the first line), and `<select>` lists its
+  `options:` inline.
 - Collapsed content (closed `<details>`, menus that open on hover) is not in
   the tree until it is opened.
 
@@ -222,7 +224,7 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 | `upload` | target, file path(s) (positional or `--file`) | `{files}` |
 | `wait` | any of `--selector <css>` (visible), `--text <t>`, `--url <part>`, `--gone <css>`, `--js <expr>`, `--idle` (no fetch/XHR for 500 ms; also `--load networkidle`), `--download [<glob>]` (the oldest download whose file name matches that no earlier `wait --download` took, once it finishes; a canceled one is an error), `--ms <n>`; `--timeout-ms` | state + `waited_ms` (+ `download`); `--ms` alone: `{waited_ms}` |
 | `downloads` | `--clear`, `--json`, `--dir <path>` | `#n state bytes path (url)` per file the pages downloaded, saved under `--download-dir` with the name the page gave it (`report (2).csv` if taken). With `--attach` the browser keeps its own download folder and `path` is empty. `--dir` saves this session's downloads in `<path>` from now on (created if missing; kept across `reset`), apart from other sessions' and returns `{dir}` |
-| `check` / `uncheck` | target (a ref or a targeting flag) | state + `checked`, `changed`: clicks a checkbox/radio/switch only when its state differs, fails if the click didn't change it |
+| `check` / `uncheck` | target (a ref or a targeting flag) | state + `checked`, `changed`: clicks a checkbox/radio/switch only when its state differs, fails if the click didn't change it. Compact output: `ok` (or the lines it changed) when it flipped the box, `{"changed":false}` when the box was already so |
 | `dblclick` / `focus` | target | state / `{focused}` |
 | `drag` | `<from> <to>` (each a ref or CSS selector), or `--from-text <t> --to-text <t>` | state and `drag`: `{html5: true, dropped}` for a `draggable` source (the drag events with one DataTransfer, which headless Chrome will not start from synthetic input; `dropped` is false when the target does not accept it), else the two points a held mouse moved between (sliders, pointer-driven sortable lists) |
 | `keydown` / `keyup` | `<key>` | holds / releases a key; held modifiers apply to later `press`es |

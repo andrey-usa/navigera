@@ -839,11 +839,10 @@ fn compact_output_says_only_what_changed() {
         let (ok, out, _) = compact(&["goto", &format!("{base}/form")]);
         assert!(ok && out.contains("\"title\":\"form\"") && out.contains("/form"), "[{engine}] {out}");
         assert_eq!(compact(&["fill", "--label", "Email address", "a@b.c"]).1, "ok", "[{engine}]");
-        assert_eq!(
-            compact(&["check", "--label", "I accept the terms"]).1,
-            r#"{"changed":true,"checked":true}"#,
-            "[{engine}]"
-        );
+        // A box that flipped is what `check` asked for: `ok`; one already
+        // checked says so.
+        assert_eq!(compact(&["check", "--label", "I accept the terms"]).1, "ok", "[{engine}]");
+        assert_eq!(compact(&["check", "--label", "I accept the terms"]).1, r#"{"changed":false}"#, "[{engine}]");
         // After a look, an action says what it changed on the page: the
         // lines of that tree that are new (`+`), gone (`-`) or different (`~`).
         assert!(compact(&["ax"]).0, "[{engine}]");

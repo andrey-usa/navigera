@@ -4675,6 +4675,19 @@ impl Driver {
         let Some(state) = state else { return };
         let before = self.reported.replace(state.clone());
         if compact {
+            // `check` and `uncheck` echo the state they were asked for, and a
+            // box that flipped is what was asked: `ok`, as a click says. One
+            // that was already so says `{"changed":false}`.
+            let own = match (command, own) {
+                (Command::SetChecked { .. }, Some(Value::Object(mut map))) => {
+                    map.remove("checked");
+                    if map.get("changed") == Some(&Value::Bool(true)) {
+                        map.remove("changed");
+                    }
+                    (!map.is_empty()).then_some(Value::Object(map))
+                }
+                (_, own) => own,
+            };
             let short = compact_result(own, &state, before.as_ref());
             *result = Some(self.page_change(command, &short).unwrap_or(short));
             self.session.turn_drop();

@@ -8323,10 +8323,7 @@ impl Page {
             (None, Some(l)) => (l.title.clone(), l.url.clone()),
             (None, None) => unreachable!(),
         };
-        let origin = url
-            .find("://")
-            .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
-            .unwrap_or_default();
+        let (origin, page) = ax::origin_and_page(&url);
         let started = std::time::Instant::now();
         let header = format!("page {} {url}", serde_json::to_string(&title).unwrap_or_default());
         let render_opts = ax::Options {
@@ -8335,6 +8332,7 @@ impl Page {
             limit: opts.limit,
             root_backend_id,
             origin,
+            page,
             clicks,
             lazy_budget: None,
         };
@@ -8756,10 +8754,7 @@ impl Page {
             .and_then(|p| p.get("value").and_then(|v| v.get("value")).and_then(Value::as_str))
             .unwrap_or_default()
             .to_string();
-        let origin = url
-            .find("://")
-            .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
-            .unwrap_or_default();
+        let (origin, page) = ax::origin_and_page(&url);
         let client = self.client.clone();
         let session = self.session_id.clone();
         let handle = self.handle.clone();
@@ -8796,6 +8791,7 @@ impl Page {
                 limit: opts.limit,
                 root_backend_id: scoped_backend,
                 origin,
+                page,
                 clicks,
                 lazy_budget: budget,
             },
@@ -8856,10 +8852,7 @@ impl Page {
             .and_then(|p| p.get("value").and_then(|v| v.get("value")).and_then(Value::as_str))
             .unwrap_or_default()
             .to_string();
-        let origin = url
-            .find("://")
-            .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
-            .unwrap_or_default();
+        let (origin, page) = ax::origin_and_page(&url);
         let root_backend_id = match &opts.scope {
             Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
             None => None,
@@ -8875,6 +8868,7 @@ impl Page {
                 limit: opts.limit,
                 root_backend_id,
                 origin,
+                page,
                 clicks,
                 lazy_budget: None,
             },

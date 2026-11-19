@@ -30,6 +30,18 @@ All notable changes to this project are documented here. The format follows
   Firefox you attached to, `--dir` is refused (it would change where every
   tab of it saves). Classic WebDriver says it has no downloads.
 
+### Changed
+
+- Fewer words for an agent to read, measured with the o200k tokenizer on a
+  TodoMVC-style page: a link to a part of the page itself shows
+  `url=#/active`, not the page's path again (`ax` 147 -> 137 tokens; a
+  hash-routed page 109 -> 102; 100 in-page links on a 500-row page
+  19,693 -> 19,293), and in compact output `check` / `uncheck` say `ok`
+  when they flipped the box, as a click does, and `{"changed":false}` when
+  it was already so (was `{"changed":true,"checked":true}`: 9 -> 2 tokens;
+  a fill, Enter, check and click batch 9 -> 2; that flow with an `ax`
+  before and after 345 -> 316).
+
 ### Fixed
 
 - `wait --download` answered with the newest finished download however
