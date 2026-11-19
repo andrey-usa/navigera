@@ -52,6 +52,27 @@ const NAV: &str = r##"<!doctype html><html><head><title>Nav</title></head><body>
 <button type="button" id="opens" onclick="window.open('/next.html')">Opens a tab</button>
 </body></html>"##;
 
+/// A TodoMVC-style router: the view follows the fragment, and only once the
+/// browser fires `hashchange`, a task of its own after the URL changed.
+const HASH: &str = r##"<!doctype html><html><head><title>Hash</title></head><body>
+<ul id="todos"><li class="done">Write tests</li><li>Ship it</li><li>Rest</li></ul>
+<p><a href="#/">All</a> <a href="#/active">Active</a> <a href="#/completed">Completed</a></p>
+<p id="shown">3 shown</p>
+<script>
+window.filter = 'all';
+addEventListener('hashchange', () => {
+  filter = location.hash.replace('#/', '') || 'all';
+  let n = 0;
+  for (const li of document.querySelectorAll('#todos li')) {
+    const show = filter === 'all' || (filter === 'completed') === li.classList.contains('done');
+    li.hidden = !show;
+    if (show) n++;
+  }
+  document.getElementById('shown').textContent = n + ' shown';
+});
+</script>
+</body></html>"##;
+
 const FRAME: &str = r#"<!doctype html><html><head><title>Inner</title></head><body><button onclick="this.textContent = 'pressed'">In frame</button></body></html>"#;
 
 /// A file the server sends as a download.
@@ -106,6 +127,7 @@ fn serve() -> String {
                         "/frame.html" => ("200 OK", FRAME),
                         "/more.html" => ("200 OK", MORE),
                         "/nav.html" => ("200 OK", NAV),
+                        "/hash.html" => ("200 OK", HASH),
                         "/report.csv" => ("200 OK", CSV),
                         _ => ("404 Not Found", "not found"),
                     };
@@ -342,6 +364,41 @@ fn nav_clicks(args: &[&str], engine: &str) {
         took(3),
         took(4)
     );
+}
+
+/// A click on a link to a fragment of the page, and Enter on one, answer
+/// once the page's `hashchange` listeners have run: the read right after
+/// shows the view the URL names (on Chrome's own engine the old view came
+/// back 34 times in 40 before it waited).
+fn hash_links(args: &[&str], engine: &str) {
+    let site = serve();
+    let links = [("#/completed", "completed 1 shown"), ("#/active", "active 2 shown"), ("#/", "all 3 shown")];
+    let view = "filter + ' ' + document.getElementById('shown').textContent";
+    let mut script = vec![json!({ "id": 1, "op": "goto", "url": format!("{site}/hash.html") })];
+    let mut checks = Vec::new();
+    for round in 0..4u64 {
+        for (i, (href, shown)) in links.iter().enumerate() {
+            let id = 10 + round * 100 + i as u64 * 10;
+            let selector = format!("a[href=\"{href}\"]");
+            script.push(json!({ "id": id, "op": "click", "selector": selector }));
+            script.push(json!({ "id": id + 1, "op": "eval", "expression": view }));
+            script.push(json!({ "id": id + 2, "op": "press", "selector": selector, "key": "Enter" }));
+            script.push(json!({ "id": id + 3, "op": "eval", "expression": "location.hash = '#/x'; ''" }));
+            script.push(json!({ "id": id + 4, "op": "wait", "js": "filter === 'x'" }));
+            script.push(json!({ "id": id + 5, "op": "press", "selector": selector, "key": "Enter" }));
+            script.push(json!({ "id": id + 6, "op": "eval", "expression": view }));
+            checks.push((id, id + 1, format!("click {href}"), *shown));
+            checks.push((id + 5, id + 6, format!("Enter on {href}"), *shown));
+        }
+    }
+    script.push(json!({ "id": 9999, "op": "quit" }));
+    let a = session(args, &script);
+    let stale: Vec<String> = checks
+        .iter()
+        .filter(|(_, read, _, shown)| ok(&a, *read) != *shown)
+        .map(|(act, read, what, shown)| format!("{what}: read {} for {shown} ({})", ok(&a, *read), ok(&a, *act)))
+        .collect();
+    assert!(stale.is_empty(), "{engine}: {} of {} reads saw the old view: {stale:#?}", stale.len(), checks.len());
 }
 
 /// The ops past the core set, on every engine: files for a file input, a
@@ -681,6 +738,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
     download_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
 
 /// A Firefox the user started with remote debugging is found by name and
@@ -803,6 +861,7 @@ fn safari_over_safaridriver_reads_acts_and_navigates() {
     scenario(&["--engine", "safari"], "safari");
     more_ops(&["--engine", "safari"], "safari", false);
     nav_clicks(&["--engine", "safari"], "safari");
+    hash_links(&["--engine", "safari"], "safari");
     lone_surrogates(&["--engine", "safari"], "safari");
 }
 
@@ -847,6 +906,8 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     more_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver", true);
     nav_clicks(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     nav_clicks(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
+    hash_links(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
+    hash_links(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
     lone_surrogates(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     lone_surrogates(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
     #[cfg(unix)]
