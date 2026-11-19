@@ -44,6 +44,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A script run by its `#!` line that reads an answer through a subshell
+  (`out=$(navigera ...)`) was taken for two processes sharing the session:
+  its commands said "another process used this session" and to give each
+  agent its own `-s` name. The script and its subshells carry the script's
+  name, each with a pid of its own; a process whose program is a shell is
+  now passed over as the shells are, up to the caller (Linux).
 - A click on a button under a loading overlay was refused as covered on
   a second visit to the page: a request that once took over a second (a
   slow search, a 2.5 s save) was taken for a long poll on every later
