@@ -42,6 +42,15 @@ All notable changes to this project are documented here. The format follows
   a fill, Enter, check and click batch 9 -> 2; that flow with an `ax`
   before and after 345 -> 316).
 
+- One process fewer per Chrome on Linux and Windows: the network service
+  runs in the browser process, as navigera's launch flags meant it to (they
+  named the feature `NetworkServiceInProcess`; Chromium calls it
+  `NetworkServiceInProcess2`, so the flag did nothing). A start, a goto and
+  an `ax` leave the browser at 262.5 MiB PSS instead of 280.4 (Chrome 153)
+  and 171.1 instead of 181.0 (chrome-headless-shell 158), Linux, medians of
+  16; no change in time. macOS keeps it apart: only there does Chrome
+  sandbox that process by default.
+
 ### Fixed
 
 - A script run by its `#!` line that reads an answer through a subshell

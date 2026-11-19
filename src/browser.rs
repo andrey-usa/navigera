@@ -95,10 +95,26 @@ const CHROME_FLAGS: &[&str] = &[
     // component updates off no model was ever downloaded. Chrome 154 to
     // 156 have no switch for it and still ask.
     "--disable-features=Translate,TranslateUI,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,site-per-process,NetworkTimeServiceQuerying,PreconnectToSearch,OptimizationGuideManifestBroker",
-    // WebMCP: the tools a page registers on `document.modelContext`
-    // (`webmcp-list`, `webmcp-call`); a Chrome without it ignores the name.
-    "--enable-features=NetworkService,NetworkServiceInProcess,WebMCP",
+    ENABLE_FEATURES,
 ];
+
+/// WebMCP: the tools a page registers on `document.modelContext`
+/// (`webmcp-list`, `webmcp-call`); a Chrome without it ignores the name.
+///
+/// `NetworkServiceInProcess2` (Chromium's name for `kNetworkServiceInProcess`;
+/// the `NetworkServiceInProcess` passed before did nothing): the network
+/// service runs in the browser process instead of a utility process of its
+/// own: one process fewer per browser, and after a start, a goto and an
+/// `ax` the browser's PSS 280.4 -> 262.5 MiB (Chrome 153) and 181.0 ->
+/// 171.1 MiB (chrome-headless-shell 158), Linux, medians of 16 interleaved,
+/// no range overlapping; the times overlap. Not on macOS, the one desktop where Chrome sandboxes that
+/// process by default (`IsNetworkSandboxEnabled`): there it stays apart.
+/// On Linux and Windows the sandbox is a feature that is off unless a
+/// field trial turns it on, and navigera's fresh profiles fetch none.
+#[cfg(target_os = "macos")]
+const ENABLE_FEATURES: &str = "--enable-features=WebMCP";
+#[cfg(not(target_os = "macos"))]
+const ENABLE_FEATURES: &str = "--enable-features=NetworkServiceInProcess2,WebMCP";
 
 /// [`CHROME_FLAGS`] adjusted by two diagnostic knobs, for bisecting a
 /// browser-version-specific failure in CI without a rebuild:
@@ -4413,6 +4429,16 @@ mod tests {
         );
         assert!(chrome_flags().iter().filter(|f| f.starts_with("--enable-features=")).count() == 1);
         assert!(chrome_flags().iter().any(|f| f.starts_with("--enable-features=") && f.contains("WebMCP")));
+    }
+
+    /// The network service in the browser process by its real feature
+    /// name, except on macOS, where its own process is sandboxed.
+    #[test]
+    fn the_network_service_runs_in_the_browser_process_where_it_has_no_sandbox() {
+        let features = chrome_flags().into_iter().find(|f| f.starts_with("--enable-features=")).unwrap();
+        let names: Vec<&str> = features["--enable-features=".len()..].split(',').collect();
+        assert!(!names.contains(&"NetworkServiceInProcess") && !names.contains(&"NetworkService"), "{features}");
+        assert_eq!(names.contains(&"NetworkServiceInProcess2"), !cfg!(target_os = "macos"), "{features}");
     }
 
     #[test]
