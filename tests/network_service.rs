@@ -265,7 +265,7 @@ fn the_network_service_runs_in_the_browser_process_only_where_it_would_have_no_s
             would.network[0], "none",
             "{name}: without {FEATURE} the browser sandboxes its network service (--service-sandbox-type={}), \
              and navigera runs it in the browser process, outside that sandbox. Leave the feature out for this \
-             browser and platform (launch_flags_for in src/browser.rs).",
+             browser and platform (`ENABLE_FEATURES` and `chrome_flags` in src/browser.rs).",
             would.network[0]
         );
     }
