@@ -1414,8 +1414,11 @@ impl Wire for Bidi {
                 self.geo_held = Some(Vec::new());
                 let here = self.geo_here();
                 let held = self.geo_held.take().unwrap_or_default();
-                let (url, before) = here?;
-                self.geo_grant(&url, true, before)?;
+                if let Err(e) = here.and_then(|(url, before)| self.geo_grant(&url, true, before)) {
+                    // Nothing granted: the next `set geo` reads and grants.
+                    self.geo = None;
+                    return Err(e);
+                }
                 for url in held {
                     let _ = self.geo_grant(&url, true, None);
                 }
@@ -1966,11 +1969,13 @@ mod geo_tests {
     /// geolocation setting starts as `settings` says; right after the
     /// position override a `navigationCommitted` of that page arrives (a
     /// navigation the command did not wait for); a read in the page says
-    /// the setting its origin has then. The `permissions.setPermission`
-    /// calls it got, in order.
+    /// the setting its origin has then. The first `failing` reads of the
+    /// page (in the page, then of the tree) fail. The
+    /// `permissions.setPermission` calls it got, in order.
     fn geo_firefox(
         page: &'static str,
         settings: &'static [(&'static str, &'static str)],
+        mut failing: u32,
     ) -> (String, std::thread::JoinHandle<Vec<(String, String)>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1985,7 +1990,16 @@ mod geo_tests {
                 let v: Value = serde_json::from_str(text.as_str()).unwrap();
                 let p = &v["params"];
                 let mut then = None;
-                let result = match v["method"].as_str().unwrap_or("") {
+                let method = v["method"].as_str().unwrap_or("");
+                if failing > 0 && matches!(method, "script.evaluate" | "browsingContext.getTree") {
+                    if method == "browsingContext.getTree" {
+                        failing -= 1;
+                    }
+                    let error = json!({ "type": "error", "id": v["id"], "error": "no such frame", "message": "gone" });
+                    ws.send(Message::text(error.to_string())).unwrap();
+                    continue;
+                }
+                let result = match method {
                     GEO => {
                         then = Some(json!({ "type": "event", "method": "browsingContext.navigationCommitted",
                             "params": { "context": "tab", "url": page } }));
@@ -2019,14 +2033,23 @@ mod geo_tests {
 
     /// `set geo <lat> <lon>`, then `set geo off`, in a Firefox navigera
     /// attached to (`headless`: one no person uses): what it was sent.
-    fn set_geo_on_and_off(headless: bool, settings: &'static [(&'static str, &'static str)]) -> Vec<(String, String)> {
-        let (url, firefox) = geo_firefox("https://blocked.test/page", settings);
+    /// `failing`: the first `set geo`s whose read of the page fails.
+    fn set_geo_on_and_off(
+        headless: bool,
+        settings: &'static [(&'static str, &'static str)],
+        failing: u32,
+    ) -> Vec<(String, String)> {
+        let (url, firefox) = geo_firefox("https://blocked.test/page", settings, failing);
         let mut b = Bidi::connect(&url, Duration::from_secs(5)).unwrap();
         b.attached = true;
         b.browser = json!({ "attached": true, "headless": headless });
         b.context = "tab".into();
         b.own.push("tab".into());
-        b.emulate(GEO, json!({ "coordinates": { "latitude": 1, "longitude": 2 } })).unwrap();
+        let on = json!({ "coordinates": { "latitude": 1, "longitude": 2 } });
+        for _ in 0..failing {
+            assert!(b.emulate(GEO, on.clone()).is_err(), "a read that failed");
+        }
+        b.emulate(GEO, on).unwrap();
         b.emulate(GEO, json!({ "coordinates": null })).unwrap();
         b.closed = true;
         drop(b);
@@ -2038,7 +2061,17 @@ mod geo_tests {
     /// the site's own, and `off` set a site the user blocked to asking.
     #[test]
     fn set_geo_off_gives_a_blocked_site_its_block_back_after_a_navigation_meanwhile() {
-        let sent = set_geo_on_and_off(true, &[("https://blocked.test", "denied")]);
+        let sent = set_geo_on_and_off(true, &[("https://blocked.test", "denied")], 0);
+        let to = |state: &str| ("https://blocked.test".to_string(), state.to_string());
+        assert_eq!(sent, [to("granted"), to("denied")]);
+    }
+
+    /// A `set geo` whose read of the page failed granted nothing, and the
+    /// next one reads and grants: it had left geo on, so a retry granted
+    /// nothing.
+    #[test]
+    fn set_geo_after_a_failed_read_reads_and_grants() {
+        let sent = set_geo_on_and_off(true, &[("https://blocked.test", "denied")], 1);
         let to = |state: &str| ("https://blocked.test".to_string(), state.to_string());
         assert_eq!(sent, [to("granted"), to("denied")]);
     }
@@ -2051,7 +2084,7 @@ mod geo_tests {
         assert!(persons_browser(&json!({ "attached": true, "headless": false })));
         assert!(!persons_browser(&json!({ "attached": true, "headless": true })));
         assert!(!persons_browser(&json!({ "headless": false })));
-        assert_eq!(set_geo_on_and_off(false, &[("https://blocked.test", "denied")]), []);
+        assert_eq!(set_geo_on_and_off(false, &[("https://blocked.test", "denied")], 0), []);
     }
 
     #[test]

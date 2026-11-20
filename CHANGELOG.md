@@ -26,7 +26,8 @@ All notable changes to this project are documented here. The format follows
   and each origin gets back the setting it had when navigera could read
   it: the page's own at `set geo` (a site blocked there stays blocked,
   also when a navigation lands while it is read), else asking, as
-  WebDriver BiDi cannot read a permission. `set media print`,
+  WebDriver BiDi cannot read a permission. A `set geo` whose read of the
+  page fails grants nothing and says why; the next one grants. `set media print`,
   `reduced-motion` and `forced-colors`, and the settings Firefox does not
   emulate (`cpu`, `network`), say to run with `--engine chrome`. Classic WebDriver
   (Safari) has no emulation and says so; its `set device` takes a device
