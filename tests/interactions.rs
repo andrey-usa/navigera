@@ -2470,25 +2470,29 @@ fn a_snapshot_after_a_click_that_fetches_waits_for_the_fetch_not_the_window() {
 /// The default quiet window reads a list that arrives in two fetches with
 /// a 400 ms gap between them; a 250 ms window ends in the gap and reads
 /// only the first half. That is why the default stays 500 ms and 250 ms
-/// is opt-in per session.
+/// is opt-in per session. `goto` and `ax` go in one call: a command line
+/// started between them (seen on a loaded macOS runner) could take past
+/// the gap, and the read then had both halves whatever the window.
 #[test]
 fn a_short_quiet_window_reads_a_chained_list_early() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("quiet-window", &[]);
+    let steps = std::env::temp_dir().join(format!("nv-quiet-window-{}.txt", std::process::id()));
+    std::fs::write(&steps, format!("goto {}/two-fetch\nax\n", site.url)).unwrap();
+    let steps = steps.display().to_string();
+    let read = || s.ok(&["batch", &steps])["results"][0]["result"].as_str().unwrap_or_default().to_string();
 
-    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
-    let tree = s.text(&["ax"]);
+    let tree = read();
     assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
 
     s.ok(&["set", "network-quiet", "250"]);
-    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
-    let tree = s.text(&["ax"]);
+    let tree = read();
     assert!(tree.contains("Alpha") && !tree.contains("Beta"), "{tree}");
 
     s.ok(&["set", "network-quiet", "500"]);
-    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
-    let tree = s.text(&["ax"]);
+    let tree = read();
     assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
+    let _ = std::fs::remove_file(&steps);
 }
 
 /// `check` on a controlled checkbox (the click's default is cancelled and the
