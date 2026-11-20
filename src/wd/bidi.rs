@@ -45,6 +45,19 @@ const NETWORK_EVENTS: &[&str] =
 /// The largest response body the browser keeps for `network <n>`.
 const BODY_MAX: u64 = 10 << 20;
 
+/// How long `network` waits for the answers of requests sent just before.
+const CATCH_UP: Duration = Duration::from_millis(150);
+
+/// Seconds since the epoch, as BiDi's timestamps (in ms) over 1000.
+fn now_s() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// A request sent within the last 2 s with no status and no error yet.
+fn fresh_pending(log: &VecDeque<crate::cdp::logs::Request>, now: f64) -> bool {
+    log.iter().rev().take(64).any(|r| r.status.is_none() && r.failed.is_none() && (now - r.started).abs() < 2.0)
+}
+
 /// Most requests kept, as on Chrome: older ones are dropped.
 const REQUESTS_MAX: usize = 1000;
 
@@ -1642,6 +1655,18 @@ impl Wire for Bidi {
 
     fn requests(&mut self, clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
         self.idle();
+        // A response the page already has can still be on its way to us (a
+        // driver translating another protocol sends it late): a request
+        // sent in the last moments with no answer yet is waited for, a
+        // little. One pending longer (a long poll) costs nothing.
+        let deadline = Instant::now() + CATCH_UP;
+        while Instant::now() < deadline && self.requests.as_ref().is_some_and(|log| fresh_pending(log, now_s())) {
+            match self.read_one(Duration::from_millis(5)) {
+                Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
         let Some(log) = &mut self.requests else {
             bail!("this browser sends no WebDriver BiDi network events, so navigera has no request list here")
         };
@@ -2407,6 +2432,16 @@ mod network_tests {
         assert_eq!((log[0].status, log[0].ended, log[0].size), (Some(404), None, None));
         log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 404, 1009.0));
         assert_eq!((log[0].ended, log[0].size), (Some(1.009), Some(120)));
+    }
+
+    #[test]
+    fn only_a_request_sent_just_now_without_an_answer_is_waited_for() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 100_000.0, 0));
+        assert!(super::fresh_pending(&log, 101.0));
+        assert!(!super::fresh_pending(&log, 103.0), "a long poll is not waited for");
+        log_request(&mut log, &mut last, "network.responseStarted", &done("1", 200, 100_500.0));
+        assert!(!super::fresh_pending(&log, 101.0));
     }
 
     #[test]
