@@ -39,7 +39,8 @@ const COMMIT_EVENTS: &[&str] = &["browsingContext.navigationCommitted"];
 
 /// `network`: the requests of this session's tabs, subscribed apart (a
 /// server without them still drives pages, and `network` then says so).
-const NETWORK_EVENTS: &[&str] = &["network.beforeRequestSent", "network.responseCompleted", "network.fetchError"];
+const NETWORK_EVENTS: &[&str] =
+    &["network.beforeRequestSent", "network.responseStarted", "network.responseCompleted", "network.fetchError"];
 
 /// The largest response body the browser keeps for `network <n>`.
 const BODY_MAX: u64 = 10 << 20;
@@ -221,15 +222,21 @@ fn log_request(log: &mut VecDeque<crate::cdp::logs::Request>, last: &mut u64, me
                 ..Default::default()
             });
         }
-        "network.responseCompleted" => {
+        // The status and headers when they arrive (as Chrome's
+        // `responseReceived`), the size and end when the body has: a
+        // server may report only the first (chromedriver 147 over BiDi
+        // sends no `responseCompleted` for a fetch).
+        "network.responseStarted" | "network.responseCompleted" => {
             let Some(r) = open.map(|i| &mut log[i]) else { return };
             let response = &params["response"];
             r.status = response["status"].as_u64();
             r.mime = response["mimeType"].as_str().unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
             r.response_headers = header_object(&response["headers"]);
             r.from_cache = response["fromCache"] == true;
-            r.size = response["bytesReceived"].as_u64();
-            r.ended = at.or(Some(r.started));
+            if method == "network.responseCompleted" {
+                r.size = response["bytesReceived"].as_u64();
+                r.ended = at.or(Some(r.started));
+            }
         }
         "network.fetchError" => {
             let Some(r) = open.map(|i| &mut log[i]) else { return };
@@ -991,7 +998,10 @@ impl Bidi {
                     "accepted": accept,
                 }));
             }
-            m @ ("network.beforeRequestSent" | "network.responseCompleted" | "network.fetchError") => {
+            m @ ("network.beforeRequestSent"
+            | "network.responseStarted"
+            | "network.responseCompleted"
+            | "network.fetchError") => {
                 if self.heard(params["context"].as_str()) {
                     if let Some(log) = &mut self.requests {
                         log_request(log, &mut self.last_request, m, params);
@@ -2387,6 +2397,16 @@ mod network_tests {
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].ended, Some(1.005));
         assert_eq!(log[1].failed.as_deref(), Some("NS_ERROR_NET_RESET"));
+    }
+
+    #[test]
+    fn a_response_that_only_started_has_its_status_and_no_end() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.responseStarted", &done("1", 404, 1004.0));
+        assert_eq!((log[0].status, log[0].ended, log[0].size), (Some(404), None, None));
+        log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 404, 1009.0));
+        assert_eq!((log[0].ended, log[0].size), (Some(1.009), Some(120)));
     }
 
     #[test]

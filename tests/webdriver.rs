@@ -751,8 +751,9 @@ fn emulate_ops(args: &[&str], engine: &str) {
 /// A file a page downloads is listed, waited for and saved where
 /// `downloads --dir` says.
 /// `network`: the requests a page made, as on Chrome: a redirect is two
-/// entries, a 404 is failed, `--since` and `clear` count from the last.
-fn network_ops(args: &[&str], engine: &str) {
+/// entries, a 404 is failed, `clear` empties it. `bodies`: the server keeps
+/// response bodies (chromedriver 147 over BiDi keeps none).
+fn network_ops(args: &[&str], engine: &str, bodies: bool) {
     let site = serve();
     let dir = tempfile::tempdir().unwrap();
     let har = dir.path().join("next.har");
@@ -783,7 +784,10 @@ fn network_ops(args: &[&str], engine: &str) {
     // The response body the browser kept, as `route --har` replays it.
     let har: Value = serde_json::from_slice(&std::fs::read(&har).unwrap()).unwrap();
     let target = &har["log"]["entries"][1]["response"];
-    assert_eq!((&target["status"], &target["content"]["text"]), (&json!(200), &json!(NEXT)), "{engine}: {target}");
+    assert_eq!(target["status"], 200, "{engine}: {target}");
+    if bodies {
+        assert_eq!(target["content"]["text"], NEXT, "{engine}: {target}");
+    }
     assert_eq!(ok(&a, 8), &json!("(no requests)"), "{engine}");
 }
 
@@ -899,7 +903,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     emulate_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
     download_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
-    network_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    network_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
     hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
@@ -1114,6 +1118,7 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     hash_links(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
     lone_surrogates(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     lone_surrogates(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
+    network_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi", false);
     viewport_back(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back_per_window(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");

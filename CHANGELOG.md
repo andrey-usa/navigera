@@ -11,7 +11,8 @@ All notable changes to this project are documented here. The format follows
 - `network` on Firefox and the other WebDriver BiDi engines: the requests
   of the session's tabs in the same list as on Chrome (`#n METHOD STATUS
   type url size time`), with `--filter`, `--type`, `--failed`, `--since`,
-  `--clear` and `--har`; a redirect is two entries, as on Chrome. A
+  `--clear` and `--har`; a redirect is two entries, as on Chrome; a
+  status shows once the response starts, the size and time once it ends. A
   response body (`network <n>`, `--body-file`) and the bodies in a HAR
   come from what the browser kept (`network.addDataCollector`, up to
   10 MiB a response). In a Firefox you attached to, only the window
