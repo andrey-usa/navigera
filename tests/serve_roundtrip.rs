@@ -328,8 +328,10 @@ fn navigera_named_session_across_processes() {
 /// viewport back. The browser takes an override away after it answers: a
 /// read right after `set device off` saw the device's size in 3 to 9 of 10
 /// fresh sessions (Chrome 153), most often just after the browser started,
-/// so each round is a session of its own; after a phone, its screen size
-/// with the page's pixel ratio in 7 of 20.
+/// so each round is a session of its own, and starts with the phone: after
+/// one, a size between came back (its screen size with the page's pixel
+/// ratio) in 7 of 20 fresh sessions, but never when the phone came third
+/// (6 runs of this test passed on that code then; 2 of 8 now).
 #[test]
 fn a_page_has_its_own_viewport_back_when_set_device_off_answers() {
     if !chrome_available() {
@@ -353,9 +355,9 @@ fn a_page_has_its_own_viewport_back_when_set_device_off_answers() {
         let own = op(json!({"op": "eval", "expression": size}));
         // A phone's comes back through sizes that are neither its nor the page's.
         let devices = [
+            ("iPhone 15", None),
             ("Laptop", Some(json!([1366, 768, 1]))),
             ("Desktop HD HiDPI", Some(json!([1280, 720, 2]))),
-            ("iPhone 15", None),
         ];
         for (device, under) in devices {
             op(json!({"op": "set", "what": "device", "values": [device]}));
