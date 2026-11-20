@@ -563,7 +563,16 @@ fn viewport_back(args: &[&str], engine: &str) {
         set(7, "viewport", &["800", "600"]),
         set(8, "viewport", &["off"]),
         eval(9),
-        json!({ "id": 10, "op": "quit" }),
+        // Every tab of the session, as on Chrome: `off` from a second tab
+        // gives the first its own back too (over BiDi it stayed at the size).
+        set(10, "viewport", &["800", "600"]),
+        json!({ "id": 11, "op": "tab-new" }),
+        eval(12),
+        set(13, "viewport", &["off"]),
+        json!({ "id": 14, "op": "tab-select", "index": 0 }),
+        json!({ "id": 15, "op": "wait", "js": "innerWidth !== 800 || innerHeight !== 600", "timeout_ms": 2000 }),
+        eval(16),
+        json!({ "id": 17, "op": "quit" }),
     ];
     let a = session(args, &script);
     let start = ok(&a, 2).clone();
@@ -571,6 +580,9 @@ fn viewport_back(args: &[&str], engine: &str) {
     assert_eq!(ok(&a, 4), &json!([1366, 768]), "{engine}: the device's viewport");
     assert_eq!(ok(&a, 6), &start, "{engine}: `set device off` gives back the viewport the window had");
     assert_eq!(ok(&a, 9), &start, "{engine}: `set viewport off` gives back the viewport the window had");
+    assert_eq!(ok(&a, 12), &json!([800, 600]), "{engine}: a tab opened after `set viewport`");
+    ok(&a, 15);
+    assert_eq!(ok(&a, 16), &start, "{engine}: `set viewport off` from the second tab, in the first");
 }
 
 /// `set` over WebDriver BiDi's `emulation.*` (Firefox): locale, timezone,

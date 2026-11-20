@@ -1378,8 +1378,17 @@ impl Wire for Bidi {
             params["devicePixelRatio"] = json!(scale);
         }
         self.viewport = size.map(|_| params.clone());
+        // Every open tab of the session, as on Chrome (tabs opened later get
+        // it as they open); the current one first: its error is the
+        // command's, and `off` waits in it. Another tab may be closing.
+        let mut tabs = self.top_contexts().map(|all| self.tabs_among(all)).unwrap_or_default();
+        tabs.retain(|t| *t != self.context);
         params["context"] = json!(self.context);
-        self.send("browsingContext.setViewport", params, Duration::from_secs(30))?;
+        self.send("browsingContext.setViewport", params.clone(), Duration::from_secs(30))?;
+        for id in tabs {
+            params["context"] = json!(id);
+            let _ = self.send("browsingContext.setViewport", params.clone(), Duration::from_secs(30));
+        }
         Ok(())
     }
 

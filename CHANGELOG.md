@@ -94,6 +94,10 @@ All notable changes to this project are documented here. The format follows
   7 in 20; 0 after). The wait is in the page and ends as soon as its width,
   height and pixel ratio are its own again, or after 1 s (a window resized
   while the device was set has other values to come back to).
+- `set viewport` and `set device` over WebDriver BiDi (Firefox, and a
+  WebDriver server with `--bidi`) size every open tab of the session, as on
+  Chrome and as the manual says, not only the current one: `off` from a
+  second tab left the first at the size set.
 - `set viewport off` over classic WebDriver gives the window back the size
   it had before `set viewport` (it maximized the window: 800x457 against
   780x437 in a headless chromedriver).
