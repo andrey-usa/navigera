@@ -1415,8 +1415,10 @@ impl Wire for Bidi {
                 let here = self.geo_here();
                 let held = self.geo_held.take().unwrap_or_default();
                 if let Err(e) = here.and_then(|(url, before)| self.geo_grant(&url, true, before)) {
-                    // Nothing granted: the next `set geo` reads and grants.
-                    self.geo = None;
+                    // Geo stays off, so the next `set geo` reads and grants.
+                    // A navigation's grant may have gone out while the
+                    // page's own waited: given back with the rest.
+                    self.geo_revoke();
                     return Err(e);
                 }
                 for url in held {
@@ -2074,6 +2076,59 @@ mod geo_tests {
         let sent = set_geo_on_and_off(true, &[("https://blocked.test", "denied")], 1);
         let to = |state: &str| ("https://blocked.test".to_string(), state.to_string());
         assert_eq!(sent, [to("granted"), to("denied")]);
+    }
+
+    /// A `set geo` whose grant for the page failed takes back a grant a
+    /// navigation got while that one waited: it forgot it, so `off` sent
+    /// nothing and the second site kept the permission.
+    #[test]
+    fn a_failed_grant_takes_back_a_navigation_granted_while_it_waited() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let firefox = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut sets = Vec::new();
+            while let Ok(Message::Text(text)) = ws.read() {
+                let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                let p = &v["params"];
+                let result = match v["method"].as_str().unwrap_or("") {
+                    "script.evaluate" => {
+                        json!({ "type": "success", "result": { "type": "string", "value": "denied https://blocked.test/page" } })
+                    }
+                    "permissions.setPermission" => {
+                        let (o, state) = (p["origin"].as_str().unwrap(), p["state"].as_str().unwrap());
+                        sets.push((o.to_string(), state.to_string()));
+                        if (o, state) == ("https://blocked.test", "granted") {
+                            let event = json!({ "type": "event", "method": "browsingContext.navigationCommitted",
+                                "params": { "context": "tab", "url": "https://second.test/page" } });
+                            ws.send(Message::text(event.to_string())).unwrap();
+                            let error = json!({ "type": "error", "id": v["id"], "error": "unknown error", "message": "refused" });
+                            ws.send(Message::text(error.to_string())).unwrap();
+                            continue;
+                        }
+                        json!({})
+                    }
+                    _ => json!({}),
+                };
+                let answer = json!({ "type": "success", "id": v["id"], "result": result });
+                ws.send(Message::text(answer.to_string())).unwrap();
+            }
+            sets
+        });
+        let mut b = Bidi::connect(&format!("ws://{addr}/"), Duration::from_secs(5)).unwrap();
+        b.attached = true;
+        b.browser = json!({ "attached": true, "headless": true });
+        b.context = "tab".into();
+        b.own.push("tab".into());
+        assert!(b.emulate(GEO, json!({ "coordinates": { "latitude": 1, "longitude": 2 } })).is_err());
+        b.emulate(GEO, json!({ "coordinates": null })).unwrap();
+        b.closed = true;
+        drop(b);
+        let to = |o: &str, state: &str| (o.to_string(), state.to_string());
+        let sent = firefox.join().unwrap();
+        let (blocked, second) = ("https://blocked.test", "https://second.test");
+        assert_eq!(sent, [to(blocked, "granted"), to(second, "granted"), to(blocked, "denied"), to(second, "prompt")]);
     }
 
     /// In a Firefox a person may be using (attached, with a window) a
