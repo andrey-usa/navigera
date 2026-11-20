@@ -533,6 +533,24 @@ pub fn requests_text(requests: &[Request], origin: &str) -> String {
         .join("\n")
 }
 
+/// `network`'s filters: a URL part, a kind (any case), failed ones (an
+/// error, or a status of 400 or more), and those after request `#since`.
+pub fn pick_requests(
+    all: Vec<Request>,
+    filter: Option<&str>,
+    kind: Option<&str>,
+    failed: bool,
+    since: Option<u64>,
+) -> Vec<Request> {
+    let kind = kind.map(str::to_ascii_lowercase);
+    all.into_iter()
+        .filter(|r| filter.is_none_or(|f| r.url.contains(f)))
+        .filter(|r| kind.as_ref().is_none_or(|k| r.kind.to_ascii_lowercase() == *k))
+        .filter(|r| !failed || r.failed.is_some() || r.status.is_some_and(|s| s >= 400))
+        .filter(|r| since.is_none_or(|n| r.n > n))
+        .collect()
+}
+
 /// The full record of one request (bodies are added by the caller).
 pub fn request_json(r: &Request) -> Value {
     json!({

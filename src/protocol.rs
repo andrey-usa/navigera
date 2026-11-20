@@ -4442,14 +4442,7 @@ impl Driver {
             }
             return Ok(out);
         }
-        let kind = kind.map(str::to_ascii_lowercase);
-        let mut picked: Vec<_> = all
-            .into_iter()
-            .filter(|r| filter.is_none_or(|f| r.url.contains(f)))
-            .filter(|r| kind.as_ref().is_none_or(|k| r.kind.to_ascii_lowercase() == *k))
-            .filter(|r| !failed || r.failed.is_some() || r.status.is_some_and(|s| s >= 400))
-            .filter(|r| since.is_none_or(|n| r.n > n))
-            .collect();
+        let mut picked = crate::cdp::logs::pick_requests(all, filter, kind, failed, since);
         if let Some(path) = har {
             let mut har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
             // Response bodies, so `route --har` can replay the file. A body
@@ -7290,7 +7283,7 @@ pub(crate) fn downloads_answer(items: &[crate::cdp::downloads::Download], as_jso
 }
 
 /// `scheme://host[:port]` of a URL ("" when it has none).
-fn origin_of(url: &str) -> String {
+pub fn origin_of(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else { return String::new() };
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     format!("{scheme}://{host}")

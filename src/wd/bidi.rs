@@ -37,6 +37,13 @@ const DOWNLOAD_EVENTS: &[&str] = &["browsingContext.downloadWillBegin", "browsin
 /// apart, as a server without it still drives pages.
 const COMMIT_EVENTS: &[&str] = &["browsingContext.navigationCommitted"];
 
+/// `network`: the requests of this session's tabs, subscribed apart (a
+/// server without them still drives pages, and `network` then says so).
+const NETWORK_EVENTS: &[&str] = &["network.beforeRequestSent", "network.responseCompleted", "network.fetchError"];
+
+/// Most requests kept, as on Chrome: older ones are dropped.
+const REQUESTS_MAX: usize = 1000;
+
 /// In the user's browser (`--attach`), also which frames and opened tabs
 /// belong to this session's tabs: their console lines and dialogs are its
 /// own, and an event names the frame, not the tab.
@@ -108,6 +115,11 @@ pub struct Bidi {
     /// `downloads`: what this session's pages downloaded, oldest first
     /// (`guid` is the download's navigation id).
     downloads: Vec<Download>,
+    /// `network`: the requests of this session's tabs, oldest first, and
+    /// the number of the last one; `None`: the browser sends no network
+    /// events (then `route` subscribes on its own).
+    requests: Option<VecDeque<crate::cdp::logs::Request>>,
+    last_request: u64,
     /// The frames inside `own` tabs, each with its tab.
     frames: Vec<(String, String)>,
     closed: bool,
@@ -126,6 +138,103 @@ pub fn persons_browser(browser: &Value) -> bool {
 
 /// `set geo`'s answer in such a Firefox.
 pub const GEO_ASKS: &str = "no location permission granted: in your own Firefox it would be the site's in the whole profile, your tabs too. A page asks you, as without navigera";
+
+/// A BiDi header list (`[{name, value: {type, value}}]`) as the object CDP
+/// gives (a repeated name's values joined by a newline, as Chrome does).
+fn header_object(list: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for h in list.as_array().into_iter().flatten() {
+        let (Some(name), Some(value)) = (h["name"].as_str(), h["value"]["value"].as_str()) else { continue };
+        match out.get_mut(name) {
+            Some(Value::String(had)) => {
+                had.push('\n');
+                had.push_str(value);
+            }
+            _ => {
+                out.insert(name.to_string(), json!(value));
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// A request's kind under Chrome's names, from what Fetch says it is for.
+fn request_kind(request: &Value) -> &'static str {
+    match (request["initiatorType"].as_str().unwrap_or(""), request["destination"].as_str().unwrap_or("")) {
+        ("xmlhttprequest", _) => "XHR",
+        ("fetch" | "beacon", _) => "Fetch",
+        (_, "document" | "iframe" | "frame") => "Document",
+        (_, "script" | "worker" | "sharedworker" | "serviceworker") => "Script",
+        (_, "style") => "Stylesheet",
+        (_, "image") => "Image",
+        (_, "font") => "Font",
+        (_, "audio" | "video" | "track") => "Media",
+        (_, "manifest") => "Manifest",
+        _ => "Other",
+    }
+}
+
+/// One `network.*` event into the request log, as Chrome's would be: a
+/// redirect closes the hop that redirected (its own `responseCompleted`)
+/// and the next hop, under the same id, is an entry of its own.
+fn log_request(log: &mut VecDeque<crate::cdp::logs::Request>, last: &mut u64, method: &str, params: &Value) {
+    let request = &params["request"];
+    let Some(id) = request["request"].as_str() else { return };
+    // BiDi times are milliseconds since the epoch.
+    let at = params["timestamp"].as_f64().map(|ms| ms / 1000.0);
+    let open = log.iter().rposition(|r| r.id == id && r.ended.is_none() && r.failed.is_none());
+    match method {
+        "network.beforeRequestSent" => {
+            // The same hop announced again (an intercepted request is, for
+            // each phase it is held in): the one entry.
+            if let Some(i) = open {
+                if log[i].url == request["url"].as_str().unwrap_or("") {
+                    return;
+                }
+                // A redirect whose own response was not reported: the hop
+                // ends where the next begins.
+                if params["redirectCount"].as_u64().unwrap_or(0) > 0 {
+                    log[i].ended = at.or(Some(log[i].started));
+                }
+            }
+            *last += 1;
+            let size = request["bodySize"].as_u64().unwrap_or(0);
+            let started = at.unwrap_or(0.0);
+            if log.len() >= REQUESTS_MAX {
+                log.pop_front();
+            }
+            log.push_back(crate::cdp::logs::Request {
+                n: *last,
+                id: id.to_string(),
+                method: request["method"].as_str().unwrap_or("GET").to_string(),
+                url: request["url"].as_str().unwrap_or("").to_string(),
+                kind: request_kind(request).to_string(),
+                request_headers: header_object(&request["headers"]),
+                has_post_data: size > 0,
+                started,
+                wall: started,
+                ..Default::default()
+            });
+        }
+        "network.responseCompleted" => {
+            let Some(r) = open.map(|i| &mut log[i]) else { return };
+            let response = &params["response"];
+            r.status = response["status"].as_u64();
+            r.mime = response["mimeType"].as_str().unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
+            r.response_headers = header_object(&response["headers"]);
+            r.from_cache = response["fromCache"] == true;
+            r.size = response["bytesReceived"].as_u64();
+            r.ended = at.or(Some(r.started));
+        }
+        "network.fetchError" => {
+            let Some(r) = open.map(|i| &mut log[i]) else { return };
+            let why = params["errorText"].as_str().unwrap_or("failed");
+            r.failed = Some(if why.is_empty() { "failed".into() } else { why.to_string() });
+            r.ended = at.or(Some(r.started));
+        }
+        _ => {}
+    }
+}
 
 /// `scheme://host[:port]` of an http(s) URL, without its user info; None
 /// for any other (about:blank, data:, file:), which has no origin to grant.
@@ -669,6 +778,8 @@ impl Bidi {
             geo: None,
             geo_held: None,
             downloads: Vec::new(),
+            requests: None,
+            last_request: 0,
             child: None,
             _profile: None,
             classic: None,
@@ -699,8 +810,12 @@ impl Bidi {
             self.context = made["context"].as_str().ok_or_else(|| anyhow!("the browser opened no window"))?.to_string();
             self.own.push(self.context.clone());
             self.listen_in(&self.context.clone(), timeout);
+            // Only its own window's requests: the user's tabs are not
+            // reported to it, nor slowed by being.
+            self.log_network(json!({ "events": NETWORK_EVENTS, "contexts": [self.context] }), timeout);
             return Ok(());
         }
+        self.log_network(json!({ "events": NETWORK_EVENTS }), timeout);
         self.send("script.addPreloadScript", json!({ "functionDeclaration": LISTEN }), timeout)?;
         let tree = self.send("browsingContext.getTree", json!({ "maxDepth": 0 }), timeout)?;
         self.context = tree["contexts"]
@@ -713,6 +828,13 @@ impl Bidi {
         // from its next document on, and in it from now.
         let _ = self.call(LISTEN, "[]", timeout);
         Ok(())
+    }
+
+    /// Keep the request log, if the browser sends its events.
+    fn log_network(&mut self, subscribe: Value, timeout: Duration) {
+        if self.send("session.subscribe", subscribe, timeout).is_ok() {
+            self.requests = Some(VecDeque::new());
+        }
     }
 
     /// Record listeners in one tab of the user's browser: its documents
@@ -852,9 +974,16 @@ impl Bidi {
                     "accepted": accept,
                 }));
             }
-            "network.beforeRequestSent" if params["isBlocked"] == true => {
-                let (method, p) = self.route_answer(params);
-                let _ = self.write(method, p);
+            m @ ("network.beforeRequestSent" | "network.responseCompleted" | "network.fetchError") => {
+                if self.heard(params["context"].as_str()) {
+                    if let Some(log) = &mut self.requests {
+                        log_request(log, &mut self.last_request, m, params);
+                    }
+                }
+                if m == "network.beforeRequestSent" && params["isBlocked"] == true {
+                    let (method, p) = self.route_answer(params);
+                    let _ = self.write(method, p);
+                }
             }
             "browsingContext.downloadWillBegin" if self.heard(params["context"].as_str()) => {
                 let text = |key: &str| params[key].as_str().unwrap_or("").to_string();
@@ -976,7 +1105,11 @@ impl Bidi {
                     subscribe["contexts"] = json!(self.own);
                     intercept["contexts"] = json!(self.own);
                 }
-                self.send("session.subscribe", subscribe, timeout)?;
+                // The request log already hears the event (in the user's
+                // Firefox only in the first tab: the rules hold every one).
+                if self.requests.is_none() || self.attached {
+                    self.send("session.subscribe", subscribe, timeout)?;
+                }
                 let r = self.send("network.addIntercept", intercept, timeout)?;
                 let id = r["intercept"].as_str().ok_or_else(|| anyhow!("the browser named no intercept"))?;
                 self.intercept = Some(id.to_string());
@@ -989,7 +1122,9 @@ impl Bidi {
                 if self.attached {
                     unsubscribe["contexts"] = json!(self.own);
                 }
-                let _ = self.send("session.unsubscribe", unsubscribe, timeout);
+                if self.requests.is_none() {
+                    let _ = self.send("session.unsubscribe", unsubscribe, timeout);
+                }
             }
             _ => {}
         }
@@ -1476,6 +1611,14 @@ impl Wire for Bidi {
 
     fn routes(&self) -> Vec<Route> {
         self.routes.clone()
+    }
+
+    fn requests(&mut self, clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
+        self.idle();
+        let Some(log) = &mut self.requests else {
+            bail!("this browser sends no WebDriver BiDi network events, so navigera has no request list here")
+        };
+        Ok(if clear { std::mem::take(log).into() } else { log.iter().cloned().collect() })
     }
 
     fn downloads(&mut self, clear: bool) -> Result<Vec<Download>> {
@@ -2160,5 +2303,70 @@ mod geo_tests {
         for none in ["about:blank", "data:text/html,x", "file:///tmp/a.html", "https:///nohost", ""] {
             assert_eq!(page_origin(none), None, "{none}");
         }
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::{log_request, REQUESTS_MAX};
+    use serde_json::{json, Value};
+    use std::collections::VecDeque;
+
+    fn sent(id: &str, url: &str, ms: f64, redirects: u64) -> Value {
+        json!({ "context": "c", "redirectCount": redirects, "timestamp": ms, "isBlocked": false,
+                "request": { "request": id, "url": url, "method": "POST", "bodySize": 3,
+                             "initiatorType": "fetch", "destination": "",
+                             "headers": [{ "name": "a", "value": { "type": "string", "value": "1" } },
+                                         { "name": "a", "value": { "type": "string", "value": "2" } }] } })
+    }
+
+    fn done(id: &str, status: u64, ms: f64) -> Value {
+        json!({ "context": "c", "timestamp": ms, "request": { "request": id },
+                "response": { "status": status, "mimeType": "text/html; charset=utf-8", "fromCache": false,
+                              "bytesReceived": 120, "headers": [] } })
+    }
+
+    #[test]
+    fn a_redirect_is_two_entries_under_one_id() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 302, 1010.0));
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/y", 1011.0, 1));
+        log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 200, 1030.0));
+        let got: Vec<_> = log.iter().map(|r| (r.n, r.url.as_str(), r.status)).collect();
+        assert_eq!(got, [(1, "http://a/x", Some(302)), (2, "http://a/y", Some(200))]);
+        let r = &log[1];
+        assert_eq!(
+            (r.kind.as_str(), r.mime.as_str(), r.size, r.has_post_data),
+            ("Fetch", "text/html", Some(120), true)
+        );
+        assert_eq!(r.request_headers, json!({ "a": "1\n2" }));
+        assert!((r.ended.unwrap() - r.started - 0.019).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_unreported_redirect_hop_ends_where_the_next_begins_and_a_repeat_is_one_entry() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1001.0, 0));
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/y", 1005.0, 1));
+        log_request(
+            &mut log,
+            &mut last,
+            "network.fetchError",
+            &json!({ "timestamp": 1009.0, "request": { "request": "1" }, "errorText": "NS_ERROR_NET_RESET" }),
+        );
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].ended, Some(1.005));
+        assert_eq!(log[1].failed.as_deref(), Some("NS_ERROR_NET_RESET"));
+    }
+
+    #[test]
+    fn the_log_keeps_the_newest_thousand() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        for i in 0..REQUESTS_MAX + 5 {
+            log_request(&mut log, &mut last, "network.beforeRequestSent", &sent(&i.to_string(), "http://a/", 0.0, 0));
+        }
+        assert_eq!((log.len(), log[0].n, last), (REQUESTS_MAX, 6, REQUESTS_MAX as u64 + 5));
     }
 }

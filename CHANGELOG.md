@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `network` on Firefox and the other WebDriver BiDi engines: the requests
+  of the session's tabs in the same list as on Chrome (`#n METHOD STATUS
+  type url size time`), with `--filter`, `--type`, `--failed`, `--since`,
+  `--clear` and `--har`; a redirect is two entries, as on Chrome. In a
+  Firefox you attached to, only the window navigera opened is listened to.
+  A response body (`network <n>`) and the bodies in a HAR are Chrome's for
+  now. Classic WebDriver still has no request list and says so.
+
 ## [0.16.0] - 2026-11-20
 
 ### Added

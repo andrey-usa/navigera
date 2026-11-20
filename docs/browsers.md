@@ -40,13 +40,16 @@ select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies,
 console and dialogs, and upload, drag, mouse, keydown, keyup, storage and
 `set viewport`. Over BiDi also `init-script`, and `route` and `unroute`
 (answer, abort or replay a request from a HAR; `--modify` is Chrome's),
-`downloads` and `wait --download`,
+`downloads` and `wait --download`, `network` (the requests of every tab
+of the session: the list, `--failed`, `--since`, `--har` without bodies;
+a response body is Chrome's for now),
 and `set locale`, `timezone`, `media dark|light`, `ua`, `offline`, `geo`
 and `device` for every tab of the session (Firefox 160 emulates no other
 media feature; `device` is the viewport, pixel ratio and user agent, no
 touch; `geo` grants the permission to each origin the tab visits, and takes
 it back at `set geo off`).
-An op only Chrome has (`cdp`, `network`, `passkey`, throttling) says to
+An op only Chrome has (`cdp`, `passkey`, throttling; `network` over
+classic WebDriver) says to
 use `--engine chrome`. Safari's driver has no
 headless mode, runs one session per machine and blocks user input while it
 runs (Apple's limits). The `webdriver` workflow runs one scenario on Firefox

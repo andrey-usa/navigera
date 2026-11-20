@@ -750,6 +750,34 @@ fn emulate_ops(args: &[&str], engine: &str) {
 
 /// A file a page downloads is listed, waited for and saved where
 /// `downloads --dir` says.
+/// `network`: the requests a page made, as on Chrome: a redirect is two
+/// entries, a 404 is failed, `--since` and `clear` count from the last.
+fn network_ops(args: &[&str], engine: &str) {
+    let site = serve();
+    let calls = "fetch('/to?u=' + location.origin + '/next.html').then(() => fetch('/nope')).then(r => r.status)";
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        json!({ "id": 2, "op": "network", "clear": true }),
+        json!({ "id": 3, "op": "eval", "expression": calls }),
+        json!({ "id": 4, "op": "network" }),
+        json!({ "id": 5, "op": "network", "failed": true }),
+        json!({ "id": 7, "op": "network", "clear": true }),
+        json!({ "id": 8, "op": "network" }),
+        json!({ "id": 9, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    assert_eq!(ok(&a, 3), &json!(404), "{engine}");
+    let list = ok(&a, 4).as_str().unwrap_or("").to_string();
+    let lines: Vec<&str> = list.lines().collect();
+    assert_eq!(lines.len(), 3, "{engine}: {list}");
+    assert!(lines[0].contains(" GET 302 Fetch /to?u="), "{engine}: {list}");
+    assert!(lines[1].contains(" GET 200 Fetch /next.html"), "{engine}: {list}");
+    assert!(lines[2].contains(" GET 404 Fetch /nope"), "{engine}: {list}");
+    let failed = ok(&a, 5).as_str().unwrap_or("").to_string();
+    assert!(failed.lines().count() == 1 && failed.contains("/nope"), "{engine}: {failed}");
+    assert_eq!(ok(&a, 8), &json!("(no requests)"), "{engine}");
+}
+
 fn download_ops(args: &[&str], engine: &str) {
     let site = serve();
     let dir = tempfile::tempdir().unwrap();
@@ -862,6 +890,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     emulate_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
     download_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    network_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
     hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }

@@ -422,6 +422,11 @@ pub trait Wire: Send {
             "classic WebDriver has no emulation; use --engine firefox or chrome (or --bidi with a server that has it)"
         )
     }
+    /// `network`: the requests of this session's tabs, oldest first
+    /// (`clear`: and forget them).
+    fn requests(&mut self, _clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
+        bail!("classic WebDriver does not report network requests; use --engine firefox or chrome (or --bidi with a server that has them)")
+    }
     /// `downloads`: the files this session's pages downloaded, oldest
     /// first (`clear`: and forget them).
     fn downloads(&mut self, _clear: bool) -> Result<Vec<crate::cdp::downloads::Download>> {
@@ -1698,6 +1703,39 @@ impl Driver {
                     Some(_) => json!({ "viewport": v, "scale": scale }),
                     None => json!({ "viewport": "default" }),
                 })
+            }
+            Command::Network { n, filter, kind, failed, limit, clear, har, body_file, since } => {
+                let all = self.wire.requests(*clear && n.is_none()).map_err(|e| e.context("network"))?;
+                if let Some(n) = n {
+                    let r = all
+                        .iter()
+                        .find(|r| r.n == *n)
+                        .ok_or_else(|| anyhow!("network: no request #{n} (older ones are dropped after 1000)"))?;
+                    if body_file.is_some() {
+                        bail!("network --body-file: response bodies are kept on Chrome only for now; `http` fetches the URL again");
+                    }
+                    let mut out = crate::cdp::logs::request_json(r);
+                    out["body"] = json!("(not kept on this engine yet; `http` fetches the URL again)");
+                    return Ok(out);
+                }
+                let mut picked =
+                    crate::cdp::logs::pick_requests(all, filter.as_deref(), kind.as_deref(), *failed, *since);
+                if let Some(path) = har {
+                    // Without bodies: this engine does not keep them yet.
+                    let har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
+                    crate::protocol::write_private(path, &serde_json::to_vec_pretty(&har)?)
+                        .with_context(|| format!("network --har {path}"))?;
+                    return Ok(json!({ "har": path, "entries": picked.len() }));
+                }
+                let limit = limit.unwrap_or(100);
+                if picked.len() > limit {
+                    picked.drain(..picked.len() - limit);
+                }
+                if picked.is_empty() {
+                    return Ok(json!("(no requests)"));
+                }
+                let url = self.url();
+                Ok(json!(crate::cdp::logs::requests_text(&picked, &crate::protocol::origin_of(&url))))
             }
             Command::Downloads { dir: Some(dir), .. } => {
                 let dir = std::path::Path::new(dir);
