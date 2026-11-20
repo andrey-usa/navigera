@@ -53,9 +53,46 @@ fn now_s() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
-/// A request sent within the last 2 s with no status and no error yet.
-fn fresh_pending(log: &VecDeque<crate::cdp::logs::Request>, now: f64) -> bool {
-    log.iter().rev().take(64).any(|r| r.status.is_none() && r.failed.is_none() && (now - r.started).abs() < 2.0)
+/// One hop of a request in the log: the entry `network` lists, with what
+/// [`log_request`] places its events by.
+#[derive(Debug)]
+struct Hop {
+    r: crate::cdp::logs::Request,
+    /// Its place in the request's redirect chain (`redirectCount`), which
+    /// with the request's id names it.
+    count: u64,
+    /// The redirect status its response's own reason phrase names, when
+    /// the status it came with is no redirect's.
+    phrase: Option<u64>,
+}
+
+/// A request listed (numbered after `cleared`), sent within the last 2 s,
+/// with no status and no error yet.
+fn fresh_pending(log: &VecDeque<Hop>, cleared: u64, now: f64) -> bool {
+    log.iter()
+        .rev()
+        .take_while(|h| h.r.n > cleared)
+        .take(64)
+        .any(|h| h.r.status.is_none() && h.r.failed.is_none() && (now - h.r.started).abs() < 2.0)
+}
+
+/// The requests `network` lists: those after the last `--clear`.
+fn listed(log: &VecDeque<Hop>, cleared: u64) -> Vec<crate::cdp::logs::Request> {
+    log.iter().filter(|h| h.r.n > cleared).map(|h| h.r.clone()).collect()
+}
+
+/// The redirect status a standard reason phrase names (HTTP/1.x; HTTP/2
+/// has none).
+fn redirect_phrase(text: &str) -> Option<u64> {
+    Some(match text.trim().to_ascii_lowercase().as_str() {
+        "multiple choices" => 300,
+        "moved permanently" => 301,
+        "found" | "moved temporarily" => 302,
+        "see other" => 303,
+        "temporary redirect" => 307,
+        "permanent redirect" => 308,
+        _ => return None,
+    })
 }
 
 /// Most requests kept, as on Chrome: older ones are dropped.
@@ -140,8 +177,12 @@ pub struct Bidi {
     /// `network`: the requests of this session's tabs, oldest first, and
     /// the number of the last one; `None`: the browser sends no network
     /// events (then `route` subscribes on its own).
-    requests: Option<VecDeque<crate::cdp::logs::Request>>,
+    requests: Option<VecDeque<Hop>>,
     last_request: u64,
+    /// The last request `network --clear` took. Those up to it stay in
+    /// the log, not shown, so that an event of theirs that comes after
+    /// does not list them again.
+    cleared: u64,
     /// The data collector that keeps response bodies for `network <n>` (in
     /// the user's browser, its first tab's: [`Self::adopt`] adds one per tab).
     collector: Option<String>,
@@ -208,27 +249,49 @@ fn timed_end(request: &Value, started: f64) -> Option<f64> {
     (to > 0.0 && to >= from).then(|| started + (to - from) / 1000.0)
 }
 
-/// One `network.*` event into the request log, as Chrome's would be: a
-/// redirect closes the hop that redirected (its own `responseCompleted`)
-/// and the next hop, under the same id, is an entry of its own.
-fn log_request(log: &mut VecDeque<crate::cdp::logs::Request>, last: &mut u64, method: &str, params: &Value) {
+/// One `network.*` event into the request log, as Chrome's would be: each
+/// hop of a redirect (the request's id and its `redirectCount`) is an
+/// entry of its own, opened by whichever of its events comes first.
+/// chromedriver's BiDi mapper holds a hop's `beforeRequestSent` until a
+/// CDP event from the browser process has come, so the hop's response can
+/// come before it, and the hop a redirect leads to gets none at all when
+/// that event went to the hop before: a response that found no entry was
+/// dropped, and the request read as pending, or was not listed.
+///
+/// The same mix-up can give a hop that redirected the status (and raw
+/// headers) of the hop it led to, while its reason phrase stays its own:
+/// once a later hop shows it redirected, a status that is no redirect's
+/// is taken from that phrase when it names one (HTTP/2 sends none).
+fn log_request(log: &mut VecDeque<Hop>, last: &mut u64, method: &str, params: &Value) {
+    if !NETWORK_EVENTS.contains(&method) {
+        return;
+    }
     let request = &params["request"];
     let Some(id) = request["request"].as_str() else { return };
     // BiDi times are milliseconds since the epoch.
     let at = params["timestamp"].as_f64().map(|ms| ms / 1000.0);
-    let open = log.iter().rposition(|r| r.id == id && r.ended.is_none() && r.failed.is_none());
-    match method {
-        "network.beforeRequestSent" => {
-            // The same hop announced again (an intercepted request is, for
-            // each phase it is held in): the one entry.
-            if let Some(i) = open {
-                if log[i].url == request["url"].as_str().unwrap_or("") {
-                    return;
-                }
+    let count = params["redirectCount"].as_u64().unwrap_or(0);
+    // A later hop of the request is after it in the log: one pass from the
+    // end finds the hop and whether it redirected.
+    let mut redirected = false;
+    let found = log.iter().rposition(|h| {
+        redirected |= h.r.id == id && h.count > count;
+        h.r.id == id && h.count == count
+    });
+    let i = match found {
+        // The hop announced again (an intercepted request is, for each
+        // phase it is held in), or after its response: the one entry.
+        Some(_) if method == "network.beforeRequestSent" => return,
+        Some(i) => i,
+        None => {
+            for h in log.iter_mut().filter(|h| h.r.id == id && h.count < count) {
                 // A redirect whose own response was not reported: the hop
                 // ends where the next begins.
-                if params["redirectCount"].as_u64().unwrap_or(0) > 0 {
-                    log[i].ended = at.or(Some(log[i].started));
+                if h.r.ended.is_none() && h.r.failed.is_none() {
+                    h.r.ended = at.or(Some(h.r.started));
+                }
+                if let Some(status) = h.phrase.take() {
+                    h.r.status = Some(status);
                 }
             }
             *last += 1;
@@ -237,7 +300,7 @@ fn log_request(log: &mut VecDeque<crate::cdp::logs::Request>, last: &mut u64, me
             if log.len() >= REQUESTS_MAX {
                 log.pop_front();
             }
-            log.push_back(crate::cdp::logs::Request {
+            let r = crate::cdp::logs::Request {
                 n: *last,
                 id: id.to_string(),
                 method: request["method"].as_str().unwrap_or("GET").to_string(),
@@ -248,16 +311,25 @@ fn log_request(log: &mut VecDeque<crate::cdp::logs::Request>, last: &mut u64, me
                 started,
                 wall: started,
                 ..Default::default()
-            });
+            };
+            log.push_back(Hop { r, count, phrase: None });
+            log.len() - 1
         }
+    };
+    match method {
         // The status and headers when they arrive (as Chrome's
         // `responseReceived`), the size and end when the body has: a
         // server may report only the first (chromedriver 147 over BiDi
         // sends no `responseCompleted` for a fetch).
         "network.responseStarted" | "network.responseCompleted" => {
-            let Some(r) = open.map(|i| &mut log[i]) else { return };
             let response = &params["response"];
-            r.status = response["status"].as_u64();
+            let status = response["status"].as_u64();
+            let phrase = status
+                .filter(|s| !(300..400).contains(s))
+                .and(response["statusText"].as_str().and_then(redirect_phrase));
+            let Hop { r, phrase: own, .. } = &mut log[i];
+            *own = phrase;
+            r.status = if redirected { phrase.or(status) } else { status };
             r.mime = response["mimeType"].as_str().unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
             r.response_headers = header_object(&response["headers"]);
             r.from_cache = response["fromCache"] == true;
@@ -271,7 +343,7 @@ fn log_request(log: &mut VecDeque<crate::cdp::logs::Request>, last: &mut u64, me
             }
         }
         "network.fetchError" => {
-            let Some(r) = open.map(|i| &mut log[i]) else { return };
+            let r = &mut log[i].r;
             let why = params["errorText"].as_str().unwrap_or("failed");
             r.failed = Some(if why.is_empty() { "failed".into() } else { why.to_string() });
             r.ended = at.or(Some(r.started));
@@ -826,6 +898,7 @@ impl Bidi {
             downloads: Vec::new(),
             requests: None,
             last_request: 0,
+            cleared: 0,
             collector: None,
             child: None,
             _profile: None,
@@ -1738,22 +1811,28 @@ impl Wire for Bidi {
 
     fn requests(&mut self, clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
         self.idle();
-        // A response the page already has can still be on its way to us (a
-        // driver translating another protocol sends it late): a request
-        // sent in the last moments with no answer yet is waited for, a
-        // little. One pending longer (a long poll) costs nothing.
+        // A request sent in the last moments with no answer yet (in
+        // flight, or its answer on its way to us) is waited for, a little.
+        // One pending longer (a long poll) costs nothing.
         let deadline = Instant::now() + CATCH_UP;
-        while Instant::now() < deadline && self.requests.as_ref().is_some_and(|log| fresh_pending(log, now_s())) {
+        let cleared = self.cleared;
+        while Instant::now() < deadline
+            && self.requests.as_ref().is_some_and(|log| fresh_pending(log, cleared, now_s()))
+        {
             match self.read_one(Duration::from_millis(5)) {
                 Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
                 Ok(_) => {}
                 Err(_) => break,
             }
         }
-        let Some(log) = &mut self.requests else {
+        let Some(log) = &self.requests else {
             bail!("this browser sends no WebDriver BiDi network events, so navigera has no request list here")
         };
-        Ok(if clear { std::mem::take(log).into() } else { log.iter().cloned().collect() })
+        let shown = listed(log, cleared);
+        if clear {
+            self.cleared = self.last_request;
+        }
+        Ok(shown)
     }
 
     fn response_body(&mut self, request: &str) -> Result<(String, bool)> {
@@ -2469,9 +2548,15 @@ mod network_tests {
     }
 
     fn done(id: &str, status: u64, ms: f64) -> Value {
-        json!({ "context": "c", "timestamp": ms, "request": { "request": id },
+        json!({ "context": "c", "timestamp": ms, "redirectCount": 0, "request": { "request": id },
                 "response": { "status": status, "mimeType": "text/html; charset=utf-8", "fromCache": false,
                               "bytesReceived": 120, "headers": [] } })
+    }
+
+    /// An event of a later hop of the request.
+    fn hop(mut event: Value, n: u64) -> Value {
+        event["redirectCount"] = json!(n);
+        event
     }
 
     #[test]
@@ -2480,10 +2565,10 @@ mod network_tests {
         log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
         log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 302, 1010.0));
         log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/y", 1011.0, 1));
-        log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 200, 1030.0));
-        let got: Vec<_> = log.iter().map(|r| (r.n, r.url.as_str(), r.status)).collect();
+        log_request(&mut log, &mut last, "network.responseCompleted", &hop(done("1", 200, 1030.0), 1));
+        let got: Vec<_> = log.iter().map(|h| (h.r.n, h.r.url.as_str(), h.r.status)).collect();
         assert_eq!(got, [(1, "http://a/x", Some(302)), (2, "http://a/y", Some(200))]);
-        let r = &log[1];
+        let r = &log[1].r;
         assert_eq!(
             (r.kind.as_str(), r.mime.as_str(), r.size, r.has_post_data),
             ("Fetch", "text/html", Some(120), true)
@@ -2502,11 +2587,93 @@ mod network_tests {
             &mut log,
             &mut last,
             "network.fetchError",
-            &json!({ "timestamp": 1009.0, "request": { "request": "1" }, "errorText": "NS_ERROR_NET_RESET" }),
+            &json!({ "timestamp": 1009.0, "redirectCount": 1, "request": { "request": "1" }, "errorText": "NS_ERROR_NET_RESET" }),
         );
         assert_eq!(log.len(), 2);
-        assert_eq!(log[0].ended, Some(1.005));
-        assert_eq!(log[1].failed.as_deref(), Some("NS_ERROR_NET_RESET"));
+        assert_eq!(log[0].r.ended, Some(1.005));
+        assert_eq!(log[1].r.failed.as_deref(), Some("NS_ERROR_NET_RESET"));
+    }
+
+    /// chromedriver's mapper (chromium-bidi) holds `beforeRequestSent`
+    /// for a CDP event from the browser process; a hop's response that
+    /// comes first opens its entry, and the announcement after it adds no
+    /// second one.
+    #[test]
+    fn a_hop_heard_of_first_by_its_response_is_one_entry() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        let mut started = done("1", 404, 1000.0);
+        started["request"] = sent("1", "http://a/nope", 1000.0, 0)["request"].clone();
+        log_request(&mut log, &mut last, "network.responseStarted", &started);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/nope", 1000.0, 0));
+        let got: Vec<_> = log.iter().map(|h| (h.r.n, h.r.url.as_str(), h.r.status, h.r.kind.as_str())).collect();
+        assert_eq!(got, [(1, "http://a/nope", Some(404), "Fetch")]);
+        assert!(!super::fresh_pending(&log, 0, 1.0), "answered: not waited for");
+    }
+
+    /// The hop a redirect leads to, of which chromedriver sent only the
+    /// response (its `beforeRequestSent` never came): listed, after the
+    /// hop that redirected, which keeps its own status.
+    #[test]
+    fn the_hop_a_redirect_leads_to_is_listed_without_its_announcement() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("7", "http://a/to", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.responseStarted", &done("7", 302, 1000.0));
+        log_request(&mut log, &mut last, "network.responseCompleted", &done("7", 302, 1000.0));
+        let mut target = hop(done("7", 200, 1003.0), 1);
+        target["request"] = sent("7", "http://a/next.html", 1003.0, 1)["request"].clone();
+        log_request(&mut log, &mut last, "network.responseStarted", &target);
+        // A late event of the first hop is its own, not the target's.
+        log_request(&mut log, &mut last, "network.responseStarted", &done("7", 302, 1000.0));
+        let got: Vec<_> = log.iter().map(|h| (h.r.n, h.count, h.r.url.as_str(), h.r.status)).collect();
+        assert_eq!(got, [(1, 0, "http://a/to", Some(302)), (2, 1, "http://a/next.html", Some(200))]);
+        assert!(log[0].r.ended.is_some() && log[1].r.ended.is_none());
+    }
+
+    /// chromedriver's mapper can give a hop that redirected the status of
+    /// the hop it led to (its CDP record took the next hop's raw response
+    /// when that came before the redirect), its reason phrase its own:
+    /// the hop after it shows it redirected, the phrase gives its status.
+    #[test]
+    fn a_redirect_reported_with_the_next_hops_status_takes_its_own_phrase() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("7", "http://a/to", 1000.0, 0));
+        let mut mixed = done("7", 200, 1000.0);
+        mixed["response"]["statusText"] = json!("Found");
+        log_request(&mut log, &mut last, "network.responseStarted", &mixed);
+        assert_eq!(log[0].r.status, Some(200), "no later hop yet: as reported");
+        log_request(&mut log, &mut last, "network.responseCompleted", &mixed);
+        let mut target = hop(done("7", 200, 1000.0), 1);
+        target["request"] = sent("7", "http://a/next.html", 1000.0, 1)["request"].clone();
+        target["response"]["statusText"] = json!("OK");
+        log_request(&mut log, &mut last, "network.responseStarted", &target);
+        assert_eq!((log[0].r.status, log[1].r.status), (Some(302), Some(200)));
+        // A late event of the redirect, the later hop known: at once.
+        log_request(&mut log, &mut last, "network.responseStarted", &mixed);
+        assert_eq!(log[0].r.status, Some(302));
+        // A phrase of no redirect, or a request that did not redirect,
+        // keeps the status it came with.
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("8", "http://a/made", 1001.0, 0));
+        let mut created = done("8", 201, 1001.0);
+        created["response"]["statusText"] = json!("Found");
+        log_request(&mut log, &mut last, "network.responseStarted", &created);
+        assert_eq!(log[2].r.status, Some(201));
+    }
+
+    /// `network --clear` hides what it took: an event of a cleared request
+    /// that comes after does not list it again.
+    #[test]
+    fn a_cleared_request_stays_cleared_when_its_events_come_after() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        let cleared = last;
+        log_request(&mut log, &mut last, "network.responseStarted", &done("1", 200, 1000.0));
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("2", "http://a/y", 1001.0, 0));
+        let shown: Vec<_> = super::listed(&log, cleared).into_iter().map(|r| (r.n, r.url)).collect();
+        assert_eq!(shown, [(2, "http://a/y".to_string())]);
+        assert_eq!(log[0].r.status, Some(200), "the hidden entry took its event");
+        // A cleared request still pending is not waited for.
+        assert!(!super::fresh_pending(&log, last, 1.0));
+        assert!(super::fresh_pending(&log, cleared, 1.0));
     }
 
     #[test]
@@ -2514,9 +2681,9 @@ mod network_tests {
         let (mut log, mut last) = (VecDeque::new(), 0);
         log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
         log_request(&mut log, &mut last, "network.responseStarted", &done("1", 404, 1004.0));
-        assert_eq!((log[0].status, log[0].ended, log[0].size), (Some(404), None, None));
+        assert_eq!((log[0].r.status, log[0].r.ended, log[0].r.size), (Some(404), None, None));
         log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 404, 1009.0));
-        assert_eq!((log[0].ended, log[0].size), (Some(1.009), Some(120)));
+        assert_eq!((log[0].r.ended, log[0].r.size), (Some(1.009), Some(120)));
     }
 
     #[test]
@@ -2528,30 +2695,30 @@ mod network_tests {
         let mut slow = done("1", 200, 5000.0);
         slow["request"]["timings"] = json!({ "timeOrigin": 5000.0, "requestTime": 0.0, "responseEnd": 2003.85 });
         log_request(&mut log, &mut last, "network.responseCompleted", &slow);
-        assert!((log[0].ended.unwrap() - log[0].started - 2.00385).abs() < 1e-9, "{:?}", log[0].ended);
+        assert!((log[0].r.ended.unwrap() - log[0].r.started - 2.00385).abs() < 1e-9, "{:?}", log[0].r.ended);
         // Firefox's: the event at its own time, the timings since the
         // epoch: the event's time is the end.
         log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("2", "http://a/x", 7000.0, 0));
         let mut ff = done("2", 200, 7040.0);
         ff["request"]["timings"] = json!({ "timeOrigin": 0.0, "requestTime": 6900.0, "responseEnd": 7039.5 });
         log_request(&mut log, &mut last, "network.responseCompleted", &ff);
-        assert_eq!(log[1].ended, Some(7.04));
+        assert_eq!(log[1].r.ended, Some(7.04));
         // No timings, or none ended: the event's time.
         log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("3", "http://a/y", 8000.0, 0));
         let mut none = done("3", 200, 8000.0);
         none["request"]["timings"] = json!({ "requestTime": 0.0, "responseEnd": 0.0 });
         log_request(&mut log, &mut last, "network.responseCompleted", &none);
-        assert_eq!(log[2].ended, Some(8.0));
+        assert_eq!(log[2].r.ended, Some(8.0));
     }
 
     #[test]
     fn only_a_request_sent_just_now_without_an_answer_is_waited_for() {
         let (mut log, mut last) = (VecDeque::new(), 0);
         log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 100_000.0, 0));
-        assert!(super::fresh_pending(&log, 101.0));
-        assert!(!super::fresh_pending(&log, 103.0), "a long poll is not waited for");
+        assert!(super::fresh_pending(&log, 0, 101.0));
+        assert!(!super::fresh_pending(&log, 0, 103.0), "a long poll is not waited for");
         log_request(&mut log, &mut last, "network.responseStarted", &done("1", 200, 100_500.0));
-        assert!(!super::fresh_pending(&log, 101.0));
+        assert!(!super::fresh_pending(&log, 0, 101.0));
     }
 
     #[test]
@@ -2560,6 +2727,6 @@ mod network_tests {
         for i in 0..REQUESTS_MAX + 5 {
             log_request(&mut log, &mut last, "network.beforeRequestSent", &sent(&i.to_string(), "http://a/", 0.0, 0));
         }
-        assert_eq!((log.len(), log[0].n, last), (REQUESTS_MAX, 6, REQUESTS_MAX as u64 + 5));
+        assert_eq!((log.len(), log[0].r.n, last), (REQUESTS_MAX, 6, REQUESTS_MAX as u64 + 5));
     }
 }
