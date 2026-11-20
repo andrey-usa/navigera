@@ -97,6 +97,15 @@ const NAME_FROM_CONTENT: &[&str] = &[
     "DisclosureTriangle",
 ];
 
+/// A page URL's origin (`http://host:port`, empty when it has none) and the
+/// URL without its fragment: [`Options::origin`] and [`Options::page`].
+pub fn origin_and_page(url: &str) -> (String, String) {
+    let origin =
+        url.find("://").and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string())).unwrap_or_default();
+    let page = url.split_once('#').map_or(url, |(doc, _)| doc).to_string();
+    (origin, page)
+}
+
 /// Rendering options.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
@@ -108,6 +117,9 @@ pub struct Options {
     pub root_backend_id: Option<u64>,
     /// Page origin (`http://host:port`) for shortening same-origin link urls.
     pub origin: String,
+    /// The page's URL without its fragment: a link to a fragment of this
+    /// page prints as `url=#fragment`, read against the header's URL.
+    pub page: String,
     /// What the page makes clickable beyond the tree's actionable roles.
     pub clicks: Clickables,
     /// The lazy walk gives up (and the caller reads the whole tree in one
@@ -742,6 +754,11 @@ impl<'a> Tree<'a> {
         if let Some(to) = destination(url) {
             return to;
         }
+        if let Some((doc, fragment)) = url.split_once('#') {
+            if !self.opts.page.is_empty() && doc == self.opts.page {
+                return format!("#{fragment}");
+            }
+        }
         if !self.opts.origin.is_empty() {
             if let Some(rest) = url.strip_prefix(&self.opts.origin) {
                 if rest.starts_with('/') {
@@ -1367,6 +1384,32 @@ mod tests {
             assert_eq!(destination(url), None, "{url}");
         }
     }
+    #[test]
+    fn a_link_to_a_fragment_of_the_page_prints_the_fragment() {
+        let link = |id: &str, name: &str, url: &str| {
+            let mut n = node(id, Some("1"), "link", name, &[], id.parse().unwrap());
+            n["properties"] = json!([{ "name": "url", "value": { "type": "string", "value": url } }]);
+            n
+        };
+        let nodes = vec![
+            node("1", None, "RootWebArea", "Todos", &["2", "3", "4", "5", "6"], 1),
+            link("2", "Active", "http://x.test/todo?v=1#/active"),
+            link("3", "Top", "http://x.test/todo?v=1#"),
+            link("4", "Other page", "http://x.test/todo#/active"),
+            link("5", "Done", "http://x.test/done"),
+            link("6", "Elsewhere", "https://y.test/todo?v=1#/active"),
+        ];
+        let (origin, page) = origin_and_page("http://x.test/todo?v=1#/completed");
+        assert_eq!((origin.as_str(), page.as_str()), ("http://x.test", "http://x.test/todo?v=1"));
+        let out = render("page \"Todos\"", &nodes, &[], &Options { origin, page, ..Options::default() });
+        assert_eq!(
+            out.text,
+            "page \"Todos\"\n- link \"Active\" [ref=2] url=#/active\n- link \"Top\" [ref=3] url=#\n\
+             - link \"Other page\" [ref=4] url=/todo#/active\n- link \"Done\" [ref=5] url=/done\n\
+             - link \"Elsewhere\" [ref=6] url=https://y.test/todo?v=1#/active"
+        );
+    }
+
     #[test]
     fn renders_nested_tree_with_refs_on_actionable_nodes_only() {
         let nodes = vec![

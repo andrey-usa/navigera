@@ -6,6 +6,190 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-20
+
+### Added
+
+- `set locale`, `set timezone`, `set media dark|light`, `set ua` and
+  `set offline` on the WebDriver BiDi engines (Firefox, experimental):
+  WebDriver BiDi's `emulation` commands, for every tab of the session and
+  the tabs it opens later; in a Firefox you attached to, for its own tabs
+  only. `set device <name>` there sets the device's viewport, pixel ratio
+  and user agent, and says that touch, `<meta name=viewport>` and a mobile
+  layout are not emulated. `set geo <lat> <lon>` sets the position and
+  grants the geolocation permission to the page's origin, and to each
+  origin the session's tabs go to after it (a redirect's target, Firefox
+  140 on, and a tab the page opens too), never to the whole profile; `set
+  geo off` takes each grant back. In a Firefox you attached to that has a
+  window it grants none: a grant there is the origin's in your whole
+  profile, so a tab of yours on that origin could read where you are
+  without asking; a page asks you, as without navigera, and the answer
+  says so. In a headless one the session's end takes each grant back too,
+  and each origin gets back the setting it had when navigera could read
+  it: the page's own at `set geo` (a site blocked there stays blocked,
+  also when a navigation lands while it is read), else asking, as
+  WebDriver BiDi cannot read a permission. A `set geo` whose read of the
+  page fails, or whose grant for it fails, says why, leaves no grant (one
+  a navigation got meanwhile is taken back too) and the next one grants. `set media print`,
+  `reduced-motion` and `forced-colors`, and the settings Firefox does not
+  emulate (`cpu`, `network`), say to run with `--engine chrome`. Classic WebDriver
+  (Safari) has no emulation and says so; its `set device` takes a device
+  without a user agent of its own (Laptop, Desktop), sizing the window, and
+  `set device off`.
+- `downloads` (`--clear`, `--json`, `--dir <path>`) and `wait --download
+  [<glob>]` on the WebDriver BiDi engines (Firefox): the files the
+  session's pages download, from BiDi's download events, with the path and
+  size of each finished one; `wait --download` reads the browser's events
+  until one finishes, as on Chrome, and a canceled one is an error. In a
+  Firefox you attached to, `--dir` is refused (it would change where every
+  tab of it saves). Classic WebDriver says it has no downloads.
+
+### Changed
+
+- Fewer words for an agent to read: a link to a part of the page itself
+  shows `url=#/active`, not the page's path again, and in compact output
+  `check` / `uncheck` say `ok` when they flipped the box, as a click does,
+  and `{"changed":false}` when it was already so (was
+  `{"changed":true,"checked":true}`).
+
+- One process fewer per Chrome on Linux and Windows: the network service
+  runs in the browser process, as navigera's launch flags meant it to (they
+  named the feature `NetworkServiceInProcess`; Chromium calls it
+  `NetworkServiceInProcess2`, so the flag did nothing). macOS keeps it
+  apart: only there does Chrome sandbox that process by default. So does a machine whose administrator
+  turned that sandbox on with the `NetworkServiceSandboxEnabled` policy
+  (a managed policy file on Linux, the registry on Windows, for Chrome,
+  Chromium, Edge or Brave): Chrome applies it only to a network service in a
+  process of its own. Edge, Chrome for Testing and chrome-headless-shell
+  run it unsandboxed by default too (Edge 157 on Linux and Windows), and get
+  the same; a test asks the browser on every CI machine whether the service
+  would have had a sandbox.
+
+### Fixed
+
+- `{"op":"reset"}` over `serve` (and the JSON a program sends a session
+  server) is `reset`, as the command is named everywhere else: only
+  `Reset` was taken, so the name the manual gives was refused as an
+  unknown op. `Reset` still works.
+- `set geo` in your own Chrome (`--attach`, `--auto-connect`) no longer
+  grants the location permission there: Chrome's grant is the browser's,
+  not a site's, so every site in your own tabs could read where you are
+  without asking until navigera quit, and `set geo off` left it (Chrome
+  153: two sites open in the user's tabs went from `prompt` to `granted`).
+  In a browser with a window `set geo` sets the position in navigera's
+  tabs, and its answer says a page asks you; `set permissions grant
+  geolocation` grants it when you want. A browser navigera started, or a
+  headless one you attached to, still gets the grant; `set geo off` now
+  takes it back (a page could read the browser's own position after it),
+  and `reset` keeps it in the new context (a page there read `error 1`,
+  denied, not the position set).
+- `set device off` and `set viewport off` answer once the page has its own
+  viewport back, on Chrome and the WebDriver engines: the browser gives it
+  back after it answers, so a read or a screenshot right after could still
+  get the device's size (7 in 12 fresh sessions locally on Chrome 153, and
+  7 in 10 through chromedriver over BiDi; after a phone, its screen size in
+  7 in 20; 0 after). The wait is in the page and ends as soon as its width,
+  height and pixel ratio are its own again, or after 1 s (a window resized
+  while the device was set has other values to come back to).
+- `set viewport` and `set device` over WebDriver BiDi (Firefox, and a
+  WebDriver server with `--bidi`) size every open tab of the session, as on
+  Chrome and as the manual says, not only the current one: `off` from a
+  second tab left the first at the size set.
+- `set viewport off` over classic WebDriver gives the window back the size
+  it had before `set viewport` (it maximized the window: 800x457 against
+  780x437 in a headless chromedriver), each window it sized: `off` from
+  a window the page opened (a popup) gave that one the first window's size
+  and left the first at the size set. A failed `off` can be asked again.
+- The user agent around `set device` is the one set last, in the open tab
+  and in each new one, on Chrome and Firefox alike. On Chrome, `set device
+  off` left the device's user agent in the tabs already open (a reload
+  still said iPhone), and after `set device <phone>` then `set ua <string>`
+  a tab opened later had the phone's again; on Firefox, `set device Laptop`
+  (a device with no user agent of its own) and `set device off` wiped an
+  earlier `set ua`. Now a device without one, and `set device off`, take
+  back only a user agent a device set. And `set viewport` after a device
+  turns the device's touch off in the open tabs, as in tabs opened later
+  (Chrome).
+- `press Enter` on a link to a fragment of the page (a hash-routed app's
+  `#/completed`, or a bare `#`) answers once the page has handled `hashchange`, as a
+  click on it has since this release: a read right after the press saw the
+  old view (25 in 39 locally, 0 after). No round trip more for any other key
+  or element. The same on the WebDriver engines, for a click and for Enter:
+  through chromedriver over classic WebDriver a read right after saw the old
+  view 11 to 18 times in 24 (Linux, macOS, Windows); Firefox and Safari
+  already saw the new one. The wait is in the page, up to 250 ms, and only
+  when the URL changed in its fragment.
+- A script run by its `#!` line that reads an answer through a subshell
+  (`out=$(navigera ...)`) was taken for two processes sharing the session:
+  its commands said "another process used this session" and to give each
+  agent its own `-s` name. The script and its subshells carry the script's
+  name, each with a pid of its own; a process whose program is a shell is
+  now passed over as the shells are, up to the caller (Linux).
+- A click on a button under a loading overlay was refused as covered on
+  a second visit to the page: a request that once took over a second (a
+  slow search or save) was taken for a long poll on every later
+  visit, and its overlay for a cover that stays (`click --text "Cancel"`
+  suggested). Requests to such URLs now count while a click waits on an
+  overlay, as on the first visit; they still hold no read. And once the
+  fetches an overlay waited on are in, the click looks once more: the
+  page takes it away in a task after the response, which a loaded
+  machine runs late (as a macOS CI runner did).
+  A cover with controls that stays is still reported after a second.
+- `wait --download` answered with the newest finished download however
+  old: after one download, a click and `wait --download` gave the earlier
+  file at once (the second still coming), and an earlier canceled download
+  failed the wait for a newer one. Now each wait takes the oldest matching
+  download that no earlier wait took, and waits for it to finish; a
+  canceled one fails only its own wait, and the next takes the one after
+  it. A wait that finds nothing names the files earlier waits took. On
+  Chrome and the WebDriver BiDi engines (Firefox).
+- A click on a link to a fragment of the page (a hash-routed app's
+  `#/completed`) answered before the page's `hashchange` listeners ran:
+  the browser fires `hashchange` in a task of its own after the URL
+  changed, and a command right after the click (`eval`, `ax`, `get text`)
+  often read the old view with the new URL (a report on 0.15.0: 6 reads in
+  20 on a TodoMVC-style page). The click now answers once the page has
+  handled `hashchange`, up to 250 ms; a URL a script pushes, which gets no
+  `hashchange`, waits for nothing. On Chrome.
+- A click on a page that had just loaded, before the page wired the
+  element up, was not sent again when the page wired it a moment after
+  the press but before navigera looked at what had listened (a timer on a
+  loaded machine): the new listener passed for one that heard the click,
+  and the click said it did nothing. What listened is now counted in the
+  page as each event of the press arrives, so such a click is sent again
+  once the page wires the element, as when it wires it later. On Chrome.
+- A lone UTF-16 surrogate in a page (half of an emoji pair, as a script
+  that cuts text by length can leave) made `ax`, `text` and `eval` on
+  Chrome wait for their timeout and fail: Chrome sends it as
+  `\ud800`, which JSON in UTF-8 cannot hold, and the whole answer was
+  dropped; on the WebDriver engines (Firefox, Safari, chromedriver) the
+  page's own `JSON.stringify` writes it the same way and the command
+  failed. It now comes back as U+FFFD at once on every engine, and the
+  clickables `ax` finds by style on such a page are kept. One case is
+  left: an `eval` value that holds one does not cross chromedriver or
+  safaridriver themselves (chromedriver over BiDi never answers;
+  safaridriver calls it an invalid argument); over classic chromedriver
+  the error now says to return it with `.toWellFormed()`. Firefox's own
+  server carries it. An answer navigera cannot read
+  at all now fails its command at once, saying so, instead of at the
+  timeout.
+
+### Performance
+
+- `text` on Chrome (the whole page, `--selector`, `--grep`) brings a big
+  text with any character outside ASCII back as the base64 of its UTF-8.
+  Chrome writes each such character as a six-byte escape and leaves its
+  fast path for the whole text, so one curly quote or accented letter
+  made a page's text several times slower to read. ASCII text, and text
+  under 16,384 characters, come back as before; Chrome before 140 (no
+  `Uint8Array.prototype.toBase64`), or a page that replaced it or
+  `TextEncoder`, too, a text that starts like navigera's own mark
+  included. `text --grep` on 2.8 MB of
+  accented text in 20,000 lines: 115.5 ms in 0.15.0, 74.6 ms now; the
+  same page in plain ASCII 39.4 ms then, 42.2 ms now (the check for a
+  character outside ASCII), on one runner, medians of 20
+  ([run 44362320763](https://github.com/andrey-usa/navigera/actions/runs/44362320763)).
+
 ## [0.15.0] - 2026-11-17
 
 ### Behaviour changes

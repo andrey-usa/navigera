@@ -254,6 +254,41 @@ fn a_caller_whose_tab_another_one_moved_is_told() {
     assert!(a.get("notes").is_none(), "{a}");
 }
 
+/// A script run by its `#!` line is one caller, also where it reads an
+/// answer through a subshell (`out=$(navigera ...)`): both carry the
+/// script's name, each with a pid of its own.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_script_that_reads_answers_through_subshells_is_one_caller() {
+    use std::os::unix::fs::PermissionsExt;
+    if !chrome() {
+        return;
+    }
+    let dir = Dir::new();
+    dir.ok(&["-s", "three", "start"]);
+    let script = dir.root.path().join("steps.sh");
+    std::fs::write(
+        &script,
+        // `; :` keeps the subshell: alone, a command in `$(...)` may take
+        // its place (dash), and then its parent is the script itself.
+        "#!/bin/sh\n\"$NV\" -s three goto 'data:text/html,<title>one</title>'\nout=$(\"$NV\" -s three get title; :)\n\"$NV\" -s three get title\nprintf '%s\\n' \"$out\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut cmd = dir.command();
+    let out = Command::new(&script)
+        .envs(cmd.get_envs().filter_map(|(k, v)| v.map(|v| (k.to_owned(), v.to_owned()))))
+        .env_remove("NAVIGERA_CALLER")
+        .env("NV", env!("CARGO_BIN_EXE_navigera"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the script");
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && said.contains("one"), "{said}");
+    assert!(!said.contains("another process used this session"), "{said}");
+    let _ = cmd.args(["-s", "three", "quit"]).output();
+}
+
 /// `quit --close-browser` on a shared session: the browser stays while
 /// another session uses it, and closes at once, not after its grace
 /// period, with the last one.

@@ -26,6 +26,65 @@ pub struct Download {
     /// The directory the browser saves it in (its scope's, when it has
     /// its own).
     pub dir: Option<PathBuf>,
+    /// A `wait --download` answered with it (see [`next_for_wait`]).
+    pub taken: bool,
+}
+
+/// What `wait --download` makes of the downloads so far (oldest first).
+#[derive(Debug, PartialEq)]
+pub enum Wait {
+    /// This one finished: the answer.
+    Done(usize),
+    /// This one was canceled: the wait fails with it.
+    Canceled(usize),
+    /// None yet, or the next one is still coming.
+    Pending,
+}
+
+/// The error of a wait that reached a canceled download.
+pub fn canceled_text(d: &Download) -> String {
+    format!("download {} was canceled ({}); the next `wait --download` takes the one after it", d.suggested, d.url)
+}
+
+/// The error of a wait that saw no download end in time: what it saw, and
+/// which of those earlier waits already took.
+pub fn none_text(items: &[Download], glob: &str, wait: std::time::Duration) -> String {
+    let seen: Vec<String> = items
+        .iter()
+        .map(|d| {
+            let state = match d.state.as_str() {
+                "inProgress" => "in progress",
+                other => other,
+            };
+            if d.taken {
+                format!("{} ({state}, taken by an earlier wait)", d.suggested)
+            } else {
+                format!("{} ({state})", d.suggested)
+            }
+        })
+        .collect();
+    format!(
+        "no finished download{} within {} ms (seen: {})",
+        if glob.is_empty() { String::new() } else { format!(" matching {glob:?}") },
+        wait.as_millis(),
+        if seen.is_empty() { "none".to_string() } else { seen.join(", ") }
+    )
+}
+
+/// `wait --download <glob>`: the oldest download whose file name matches
+/// that no earlier wait took, once it ends. Taking downloads in the order
+/// they began (not the newest finished one) gives each wait its own file:
+/// a click, a wait, a second click and a second wait answer with the second
+/// file even while an earlier one sits finished in the list, and an earlier
+/// canceled one fails only the wait that reaches it. The caller marks the
+/// answer `taken`.
+pub fn next_for_wait(items: &[Download], glob: &str) -> Wait {
+    let at = items.iter().position(|d| !d.taken && (glob.is_empty() || crate::cdp::glob_match(glob, &d.suggested)));
+    match at {
+        Some(i) if items[i].state == "completed" => Wait::Done(i),
+        Some(i) if items[i].state == "canceled" => Wait::Canceled(i),
+        _ => Wait::Pending,
+    }
 }
 
 impl Download {
@@ -72,6 +131,7 @@ impl Downloads {
                     path: None,
                     scope: scope.to_string(),
                     dir: self.dirs.get(scope).or(self.dir.as_ref()).cloned(),
+                    taken: false,
                 });
                 if self.items.len() > 1000 {
                     self.items.remove(0);
@@ -136,6 +196,37 @@ fn safe_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_wait_takes_the_oldest_download_no_wait_took() {
+        let d = |n: u64, name: &str, state: &str| Download {
+            n,
+            guid: format!("g{n}"),
+            url: String::new(),
+            suggested: name.into(),
+            state: state.into(),
+            received: 0,
+            total: 0,
+            path: None,
+            scope: String::new(),
+            dir: None,
+            taken: false,
+        };
+        let mut items = vec![d(1, "a.csv", "completed"), d(2, "b.csv", "inProgress")];
+        assert_eq!(next_for_wait(&items, "*.csv"), Wait::Done(0));
+        items[0].taken = true;
+        // The finished a.csv is not the answer again: b.csv is waited for.
+        assert_eq!(next_for_wait(&items, "*.csv"), Wait::Pending);
+        items[1].state = "completed".into();
+        assert_eq!(next_for_wait(&items, "*.csv"), Wait::Done(1));
+        // A glob skips the others; a canceled one fails only its own wait.
+        let mut items = vec![d(1, "c.csv", "canceled"), d(2, "r.pdf", "completed"), d(3, "b.csv", "inProgress")];
+        assert_eq!(next_for_wait(&items, "*.pdf"), Wait::Done(1));
+        assert_eq!(next_for_wait(&items, "*.csv"), Wait::Canceled(0));
+        items[0].taken = true;
+        assert_eq!(next_for_wait(&items, "*.csv"), Wait::Pending);
+        assert_eq!(next_for_wait(&[], ""), Wait::Pending);
+    }
 
     #[test]
     fn names_stay_inside_the_directory() {

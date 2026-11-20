@@ -57,6 +57,11 @@ struct Session {
 
 impl Session {
     fn start(test: &str, extra: &[&str]) -> Session {
+        Self::start_with(test, extra, &[])
+    }
+
+    /// [`Self::start`] with variables for the session's process.
+    fn start_with(test: &str, extra: &[&str], env: &[(&str, &str)]) -> Session {
         let name = std::env::temp_dir()
             .join(format!("nv-interactions-{test}-{}.sock", std::process::id()))
             .display()
@@ -66,17 +71,23 @@ impl Session {
         let mut args = vec!["start", "--download-dir", &dir];
         args.extend_from_slice(extra);
         let s = Session { name, _downloads: Some(downloads) };
-        s.ok(&args);
+        let (success, r) = s.run_with(&args, env);
+        assert!(success && r["ok"] == true, "{args:?} failed: {r}");
         s
     }
 
     fn run(&self, args: &[&str]) -> (bool, Value) {
+        self.run_with(args, &[])
+    }
+
+    fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> (bool, Value) {
         let out = Command::new(tool_exe())
             .arg("--session")
             .arg(&self.name)
             .args(args)
             // Clicks say what they saw change (`effect_trace`): failures show it.
             .env("NAVIGERA_TRACE_EFFECT", "1")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .output()
             .expect("run navigera");
@@ -192,30 +203,30 @@ fn a_locator_on_a_long_page_is_linear() {
 /// A wait sees a change within a frame of it, not at its next poll. The
 /// page notes when the element was added and when the wait's own check
 /// first saw it: times in the page, so the test's commands don't count.
-/// Checking every 100 ms put that at 50 ms on average.
+/// Checking every 100 ms put that at 50 ms on average. The timer is armed
+/// and waited for in one call: a command line started between them (a
+/// loaded runner) could take past the timer, and the wait's first check
+/// then counted that gap.
 #[test]
 fn a_wait_sees_a_change_within_a_frame() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("wake", &[]);
     s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+    let steps = std::env::temp_dir().join(format!("nv-wake-{}.txt", std::process::id()));
     let mut after = Vec::new();
     for i in 0..7 {
         let delay = 120 + 37 * i;
-        s.ok(&[
-            "eval",
-            &format!(
-                "window.__seen = 0; document.querySelectorAll('.late').forEach((e) => e.remove()); \
+        let arm = format!(
+            "window.__seen = 0; document.querySelectorAll('.late').forEach((e) => e.remove()); \
              setTimeout(() => {{ const p = document.createElement('p'); p.className = 'late'; \
              p.textContent = 'late {i}'; document.body.append(p); window.__added = performance.now(); }}, {delay}); 1"
-            ),
-        ]);
-        s.ok(&[
-            "wait",
-            "--js",
-            "document.querySelector('.late') && (window.__seen = window.__seen || performance.now())",
-        ]);
+        );
+        let wait = "document.querySelector('.late') && (window.__seen = window.__seen || performance.now())";
+        std::fs::write(&steps, format!("eval \"{arm}\"\nwait --js \"{wait}\"\n")).unwrap();
+        s.ok(&["batch", &steps.display().to_string()]);
         after.push(s.ok(&["eval", "window.__seen - window.__added"]).as_f64().unwrap());
     }
+    let _ = std::fs::remove_file(&steps);
     after.sort_by(f64::total_cmp);
     assert!(after[3] < 35.0, "seen this many ms after the change: {after:?}");
 }
@@ -506,6 +517,39 @@ fn the_element_wait_is_the_one_asked_for() {
     // A longer wait on one command.
     s.ok(&["click", "--selector", "#late", "--wait-ms", "4000"]);
     s.ok(&["wait", "--text", "late clicked"]);
+}
+
+#[test]
+fn each_download_wait_answers_with_its_own_file() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("download-order", &[]);
+    s.ok(&["goto", &format!("{}/download", site.url)]);
+    s.ok(&["click", "--selector", "#dl"]);
+    let r = s.ok(&["wait", "--download", "*.csv"]);
+    assert_eq!(r["download"]["file"], "report.csv", "{r}");
+    // A second file, still coming: the wait is for it, not the finished
+    // report.csv (which it answered with at once before).
+    s.ok(&["click", "--selector", "#slow"]);
+    let r = s.ok(&["wait", "--download", "*.csv", "--timeout-ms", "15000"]);
+    assert_eq!(
+        (&r["download"]["file"], &r["download"]["state"]),
+        (&serde_json::json!("slow.csv"), &serde_json::json!("completed")),
+        "{r}"
+    );
+    // A canceled one fails its own wait only.
+    s.ok(&["click", "--selector", "#cut"]);
+    let err = s.fails(&["wait", "--download", "*.csv", "--timeout-ms", "15000"]);
+    assert!(err.contains("cut.csv was canceled"), "{err}");
+    s.ok(&["click", "--selector", "#dl"]);
+    let r = s.ok(&["wait", "--download", "*.csv", "--timeout-ms", "15000"]);
+    assert_eq!(
+        (&r["download"]["file"], &r["download"]["state"]),
+        (&serde_json::json!("report.csv"), &serde_json::json!("completed")),
+        "{r}"
+    );
+    // Nothing left: the error says the files it saw were taken.
+    let err = s.fails(&["wait", "--download", "--timeout-ms", "300"]);
+    assert!(err.contains("report.csv (completed, taken by an earlier wait)"), "{err}");
 }
 
 #[test]
@@ -948,7 +992,9 @@ fn a_toggle_an_earlier_click_queued_is_not_the_next_clicks_effect() {
 /// page adds a listener later, not when analytics on the document heard it,
 /// and not when a script there recorded it to replay once the button is
 /// wired, even a replay that shows nothing. A button never wired still says
-/// the click did nothing.
+/// the click did nothing. What listened is what was there as the press
+/// came: on a loaded machine, a listener the page adds between the press
+/// and navigera's look at it heard nothing.
 #[test]
 fn a_click_before_the_page_wired_the_element_is_sent_again() {
     let (true, Some(site)) = (chrome(), site()) else { return };
@@ -996,11 +1042,21 @@ fn a_click_before_the_page_wired_the_element_is_sent_again() {
         // A page that replays a recorded click does it after the click
         // returned; navigera's own clicks are all done by then.
         if hits > 0 {
-            s.ok(&["wait", "--js", "window.hits > 0"]);
+            let (waited, w) = s.run(&["wait", "--js", "window.hits > 0"]);
+            assert!(waited && w["ok"] == true, "{query}: the click never counted: {w}\nclick: {r}");
         }
         assert_eq!(s.text(&["get", "text", "--selector", "#out"]), out, "{query}: {r}");
         assert_eq!(s.ok(&["eval", "window.hits"]), hits, "{query}: {r}");
     }
+    // The press's arrival read 1 s late, as a loaded runner did (macOS, ci
+    // run 44422037582): the 150 ms timer wires the button in between, and
+    // the click was taken for one the button heard, never sent again.
+    let late = Session::start_with("wired-late-read", &[], &[("NAVIGERA_TEST_CLICK_READ_DELAY_MS", "1000")]);
+    std::fs::write(&steps, format!("goto {}/wired-late?ms=150\nclick --selector #go\n", site.url)).unwrap();
+    let r = late.ok(&["batch", &steps_arg]);
+    let (waited, w) = late.run(&["wait", "--js", "window.hits > 0"]);
+    assert!(waited && w["ok"] == true, "ms=150, read late: the click never counted: {w}\nclick: {r}");
+    assert_eq!(late.ok(&["eval", "window.hits"]), 1, "ms=150, read late: {r}");
     let _ = std::fs::remove_file(&steps);
 }
 
@@ -2414,25 +2470,29 @@ fn a_snapshot_after_a_click_that_fetches_waits_for_the_fetch_not_the_window() {
 /// The default quiet window reads a list that arrives in two fetches with
 /// a 400 ms gap between them; a 250 ms window ends in the gap and reads
 /// only the first half. That is why the default stays 500 ms and 250 ms
-/// is opt-in per session.
+/// is opt-in per session. `goto` and `ax` go in one call: a command line
+/// started between them (seen on a loaded macOS runner) could take past
+/// the gap, and the read then had both halves whatever the window.
 #[test]
 fn a_short_quiet_window_reads_a_chained_list_early() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("quiet-window", &[]);
+    let steps = std::env::temp_dir().join(format!("nv-quiet-window-{}.txt", std::process::id()));
+    std::fs::write(&steps, format!("goto {}/two-fetch\nax\n", site.url)).unwrap();
+    let steps = steps.display().to_string();
+    let read = || s.ok(&["batch", &steps])["results"][0]["result"].as_str().unwrap_or_default().to_string();
 
-    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
-    let tree = s.text(&["ax"]);
+    let tree = read();
     assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
 
     s.ok(&["set", "network-quiet", "250"]);
-    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
-    let tree = s.text(&["ax"]);
+    let tree = read();
     assert!(tree.contains("Alpha") && !tree.contains("Beta"), "{tree}");
 
     s.ok(&["set", "network-quiet", "500"]);
-    s.ok(&["goto", &format!("{}/two-fetch", site.url)]);
-    let tree = s.text(&["ax"]);
+    let tree = read();
     assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
+    let _ = std::fs::remove_file(&steps);
 }
 
 /// `check` on a controlled checkbox (the click's default is cancelled and the
@@ -2588,6 +2648,53 @@ fn a_redrawn_element_is_found_again_by_its_ref() {
     assert!(!ok && r.to_string().contains("that ref is stale"), "{r}");
 }
 
+/// A click on a link to a fragment of the page (a hash-routed app's
+/// filters) answers once the page's `hashchange` listeners have run: the
+/// browser fires it in a task of its own after the URL changed, and a
+/// command right after the click read the old view (a report on 0.15.0:
+/// 6 reads in 20; 34 in 40 here before the fix).
+#[test]
+fn a_click_on_a_fragment_link_answers_after_the_page_saw_the_hash_change() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("hash-router", &[]);
+    s.ok(&["goto", &format!("{}/hash-router", site.url)]);
+    for round in 0..3 {
+        for (link, filter, shown) in
+            [("Completed", "completed", "1 shown"), ("Active", "active", "2 shown"), ("All", "all", "3 shown")]
+        {
+            let r = s.ok(&["click", "--text", link]);
+            assert_eq!(s.ok(&["eval", "filter"]), filter, "round {round}, {link}: {r}");
+            assert_eq!(s.text(&["get", "text", "--selector", "#shown"]), shown, "round {round}, {link}: {r}");
+        }
+    }
+    // A snapshot right after the click shows the view the URL names.
+    s.ok(&["click", "--text", "Completed"]);
+    let tree = s.text(&["ax"]);
+    assert!(tree.contains("Write tests") && !tree.contains("Ship it"), "{tree}");
+}
+
+/// The same with Enter on the focused link: the key path answers once the
+/// page's `hashchange` listeners have run (25 reads in 39 saw the old view
+/// before).
+#[test]
+fn enter_on_a_fragment_link_answers_after_the_page_saw_the_hash_change() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("hash-router-enter", &[]);
+    s.ok(&["goto", &format!("{}/hash-router", site.url)]);
+    for round in 0..4 {
+        for (href, filter, shown) in [
+            ("#/completed", "completed", "1 shown"),
+            ("#", "all", "3 shown"),
+            ("#/active", "active", "2 shown"),
+            ("#/", "all", "3 shown"),
+        ] {
+            let r = s.ok(&["press", "Enter", "--selector", &format!("a[href=\"{href}\"]")]);
+            assert_eq!(s.ok(&["eval", "filter"]), filter, "round {round}, {href}: {r}");
+            assert_eq!(s.text(&["get", "text", "--selector", "#shown"]), shown, "round {round}, {href}: {r}");
+        }
+    }
+}
+
 /// A banner with controls of its own that stays over the button is said
 /// after about a second, naming its controls; an overlay over a page that
 /// is still fetching is waited for, as long as the element wait.
@@ -2609,6 +2716,11 @@ fn a_cover_that_stays_is_said_quickly_and_a_loading_one_is_waited_for() {
     assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "bought");
 
     s.ok(&["goto", &format!("{}/loading-cover", site.url)]);
+    s.ok(&["click", "--selector", "#save"]);
+    assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "saved");
+    // The page takes the overlay away a moment after its fetch is in (a
+    // loaded machine runs the page's own handler late): one more look.
+    s.ok(&["goto", &format!("{}/loading-cover?late=900", site.url)]);
     s.ok(&["click", "--selector", "#save"]);
     assert_eq!(s.text(&["get", "text", "--selector", "#status"]), "saved");
 }

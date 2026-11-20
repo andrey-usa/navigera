@@ -95,10 +95,153 @@ const CHROME_FLAGS: &[&str] = &[
     // component updates off no model was ever downloaded. Chrome 154 to
     // 156 have no switch for it and still ask.
     "--disable-features=Translate,TranslateUI,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,site-per-process,NetworkTimeServiceQuerying,PreconnectToSearch,OptimizationGuideManifestBroker",
-    // WebMCP: the tools a page registers on `document.modelContext`
-    // (`webmcp-list`, `webmcp-call`); a Chrome without it ignores the name.
-    "--enable-features=NetworkService,NetworkServiceInProcess,WebMCP",
+    ENABLE_FEATURES,
 ];
+
+/// WebMCP: the tools a page registers on `document.modelContext`
+/// (`webmcp-list`, `webmcp-call`); a Chrome without it ignores the name.
+///
+/// `NetworkServiceInProcess2` (Chromium's name for `kNetworkServiceInProcess`;
+/// the `NetworkServiceInProcess` passed before did nothing): the network
+/// service runs in the browser process instead of a utility process of its
+/// own: one process fewer per browser, and after a start, a goto and an
+/// `ax` the browser's PSS 280.4 -> 262.5 MiB (Chrome 153) and 181.0 ->
+/// 171.1 MiB (chrome-headless-shell 158), Linux, medians of 16 interleaved,
+/// no range overlapping; the times overlap. Not on macOS, the one desktop where Chrome sandboxes that
+/// process by default (`IsNetworkSandboxEnabled`): there it stays apart.
+/// On Linux and Windows the sandbox is a feature that is off unless a
+/// field trial turns it on, and navigera's fresh profiles fetch none; there
+/// the process runs with `--service-sandbox-type=none`, Edge's too (Chrome
+/// 155-159, chrome-headless-shell 158 and Edge 157 on CI's Linux and
+/// Windows; `tests/network_service.rs` asks the browser on every run). An administrator can
+/// turn it on there with the `NetworkServiceSandboxEnabled` policy, which
+/// Chrome applies only to a network service in a process of its own: when a
+/// policy asks for it, the feature is left out ([`network_sandbox_by_policy`]).
+#[cfg(target_os = "macos")]
+const ENABLE_FEATURES: &str = "--enable-features=WebMCP";
+#[cfg(not(target_os = "macos"))]
+const ENABLE_FEATURES: &str = "--enable-features=NetworkServiceInProcess2,WebMCP";
+
+/// The policy that sandboxes Chrome's network service, and the largest
+/// policy file read for it (a policy file is a few hundred bytes).
+#[cfg(any(test, not(target_os = "macos")))]
+const NETWORK_SANDBOX_POLICY: &str = "NetworkServiceSandboxEnabled";
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+const POLICY_FILE_MAX: u64 = 1 << 20;
+
+/// Managed policy directories of the Chromium browsers navigera may launch
+/// on Linux (Chromium's `policy_paths.cc`; Edge's and Brave's own).
+#[cfg(all(unix, not(target_os = "macos")))]
+const POLICY_DIRS: &[&str] = &[
+    "/etc/opt/chrome/policies/managed",
+    "/etc/opt/chrome_for_testing/policies/managed",
+    "/etc/chromium/policies/managed",
+    "/etc/opt/edge/policies/managed",
+    "/etc/brave/policies/managed",
+];
+
+/// Policy keys of the same browsers on Windows, read under both
+/// HKEY_LOCAL_MACHINE and HKEY_CURRENT_USER.
+#[cfg(windows)]
+const POLICY_KEYS: &[&str] = &[
+    r"SOFTWARE\Policies\Google\Chrome",
+    r"SOFTWARE\Policies\Google\Chrome for Testing",
+    r"SOFTWARE\Policies\Chromium",
+    r"SOFTWARE\Policies\Microsoft\Edge",
+    r"SOFTWARE\Policies\BraveSoftware\Brave",
+];
+
+/// Whether an administrator's policy asks a Chromium browser on this machine
+/// to sandbox its network service. Any one of them saying so counts, whichever
+/// browser is launched: the cost of a wrong yes is the ~10 MiB the feature
+/// saves, the cost of a wrong no is the sandbox the administrator asked for.
+fn network_sandbox_by_policy() -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dirs: Vec<&Path> = POLICY_DIRS.iter().map(Path::new).collect();
+        policy_files_ask_for_network_sandbox(&dirs)
+    }
+    #[cfg(windows)]
+    {
+        registry_asks_for_network_sandbox(POLICY_KEYS)
+    }
+    #[cfg(not(any(all(unix, not(target_os = "macos")), windows)))]
+    {
+        false
+    }
+}
+
+/// Whether a JSON policy file in one of `dirs` sets the network sandbox
+/// policy to true (Chrome reads every file in a managed directory).
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn policy_files_ask_for_network_sandbox(dirs: &[&Path]) -> bool {
+    dirs.iter().filter_map(|dir| std::fs::read_dir(dir).ok()).flatten().flatten().any(|entry| {
+        let path = entry.path();
+        std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= POLICY_FILE_MAX)
+            && std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|policy| policy.get(NETWORK_SANDBOX_POLICY) == Some(&serde_json::Value::Bool(true)))
+    })
+}
+
+/// Whether one of `keys`, under HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER,
+/// holds the network sandbox policy as a nonzero DWORD.
+#[cfg(windows)]
+fn registry_asks_for_network_sandbox(keys: &[&str]) -> bool {
+    use std::ffi::c_void;
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegGetValueW(
+            key: *mut c_void,
+            sub_key: *const u16,
+            value: *const u16,
+            flags: u32,
+            kind: *mut u32,
+            data: *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+    }
+    const RRF_RT_REG_DWORD: u32 = 0x10;
+    // The predefined HKEY_CURRENT_USER and HKEY_LOCAL_MACHINE, sign-extended
+    // as Windows defines them.
+    let roots = [0x8000_0002u32 as i32 as isize as *mut c_void, 0x8000_0001u32 as i32 as isize as *mut c_void];
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let value = wide(NETWORK_SANDBOX_POLICY);
+    keys.iter().map(|key| wide(key)).any(|key| {
+        roots.iter().any(|&root| {
+            let mut data = 0u32;
+            let mut size = std::mem::size_of::<u32>() as u32;
+            // SAFETY: `key` and `value` are NUL-terminated UTF-16 that live past
+            // the call; `data` is the 4 bytes `size` says it is, and
+            // RRF_RT_REG_DWORD makes the call fail instead of writing a value of
+            // any other type or length.
+            let status = unsafe {
+                RegGetValueW(
+                    root,
+                    key.as_ptr(),
+                    value.as_ptr(),
+                    RRF_RT_REG_DWORD,
+                    std::ptr::null_mut(),
+                    (&mut data as *mut u32).cast(),
+                    &mut size,
+                )
+            };
+            status == 0 && data != 0
+        })
+    })
+}
+
+/// `flag` (an `--enable-features=` list) without the feature `name`.
+fn without_feature(flag: &str, name: &str) -> String {
+    match flag.strip_prefix("--enable-features=") {
+        Some(list) => {
+            let kept: Vec<&str> = list.split(',').filter(|f| *f != name).collect();
+            format!("--enable-features={}", kept.join(","))
+        }
+        None => flag.to_string(),
+    }
+}
 
 /// [`CHROME_FLAGS`] adjusted by two diagnostic knobs, for bisecting a
 /// browser-version-specific failure in CI without a rebuild:
@@ -113,6 +256,11 @@ pub(crate) fn chrome_flags() -> Vec<String> {
         .filter(|f| !drop.iter().any(|d| f.starts_with(d.as_str())))
         .map(|f| f.to_string())
         .collect();
+    if !cfg!(target_os = "macos") && network_sandbox_by_policy() {
+        for flag in &mut flags {
+            *flag = without_feature(flag, "NetworkServiceInProcess2");
+        }
+    }
     if no_sandbox_wanted(crate::proc::running_as_root(), std::env::var("NAVIGERA_NO_SANDBOX").ok().as_deref()) {
         flags.push(NO_SANDBOX.into());
     }
@@ -303,10 +451,14 @@ fn windowed_user_agent(exe: &str, major: u32) -> String {
     } else {
         "X11; Linux x86_64"
     };
-    let file = Path::new(exe).file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    let edge =
-        if file.contains("msedge") || file.contains("edge") { format!(" Edg/{major}.0.0.0") } else { String::new() };
+    let edge = if is_edge(exe) { format!(" Edg/{major}.0.0.0") } else { String::new() };
     format!("Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36{edge}")
+}
+
+/// Whether `exe` is Microsoft Edge (`msedge.exe`, `microsoft-edge`, the
+/// macOS app's `Microsoft Edge`).
+fn is_edge(exe: &str) -> bool {
+    Path::new(exe).file_name().is_some_and(|f| f.to_string_lossy().to_ascii_lowercase().contains("edge"))
 }
 
 /// The major version of a Chrome-family executable: from the version
@@ -825,6 +977,13 @@ pub struct BrowserSession {
     /// `set …` overrides (keyed by what they set): applied to every open
     /// tab and replayed on tabs opened later.
     overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
+    /// The permissions `set geo` granted ([`Self::grant`]): granted again in
+    /// the context `reset` makes, taken back by `set geo off`.
+    granted: std::collections::BTreeSet<&'static str>,
+    /// The `ua` override is a device's (`set device`), which a device
+    /// without a user agent or `set device off` takes back
+    /// ([`crate::emulate::device_ua_step`]); one from `set ua` stays.
+    ua_by_device: bool,
     /// `passkey on`: the virtual authenticator every tab gets.
     passkeys: crate::passkey::Passkeys,
     /// The browser answered -32601 to `Network.emulateNetworkConditionsByRule`
@@ -963,6 +1122,8 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -1047,6 +1208,8 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -1234,6 +1397,8 @@ impl BrowserSession {
             profile_exe,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -1356,6 +1521,8 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -1449,30 +1616,37 @@ impl BrowserSession {
         out
     }
 
-    /// Wait for a finished download whose file name matches `glob`
-    /// (`*`, `?`; empty: any). A canceled match is an error.
+    /// `wait --download`: the oldest download whose file name matches `glob`
+    /// (`*`, `?`; empty: any) that no earlier wait took, once it finishes
+    /// (see [`cdp::downloads::next_for_wait`]). A canceled one is an error,
+    /// and the next wait takes the one after it.
     pub fn wait_download(&self, glob: &str, timeout_ms: Option<f64>) -> Result<cdp::downloads::Download> {
         let (wait, _) = self.element_budget(timeout_ms.or(Some(self.timeout_ms)));
         let deadline = std::time::Instant::now() + wait;
-        let matches = |d: &cdp::downloads::Download| glob.is_empty() || cdp::glob_match(glob, &d.suggested);
         loop {
             let items = self.downloads(false);
-            if let Some(d) = items.iter().rev().find(|d| matches(d) && d.state == "completed") {
+            if let cdp::downloads::Wait::Done(i) | cdp::downloads::Wait::Canceled(i) =
+                cdp::downloads::next_for_wait(&items, glob)
+            {
+                let d = &items[i];
+                self.take_download(d.n);
+                if d.state == "canceled" {
+                    bail!("{}", cdp::downloads::canceled_text(d));
+                }
                 return Ok(d.clone());
             }
-            if let Some(d) = items.iter().rev().find(|d| matches(d) && d.state == "canceled") {
-                bail!("download {} was canceled ({})", d.suggested, d.url);
-            }
             if std::time::Instant::now() >= deadline {
-                let seen: Vec<String> = items.iter().map(|d| format!("{} ({})", d.suggested, d.state)).collect();
-                bail!(
-                    "no finished download{} within {} ms (seen: {})",
-                    if glob.is_empty() { String::new() } else { format!(" matching {glob:?}") },
-                    wait.as_millis(),
-                    if seen.is_empty() { "none".to_string() } else { seen.join(", ") }
-                );
+                bail!("{}", cdp::downloads::none_text(&items, glob, wait));
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// A download a wait answered with is not the answer to the next one.
+    fn take_download(&self, n: u64) {
+        let mut d = self.browser.shared().downloads.lock().unwrap();
+        if let Some(item) = d.items.iter_mut().find(|x| x.n == n) {
+            item.taken = true;
         }
     }
 
@@ -1581,8 +1755,14 @@ impl BrowserSession {
             self.browser.shared().move_scope(&self.scope(), &context, !all);
             if all {
                 self.overrides.clear();
+                self.granted.clear();
+                self.ua_by_device = false;
                 self.init_scripts.clear();
                 self.init_ids.clear();
+            }
+            // A permission is its context's: `set geo`'s goes with it.
+            for permission in &self.granted {
+                let _ = self.browser.grant_permission(permission, Some(&context));
             }
             // A clock belongs to the browser context, as the page's time.
             self.clock = Clock::default();
@@ -1679,6 +1859,8 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
+            ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
             init_scripts: Vec::new(),
@@ -1738,6 +1920,12 @@ impl BrowserSession {
     /// navigera's own `--profile` browser or an Electron app.
     pub fn in_users_browser(&self) -> bool {
         self.attached && self.profile_dir.is_none() && !self.is_electron()
+    }
+
+    /// The user's browser with a window (not headless): a person may be
+    /// using it, in tabs of their own that share its permissions.
+    pub fn persons_browser(&self) -> bool {
+        self.in_users_browser() && !self.attached_headless()
     }
 
     /// Where this process lists its own tabs in the user's browser, for the
@@ -2313,6 +2501,32 @@ impl BrowserSession {
             self.overrides.remove(kind);
         } else {
             self.overrides.insert(kind, calls);
+        }
+        if kind == "ua" {
+            self.ua_by_device = false;
+        }
+        Ok(())
+    }
+
+    /// Whether a `set …` of this kind (`viewport`, `media`, …) is in force.
+    pub fn has_override(&self, kind: &str) -> bool {
+        self.overrides.contains_key(kind)
+    }
+
+    /// `set device`'s user agent (`None`: `set device off`), in the one
+    /// `ua` slot `set ua` writes too, so the last of them is the one every
+    /// tab has, open or new.
+    pub fn set_device_ua(&mut self, ua: Option<&'static str>) -> Result<()> {
+        use crate::emulate::UaStep;
+        let call = "Emulation.setUserAgentOverride";
+        match crate::emulate::device_ua_step(ua, self.ua_by_device) {
+            UaStep::Set(ua) => {
+                self.set_override("ua", vec![(call, serde_json::json!({ "userAgent": ua }))], vec![])?;
+                self.ua_by_device = true;
+            }
+            // Chrome has no "clear": an empty string restores its own.
+            UaStep::Clear => self.set_override("ua", vec![], vec![(call, serde_json::json!({ "userAgent": "" }))])?,
+            UaStep::Keep => {}
         }
         Ok(())
     }
@@ -3078,17 +3292,36 @@ impl BrowserSession {
         )
     }
 
-    /// Permission for the pages' origins (geolocation), in this session's
-    /// browser context.
-    pub fn grant(&self, permission: &str) {
-        let _ = self.browser.grant_permission(permission, self.context.as_deref());
+    /// `set geo`'s permission (geolocation) for every origin, in this
+    /// session's browser context. None in a browser a person may be using
+    /// ([`Self::persons_browser`]): a permission is the browser context's,
+    /// so every site in their own tabs could read where they are. False
+    /// when it was not granted for that reason.
+    pub fn grant(&mut self, permission: &'static str) -> bool {
+        if self.persons_browser() {
+            return false;
+        }
+        if self.browser.grant_permission(permission, self.context.as_deref()).is_ok() {
+            self.granted.insert(permission);
+        }
+        true
+    }
+
+    /// `set geo off`: a permission [`Self::grant`] gave goes back to asking,
+    /// so a page cannot read the browser's own position without a prompt.
+    pub fn ungrant(&mut self, permission: &str) {
+        if self.granted.remove(permission) {
+            let _ = self.browser.set_permission(permission, "prompt", self.context.as_deref());
+        }
     }
 
     /// Set browser permissions for this session's pages (`granted`, `denied`
     /// or `prompt`, the browser's own names, see `emulate::permission_names`).
-    pub fn set_permissions(&self, setting: &str, names: &[&str]) -> Result<()> {
+    /// A permission set so is no longer `set geo`'s to take back.
+    pub fn set_permissions(&mut self, setting: &str, names: &[&str]) -> Result<()> {
         for name in names {
             self.browser.set_permission(name, setting, self.context.as_deref())?;
+            self.granted.remove(*name);
         }
         Ok(())
     }
@@ -4151,12 +4384,6 @@ impl BrowserSession {
                     _ => break,
                 }
                 eprintln!("[screenshot] --annotate: the capture came without the labels; taking it again ({again})");
-                // Retakes alone did not bring them (macOS, 1 session in 300:
-                // three retakes, all without): a tab the window does not
-                // show keeps its last frame. Brought to the front first.
-                if again == 1 && self.bring_to_front().is_ok() {
-                    eprintln!("[screenshot] --annotate: the tab brought to the front before the retake");
-                }
                 let _ = tab.evaluate(crate::annotate::NEXT_FRAME, timeout);
                 shot = tab.screenshot_as(timeout, full_page, quality);
             }
@@ -4357,6 +4584,7 @@ impl BrowserSession {
             }
         }
         self.overrides = old.overrides.clone();
+        self.ua_by_device = old.ua_by_device;
         self.init_scripts = old.init_scripts.clone();
         // Its passkeys come back with the state it saved, if any.
         self.passkeys = crate::passkey::Passkeys { ids: Default::default(), ..old.passkeys.clone() };
@@ -4412,6 +4640,71 @@ mod tests {
         );
         assert!(chrome_flags().iter().filter(|f| f.starts_with("--enable-features=")).count() == 1);
         assert!(chrome_flags().iter().any(|f| f.starts_with("--enable-features=") && f.contains("WebMCP")));
+    }
+
+    /// The network service in the browser process by its real feature
+    /// name, except on macOS, where its own process is sandboxed.
+    #[test]
+    fn the_network_service_runs_in_the_browser_process_where_it_has_no_sandbox() {
+        let features = chrome_flags().into_iter().find(|f| f.starts_with("--enable-features=")).unwrap();
+        let names: Vec<&str> = features["--enable-features=".len()..].split(',').collect();
+        assert!(!names.contains(&"NetworkServiceInProcess") && !names.contains(&"NetworkService"), "{features}");
+        let unsandboxed = !cfg!(target_os = "macos") && !network_sandbox_by_policy();
+        assert_eq!(names.contains(&"NetworkServiceInProcess2"), unsandboxed, "{features}");
+        assert!(names.contains(&"WebMCP"), "{features}");
+    }
+
+    /// A managed policy file that turns the network sandbox on is found in
+    /// any of the directories; one that turns it off, or says something
+    /// else, or is not JSON, or is too large to be a policy, is not.
+    #[test]
+    fn a_policy_file_that_sandboxes_the_network_service_is_found() {
+        let root = tempfile::tempdir().unwrap();
+        let (chrome, edge) = (root.path().join("chrome"), root.path().join("edge"));
+        std::fs::create_dir_all(&chrome).unwrap();
+        std::fs::create_dir_all(edge.join("sub.json")).unwrap();
+        let dirs = [chrome.as_path(), edge.as_path(), Path::new("/nonexistent/navigera/policies")];
+        assert!(!policy_files_ask_for_network_sandbox(&dirs));
+        std::fs::write(chrome.join("certs.json"), r#"{"XSLTEnabled": false}"#).unwrap();
+        std::fs::write(chrome.join("broken.json"), "{NetworkServiceSandboxEnabled: true").unwrap();
+        std::fs::write(edge.join("off.json"), r#"{"NetworkServiceSandboxEnabled": false}"#).unwrap();
+        std::fs::write(edge.join("string.json"), r#"{"NetworkServiceSandboxEnabled": "true"}"#).unwrap();
+        let big =
+            format!(r#"{{"NetworkServiceSandboxEnabled": true, "pad": "{}"}}"#, "x".repeat(POLICY_FILE_MAX as usize));
+        std::fs::write(edge.join("big.json"), big).unwrap();
+        assert!(!policy_files_ask_for_network_sandbox(&dirs));
+        std::fs::write(edge.join("sandbox"), r#"{"NetworkServiceSandboxEnabled": true}"#).unwrap();
+        assert!(policy_files_ask_for_network_sandbox(&dirs));
+        assert_eq!(
+            without_feature("--enable-features=NetworkServiceInProcess2,WebMCP", "NetworkServiceInProcess2"),
+            "--enable-features=WebMCP"
+        );
+        assert_eq!(without_feature("--disable-features=A,B", "A"), "--disable-features=A,B");
+    }
+
+    /// The registry read finds the policy as a nonzero DWORD under
+    /// HKEY_CURRENT_USER, and nothing for a zero, a string, or no value.
+    #[cfg(windows)]
+    #[test]
+    fn a_registry_policy_that_sandboxes_the_network_service_is_found() {
+        let key = format!(r"SOFTWARE\navigera-test-{}", std::process::id());
+        let reg = |args: &[&str]| {
+            let status = std::process::Command::new("reg").args(args).status().unwrap();
+            assert!(status.success(), "reg {args:?}");
+        };
+        let full = format!(r"HKCU\{key}");
+        let set = |kind: &str, data: &str| {
+            reg(&["add", &full, "/v", NETWORK_SANDBOX_POLICY, "/t", kind, "/d", data, "/f"]);
+        };
+        assert!(!registry_asks_for_network_sandbox(&[&key]));
+        set("REG_DWORD", "0");
+        let zero = registry_asks_for_network_sandbox(&[&key]);
+        set("REG_SZ", "1");
+        let string = registry_asks_for_network_sandbox(&[&key]);
+        set("REG_DWORD", "1");
+        let one = registry_asks_for_network_sandbox(&[r"SOFTWARE\navigera-test-none", &key]);
+        reg(&["delete", &full, "/f"]);
+        assert!(!zero && !string && one, "zero {zero}, string {string}, one {one}");
     }
 
     #[test]

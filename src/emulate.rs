@@ -105,6 +105,20 @@ pub const DEVICES: &[Device] = &[
     Device { name: "Desktop HD HiDPI", width: 1280, height: 720, scale: 2.0, mobile: false, ua: "" },
 ];
 
+/// The device a `set device` names, `None` for `off`; an empty or unknown
+/// name is an error that lists the known ones.
+pub fn device_named(values: &[String]) -> Result<Option<&'static Device>> {
+    let name = values.join(" ");
+    let known = || DEVICES.iter().map(|d| d.name).collect::<Vec<_>>().join(", ");
+    if name.is_empty() || name == "list" {
+        bail!("set device <name>; known: {}", known());
+    }
+    if off(&name) {
+        return Ok(None);
+    }
+    device(&name).map(Some).ok_or_else(|| anyhow::anyhow!("set device: unknown {name:?}; known: {}", known()))
+}
+
 /// A device by name, ignoring case and spaces/dashes (`iphone-15`).
 pub fn device(name: &str) -> Option<&'static Device> {
     let key = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
@@ -142,6 +156,62 @@ pub struct Plan {
     /// What the agent is told.
     pub result: Value,
 }
+
+/// What a `set device` does to the user agent. A session has one user agent,
+/// whoever sets it, and the last write wins in open tabs and in new ones: a
+/// device with a user agent sets it; a device without one (a laptop) and
+/// `set device off` take back a user agent only a device set, so one from
+/// `set ua` stays. Chrome and the WebDriver engines both go by this.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UaStep {
+    Set(&'static str),
+    Clear,
+    Keep,
+}
+
+/// [`UaStep`] for a device with user agent `ua` (`None`: `set device off`),
+/// given whether the user agent in force is a device's.
+pub fn device_ua_step(ua: Option<&'static str>, set_by_device: bool) -> UaStep {
+    match ua.filter(|ua| !ua.is_empty()) {
+        Some(ua) => UaStep::Set(ua),
+        None if set_by_device => UaStep::Clear,
+        None => UaStep::Keep,
+    }
+}
+
+/// The page's viewport and pixel ratio: read before a viewport override is
+/// set (the page's own), and before one is taken away when that is unknown
+/// (what it shows under it), for [`VIEWPORT_BACK`].
+pub const VIEWPORT_NOW: &str = "() => [innerWidth, innerHeight, devicePixelRatio]";
+
+/// After `set viewport off` or `set device off`: the browser answers before
+/// the page has its own viewport back, so for a frame or more a read still
+/// sees the override's (right after `set device off` on Chrome 153, the
+/// device's size in 3 to 9 of 10 fresh sessions; over chromedriver's BiDi
+/// alike), and it gives the parts back one by one, through sizes that are
+/// neither (a phone's layout viewport, then its screen with the pixel ratio
+/// already back, then the window's: `[980, 2125, 3]`, `[393, 852, 1]`,
+/// `[1440, 813, 1]`). So this answers once the page shows its own values
+/// (`own`); with those unknown (`null`), once its size has left the one it
+/// had under the override (`under`); or after `ms`. Polled, not waited on
+/// `resize`: a page that keeps its size gets no event.
+pub const VIEWPORT_BACK: &str = "(under, own, ms) => new Promise((done) => {
+  const t0 = performance.now();
+  const look = () => {
+    const now = [innerWidth, innerHeight, devicePixelRatio];
+    const back = Array.isArray(own)
+      ? now[0] === own[0] && now[1] === own[1] && now[2] === own[2]
+      : !Array.isArray(under) || now[0] !== under[0] || now[1] !== under[1];
+    if (back || performance.now() - t0 >= ms) return done(now);
+    setTimeout(look, 5);
+  };
+  look();
+})";
+
+/// How long [`VIEWPORT_BACK`] waits at most: reached only when the page's
+/// own size changed while the override was on (its window was resized, or
+/// it is a tab whose window differs from the one it was read in).
+pub const VIEWPORT_BACK_MS: u64 = 1000;
 
 fn off(v: &str) -> bool {
     matches!(v.to_ascii_lowercase().as_str(), "off" | "reset" | "none" | "clear" | "default")
@@ -205,11 +275,16 @@ pub fn plan(
             });
         }
     }
+    // `viewport` is one kind with `device`: a viewport replaces a device's
+    // touch in open tabs as it does in tabs opened later.
     let reset_metrics = vec![("Emulation.clearDeviceMetricsOverride", json!({}))];
+    let reset_touch: Vec<(&str, Value)> =
+        if lightpanda { vec![] } else { vec![("Emulation.setTouchEmulationEnabled", json!({ "enabled": false }))] };
     Ok(match what {
         "viewport" => {
             if off(first) {
-                return Ok(Plan { kind: "viewport", calls: vec![], reset: reset_metrics, grant: None, result: json!({ "viewport": "default" }) });
+                let reset = [reset_metrics, reset_touch].concat();
+                return Ok(Plan { kind: "viewport", calls: vec![], reset, grant: None, result: json!({ "viewport": "default" }) });
             }
             let (w, h) = match values {
                 [w, h] => (num(w, "width")? as u32, num(h, "height")? as u32),
@@ -227,20 +302,13 @@ pub fn plan(
             Plan {
                 kind: "viewport",
                 calls: vec![("Emulation.setDeviceMetricsOverride", metrics(w, h, scale, mobile))],
-                reset: vec![],
+                reset: reset_touch,
                 grant: None,
                 result: json!({ "viewport": [w, h], "scale": scale, "mobile": mobile }),
             }
         }
         "device" => {
-            if first.is_empty() || first == "list" {
-                bail!(
-                    "set device <name>; known: {}",
-                    DEVICES.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
-                );
-            }
-            let name = values.join(" ");
-            if off(&name) {
+            let Some(d) = device_named(values)? else {
                 return Ok(Plan {
                     kind: "viewport",
                     calls: vec![],
@@ -251,13 +319,7 @@ pub fn plan(
                     grant: None,
                     result: json!({ "device": "default" }),
                 });
-            }
-            let d = device(&name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "set device: unknown {name:?}; known: {}",
-                    DEVICES.iter().map(|d| d.name).collect::<Vec<_>>().join(", ")
-                )
-            })?;
+            };
             let mut calls = vec![("Emulation.setDeviceMetricsOverride", metrics(d.width, d.height, d.scale, d.mobile))];
             let mut result = json!({ "device": d.name, "viewport": [d.width, d.height], "scale": d.scale, "mobile": d.mobile });
             if lightpanda {
@@ -267,11 +329,10 @@ pub fn plan(
             } else {
                 // Chrome refuses `maxTouchPoints: 0` ("must be between 1 and
                 // 16"), so a desktop device turns touch off with no count.
+                // Its user agent goes through the session's one slot
+                // ([`device_ua_step`]), not this kind.
                 let touch = if d.mobile { json!({ "enabled": true, "maxTouchPoints": 5 }) } else { json!({ "enabled": false }) };
                 calls.push(("Emulation.setTouchEmulationEnabled", touch));
-                if !d.ua.is_empty() {
-                    calls.push(("Emulation.setUserAgentOverride", json!({ "userAgent": d.ua })));
-                }
             }
             Plan { kind: "viewport", calls, reset: vec![], grant: None, result }
         }
@@ -519,12 +580,130 @@ pub fn plan(
     })
 }
 
+/// One WebDriver BiDi `emulation.*` command for a `set` (Firefox 160:
+/// locale, timezone, a light or dark color scheme, offline, the user
+/// agent; `null` takes the override away). The session adds the tabs it
+/// applies to.
+pub struct BidiPlan {
+    pub method: &'static str,
+    pub params: Value,
+    pub result: Value,
+}
+
+/// The settings [`bidi_plan`] knows.
+pub const BIDI_SETTINGS: &[&str] = &["locale", "timezone", "tz", "media", "offline", "ua", "user-agent", "useragent"];
+
+pub fn bidi_plan(what: &str, values: &[String], engine: &str) -> Result<BidiPlan> {
+    let first = values.first().map(String::as_str).unwrap_or("");
+    let plan = |method, params, result| Ok(BidiPlan { method, params, result });
+    match what {
+        "locale" => {
+            if first.is_empty() {
+                bail!("set locale <BCP 47 tag, e.g. de-DE> (or `off`)");
+            }
+            let on = !off(first);
+            plan(
+                "emulation.setLocaleOverride",
+                json!({ "locale": on.then_some(first) }),
+                json!({ "locale": if on { first } else { "default" } }),
+            )
+        }
+        "timezone" | "tz" => {
+            if first.is_empty() {
+                bail!("set timezone <IANA zone, e.g. Europe/Berlin> (or `off`)");
+            }
+            let on = !off(first);
+            plan(
+                "emulation.setTimezoneOverride",
+                json!({ "timezone": on.then_some(first) }),
+                json!({ "timezone": if on { first } else { "default" } }),
+            )
+        }
+        "media" => {
+            let scheme = match first.to_ascii_lowercase().as_str() {
+                v if off(v) => None,
+                v @ ("dark" | "light") if values.len() == 1 => Some(v.to_string()),
+                _ => bail!(
+                    "set media {}: the {engine} engine emulates the color scheme only (dark, light or off); \
+                     print, reduced-motion and forced-colors are Chrome's: run it with --engine chrome",
+                    values.join(" ")
+                ),
+            };
+            let features = scheme.as_ref().map(|v| json!({ "prefers-color-scheme": v }));
+            let shown = scheme.clone().unwrap_or_else(|| "default".into());
+            plan("emulation.setMediaFeaturesOverride", json!({ "features": features }), json!({ "media": shown }))
+        }
+        "offline" => {
+            let on = match first.to_ascii_lowercase().as_str() {
+                "" | "on" | "true" | "1" => true,
+                "off" | "false" | "0" => false,
+                other => bail!("set offline takes on|off, got {other:?}"),
+            };
+            let conditions = on.then(|| json!({ "type": "offline" }));
+            plan("emulation.setNetworkConditions", json!({ "networkConditions": conditions }), json!({ "offline": on }))
+        }
+        "ua" | "user-agent" | "useragent" => {
+            let ua = values.join(" ");
+            if ua.is_empty() {
+                bail!("set ua <user agent string> (or `off`)");
+            }
+            let on = !off(&ua);
+            let shown = if on { ua.clone() } else { "default".into() };
+            plan("emulation.setUserAgentOverride", json!({ "userAgent": on.then_some(ua) }), json!({ "ua": shown }))
+        }
+        other => bail!(
+            "set {other}: not on the {engine} engine yet (it emulates viewport, device, geo, locale, \
+             timezone, media dark|light, offline and ua); run it with --engine chrome"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_device_takes_back_only_a_user_agent_a_device_set() {
+        let phone = Some("Mozilla/5.0 (iPhone)");
+        assert_eq!(device_ua_step(phone, false), UaStep::Set("Mozilla/5.0 (iPhone)"), "over a `set ua` too");
+        assert_eq!(device_ua_step(phone, true), UaStep::Set("Mozilla/5.0 (iPhone)"));
+        for laptop_or_off in [Some(""), None] {
+            assert_eq!(device_ua_step(laptop_or_off, true), UaStep::Clear, "a device's goes");
+            assert_eq!(device_ua_step(laptop_or_off, false), UaStep::Keep, "a `set ua` stays");
+        }
+        let laptop = device_named(&v(&["Laptop"])).unwrap().unwrap();
+        let plan = plan("device", &v(&["iPhone 15"]), None, false, None, false).unwrap();
+        assert!(plan.calls.iter().all(|(m, _)| *m != "Emulation.setUserAgentOverride"), "{:?}", plan.calls);
+        assert_eq!(device_ua_step(Some(laptop.ua), true), UaStep::Clear);
+    }
+
+    #[test]
+    fn bidi_plans_say_what_firefox_takes() {
+        let p = bidi_plan("media", &v(&["dark"]), "firefox").unwrap();
+        assert_eq!(p.params, json!({ "features": { "prefers-color-scheme": "dark" } }));
+        assert_eq!(bidi_plan("media", &v(&["off"]), "firefox").unwrap().params, json!({ "features": null }));
+        assert!(bidi_plan("media", &v(&["print"]), "firefox").err().unwrap().to_string().contains("--engine chrome"));
+        assert!(bidi_plan("media", &v(&["dark", "print"]), "firefox").is_err());
+        assert_eq!(
+            bidi_plan("tz", &v(&["Asia/Tokyo"]), "firefox").unwrap().params,
+            json!({ "timezone": "Asia/Tokyo" })
+        );
+        assert_eq!(bidi_plan("locale", &v(&["reset"]), "firefox").unwrap().params, json!({ "locale": null }));
+        let ua = bidi_plan("ua", &v(&["Bot/1.0", "(x)"]), "firefox").unwrap();
+        assert_eq!((ua.params, ua.result), (json!({ "userAgent": "Bot/1.0 (x)" }), json!({ "ua": "Bot/1.0 (x)" })));
+        assert_eq!(
+            bidi_plan("offline", &v(&[]), "firefox").unwrap().params,
+            json!({ "networkConditions": { "type": "offline" } })
+        );
+        assert_eq!(bidi_plan("offline", &v(&["off"]), "firefox").unwrap().params, json!({ "networkConditions": null }));
+        assert!(bidi_plan("cpu", &v(&["4"]), "firefox").is_err());
+        for what in BIDI_SETTINGS {
+            assert!(crate::protocol::SETTINGS.contains(what), "{what}");
+        }
     }
 
     #[test]
@@ -567,7 +746,7 @@ mod tests {
         assert_eq!(plan("viewport", &v(&["1280x720"]), None, false, None, false).unwrap().calls[0].1["height"], 720);
         let p = plan("device", &v(&["iPhone", "15"]), None, false, None, false).unwrap();
         assert_eq!(p.kind, "viewport");
-        assert_eq!(p.calls.len(), 3);
+        assert_eq!(p.calls.len(), 2, "metrics and touch; its user agent goes through the `ua` slot");
         let p = plan("network", &v(&["slow-3g"]), None, false, None, false).unwrap();
         assert_eq!(p.kind, "offline", "one network setting with offline");
         assert_eq!(p.calls[0].1["matchedNetworkConditions"][0]["latency"], 2000.0);

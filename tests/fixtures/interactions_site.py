@@ -62,7 +62,7 @@ getting wrong, one page each, built the way those sites behave:
 /long-text      a <div> and a <p> of 1,120 characters each
 /cookie-banner  a button under a banner with Accept and Reject that stays
 /loading-cover  a button under an overlay with a Cancel button, removed when
-                a 2.5 s fetch returns
+                a 2.5 s fetch returns (?late=N: N ms after it returns)
 /wired-late     a button wired only after load: by a timer (?ms=N), by a
                 script the page loads then (?script=N), by a listener its
                 container gets (?root=N) or the document gets (?doc=N);
@@ -71,6 +71,9 @@ getting wrong, one page each, built the way those sites behave:
                 once it is (&late: 50 ms after; &invisible: the replayed
                 click shows nothing); ?quiet: a button that works
                 from the start and shows nothing, beside a late listener
+/hash-router    a to-do list routed by the URL's fragment: its filter links
+                (#/, #/active, #/completed) change the view only in the
+                page's `hashchange` listener
 /hover-cover    a button whose first mouse move opens an overlay over it, with
                 a Subscribe button, for 300 ms: the press that follows the
                 move lands on the overlay
@@ -180,7 +183,9 @@ PAGES["/loading-cover"] = ("loading cover", "", """
   <p>Loading...</p><button>Cancel</button>
 </div>
 <script>
-fetch('/hold?ms=2500').then(() => document.getElementById('cover').remove());
+const late = +new URLSearchParams(location.search).get('late');
+const uncover = () => document.getElementById('cover').remove();
+fetch('/hold?ms=2500').then(() => late ? setTimeout(uncover, late) : uncover());
 </script>""")
 
 PAGES["/moving-target"] = ("moving target", "", """
@@ -544,6 +549,8 @@ PAGES["/posted"] = ("posted", "", """<p>posted</p>""")
 
 PAGES["/download"] = ("download", "", """
 <a id=dl href="/file.csv">Download CSV</a>
+<a id=slow href="/slow-file.csv?ms=1500">Slow CSV</a>
+<a id=cut href="/cut.csv">Cut CSV</a>
 <button id=blob type=button>Save notes</button>
 <script>
 document.getElementById('blob').addEventListener('click', () => {
@@ -853,6 +860,27 @@ if (q.has('banner')) go.onpointerdown = () => {
 </script>""")
 
 
+PAGES["/hash-router"] = ("hash router", "", """
+<ul id=todos><li class=done>Write tests</li><li>Ship it</li><li>Rest</li></ul>
+<p><a href="#/">All</a> <a href="#/active">Active</a> <a href="#/completed">Completed</a> <a href="#">Top</a></p>
+<p id=shown>3 shown</p>
+<script>
+// A TodoMVC-style router: the view follows the fragment, and only once the
+// browser fires `hashchange`, a task of its own after the URL changed.
+window.filter = 'all';
+const render = () => {
+  let n = 0;
+  for (const li of document.querySelectorAll('#todos li')) {
+    const show = filter === 'all' || (filter === 'completed') === li.classList.contains('done');
+    li.hidden = !show;
+    if (show) n++;
+  }
+  document.getElementById('shown').textContent = n + ' shown';
+};
+addEventListener('hashchange', () => { filter = location.hash.replace('#/', '') || 'all'; render(); });
+</script>""")
+
+
 PAGES["/wired-late"] = ("wired late", "", """
 <button id=go>Go</button>
 <div id=root><span><button id=inner>Inner</button></span></div>
@@ -1123,6 +1151,26 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/file.csv":
             return self.send("id,name\n1,Ada\n2,Grace\n", "text/csv",
                              [("Content-Disposition", 'attachment; filename="report.csv"')])
+        if u.path in ("/slow-file.csv", "/cut.csv"):
+            # Half the file now; the rest after ms (slow), or never: the
+            # connection is cut and the browser cancels the download.
+            import socket, time
+            data = ("id,name\n" + "9,Slow\n" * 2000).encode()
+            name = "slow.csv" if u.path == "/slow-file.csv" else "cut.csv"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.end_headers()
+            self.wfile.write(data[: len(data) // 2])
+            self.wfile.flush()
+            if u.path == "/cut.csv":
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            time.sleep(int(q.get("ms", ["1500"])[0]) / 1000)
+            self.wfile.write(data[len(data) // 2 :])
+            return
         if u.path == "/no-content":
             self.send_response(204)
             self.end_headers()

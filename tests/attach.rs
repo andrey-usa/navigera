@@ -132,11 +132,17 @@ impl Drop for Browser {
 /// runner sometimes starts Chrome without it ever writing its
 /// DevToolsActivePort: a second launch, on a fresh profile, gets one.
 fn users_browser(exe: &str) -> (Browser, tempfile::TempDir, u16, String) {
+    users_browser_with(exe, &[])
+}
+
+/// [`users_browser`], with `extra` flags on its command line.
+fn users_browser_with(exe: &str, extra: &[&str]) -> (Browser, tempfile::TempDir, u16, String) {
     let launch = || {
         let profile = tempfile::tempdir().unwrap();
         let mut user = Browser(
             Command::new(exe)
                 .args(["--headless=new", "--no-sandbox", "--no-first-run", "--remote-debugging-port=0"])
+                .args(extra)
                 .arg(format!("--user-data-dir={}", profile.path().display()))
                 .arg("data:text/html,<title>Mine</title>users%20own%20tab")
                 .stdin(Stdio::null())
@@ -329,6 +335,52 @@ fn an_attached_session_works_in_the_users_tab_and_leaves_it_open() {
     let urls = page_urls(port).unwrap_or_default();
     assert!(urls.iter().any(|u| u.contains("Shown")), "{urls:?}");
     drop(user);
+}
+
+/// `set geo` grants the location permission only in a browser no person
+/// may be using. Chrome's permission is the browser context's: granted in
+/// the user's own browser, every site in their tabs could read where they
+/// are without asking, until navigera quit (`set geo off` left it). There
+/// `set geo` sets the position and says a page asks; a headless browser
+/// gets the grant, in the context `reset` makes too, and `set geo off`
+/// takes it back.
+#[test]
+fn set_geo_grants_the_location_only_where_no_person_may_use_the_browser() {
+    let Some(exe) = chrome() else { return };
+    let site_script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/edge_site.py");
+    let mut site = Browser(
+        Command::new(python()).arg(site_script).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().expect("site"),
+    );
+    let mut line = String::new();
+    BufReader::new(site.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let base = line.split_whitespace().nth(1).expect("LISTENING line").to_string();
+    let state = "navigator.permissions.query({ name: 'geolocation' }).then((s) => s.state)";
+    let position = "new Promise((ok) => navigator.geolocation.getCurrentPosition(\
+                    (p) => ok([p.coords.latitude, p.coords.longitude]), (e) => ok('error ' + e.code), { timeout: 3000 }))";
+    // A browser with a window: its user agent does not say HeadlessChrome.
+    let windowed = "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
+    for (person, extra) in [(true, vec![windowed]), (false, vec![])] {
+        let (user, profile, _port, _mine) = users_browser_with(&exe, &extra);
+        let dir = profile.path().display().to_string();
+        let s = session_name(if person { "geo-person" } else { "geo-headless" });
+        ok(&s, &["start", "--attach", &dir]);
+        ok(&s, &["goto", &format!("{base}/landed")]);
+        let set = ok(&s, &["set", "geo", "48.85", "2.35"]);
+        if person {
+            assert!(set["note"].as_str().is_some_and(|n| n.contains("no location permission")), "{set}");
+            assert_eq!(ok(&s, &["eval", state]), "prompt", "a browser a person may use got the grant");
+        } else {
+            assert!(set.get("note").is_none(), "{set}");
+            assert_eq!(ok(&s, &["eval", state]), "granted");
+            ok(&s, &["reset"]);
+            ok(&s, &["goto", &format!("{base}/landed")]);
+            assert_eq!(ok(&s, &["eval", position]), serde_json::json!([48.85, 2.35]), "after reset");
+            ok(&s, &["set", "geo", "off"]);
+            assert_eq!(ok(&s, &["eval", state]), "prompt", "`set geo off` left the grant");
+        }
+        ok(&s, &["quit"]);
+        drop(user);
+    }
 }
 
 #[test]

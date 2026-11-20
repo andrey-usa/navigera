@@ -216,6 +216,19 @@ const ARM_NAV: &str = r#"function (el, key) {
     on(w, 'click', (e) => { if (!n.click && e.isTrusted) n.click = e; });
     on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
     on(w, 'invalid', () => { n.invalid = true; });
+    // A link to a fragment of this document, or a handler that sets
+    // `location.hash`: the URL changes with the action, and the page learns
+    // of it from `hashchange`, a task of its own after it, where a
+    // hash-routed page renders its view. The verdict waits for that
+    // (`n.hashed`), as a click on Chrome does. Told by the Navigation API's
+    // `hashChange`, or where there is none by a URL that changed in its
+    // fragment only; a URL a script pushed gets no `hashchange`.
+    const from = w.location.href;
+    const hash = { want: false, seen: false, end: null };
+    // Not a capturing listener: it runs after the page's own on the window.
+    const onHash = () => { hash.seen = true; if (hash.end) hash.end(); };
+    w.addEventListener('hashchange', onHash);
+    n.offs.push(() => w.removeEventListener('hashchange', onHash));
     // A handler that navigates by script (`location`, `form.submit()`),
     // this window or the tab's.
     let told = 0;
@@ -223,9 +236,24 @@ const ARM_NAV: &str = r#"function (el, key) {
         const api = v.navigation;
         if (api && api.addEventListener) {
             told++;
-            on(api, 'navigate', (e) => { if (!(e.destination && e.destination.sameDocument)) n.planned = true; });
+            on(api, 'navigate', (e) => {
+                if (!(e.destination && e.destination.sameDocument)) n.planned = true;
+                else if (v === w && e.hashChange) hash.want = true;
+            });
         }
     }
+    const navApi = !!(w.navigation && w.navigation.addEventListener);
+    n.hashed = (ms) => new Promise((res) => {
+        try {
+            if (!navApi) {
+                const at = w.location.href;
+                hash.want = at !== from && at.split('#')[0] === from.split('#')[0];
+            }
+        } catch (_) {}
+        if (!hash.want || hash.seen) { res(true); return; }
+        const t = setTimeout(() => res(false), ms);
+        hash.end = () => { clearTimeout(t); res(true); };
+    });
     const F = w.HTMLFormElement && w.HTMLFormElement.prototype, submit = F && F.submit;
     if (typeof submit === 'function') {
         // Put back only while ours is there: a method the page put in
@@ -273,8 +301,11 @@ const ARM_NAV: &str = r#"function (el, key) {
 }"#;
 
 /// After the click: the verdict of [`ARM_NAV`], and the page's URL and
-/// title (the page's state when no navigation follows).
-const NAV_VERDICT: &str = "() => { const K = Symbol.for('navigera.nav'); const n = window[K]; delete window[K]; \
+/// title (the page's state when no navigation follows), read once the
+/// `hashchange` of a fragment navigation has run, up to 250 ms (Chrome's
+/// `HASH_WAIT`).
+const NAV_VERDICT: &str = "async () => { const K = Symbol.for('navigera.nav'); const n = window[K]; delete window[K]; \
+    if (n && n.hashed) await n.hashed(250); \
     return [n ? n.verdict() : null, location.href, document.title]; }";
 
 /// The page expression for the element an op kept for the protocol's own
@@ -382,6 +413,29 @@ pub trait Wire: Send {
     /// The viewport's size in CSS pixels and its pixel ratio; `None` is the
     /// browser's own again.
     fn set_viewport(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()>;
+    /// `set locale|timezone|media|offline|ua|geo` (and `device`'s user agent):
+    /// one WebDriver BiDi
+    /// `emulation.*` command (see [`crate::emulate::bidi_plan`]) for the
+    /// session's tabs, now and later.
+    fn emulate(&mut self, _method: &str, _params: Value) -> Result<()> {
+        bail!(
+            "classic WebDriver has no emulation; use --engine firefox or chrome (or --bidi with a server that has it)"
+        )
+    }
+    /// `downloads`: the files this session's pages downloaded, oldest
+    /// first (`clear`: and forget them).
+    fn downloads(&mut self, _clear: bool) -> Result<Vec<crate::cdp::downloads::Download>> {
+        bail!("classic WebDriver does not report downloads; use --engine firefox or chrome (or --bidi with a server that has them)")
+    }
+    /// `downloads --dir`: where the session's downloads go from now on.
+    fn set_downloads_dir(&mut self, _dir: &std::path::Path) -> Result<()> {
+        bail!("classic WebDriver cannot choose where downloads go; use --engine firefox or chrome (or --bidi with a server that has it)")
+    }
+    /// `wait --download`: a finished download whose file name matches
+    /// `glob` (empty: any) by `timeout`; a canceled one is an error.
+    fn wait_download(&mut self, _glob: &str, _timeout: Duration) -> Result<crate::cdp::downloads::Download> {
+        bail!("classic WebDriver does not report downloads; use --engine firefox or chrome (or --bidi with a server that has them)")
+    }
     /// A script every new document runs before its own.
     fn add_init_script(&mut self, source: &str) -> Result<()>;
     /// Take the init scripts away again; how many there were.
@@ -449,13 +503,33 @@ struct Reply<'a> {
 }
 
 /// The `ok` of a [`wrap`]ped answer, as JSON text; its `err` as the error.
-fn ok_text(answer: &str) -> Result<&str> {
-    let reply: Reply = serde_json::from_str(answer).map_err(|e| anyhow!("the page's answer is not JSON ({e})"))?;
-    match (reply.ok, reply.err) {
-        (_, Some(err)) => Err(anyhow!(err)),
-        (Some(ok), None) => Ok(ok.get()),
-        (None, None) => Ok("null"),
+/// A lone UTF-16 surrogate, which the page's `JSON.stringify` writes as
+/// `\ud800` (half of an emoji pair) and JSON in UTF-8 cannot hold, is read
+/// as U+FFFD.
+fn ok_text(answer: &str) -> Result<std::borrow::Cow<'_, str>> {
+    fn read(answer: &str) -> Result<&str> {
+        let reply: Reply = serde_json::from_str(answer).map_err(|e| anyhow!("the page's answer is not JSON ({e})"))?;
+        match (reply.ok, reply.err) {
+            (_, Some(err)) => Err(anyhow!(err)),
+            (Some(ok), None) => Ok(ok.get()),
+            (None, None) => Ok("null"),
+        }
     }
+    match read(answer) {
+        Ok(ok) => Ok(std::borrow::Cow::Borrowed(ok)),
+        Err(e) => match crate::cdp::lone_surrogates_replaced(answer) {
+            Some(fixed) => read(&fixed).map(|ok| std::borrow::Cow::Owned(ok.to_string())),
+            None => Err(e),
+        },
+    }
+}
+
+/// JSON text a page wrote, read. A lone UTF-16 surrogate in it (the
+/// page's `JSON.stringify` writes half of an emoji pair as `\ud800`, which
+/// JSON in UTF-8 cannot hold) is read as U+FFFD.
+fn page_value(text: &str) -> Result<Value> {
+    let fixed = |e| crate::cdp::lone_surrogates_replaced(text).map_or(Err(e), |t| serde_json::from_str(&t));
+    Ok(serde_json::from_str(text).or_else(fixed)?)
 }
 
 /// A WebDriver key value for a key name (`Enter`, `ArrowDown`, `a`).
@@ -571,6 +645,12 @@ pub struct Driver {
     init_scripts: Vec<String>,
     /// How many tabs the last look found.
     tabs_seen: usize,
+    /// The user agent in force is a device's (see
+    /// [`crate::emulate::device_ua_step`]).
+    ua_by_device: bool,
+    /// While `set viewport` or `set device` sizes the page: its own viewport,
+    /// read before (`null` if that read failed), for `off` to wait for.
+    viewport_own: Option<Value>,
 }
 
 impl Driver {
@@ -621,6 +701,8 @@ impl Driver {
             keys: Vec::new(),
             init_scripts: Vec::new(),
             tabs_seen: usize::MAX,
+            ua_by_device: false,
+            viewport_own: None,
         })
     }
 
@@ -659,13 +741,43 @@ impl Driver {
     /// Run `function` in the page with `args`; its answer.
     fn call(&mut self, function: &str, args: Value) -> Result<Value> {
         let answer = self.wire.call(function, &args.to_string(), self.timeout)?;
-        Ok(serde_json::from_str(ok_text(&answer)?)?)
+        page_value(&ok_text(&answer)?)
+    }
+
+    /// [`Wire::set_viewport`] for `set viewport` and `set device`. The
+    /// first size reads the page's own viewport; `off` (`None`) answers once
+    /// the page shows it again, as the browser may take an override away
+    /// after it answers ([`crate::emulate::VIEWPORT_BACK`]).
+    fn size_page(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()> {
+        use crate::emulate::{VIEWPORT_BACK, VIEWPORT_BACK_MS, VIEWPORT_NOW};
+        if size.is_none() {
+            let Some(own) = self.viewport_own.take() else {
+                return self.wire.set_viewport(None, scale);
+            };
+            // Its own size unknown (the read failed): what it shows now.
+            let under =
+                if own.is_null() { self.call(VIEWPORT_NOW, json!([])).unwrap_or(Value::Null) } else { Value::Null };
+            self.wire.set_viewport(None, scale)?;
+            if !own.is_null() || !under.is_null() {
+                let _ = self.call(VIEWPORT_BACK, json!([under, own, VIEWPORT_BACK_MS]));
+            }
+            return Ok(());
+        }
+        let own = match self.viewport_own {
+            None => Some(self.call(VIEWPORT_NOW, json!([])).unwrap_or(Value::Null)),
+            Some(_) => None,
+        };
+        self.wire.set_viewport(size, scale)?;
+        if own.is_some() {
+            self.viewport_own = own;
+        }
+        Ok(())
     }
 
     /// [`Driver::call`] with the session's tabs, read as the call runs.
     fn call_tabs(&mut self, function: &str, args: Value) -> Result<(Value, Vec<String>)> {
         let (answer, tabs) = self.wire.call_and_tabs(function, &args.to_string(), self.timeout)?;
-        Ok((serde_json::from_str(ok_text(&answer)?)?, tabs))
+        Ok((page_value(&ok_text(&answer)?)?, tabs))
     }
 
     fn url_title(&mut self) -> Result<(String, String)> {
@@ -790,7 +902,7 @@ impl Driver {
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport, route, unroute)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|device|geo|locale|timezone|media|offline|ua, route, unroute, downloads, wait --download)",
             op_name(command),
             self.engine
         )
@@ -822,7 +934,9 @@ impl Driver {
         crate::timing::record("ax_wd_page", started);
         let text = ok_text(&answer).context("ax")?;
         // The page's own script made this: checked before it is indexed.
-        let snap = crate::cdp::snap::Snap::from_page_json(text).map_err(|why| {
+        let snap = crate::cdp::snap::Snap::from_page_json(&text)
+            .or_else(|why| crate::cdp::lone_surrogates_replaced(&text).map_or(Err(why), |t| crate::cdp::snap::Snap::from_page_json(&t)))
+            .map_err(|why| {
             anyhow!("ax: the page's snapshot {why}; the page may have changed the built-ins its reader uses: try `text`, or --engine chrome")
         })?;
         crate::timing::record("ax_wd_snapshot", started);
@@ -851,10 +965,7 @@ impl Driver {
                 return Ok(Ok(flat_list(&built, opts.limit)));
             }
             let url = built.url.clone();
-            let origin = url
-                .find("://")
-                .and_then(|i| url[i + 3..].find('/').map(|j| url[..i + 3 + j].to_string()))
-                .unwrap_or_default();
+            let (origin, page) = crate::cdp::ax::origin_and_page(&url);
             let header = format!("page {} {url}", serde_json::to_string(&built.title).unwrap_or_default());
             let render_opts = crate::cdp::ax::Options {
                 full_text: opts.full_text,
@@ -862,6 +973,7 @@ impl Driver {
                 limit: opts.limit,
                 root_backend_id: root,
                 origin,
+                page,
                 clicks: crate::cdp::page::clickables_of(&snap),
                 lazy_budget: None,
             };
@@ -1099,10 +1211,34 @@ impl Driver {
             }
             Command::Eval { expression, timeout_ms, main: _ } => {
                 let timeout = timeout_ms.map_or(self.timeout, |ms| Duration::from_millis(ms.max(1.0) as u64));
-                self.wire.evaluate(expression, timeout).context("eval")
+                self.wire.evaluate(expression, timeout).map_err(|e| {
+                    // chromedriver's own reader refuses a value holding a
+                    // lone UTF-16 surrogate before navigera sees it.
+                    let e = e.context("eval");
+                    if format!("{e:#}").contains("cannot deserialize the result value") {
+                        anyhow!(
+                            "{e:#} (a string in the value may hold a lone UTF-16 surrogate, which the WebDriver \
+                             server cannot read: return it with .toWellFormed())"
+                        )
+                    } else {
+                        e
+                    }
+                })
             }
             Command::Wait { selector, text, url, gone, js, frame, ms, idle: _, timeout_ms, download } => {
-                if frame.is_some() || download.is_some() {
+                if let Some(glob) = download.as_deref().filter(|_| frame.is_none()) {
+                    if selector.is_some() || text.is_some() || url.is_some() || gone.is_some() || js.is_some() {
+                        bail!(
+                            "wait --download: alone on the {} engine (wait for the page first, then the file)",
+                            self.engine
+                        );
+                    }
+                    let timeout = timeout_ms
+                        .map_or_else(crate::browser::element_wait, |ms| Duration::from_millis(ms.max(1.0) as u64));
+                    let d = self.wire.wait_download(glob, timeout).map_err(|e| e.context("wait"))?;
+                    return Ok(json!({ "download": d.to_json() }));
+                }
+                if frame.is_some() {
                     return Err(self.not_here(command));
                 }
                 // As on Chrome: the element wait (5 s unless set), not the
@@ -1556,12 +1692,85 @@ impl Driver {
                     }
                     _ => None,
                 };
-                self.wire.set_viewport(size, *scale).map_err(|e| e.context("set viewport"))?;
+                self.size_page(size, *scale).map_err(|e| e.context("set viewport"))?;
                 let v = self.call(VIEWPORT_SIZE, json!([]))?;
                 Ok(match size {
                     Some(_) => json!({ "viewport": v, "scale": scale }),
                     None => json!({ "viewport": "default" }),
                 })
+            }
+            Command::Downloads { dir: Some(dir), .. } => {
+                let dir = std::path::Path::new(dir);
+                std::fs::create_dir_all(dir).with_context(|| format!("downloads --dir {}", dir.display()))?;
+                // Not `canonicalize`, as on Chrome (see `browser::download_dir`).
+                let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+                self.wire.set_downloads_dir(&dir).map_err(|e| e.context("downloads --dir"))?;
+                Ok(json!({ "dir": dir.display().to_string() }))
+            }
+            Command::Downloads { clear, format, dir: None } => {
+                let items = self.wire.downloads(*clear).map_err(|e| e.context("downloads"))?;
+                Ok(crate::protocol::downloads_answer(&items, format.as_deref() == Some("json")))
+            }
+            Command::Set { what, values, accuracy, .. }
+                if matches!(what.as_str(), "geo" | "geolocation" | "location") =>
+            {
+                let plan = crate::emulate::plan("geo", values, None, false, *accuracy, false)?;
+                let coordinates = match &plan.result["geo"] {
+                    Value::Array(at) => {
+                        json!({ "latitude": at[0], "longitude": at[1], "accuracy": plan.result["accuracy"] })
+                    }
+                    _ => Value::Null,
+                };
+                let on = !coordinates.is_null();
+                let params = json!({ "coordinates": coordinates });
+                self.wire.emulate(bidi::GEO, params).map_err(|e| e.context(format!("set {what}")))?;
+                let mut out = plan.result;
+                if on && bidi::persons_browser(&self.wire.describe()) {
+                    out["note"] = json!(bidi::GEO_ASKS);
+                }
+                Ok(out)
+            }
+            Command::Set { what, values, .. } if what == "device" => {
+                // The viewport, its pixel ratio and the user agent: what
+                // WebDriver BiDi emulates of a device. The user agent first:
+                // classic WebDriver has none to set, and its refusal leaves
+                // the viewport as it was; a device without one (a laptop)
+                // and `off` touch it only to take back a device's.
+                let d = crate::emulate::device_named(values)?;
+                let ua = match crate::emulate::device_ua_step(d.map(|d| d.ua), self.ua_by_device) {
+                    crate::emulate::UaStep::Set(ua) => Some(json!({ "userAgent": ua })),
+                    crate::emulate::UaStep::Clear => Some(json!({ "userAgent": null })),
+                    crate::emulate::UaStep::Keep => None,
+                };
+                if let Some(ua) = ua {
+                    let set = !ua["userAgent"].is_null();
+                    self.wire.emulate("emulation.setUserAgentOverride", ua).map_err(|e| e.context("set device"))?;
+                    self.ua_by_device = set;
+                }
+                let Some(d) = d else {
+                    self.size_page(None, None).map_err(|e| e.context("set device"))?;
+                    return Ok(json!({ "device": "default" }));
+                };
+                self.size_page(Some((d.width, d.height)), Some(d.scale)).map_err(|e| e.context("set device"))?;
+                let mut result = json!({ "device": d.name, "viewport": [d.width, d.height], "scale": d.scale });
+                if d.mobile {
+                    result["note"] = json!(format!(
+                        "the {} engine sets the viewport, pixel ratio and user agent only: touch, \
+                         <meta name=viewport> and a mobile layout are Chrome's emulation (--engine chrome)",
+                        self.engine
+                    ));
+                }
+                Ok(result)
+            }
+            Command::Set { what, values, .. } if crate::emulate::BIDI_SETTINGS.contains(&what.as_str()) => {
+                let plan = crate::emulate::bidi_plan(what, values, self.engine)?;
+                let ua = plan.method == "emulation.setUserAgentOverride";
+                self.wire.emulate(plan.method, plan.params).map_err(|e| e.context(format!("set {what}")))?;
+                if ua {
+                    // `set ua`: the user's now, which no device takes back.
+                    self.ua_by_device = false;
+                }
+                Ok(plan.result)
             }
             Command::Route { pattern: None, har: None, .. } => {
                 let routes = self.wire.routes();
@@ -1668,6 +1877,15 @@ mod tests {
         let e = ok_text(r##"{"err":"click: no element matches \"#x\""}"##).unwrap_err();
         assert!(format!("{e}").contains("no element"), "{e}");
         assert!(ok_text("not json").is_err());
+    }
+
+    #[test]
+    fn a_lone_surrogate_in_a_page_answer_reads_as_the_replacement_character() {
+        assert_eq!(page_value(&ok_text(r#"{"ok":"a\ud800b"}"#).unwrap()).unwrap(), "a\u{fffd}b");
+        let e = ok_text(r#"{"err":"no \udc00 here"}"#).unwrap_err();
+        assert!(format!("{e}").contains("no \u{fffd} here"), "{e}");
+        assert_eq!(page_value(r#"["\ud83d\ude00"]"#).unwrap(), json!(["😀"]));
+        assert!(page_value("[1,").is_err());
     }
 
     #[test]

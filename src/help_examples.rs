@@ -198,7 +198,7 @@ pub const EXAMPLES: &[Help] = &[
             ("--frame <css>", "look only inside this iframe"),
             ("--idle", "wait for no fetch/XHR for 500 ms"),
             ("--load networkidle", "wait until the network is idle"),
-            ("--download [<glob>]", "wait for a finished download, optionally matching"),
+            ("--download [<glob>]", "wait for the next download to finish, optionally matching"),
             ("--ms <n>", "wait exactly this many milliseconds"),
         ],
     ),

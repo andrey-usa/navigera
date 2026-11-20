@@ -944,7 +944,9 @@ pub enum Command {
     Hide {},
     /// A clean slate: a new browser context with one blank tab. `all`: also
     /// forget `set` emulation, routes, credentials, init scripts and the
-    /// dialog answer, as a new session would have none.
+    /// dialog answer, as a new session would have none. (`Reset`: what
+    /// earlier clients sent their session server.)
+    #[serde(rename = "reset", alias = "Reset")]
     Reset {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all: bool,
@@ -1344,7 +1346,7 @@ const OPS: &[(&str, &str, &str)] = &[
         "scroll the page, or an element into view",
     ),
     ("upload", "<ref> <file>... | --selector <css> --file <path>", "set the files of an <input type=file>"),
-    ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: a finished download"),
+    ("wait", "[--selector <css>] [--text <t>] [--url <part>] [--gone <css>] [--js <expr>] [--frame <css>] [--idle | --load networkidle] [--download [<glob>]] [--ms <n>]", "wait until every condition holds (default up to 5 s; --timeout-ms); --idle: no fetch/XHR for 500 ms; --download: the next download no earlier wait took, once it finishes"),
     ("downloads", "[--clear] [--json] | --dir <path>", "files the pages downloaded: #n state bytes path (url); --dir saves this session's from now on in <path> (kept across reset)"),
     ("eval", "<js> | --file <path.js> | - [--main]", "run JavaScript in the page and print the JSON result: an expression, an arrow function (called), or statements, with `await` and `return` working at the top level; `-` reads the script from stdin; --main (Electron) runs it in the app's main process, a function getting the electron module"),
     ("text", "[--selector <css>] [--grep <words> [--context <lines>] [--limit <passages>]]", "the first match's text as it reads (innerText; textContent when it is not rendered); with no selector, the whole page's. --grep: only the passages that mention the words, each with the lines around it (1) and its line number; the first 5, letter case aside"),
@@ -3399,7 +3401,14 @@ pub struct Driver {
     /// Hashes of `eval` sources V8 refused as reads, so a repeated write
     /// does not pay the refused try again (cleared at [`REFUSED_MAX`]).
     refused_reads: std::collections::HashSet<u64>,
+    /// The page's own viewport, read as `set viewport` or `set device`
+    /// first overrode it, for `off` to wait for ([`crate::emulate::VIEWPORT_BACK`]).
+    viewport_own: Option<Value>,
 }
+
+/// `set geo`'s answer in a browser a person may be using, where navigera
+/// grants no location permission (a grant would be every site's there).
+pub(crate) const GEO_ASKS: &str = "no location permission granted: in your own browser it would reach every site in your tabs too. A page asks you, as without navigera; `set permissions grant geolocation` grants it for the whole browser until the session ends";
 
 /// The rule a `route` command asks for: its URL glob and what happens to
 /// the requests it matches.
@@ -4142,6 +4151,7 @@ impl Driver {
                 was_read: false,
                 read_error: None,
                 refused_reads: Default::default(),
+                viewport_own: None,
                 pre_read: PreRead::default(),
             });
         }
@@ -4165,6 +4175,7 @@ impl Driver {
                 was_read: false,
                 read_error: None,
                 refused_reads: Default::default(),
+                viewport_own: None,
                 pre_read: PreRead::default(),
             });
         }
@@ -4195,6 +4206,7 @@ impl Driver {
             was_read: false,
             read_error: None,
             refused_reads: Default::default(),
+            viewport_own: None,
             pre_read: PreRead::default(),
         })
     }
@@ -4227,6 +4239,7 @@ impl Driver {
             was_read: false,
             read_error: None,
             refused_reads: Default::default(),
+            viewport_own: None,
             pre_read: PreRead::default(),
         })
     }
@@ -4274,6 +4287,7 @@ impl Driver {
             was_read: false,
             read_error: None,
             refused_reads: Default::default(),
+            viewport_own: None,
             pre_read: PreRead::default(),
         })
     }
@@ -4675,6 +4689,19 @@ impl Driver {
         let Some(state) = state else { return };
         let before = self.reported.replace(state.clone());
         if compact {
+            // `check` and `uncheck` echo the state they were asked for, and a
+            // box that flipped is what was asked: `ok`, as a click says. One
+            // that was already so says `{"changed":false}`.
+            let own = match (command, own) {
+                (Command::SetChecked { .. }, Some(Value::Object(mut map))) => {
+                    map.remove("checked");
+                    if map.get("changed") == Some(&Value::Bool(true)) {
+                        map.remove("changed");
+                    }
+                    (!map.is_empty()).then_some(Value::Object(map))
+                }
+                (_, own) => own,
+            };
             let short = compact_result(own, &state, before.as_ref());
             *result = Some(self.page_change(command, &short).unwrap_or(short));
             self.session.turn_drop();
@@ -5895,28 +5922,7 @@ impl Driver {
                 Ok(json!({ "dir": dir.display().to_string() }))
             }
             Command::Downloads { clear, format, dir: None } => {
-                let items = s.downloads(*clear);
-                if format.as_deref() == Some("json") {
-                    return Ok(json!(items.iter().map(|d| d.to_json()).collect::<Vec<_>>()));
-                }
-                if items.is_empty() {
-                    return Ok(json!("(no downloads)"));
-                }
-                let lines: Vec<String> = items
-                    .iter()
-                    .map(|d| {
-                        let j = d.to_json();
-                        format!(
-                            "#{} {} {} B {}  ({})",
-                            d.n,
-                            j["state"].as_str().unwrap_or(""),
-                            j["bytes"],
-                            j["path"].as_str().unwrap_or(&d.suggested),
-                            d.url
-                        )
-                    })
-                    .collect();
-                Ok(json!(lines.join("\n")))
+                Ok(downloads_answer(&s.downloads(*clear), format.as_deref() == Some("json")))
             }
             Command::Dialog { accept, prompt_text } => {
                 let accept = accept.unwrap_or(true);
@@ -6343,14 +6349,56 @@ impl Driver {
                 Ok(json!({ "network-quiet-ms": ms }))
             }
             Command::Set { what, values, scale, mobile, accuracy } => {
-                let plan = crate::emulate::plan(what, values, *scale, *mobile, *accuracy, s.is_lightpanda())?;
+                let lightpanda = s.is_lightpanda();
+                let plan = crate::emulate::plan(what, values, *scale, *mobile, *accuracy, lightpanda)?;
+                let mut note = None;
                 if let Some(permission) = plan.grant {
-                    self.session.grant(permission);
+                    if !self.session.grant(permission) {
+                        note = Some(GEO_ASKS);
+                    }
+                } else if plan.kind == "geo" {
+                    self.session.ungrant("geolocation");
                 }
+                // A viewport override taken away reaches the page after the
+                // browser answers: the page's own size (read as the first
+                // override is set), or, unknown, what it shows under the
+                // override, for the wait below (`emulate::VIEWPORT_BACK`).
+                let sizes = plan.kind == "viewport" && !lightpanda;
+                let had = sizes && self.session.has_override("viewport");
+                let now = || self.session.evaluate::<Value>(crate::emulate::VIEWPORT_NOW).ok();
+                let first = if sizes && !had && !plan.calls.is_empty() { now() } else { None };
+                let back = if had && plan.calls.is_empty() {
+                    let own = self.viewport_own.take();
+                    let under = if own.is_none() { now() } else { None };
+                    // Neither known: nothing to wait for.
+                    (own.is_some() || under.is_some())
+                        .then(|| (under.unwrap_or(Value::Null), own.unwrap_or(Value::Null)))
+                } else {
+                    None
+                };
                 self.session
                     .set_override(plan.kind, plan.calls, plan.reset)
                     .map_err(|e| e.context(format!("set {what}")))?;
-                Ok(plan.result)
+                if first.is_some() {
+                    self.viewport_own = first;
+                }
+                if what == "device" && !lightpanda {
+                    let ua = crate::emulate::device_named(values)?.map(|d| d.ua);
+                    self.session.set_device_ua(ua).map_err(|e| e.context("set device"))?;
+                }
+                if let Some((under, own)) = back {
+                    let back = format!(
+                        "({})({under}, {own}, {})",
+                        crate::emulate::VIEWPORT_BACK,
+                        crate::emulate::VIEWPORT_BACK_MS
+                    );
+                    let _ = self.session.evaluate::<Value>(&back);
+                }
+                let mut out = plan.result;
+                if let Some(note) = note {
+                    out["note"] = json!(note);
+                }
+                Ok(out)
             }
             Command::Get { what, name_of, target, timeout_ms } => {
                 if what == "count" {
@@ -6806,7 +6854,7 @@ impl Command {
 }
 
 /// What `set` sets, with the other names each goes by.
-const SETTINGS: &[&str] = &[
+pub(crate) const SETTINGS: &[&str] = &[
     "viewport",
     "device",
     "media",
@@ -7213,6 +7261,32 @@ fn cookies_text(cookies: &Value, values: bool) -> String {
     } else {
         lines.join("\n")
     }
+}
+
+/// What `downloads` answers: `#n state bytes path (url)` lines, or the
+/// items as JSON.
+pub(crate) fn downloads_answer(items: &[crate::cdp::downloads::Download], as_json: bool) -> Value {
+    if as_json {
+        return json!(items.iter().map(|d| d.to_json()).collect::<Vec<_>>());
+    }
+    if items.is_empty() {
+        return json!("(no downloads)");
+    }
+    let lines: Vec<String> = items
+        .iter()
+        .map(|d| {
+            let j = d.to_json();
+            format!(
+                "#{} {} {} B {}  ({})",
+                d.n,
+                j["state"].as_str().unwrap_or(""),
+                j["bytes"],
+                j["path"].as_str().unwrap_or(&d.suggested),
+                d.url
+            )
+        })
+        .collect();
+    json!(lines.join("\n"))
 }
 
 /// `scheme://host[:port]` of a URL ("" when it has none).
@@ -9263,6 +9337,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(wire, r#"{"op":"click","ref":9}"#);
+        // Every op by its command's name (`reset` was `Reset` on the wire).
+        assert_eq!(serde_json::to_string(&Command::Reset { all: true }).unwrap(), r#"{"op":"reset","all":true}"#);
+        for json in [r#"{"op":"reset","all":true}"#, r#"{"op":"Reset","all":true}"#] {
+            assert_eq!(serde_json::from_str::<Command>(json).unwrap(), Command::Reset { all: true }, "{json}");
+        }
         // `until_gone`: true is the default limit, a number is the limit.
         let until = |json: &str| match serde_json::from_str::<Command>(json) {
             Ok(Command::Click { until_gone, .. }) => Ok(until_gone),

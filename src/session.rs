@@ -1187,7 +1187,16 @@ fn linux_caller() -> Option<String> {
             && std::fs::read(format!("/proc/{pid}/cmdline"))
                 .map(|c| String::from_utf8_lossy(&c).contains("navigera"))
                 .unwrap_or(false);
-        if !PASS.contains(&comm) && !launcher {
+        // A script run by its `#!` line is named after the script, and so
+        // is every subshell it forks (`out=$(navigera ...)`), each with a
+        // pid of its own: the program it runs says it is a shell.
+        let shell = || {
+            std::fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .and_then(|exe| exe.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .is_some_and(|name| PASS.contains(&name.as_str()))
+        };
+        if !PASS.contains(&comm) && !launcher && !shell() {
             return Some(format!("{comm} {pid}/{started}"));
         }
         if ppid <= 1 {

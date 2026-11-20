@@ -775,8 +775,23 @@ fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Val
         }
         return;
     }
-    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
-        return;
+    let parsed = serde_json::from_str::<Value>(text)
+        .or_else(|e| lone_surrogates_replaced(text).map_or(Err(e), |fixed| serde_json::from_str(&fixed)));
+    let mut value = match parsed {
+        Ok(value) => value,
+        Err(e) => {
+            // An answer that can't be read still ends its command now: left
+            // waiting, it would fail only at its timeout, saying nothing.
+            if let Some(id) = leading_id(text) {
+                if let Some((_, _, responder)) = pending.lock().unwrap().remove(&id) {
+                    let _ = responder.send(Err(Refusal::Other(format!(
+                        "the browser's answer is not JSON navigera can read ({e}, {} bytes)",
+                        text.len()
+                    ))));
+                }
+            }
+            return;
+        }
     };
     if let Some(id) = value.get("id").and_then(Value::as_u64) {
         let responder = pending.lock().unwrap().remove(&id);
@@ -815,6 +830,85 @@ fn dispatch(text: &str, pending: &Mutex<Pending>, events: &broadcast::Sender<Val
         }
         sent.fetch_add(1, Ordering::SeqCst);
         let _ = events.send(value);
+    }
+}
+
+/// The id of an answer as Chrome writes one, `{"id":<n>,…`, read without
+/// parsing the rest.
+fn leading_id(text: &str) -> Option<u64> {
+    let after = text.strip_prefix("{\"id\":")?;
+    after[..after.bytes().take_while(u8::is_ascii_digit).count()].parse().ok()
+}
+
+/// `text` with every escaped UTF-16 surrogate that has no partner written
+/// as `�`, or None when it has none. A JavaScript string may hold a
+/// lone surrogate and Chrome sends it as `\ud800`, which JSON read as UTF-8
+/// cannot take: the whole message was refused, and a command whose answer
+/// held one waited for its timeout. U+FFFD is what `TextEncoder` writes
+/// for one too. Only called on a message that failed to parse.
+pub(crate) fn lone_surrogates_replaced(text: &str) -> Option<String> {
+    let b = text.as_bytes();
+    let unit = |at: usize| -> Option<u16> {
+        let hex = b.get(at..at + 4)?;
+        if !hex.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        u16::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()
+    };
+    let (mut out, mut copied, mut at) = (String::new(), None, 0);
+    while let Some(i) = b.get(at..).and_then(|rest| memchr::memchr(b'\\', rest)).map(|i| at + i) {
+        // Every other escape is two bytes; `\\u` is a backslash, then `u`.
+        at = i + 2;
+        if b.get(i + 1) != Some(&b'u') {
+            continue;
+        }
+        let lone = match unit(i + 2) {
+            Some(0xD800..=0xDBFF) => {
+                let paired = b.get(i + 6..i + 8) == Some(b"\\u") && matches!(unit(i + 8), Some(0xDC00..=0xDFFF));
+                if paired {
+                    at = i + 12;
+                    continue;
+                }
+                true
+            }
+            Some(0xDC00..=0xDFFF) => true,
+            _ => false,
+        };
+        at = i + 6;
+        if lone {
+            out.push_str(&text[copied.unwrap_or(0)..i]);
+            out.push_str("\\ufffd");
+            copied = Some(i + 6);
+        }
+    }
+    let copied = copied?;
+    out.push_str(&text[copied..]);
+    Some(out)
+}
+
+#[cfg(test)]
+mod lone_surrogate_tests {
+    use super::*;
+
+    #[test]
+    fn lone_surrogates_become_the_replacement_character_and_pairs_stay() {
+        let read = |t: &str| serde_json::from_str::<Value>(&lone_surrogates_replaced(t).unwrap()).unwrap();
+        assert!(serde_json::from_str::<Value>(r#"{"id":1,"result":"a\ud800b"}"#).is_err(), "serde_json refuses them");
+        assert_eq!(read(r#"{"id":1,"result":"a\ud800b"}"#)["result"], "a\u{fffd}b");
+        assert_eq!(read(r#"{"r":"\udc00"}"#)["r"], "\u{fffd}");
+        assert_eq!(read(r#"{"r":"\ud800𐀀"}"#)["r"], "\u{fffd}\u{10000}");
+        assert_eq!(read(r#"{"r":"😀\ud800","s":"\\ud800"}"#), serde_json::json!({"r": "😀\u{fffd}", "s": "\\ud800"}));
+        assert_eq!(read(r#"{"r":"é\ud800"}"#)["r"], "é\u{fffd}");
+        assert_eq!(lone_surrogates_replaced(r#"{"r":"😀 \\ud800 é"}"#), None);
+        assert_eq!(lone_surrogates_replaced(r#"{"r":"\ud8"#), None);
+        assert_eq!(lone_surrogates_replaced(r#"{"r":"\"#), None);
+    }
+
+    #[test]
+    fn the_id_of_an_answer_is_read_without_the_rest() {
+        assert_eq!(leading_id(r#"{"id":42,"result":{"x":"\ud800"}}"#), Some(42));
+        assert_eq!(leading_id(r#"{"method":"x"}"#), None);
+        assert_eq!(leading_id(r#"{"id":}"#), None);
     }
 }
 

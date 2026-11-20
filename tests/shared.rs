@@ -364,12 +364,34 @@ fn a_killed_shared_browser_is_relaunched_and_sessions_carry_on() {
     // Both at once: one relaunch, the other joins it.
     let started = Instant::now();
     let probe = ["eval", "[localStorage.getItem('who'), document.cookie, location.pathname]"];
-    let (ra, rb) = std::thread::scope(|scope| {
-        let ha = scope.spawn(|| after_crash(&a, &probe));
-        let hb = scope.spawn(|| after_crash(&b, &probe));
+    // Each session's time to its answer, and the first answer when it was
+    // a refusal asked again, so a slow recovery says where its time went.
+    let timed = |s: &Session| {
+        let (success, first) = s.run(&probe);
+        let first_at = started.elapsed();
+        if !success && first.to_string().contains("was not retried") {
+            let (success, r) = s.run(&probe);
+            (success, r, format!("answered at {:?}, first at {first_at:?}: {first}", started.elapsed()))
+        } else {
+            (success, first, format!("answered at {first_at:?}"))
+        }
+    };
+    let ((sa, ra, ta), (sb, rb, tb)) = std::thread::scope(|scope| {
+        let ha = scope.spawn(|| timed(&a));
+        let hb = scope.spawn(|| timed(&b));
         (ha.join().unwrap(), hb.join().unwrap())
     });
-    assert!(started.elapsed() < Duration::from_secs(15), "recovery took {:?}", started.elapsed());
+    let (ra, rb) = ((sa, ra), (sb, rb));
+    let took = started.elapsed();
+    let relaunch = |r: &Value| r["recovered"]["ms"].clone();
+    assert!(
+        took < Duration::from_secs(15),
+        "recovery took {took:?}: a {ta}, its recovery {} ms; b {tb}, its recovery {} ms\na: {}\nb: {}",
+        relaunch(&ra.1),
+        relaunch(&rb.1),
+        ra.1,
+        rb.1
+    );
     for (name, (success, r)) in [("a", ra), ("b", rb)] {
         assert!(success && r["ok"] == true, "{name}: {r}");
         assert_eq!(r["recovered"]["browser"], "relaunched", "{name}: {r}");

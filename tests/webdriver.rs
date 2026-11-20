@@ -52,7 +52,31 @@ const NAV: &str = r##"<!doctype html><html><head><title>Nav</title></head><body>
 <button type="button" id="opens" onclick="window.open('/next.html')">Opens a tab</button>
 </body></html>"##;
 
+/// A TodoMVC-style router: the view follows the fragment, and only once the
+/// browser fires `hashchange`, a task of its own after the URL changed.
+const HASH: &str = r##"<!doctype html><html><head><title>Hash</title></head><body>
+<ul id="todos"><li class="done">Write tests</li><li>Ship it</li><li>Rest</li></ul>
+<p><a href="#/">All</a> <a href="#/active">Active</a> <a href="#/completed">Completed</a></p>
+<p id="shown">3 shown</p>
+<script>
+window.filter = 'all';
+addEventListener('hashchange', () => {
+  filter = location.hash.replace('#/', '') || 'all';
+  let n = 0;
+  for (const li of document.querySelectorAll('#todos li')) {
+    const show = filter === 'all' || (filter === 'completed') === li.classList.contains('done');
+    li.hidden = !show;
+    if (show) n++;
+  }
+  document.getElementById('shown').textContent = n + ' shown';
+});
+</script>
+</body></html>"##;
+
 const FRAME: &str = r#"<!doctype html><html><head><title>Inner</title></head><body><button onclick="this.textContent = 'pressed'">In frame</button></body></html>"#;
+
+/// A file the server sends as a download.
+const CSV: &str = "a,b\n1,2\n";
 
 const MORE: &str = r#"<!doctype html><html><head><title>More</title></head><body style="margin:0;user-select:none;-webkit-user-select:none">
 <input type="file" id="one"> <input type="file" id="many" multiple>
@@ -96,6 +120,16 @@ fn serve() -> String {
                             break;
                         }
                     }
+                    // `/to?u=<url>`: a redirect there (another origin's page).
+                    if let Some(to) = path.strip_prefix("/to?u=") {
+                        let head = format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nCache-Control: no-store\r\n\r\n"
+                        );
+                        if s.write_all(head.as_bytes()).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     // A form's GET adds a query.
                     let (status, body) = match path.split('?').next().unwrap_or("/") {
                         "/" => ("200 OK", INDEX),
@@ -103,10 +137,17 @@ fn serve() -> String {
                         "/frame.html" => ("200 OK", FRAME),
                         "/more.html" => ("200 OK", MORE),
                         "/nav.html" => ("200 OK", NAV),
+                        "/hash.html" => ("200 OK", HASH),
+                        "/report.csv" => ("200 OK", CSV),
                         _ => ("404 Not Found", "not found"),
                     };
+                    let kind = if body == CSV {
+                        "text/csv\r\nContent-Disposition: attachment; filename=\"report.csv\""
+                    } else {
+                        "text/html; charset=utf-8"
+                    };
                     let head = format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n\r\n",
                         body.len()
                     );
                     if s.write_all(head.as_bytes()).and_then(|_| s.write_all(body.as_bytes())).is_err() {
@@ -335,6 +376,41 @@ fn nav_clicks(args: &[&str], engine: &str) {
     );
 }
 
+/// A click on a link to a fragment of the page, and Enter on one, answer
+/// once the page's `hashchange` listeners have run: the read right after
+/// shows the view the URL names (on Chrome's own engine the old view came
+/// back 34 times in 40 before it waited).
+fn hash_links(args: &[&str], engine: &str) {
+    let site = serve();
+    let links = [("#/completed", "completed 1 shown"), ("#/active", "active 2 shown"), ("#/", "all 3 shown")];
+    let view = "filter + ' ' + document.getElementById('shown').textContent";
+    let mut script = vec![json!({ "id": 1, "op": "goto", "url": format!("{site}/hash.html") })];
+    let mut checks = Vec::new();
+    for round in 0..4u64 {
+        for (i, (href, shown)) in links.iter().enumerate() {
+            let id = 10 + round * 100 + i as u64 * 10;
+            let selector = format!("a[href=\"{href}\"]");
+            script.push(json!({ "id": id, "op": "click", "selector": selector }));
+            script.push(json!({ "id": id + 1, "op": "eval", "expression": view }));
+            script.push(json!({ "id": id + 2, "op": "press", "selector": selector, "key": "Enter" }));
+            script.push(json!({ "id": id + 3, "op": "eval", "expression": "location.hash = '#/x'; ''" }));
+            script.push(json!({ "id": id + 4, "op": "wait", "js": "filter === 'x'" }));
+            script.push(json!({ "id": id + 5, "op": "press", "selector": selector, "key": "Enter" }));
+            script.push(json!({ "id": id + 6, "op": "eval", "expression": view }));
+            checks.push((id, id + 1, format!("click {href}"), *shown));
+            checks.push((id + 5, id + 6, format!("Enter on {href}"), *shown));
+        }
+    }
+    script.push(json!({ "id": 9999, "op": "quit" }));
+    let a = session(args, &script);
+    let stale: Vec<String> = checks
+        .iter()
+        .filter(|(_, read, _, shown)| ok(&a, *read) != *shown)
+        .map(|(act, read, what, shown)| format!("{what}: read {} for {shown} ({})", ok(&a, *read), ok(&a, *act)))
+        .collect();
+    assert!(stale.is_empty(), "{engine}: {} of {} reads saw the old view: {stale:#?}", stale.len(), checks.len());
+}
+
 /// The ops past the core set, on every engine: files for a file input, a
 /// drag of a `draggable` and of a plain element, the raw mouse and held
 /// keys, storage, the viewport, and a script that runs before the page's.
@@ -395,6 +471,7 @@ fn more_ops(args: &[&str], engine: &str, bidi: bool) {
         json!({ "id": 41, "op": "eval", "expression": ask("/api/data?x=1") }),
         json!({ "id": 42, "op": "wait", "js": "window.got !== undefined" }),
         json!({ "id": 43, "op": "eval", "expression": "window.got" }),
+        json!({ "id": 44, "op": "set", "what": "locale", "values": ["de-DE"] }),
         json!({ "id": 30, "op": "quit" }),
     ];
     let a = session(args, &script);
@@ -461,9 +538,291 @@ fn more_ops(args: &[&str], engine: &str, bidi: bool) {
         // (Several statements in one `eval`, and the server's own answer.)
         assert!(ok(&a, 35).as_str().unwrap().starts_with("404 "), "{engine}: {}", ok(&a, 35));
         assert!(failed(26).contains("classic WebDriver has no script"), "{engine}: {}", failed(26));
+        assert!(failed(44).contains("classic WebDriver has no emulation"), "{engine}: {}", failed(44));
         assert_eq!(ok(&a, 28), "undefined", "{engine}");
     }
     assert_eq!(ok(&a, 30)["bye"], true);
+}
+
+/// `set device` with a device that has no user agent of its own, then
+/// `off`, and `set viewport` then `off`: the device's viewport, then the one
+/// the window had before. (Classic WebDriver sizes the window: it takes a
+/// laptop and refuses a phone, whose user agent it cannot set.)
+fn viewport_back(args: &[&str], engine: &str) {
+    let site = serve();
+    let size = "[window.innerWidth, window.innerHeight]";
+    let set = |id: u64, what: &str, values: &[&str]| json!({ "id": id, "op": "set", "what": what, "values": values });
+    let eval = |id: u64| json!({ "id": id, "op": "eval", "expression": size });
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        // The first tab keeps its own size in the page, for the wait at 15.
+        json!({ "id": 2, "op": "eval", "expression": "(window.__own = [window.innerWidth, window.innerHeight])" }),
+        set(3, "device", &["Laptop"]),
+        eval(4),
+        set(5, "device", &["off"]),
+        eval(6),
+        set(7, "viewport", &["800", "600"]),
+        set(8, "viewport", &["off"]),
+        eval(9),
+        // Every tab of the session, as on Chrome: `off` from a second tab
+        // gives the first its own back too (over BiDi it stayed at the size).
+        // The wait is for its own size, not any other than 800x600: a tab
+        // shown again can first read a size between (macOS, chromedriver
+        // classic: the whole window, [756,469] for [756,356]).
+        set(10, "viewport", &["800", "600"]),
+        json!({ "id": 11, "op": "tab-new" }),
+        eval(12),
+        set(13, "viewport", &["off"]),
+        json!({ "id": 14, "op": "tab-select", "index": 0 }),
+        json!({ "id": 15, "op": "wait", "js": "innerWidth === __own[0] && innerHeight === __own[1]", "timeout_ms": 2000 }),
+        eval(16),
+        json!({ "id": 17, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    let start = ok(&a, 2).clone();
+    assert_eq!(ok(&a, 3)["device"], "Laptop", "{engine}: {}", ok(&a, 3));
+    assert_eq!(ok(&a, 4), &json!([1366, 768]), "{engine}: the device's viewport");
+    assert_eq!(ok(&a, 6), &start, "{engine}: `set device off` gives back the viewport the window had");
+    assert_eq!(ok(&a, 9), &start, "{engine}: `set viewport off` gives back the viewport the window had");
+    assert_eq!(ok(&a, 12), &json!([800, 600]), "{engine}: a tab opened after `set viewport`");
+    assert_eq!(ok(&a, 16), &start, "{engine}: `set viewport off` from the second tab, in the first ({})", a[14]);
+    ok(&a, 15);
+}
+
+/// Classic WebDriver sizes a window, not a viewport: `off` gives back the
+/// window it sized, also from another window of the session (a popup the
+/// page opened as a window of its own). It gave the first window's size
+/// to the window it was in and left the first at the size set.
+fn viewport_back_per_window(args: &[&str], engine: &str) {
+    let site = serve();
+    let size = "[window.innerWidth, window.innerHeight]";
+    let set = |id: u64, what: &str, values: &[&str]| json!({ "id": id, "op": "set", "what": what, "values": values });
+    let eval = |id: u64| json!({ "id": id, "op": "eval", "expression": size });
+    let popup = format!("window.open('{site}/more.html', '_blank', 'popup,width=520,height=410'); 1");
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        eval(2),
+        set(3, "viewport", &["800", "600"]),
+        json!({ "id": 4, "op": "eval", "expression": popup }),
+        json!({ "id": 5, "op": "wait", "js": "true", "timeout_ms": 500 }),
+        json!({ "id": 6, "op": "tab-select", "index": 1 }),
+        eval(7),
+        set(8, "viewport", &["off"]),
+        eval(9),
+        json!({ "id": 10, "op": "tab-select", "index": 0 }),
+        eval(11),
+        json!({ "id": 12, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    let start = ok(&a, 2).clone();
+    ok(&a, 6);
+    let popup_own = ok(&a, 7).clone();
+    assert_ne!(popup_own, start, "{engine}: the popup is a window of its own size");
+    assert_eq!(ok(&a, 9), &popup_own, "{engine}: `off` from the popup leaves the popup as it was");
+    assert_eq!(ok(&a, 11), &start, "{engine}: `off` from the popup gives the sized window its own back");
+}
+
+/// `set` over WebDriver BiDi's `emulation.*` (Firefox): locale, timezone,
+/// the color scheme, the user agent and offline, for every tab, a new one
+/// too; what Firefox cannot emulate is refused with the engine to use.
+fn emulate_ops(args: &[&str], engine: &str) {
+    let site = serve();
+    let set = |id: u64, what: &str, values: &[&str]| json!({ "id": id, "op": "set", "what": what, "values": values });
+    let eval = |id: u64, expression: &str| json!({ "id": id, "op": "eval", "expression": expression });
+    let fetch = "window.got = undefined; fetch('/more.html').then((r) => { window.got = r.status; }, () => { window.got = 'failed'; }); 0";
+    // Another server is another origin: the permission follows the tab there,
+    // through a redirect, and into a tab the page opens.
+    let other = serve();
+    let (third, fourth) = (serve(), serve());
+    let position = "new Promise((ok) => navigator.geolocation.getCurrentPosition(\
+                    (p) => ok([p.coords.latitude, p.coords.longitude, p.coords.accuracy]), (e) => ok('error ' + e.code), \
+                    { timeout: 5000 }))";
+    let state = "[navigator.language, new Intl.NumberFormat().format(1234.5), Intl.DateTimeFormat().resolvedOptions().timeZone, \
+                 matchMedia('(prefers-color-scheme: dark)').matches, navigator.userAgent]";
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        set(2, "locale", &["de-DE"]),
+        set(3, "timezone", &["Asia/Tokyo"]),
+        set(4, "media", &["dark"]),
+        set(5, "ua", &["NavigeraTest/1.0", "(emulated)"]),
+        json!({ "id": 6, "op": "reload" }),
+        eval(7, state),
+        set(8, "media", &["print"]),
+        set(9, "cpu", &["4"]),
+        set(10, "offline", &[]),
+        eval(11, fetch),
+        json!({ "id": 12, "op": "wait", "js": "window.got !== undefined" }),
+        eval(13, "window.got"),
+        set(14, "offline", &["off"]),
+        eval(15, fetch),
+        json!({ "id": 16, "op": "wait", "js": "window.got !== undefined" }),
+        eval(17, "window.got"),
+        json!({ "id": 18, "op": "tab-new" }),
+        json!({ "id": 19, "op": "goto", "url": format!("{site}/more.html") }),
+        eval(20, state),
+        set(21, "locale", &["off"]),
+        set(22, "timezone", &["off"]),
+        set(23, "media", &["off"]),
+        set(24, "ua", &["off"]),
+        json!({ "id": 25, "op": "reload" }),
+        eval(26, state),
+        set(27, "device", &["iPhone", "15"]),
+        eval(28, "[innerWidth, devicePixelRatio, navigator.userAgent.includes('iPhone')]"),
+        set(29, "device", &["off"]),
+        set(30, "geo", &["52.52", "13.405"]),
+        eval(31, position),
+        json!({ "id": 32, "op": "goto", "url": format!("{other}/more.html") }),
+        eval(33, position),
+        // A redirect to an origin the session has not been to: granted where
+        // the navigation lands, not where it was asked to go.
+        json!({ "id": 45, "op": "goto", "url": format!("{site}/to?u={third}/more.html") }),
+        eval(46, "location.origin"),
+        eval(47, position),
+        // A tab the page opens, on another origin again.
+        eval(
+            48,
+            &format!(
+                "(document.body.insertAdjacentHTML('beforeend', '<button id=\"pop\" onclick=\"window.w = window.open(\\'{fourth}/more.html\\')\">Pop</button>'), 1)"
+            ),
+        ),
+        json!({ "id": 49, "op": "click", "selector": "#pop" }),
+        json!({ "id": 51, "op": "wait", "js": "!!window.w" }),
+        json!({ "id": 52, "op": "tab-select", "index": 2 }),
+        json!({ "id": 53, "op": "wait", "js": format!("location.origin === '{fourth}' && document.readyState === 'complete'") }),
+        eval(54, position),
+        json!({ "id": 55, "op": "tab-select", "index": 1 }),
+        set(34, "geo", &["off"]),
+        // One user agent, the one set last: a device without one (a
+        // laptop) and `device off` leave a `set ua` alone, and take back
+        // a device's.
+        set(35, "ua", &["Bot/1.0"]),
+        set(36, "device", &["Laptop"]),
+        set(37, "device", &["off"]),
+        json!({ "id": 38, "op": "reload" }),
+        eval(39, "navigator.userAgent"),
+        set(41, "device", &["iPhone", "15"]),
+        set(42, "device", &["Laptop"]),
+        json!({ "id": 43, "op": "reload" }),
+        eval(44, "[navigator.userAgent.includes('iPhone'), navigator.userAgent.startsWith('Bot/')]"),
+        json!({ "id": 50, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    let failed = |id: u64| {
+        let x = a.iter().find(|x| x["id"] == id).unwrap();
+        assert_eq!(x["ok"], false, "{engine}: step {id} should fail: {x}");
+        x["error"].to_string()
+    };
+    assert_eq!(ok(&a, 2), &json!({ "locale": "de-DE" }), "{engine}");
+    assert_eq!(ok(&a, 4), &json!({ "media": "dark" }), "{engine}");
+    let emulated = json!(["de-DE", "1.234,5", "Asia/Tokyo", true, "NavigeraTest/1.0 (emulated)"]);
+    assert_eq!(ok(&a, 7), &emulated, "{engine}: the page sees every override");
+    assert!(failed(8).contains("--engine chrome"), "{engine}: {}", failed(8));
+    assert!(failed(9).contains("--engine chrome"), "{engine}: {}", failed(9));
+    assert_eq!(ok(&a, 10), &json!({ "offline": true }), "{engine}");
+    assert_eq!(ok(&a, 13), "failed", "{engine}: a request while offline");
+    assert_eq!(ok(&a, 17), 200, "{engine}: online again");
+    assert_eq!(ok(&a, 20), &emulated, "{engine}: a tab opened after the overrides has them too");
+    let back = ok(&a, 26);
+    assert!(
+        back[0] != "de-DE" && back[2] != "Asia/Tokyo" && back[4] != "NavigeraTest/1.0 (emulated)",
+        "{engine}: {back}"
+    );
+    assert_eq!(ok(&a, 27)["device"], "iPhone 15", "{engine}");
+    assert!(ok(&a, 27)["note"].as_str().is_some_and(|n| n.contains("touch")), "{engine}: {}", ok(&a, 27));
+    assert_eq!(ok(&a, 28), &json!([393, 3, true]), "{engine}: the page sees the device");
+    assert_eq!(ok(&a, 29), &json!({ "device": "default" }), "{engine}");
+    let nums = |v: &Value| v.as_array().map(|n| n.iter().map(Value::as_f64).collect::<Vec<_>>());
+    let berlin = Some(vec![Some(52.52), Some(13.405), Some(50.0)]);
+    assert_eq!(
+        (nums(&ok(&a, 30)["geo"]), ok(&a, 30)["accuracy"].as_f64()),
+        (nums(&json!([52.52, 13.405])), Some(50.0))
+    );
+    assert_eq!(nums(ok(&a, 31)), berlin, "{engine}: the page reads the position, no prompt: {}", ok(&a, 31));
+    assert_eq!(nums(ok(&a, 33)), berlin, "{engine}: and so does the next origin: {}", ok(&a, 33));
+    assert_eq!(ok(&a, 46), &json!(third), "{engine}: the redirect landed on the third origin");
+    assert_eq!(nums(ok(&a, 47)), berlin, "{engine}: a redirect's target reads it too: {}", ok(&a, 47));
+    assert_eq!(nums(ok(&a, 54)), berlin, "{engine}: and so does a tab the page opened: {}", ok(&a, 54));
+    assert_eq!(ok(&a, 34), &json!({ "geo": "default" }), "{engine}");
+    assert_eq!(ok(&a, 39), "Bot/1.0", "{engine}: a laptop and `device off` leave a `set ua` alone");
+    assert_eq!(ok(&a, 44), &json!([false, false]), "{engine}: a laptop takes back the phone's user agent");
+    assert_eq!(ok(&a, 50)["bye"], true);
+}
+
+/// A file a page downloads is listed, waited for and saved where
+/// `downloads --dir` says.
+fn download_ops(args: &[&str], engine: &str) {
+    let site = serve();
+    let dir = tempfile::tempdir().unwrap();
+    let start = "(() => { const a = document.createElement('a'); a.href = '/report.csv'; document.body.append(a); a.click(); return 1; })()";
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        json!({ "id": 2, "op": "downloads" }),
+        json!({ "id": 3, "op": "eval", "expression": start }),
+        json!({ "id": 4, "op": "wait", "download": "*.csv" }),
+        json!({ "id": 5, "op": "downloads", "dir": dir.path().display().to_string() }),
+        json!({ "id": 6, "op": "eval", "expression": start }),
+        json!({ "id": 7, "op": "wait", "download": "" }),
+        json!({ "id": 8, "op": "downloads", "format": "json" }),
+        json!({ "id": 9, "op": "wait", "download": "*.pdf", "timeout_ms": 300 }),
+        json!({ "id": 10, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    assert_eq!(ok(&a, 2), "(no downloads)", "{engine}");
+    let first = &ok(&a, 4)["download"];
+    assert_eq!(
+        (&first["state"], &first["file"], &first["bytes"]),
+        (&json!("completed"), &json!("report.csv"), &json!(CSV.len())),
+        "{engine}: {first}"
+    );
+    let second = &ok(&a, 7)["download"];
+    let saved = std::path::Path::new(second["path"].as_str().unwrap_or(""));
+    // Both sides canonical: a temporary directory may be named through a
+    // link (macOS) or by its short name (Windows).
+    let parent = saved.parent().and_then(|p| p.canonicalize().ok());
+    assert_eq!(parent, dir.path().canonicalize().ok(), "{engine}: {second}");
+    assert_eq!(std::fs::read_to_string(saved).unwrap(), CSV, "{engine}");
+    // The second wait took the second file, though the first was in the
+    // list, finished.
+    assert_eq!(ok(&a, 8).as_array().map(Vec::len), Some(2), "{engine}: {}", ok(&a, 8));
+    let x = a.iter().find(|x| x["id"] == 9).unwrap();
+    assert!(
+        x["error"].as_str().is_some_and(|e| e.contains("no finished download matching \"*.pdf\"")),
+        "{engine}: {x}"
+    );
+}
+
+/// A lone UTF-16 surrogate in a page (half of an emoji pair) reads as
+/// U+FFFD in `text`, `ax` and `eval`, where it failed the command: the
+/// page's and the browser's JSON write it as `\ud800`, which JSON in UTF-8
+/// cannot hold.
+fn lone_surrogates(args: &[&str], engine: &str) {
+    let site = serve();
+    let eval = |id: u64, expression: &str| json!({ "id": id, "op": "eval", "expression": expression });
+    // An `eval` value holding one crosses Firefox's own BiDi server; the
+    // other servers refuse it themselves (chromedriver over BiDi does not
+    // answer at all), and over classic chromedriver the error says what to
+    // do. `text` and `ax` come back on every engine.
+    let firefox = args.contains(&"firefox");
+    let classic_chromedriver = args.contains(&"--webdriver") && !args.contains(&"--bidi");
+    let mut script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        eval(2, "(document.body.innerHTML = '<p>x\\ud800y</p><button>Go\\udc00</button>', 1)"),
+        json!({ "id": 3, "op": "text" }),
+        json!({ "id": 4, "op": "ax", "format": "text" }),
+    ];
+    if firefox || classic_chromedriver {
+        script.push(eval(5, "'\\ud800' + '\\ud83d\\ude00'"));
+    }
+    script.push(json!({ "id": 9, "op": "quit" }));
+    let a = session(args, &script);
+    assert!(ok(&a, 3).as_str().is_some_and(|t| t.contains("x\u{fffd}y")), "{engine}: {}", ok(&a, 3));
+    assert!(ok(&a, 4).as_str().is_some_and(|t| t.contains("Go\u{fffd}")), "{engine}: {}", ok(&a, 4));
+    if firefox {
+        assert_eq!(ok(&a, 5), "\u{fffd}😀", "{engine}");
+    } else if classic_chromedriver {
+        let x = a.iter().find(|x| x["id"] == 5).unwrap();
+        assert!(x["error"].to_string().contains(".toWellFormed()"), "{engine}: {x}");
+    }
 }
 
 /// A list of allowed hosts is held by Chrome's engine only: a WebDriver
@@ -500,7 +859,36 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     };
     scenario(&["--engine", "firefox", "--executable", &firefox], "firefox");
     more_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
+    emulate_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    download_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
+}
+
+/// One WebDriver BiDi command in a session of its own, ended after it:
+/// what the user set in their own Firefox before navigera attaches
+/// (Firefox serves one session at a time).
+fn bidi_once(port: &str, method: &str, params: Value) {
+    use tokio_tungstenite::tungstenite::{self, Message};
+    let stream = std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).expect("BiDi port");
+    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let url = format!("ws://127.0.0.1:{port}/session");
+    let (mut ws, _) = tungstenite::client::client(url.as_str(), stream).expect("BiDi handshake");
+    let mut ask = |id: u64, method: &str, params: Value| {
+        ws.send(Message::text(json!({ "id": id, "method": method, "params": params }).to_string())).unwrap();
+        loop {
+            let Message::Text(text) = ws.read().expect("an answer from Firefox") else { continue };
+            let v: Value = serde_json::from_str(text.as_str()).unwrap();
+            if v["id"] == id {
+                assert_eq!(v["type"], "success", "{method}: {v}");
+                return;
+            }
+        }
+    };
+    ask(1, "session.new", json!({ "capabilities": { "alwaysMatch": {} } }));
+    ask(2, method, params);
+    ask(3, "session.end", json!({}));
 }
 
 /// A Firefox the user started with remote debugging is found by name and
@@ -554,12 +942,25 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+    // The user's own setting for the site: location blocked.
+    let blocked = json!({ "descriptor": { "name": "geolocation" }, "state": "denied", "origin": site });
+    bidi_once(&port, "permissions.setPermission", blocked);
+    let state = "navigator.permissions.query({ name: 'geolocation' }).then((s) => s.state)";
+    let position = "new Promise((ok) => navigator.geolocation.getCurrentPosition(\
+                    (p) => ok([p.coords.latitude, p.coords.longitude]), (e) => ok('error ' + e.code), { timeout: 5000 }))";
     let script: Vec<Value> = vec![
         json!({ "id": 1, "op": "status" }),
         json!({ "id": 2, "op": "goto", "url": format!("{site}/") }),
         json!({ "id": 3, "op": "fill", "label": "Name", "value": "Ada" }),
         json!({ "id": 4, "op": "click", "role": "button", "name": "Send" }),
         json!({ "id": 5, "op": "text", "selector": "#out" }),
+        // `set geo` lets the page read the position it sets; `off` gives the
+        // site back the user's own setting, not "ask".
+        json!({ "id": 19, "op": "eval", "expression": state }),
+        json!({ "id": 20, "op": "set", "what": "geo", "values": ["52.52", "13.405"] }),
+        json!({ "id": 21, "op": "eval", "expression": position }),
+        json!({ "id": 22, "op": "set", "what": "geo", "values": ["off"] }),
+        json!({ "id": 23, "op": "eval", "expression": state }),
         json!({ "id": 6, "op": "tab-list" }),
         json!({ "id": 7, "op": "tab-new" }),
         json!({ "id": 8, "op": "tab-list" }),
@@ -589,6 +990,9 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         assert_eq!(status["engine"], "firefox", "{how}: {status}");
         assert_eq!(ok(&a, 2)["title"], "Fixture", "{how}");
         assert_eq!(ok(&a, 5), "sent Ada s false", "{how}");
+        assert_eq!(ok(&a, 19), "denied", "{how}: the setting made before navigera attached did not hold");
+        assert_eq!(ok(&a, 21), &json!([52.52, 13.405]), "{how}: the page reads the position set");
+        assert_eq!(ok(&a, 23), ok(&a, 19), "{how}: `set geo off` gives the site back the user's own setting");
         // Only what it opened counts: its window, not the user's tab.
         let tabs = |id: u64| ok(&a, id).as_array().map(Vec::len);
         assert_eq!((tabs(6), tabs(8)), (Some(1), Some(2)), "{how}: tabs {} then {}", ok(&a, 6), ok(&a, 8));
@@ -623,6 +1027,8 @@ fn safari_over_safaridriver_reads_acts_and_navigates() {
     scenario(&["--engine", "safari"], "safari");
     more_ops(&["--engine", "safari"], "safari", false);
     nav_clicks(&["--engine", "safari"], "safari");
+    hash_links(&["--engine", "safari"], "safari");
+    lone_surrogates(&["--engine", "safari"], "safari");
 }
 
 /// chromedriver on a free port, for the `--webdriver` scenarios.
@@ -666,6 +1072,13 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     more_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver", true);
     nav_clicks(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     nav_clicks(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
+    hash_links(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
+    hash_links(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
+    lone_surrogates(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
+    lone_surrogates(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
+    viewport_back(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
+    viewport_back_per_window(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
+    viewport_back(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
     #[cfg(unix)]
     {
         extern "C" {

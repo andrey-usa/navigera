@@ -617,7 +617,14 @@ fn start(
         return Ok(Box::new(super::bidi::Bidi::over(session, &ws, timeout)?));
     }
     let window = String::new();
-    let mut me = Classic { s: session, window, accept_dialogs: true, prompt_text: None, dialogs: Vec::new() };
+    let mut me = Classic {
+        s: session,
+        window,
+        accept_dialogs: true,
+        prompt_text: None,
+        dialogs: Vec::new(),
+        own_size: Vec::new(),
+    };
     me.window =
         me.s.cmd("GET", "/window", None, timeout).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
     Ok(Box::new(me))
@@ -630,6 +637,10 @@ pub struct Classic {
     accept_dialogs: bool,
     prompt_text: Option<String>,
     dialogs: Vec<Value>,
+    /// Each window `set viewport` or `set device` sized, in order, with the
+    /// size it had before (`None`: the server would not say), given back
+    /// at `off`. Per window: a server may open a tab as a window of its own.
+    own_size: Vec<(String, Option<(i64, i64)>)>,
 }
 
 impl Classic {
@@ -779,9 +790,49 @@ impl Wire for Classic {
             bail!("--scale: classic WebDriver sizes the window and has no pixel-ratio override; drop --scale, or use --engine firefox or chrome");
         }
         let Some((width, height)) = size else {
-            self.s.cmd("POST", "/window/maximize", Some(json!({})), Duration::from_secs(30))?;
-            return Ok(());
+            // Back to the size each sized window had (classic WebDriver has
+            // no viewport override to clear), the last sized first: tabs
+            // that share one window end at the size the first one read. A
+            // window never sized is as it was, one whose size the server
+            // would not say is maximized, and one closed since is skipped.
+            // An entry goes once its size is back, so a failed `off` can be
+            // asked again.
+            let here = self.window.clone();
+            let result = (|| -> Result<()> {
+                while let Some((window, size)) = self.own_size.last().cloned() {
+                    if window != self.window {
+                        let to = json!({ "handle": window });
+                        if self.s.cmd("POST", "/window", Some(to), Duration::from_secs(10)).is_err() {
+                            self.own_size.pop();
+                            continue;
+                        }
+                        self.window = window;
+                    }
+                    match size {
+                        Some((w, h)) => {
+                            let rect = json!({ "width": w, "height": h });
+                            self.s.cmd("POST", "/window/rect", Some(rect), Duration::from_secs(30))?;
+                        }
+                        None => {
+                            self.s.cmd("POST", "/window/maximize", Some(json!({})), Duration::from_secs(30))?;
+                        }
+                    }
+                    self.own_size.pop();
+                }
+                Ok(())
+            })();
+            if self.window != here {
+                let back = json!({ "handle": here });
+                self.s.cmd("POST", "/window", Some(back), Duration::from_secs(10))?;
+                self.window = here;
+            }
+            return result;
         };
+        if !self.own_size.iter().any(|(w, _)| *w == self.window) {
+            let rect = self.s.cmd("GET", "/window/rect", None, Duration::from_secs(10)).ok();
+            let wh = rect.and_then(|r| Some((r["width"].as_i64()?, r["height"].as_i64()?)));
+            self.own_size.push((self.window.clone(), wh));
+        }
         // The command sizes the window; the viewport is that less the
         // browser's own bars, so the difference is measured and added.
         let inner = |s: &mut Session| -> Result<(i64, i64)> {
