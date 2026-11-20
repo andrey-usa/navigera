@@ -944,7 +944,9 @@ pub enum Command {
     Hide {},
     /// A clean slate: a new browser context with one blank tab. `all`: also
     /// forget `set` emulation, routes, credentials, init scripts and the
-    /// dialog answer, as a new session would have none.
+    /// dialog answer, as a new session would have none. (`Reset`: what
+    /// earlier clients sent their session server.)
+    #[serde(rename = "reset", alias = "Reset")]
     Reset {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all: bool,
@@ -9335,6 +9337,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(wire, r#"{"op":"click","ref":9}"#);
+        // Every op by its command's name (`reset` was `Reset` on the wire).
+        assert_eq!(serde_json::to_string(&Command::Reset { all: true }).unwrap(), r#"{"op":"reset","all":true}"#);
+        for json in [r#"{"op":"reset","all":true}"#, r#"{"op":"Reset","all":true}"#] {
+            assert_eq!(serde_json::from_str::<Command>(json).unwrap(), Command::Reset { all: true }, "{json}");
+        }
         // `until_gone`: true is the default limit, a number is the limit.
         let until = |json: &str| match serde_json::from_str::<Command>(json) {
             Ok(Command::Click { until_gone, .. }) => Ok(until_gone),

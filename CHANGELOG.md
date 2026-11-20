@@ -70,6 +70,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `{"op":"reset"}` over `serve` (and the JSON a program sends a session
+  server) is `reset`, as the command is named everywhere else: only
+  `Reset` was taken, so the name the manual gives was refused as an
+  unknown op. `Reset` still works.
 - `set geo` in your own Chrome (`--attach`, `--auto-connect`) no longer
   grants the location permission there: Chrome's grant is the browser's,
   not a site's, so every site in your own tabs could read where you are
