@@ -203,30 +203,30 @@ fn a_locator_on_a_long_page_is_linear() {
 /// A wait sees a change within a frame of it, not at its next poll. The
 /// page notes when the element was added and when the wait's own check
 /// first saw it: times in the page, so the test's commands don't count.
-/// Checking every 100 ms put that at 50 ms on average.
+/// Checking every 100 ms put that at 50 ms on average. The timer is armed
+/// and waited for in one call: a command line started between them (a
+/// loaded runner) could take past the timer, and the wait's first check
+/// then counted that gap.
 #[test]
 fn a_wait_sees_a_change_within_a_frame() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("wake", &[]);
     s.ok(&["goto", &format!("{}/hidden-layers", site.url)]);
+    let steps = std::env::temp_dir().join(format!("nv-wake-{}.txt", std::process::id()));
     let mut after = Vec::new();
     for i in 0..7 {
         let delay = 120 + 37 * i;
-        s.ok(&[
-            "eval",
-            &format!(
-                "window.__seen = 0; document.querySelectorAll('.late').forEach((e) => e.remove()); \
+        let arm = format!(
+            "window.__seen = 0; document.querySelectorAll('.late').forEach((e) => e.remove()); \
              setTimeout(() => {{ const p = document.createElement('p'); p.className = 'late'; \
              p.textContent = 'late {i}'; document.body.append(p); window.__added = performance.now(); }}, {delay}); 1"
-            ),
-        ]);
-        s.ok(&[
-            "wait",
-            "--js",
-            "document.querySelector('.late') && (window.__seen = window.__seen || performance.now())",
-        ]);
+        );
+        let wait = "document.querySelector('.late') && (window.__seen = window.__seen || performance.now())";
+        std::fs::write(&steps, format!("eval \"{arm}\"\nwait --js \"{wait}\"\n")).unwrap();
+        s.ok(&["batch", &steps.display().to_string()]);
         after.push(s.ok(&["eval", "window.__seen - window.__added"]).as_f64().unwrap());
     }
+    let _ = std::fs::remove_file(&steps);
     after.sort_by(f64::total_cmp);
     assert!(after[3] < 35.0, "seen this many ms after the change: {after:?}");
 }
