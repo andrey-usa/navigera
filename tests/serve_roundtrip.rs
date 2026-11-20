@@ -328,7 +328,8 @@ fn navigera_named_session_across_processes() {
 /// viewport back. The browser takes an override away after it answers: a
 /// read right after `set device off` saw the device's size in 3 to 9 of 10
 /// fresh sessions (Chrome 153), most often just after the browser started,
-/// so each round is a session of its own.
+/// so each round is a session of its own; after a phone, its screen size
+/// with the page's pixel ratio in 7 of 20.
 #[test]
 fn a_page_has_its_own_viewport_back_when_set_device_off_answers() {
     if !chrome_available() {
@@ -350,9 +351,17 @@ fn a_page_has_its_own_viewport_back_when_set_device_off_answers() {
         };
         op(json!({"op": "goto", "url": "data:text/html,<title>viewport</title><p>viewport"}));
         let own = op(json!({"op": "eval", "expression": size}));
-        for (device, under) in [("Laptop", json!([1366, 768, 1])), ("Desktop HD HiDPI", json!([1280, 720, 2]))] {
+        // A phone's comes back through sizes that are neither its nor the page's.
+        let devices = [
+            ("Laptop", Some(json!([1366, 768, 1]))),
+            ("Desktop HD HiDPI", Some(json!([1280, 720, 2]))),
+            ("iPhone 15", None),
+        ];
+        for (device, under) in devices {
             op(json!({"op": "set", "what": "device", "values": [device]}));
-            assert_eq!(op(json!({"op": "eval", "expression": size})), under, "round {round}: {device}");
+            let seen = op(json!({"op": "eval", "expression": size}));
+            assert!(under.is_none_or(|under| seen == under), "round {round}: {device}: {seen}");
+            assert_ne!(seen, own, "round {round}: {device} changed nothing the page sees");
             op(json!({"op": "set", "what": "device", "values": ["off"]}));
             let back = op(json!({"op": "eval", "expression": size}));
             assert_eq!(back, own, "round {round}: the page's own viewport once `set device off` answers ({device})");

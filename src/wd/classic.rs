@@ -631,9 +631,9 @@ pub struct Classic {
     accept_dialogs: bool,
     prompt_text: Option<String>,
     dialogs: Vec<Value>,
-    /// The window's size before `set viewport` or `set device` first sized
-    /// it, given back at `off`.
-    own_size: Option<(i64, i64)>,
+    /// Once `set viewport` or `set device` sized the window: the size it had
+    /// before, given back at `off` (`None` inside: the server would not say).
+    own_size: Option<Option<(i64, i64)>>,
 }
 
 impl Classic {
@@ -784,18 +784,24 @@ impl Wire for Classic {
         }
         let Some((width, height)) = size else {
             // Back to the size the window had (classic WebDriver has no
-            // viewport override to clear); a window never sized is as it was.
-            if let Some((w, h)) = self.own_size.take() {
-                let rect = json!({ "width": w, "height": h });
-                self.s.cmd("POST", "/window/rect", Some(rect), Duration::from_secs(30))?;
+            // viewport override to clear); a window never sized is as it was,
+            // and one whose size the server would not say is maximized.
+            match self.own_size.take() {
+                Some(Some((w, h))) => {
+                    let rect = json!({ "width": w, "height": h });
+                    self.s.cmd("POST", "/window/rect", Some(rect), Duration::from_secs(30))?;
+                }
+                Some(None) => {
+                    self.s.cmd("POST", "/window/maximize", Some(json!({})), Duration::from_secs(30))?;
+                }
+                None => {}
             }
             return Ok(());
         };
         if self.own_size.is_none() {
-            let rect = self.s.cmd("GET", "/window/rect", None, Duration::from_secs(10))?;
-            if let (Some(w), Some(h)) = (rect["width"].as_i64(), rect["height"].as_i64()) {
-                self.own_size = Some((w, h));
-            }
+            let rect = self.s.cmd("GET", "/window/rect", None, Duration::from_secs(10)).ok();
+            let wh = rect.and_then(|r| Some((r["width"].as_i64()?, r["height"].as_i64()?)));
+            self.own_size = Some(wh);
         }
         // The command sizes the window; the viewport is that less the
         // browser's own bars, so the difference is measured and added.

@@ -6349,25 +6349,33 @@ impl Driver {
                     self.session.grant(permission);
                 }
                 // A viewport override taken away reaches the page after the
-                // browser answers: what the page shows under it and its own
-                // size, for the wait below (`emulate::VIEWPORT_BACK`).
+                // browser answers: the page's own size (read as the first
+                // override is set), or, unknown, what it shows under the
+                // override, for the wait below (`emulate::VIEWPORT_BACK`).
                 let sizes = plan.kind == "viewport" && !lightpanda;
                 let had = sizes && self.session.has_override("viewport");
                 let now = || self.session.evaluate::<Value>(crate::emulate::VIEWPORT_NOW).ok();
-                let under = if had && plan.calls.is_empty() { now() } else { None };
-                let own = if sizes && !had && !plan.calls.is_empty() { now() } else { None };
+                let first = if sizes && !had && !plan.calls.is_empty() { now() } else { None };
+                let back = if had && plan.calls.is_empty() {
+                    let own = self.viewport_own.take();
+                    let under = if own.is_none() { now() } else { None };
+                    // Neither known: nothing to wait for.
+                    (own.is_some() || under.is_some())
+                        .then(|| (under.unwrap_or(Value::Null), own.unwrap_or(Value::Null)))
+                } else {
+                    None
+                };
                 self.session
                     .set_override(plan.kind, plan.calls, plan.reset)
                     .map_err(|e| e.context(format!("set {what}")))?;
-                if own.is_some() {
-                    self.viewport_own = own;
+                if first.is_some() {
+                    self.viewport_own = first;
                 }
                 if what == "device" && !lightpanda {
                     let ua = crate::emulate::device_named(values)?.map(|d| d.ua);
                     self.session.set_device_ua(ua).map_err(|e| e.context("set device"))?;
                 }
-                if let Some(under) = under {
-                    let own = self.viewport_own.take().unwrap_or(Value::Null);
+                if let Some((under, own)) = back {
                     let back = format!(
                         "({})({under}, {own}, {})",
                         crate::emulate::VIEWPORT_BACK,

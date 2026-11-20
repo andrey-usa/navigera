@@ -66,9 +66,9 @@ All notable changes to this project are documented here. The format follows
   viewport back, on Chrome and the WebDriver engines: the browser gives it
   back after it answers, so a read or a screenshot right after could still
   get the device's size (7 in 12 fresh sessions locally on Chrome 153, and
-  7 in 10 through chromedriver over BiDi; 0 after). The wait is in the
-  page and ends as soon as its width, height and pixel ratio are its own
-  again.
+  7 in 10 through chromedriver over BiDi; after a phone, its screen size in
+  7 in 20; 0 after). The wait is in the page and ends as soon as its width,
+  height and pixel ratio are its own again.
 - `set viewport off` over classic WebDriver gives the window back the size
   it had before `set viewport` (it maximized the window: 800x457 against
   780x437 in a headless chromedriver).

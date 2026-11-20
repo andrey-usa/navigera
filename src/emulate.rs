@@ -105,7 +105,6 @@ pub const DEVICES: &[Device] = &[
     Device { name: "Desktop HD HiDPI", width: 1280, height: 720, scale: 2.0, mobile: false, ua: "" },
 ];
 
-/// A device by name, ignoring case and spaces/dashes (`iphone-15`).
 /// The device a `set device` names, `None` for `off`; an empty or unknown
 /// name is an error that lists the known ones.
 pub fn device_named(values: &[String]) -> Result<Option<&'static Device>> {
@@ -120,6 +119,7 @@ pub fn device_named(values: &[String]) -> Result<Option<&'static Device>> {
     device(&name).map(Some).ok_or_else(|| anyhow::anyhow!("set device: unknown {name:?}; known: {}", known()))
 }
 
+/// A device by name, ignoring case and spaces/dashes (`iphone-15`).
 pub fn device(name: &str) -> Option<&'static Device> {
     let key = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
     DEVICES.iter().find(|d| key(d.name) == key(name))
@@ -180,34 +180,37 @@ pub fn device_ua_step(ua: Option<&'static str>, set_by_device: bool) -> UaStep {
 }
 
 /// The page's viewport and pixel ratio: read before a viewport override is
-/// set (the page's own) and before one is taken away (what it shows under
-/// it), for [`VIEWPORT_BACK`].
+/// set (the page's own), and before one is taken away when that is unknown
+/// (what it shows under it), for [`VIEWPORT_BACK`].
 pub const VIEWPORT_NOW: &str = "() => [innerWidth, innerHeight, devicePixelRatio]";
 
 /// After `set viewport off` or `set device off`: the browser answers before
 /// the page has its own viewport back, so for a frame or more a read still
 /// sees the override's (right after `set device off` on Chrome 153, the
 /// device's size in 3 to 9 of 10 fresh sessions; over chromedriver's BiDi
-/// alike), and it gives the parts back one by one (the pixel ratio a frame
-/// before the size, seen). This answers once each part the override
-/// changed, by the page's own values (`own`), has left the one it had
-/// under it (`under`); with `own` unknown (`null`), once the size has; or
-/// after `ms`. Polled, not waited on `resize`: a page that keeps its size
-/// gets no event.
+/// alike), and it gives the parts back one by one, through sizes that are
+/// neither (a phone's layout viewport, then its screen with the pixel ratio
+/// already back, then the window's: `[980, 2125, 3]`, `[393, 852, 1]`,
+/// `[1440, 813, 1]`). So this answers once the page shows its own values
+/// (`own`); with those unknown (`null`), once its size has left the one it
+/// had under the override (`under`); or after `ms`. Polled, not waited on
+/// `resize`: a page that keeps its size gets no event.
 pub const VIEWPORT_BACK: &str = "(under, own, ms) => new Promise((done) => {
   const t0 = performance.now();
   const look = () => {
     const now = [innerWidth, innerHeight, devicePixelRatio];
-    const left = (i) => now[i] !== under[i];
-    const back = Array.isArray(own) ? [0, 1, 2].every((i) => own[i] === under[i] || left(i)) : left(0) || left(1);
+    const back = Array.isArray(own)
+      ? now[0] === own[0] && now[1] === own[1] && now[2] === own[2]
+      : !Array.isArray(under) || now[0] !== under[0] || now[1] !== under[1];
     if (back || performance.now() - t0 >= ms) return done(now);
     setTimeout(look, 5);
   };
   look();
 })";
 
-/// How long [`VIEWPORT_BACK`] waits at most: reached only when a part the
-/// override changed keeps its value (the window was given it meanwhile).
+/// How long [`VIEWPORT_BACK`] waits at most: reached only when the page's
+/// own size changed while the override was on (its window was resized, or
+/// it is a tab whose window differs from the one it was read in).
 pub const VIEWPORT_BACK_MS: u64 = 1000;
 
 fn off(v: &str) -> bool {

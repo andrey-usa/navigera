@@ -754,9 +754,11 @@ impl Driver {
             let Some(own) = self.viewport_own.take() else {
                 return self.wire.set_viewport(None, scale);
             };
-            let under = self.call(VIEWPORT_NOW, json!([])).ok();
+            // Its own size unknown (the read failed): what it shows now.
+            let under =
+                if own.is_null() { self.call(VIEWPORT_NOW, json!([])).unwrap_or(Value::Null) } else { Value::Null };
             self.wire.set_viewport(None, scale)?;
-            if let Some(under) = under {
+            if !own.is_null() || !under.is_null() {
                 let _ = self.call(VIEWPORT_BACK, json!([under, own, VIEWPORT_BACK_MS]));
             }
             return Ok(());
