@@ -754,6 +754,8 @@ fn emulate_ops(args: &[&str], engine: &str) {
 /// entries, a 404 is failed, `--since` and `clear` count from the last.
 fn network_ops(args: &[&str], engine: &str) {
     let site = serve();
+    let dir = tempfile::tempdir().unwrap();
+    let har = dir.path().join("next.har");
     let calls = "fetch('/to?u=' + location.origin + '/next.html').then(() => fetch('/nope')).then(r => r.status)";
     let script: Vec<Value> = vec![
         json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
@@ -761,6 +763,7 @@ fn network_ops(args: &[&str], engine: &str) {
         json!({ "id": 3, "op": "eval", "expression": calls }),
         json!({ "id": 4, "op": "network" }),
         json!({ "id": 5, "op": "network", "failed": true }),
+        json!({ "id": 6, "op": "network", "filter": "/next.html", "har": har.display().to_string() }),
         json!({ "id": 7, "op": "network", "clear": true }),
         json!({ "id": 8, "op": "network" }),
         json!({ "id": 9, "op": "quit" }),
@@ -775,6 +778,12 @@ fn network_ops(args: &[&str], engine: &str) {
     assert!(lines[2].contains(" GET 404 Fetch /nope"), "{engine}: {list}");
     let failed = ok(&a, 5).as_str().unwrap_or("").to_string();
     assert!(failed.lines().count() == 1 && failed.contains("/nope"), "{engine}: {failed}");
+    // The redirect (its query names the target) and the target.
+    assert_eq!(ok(&a, 6)["entries"], 2, "{engine}");
+    // The response body the browser kept, as `route --har` replays it.
+    let har: Value = serde_json::from_slice(&std::fs::read(&har).unwrap()).unwrap();
+    let target = &har["log"]["entries"][1]["response"];
+    assert_eq!((&target["status"], &target["content"]["text"]), (&json!(200), &json!(NEXT)), "{engine}: {target}");
     assert_eq!(ok(&a, 8), &json!("(no requests)"), "{engine}");
 }
 

@@ -11,10 +11,12 @@ All notable changes to this project are documented here. The format follows
 - `network` on Firefox and the other WebDriver BiDi engines: the requests
   of the session's tabs in the same list as on Chrome (`#n METHOD STATUS
   type url size time`), with `--filter`, `--type`, `--failed`, `--since`,
-  `--clear` and `--har`; a redirect is two entries, as on Chrome. In a
-  Firefox you attached to, only the window navigera opened is listened to.
-  A response body (`network <n>`) and the bodies in a HAR are Chrome's for
-  now. Classic WebDriver still has no request list and says so.
+  `--clear` and `--har`; a redirect is two entries, as on Chrome. A
+  response body (`network <n>`, `--body-file`) and the bodies in a HAR
+  come from what the browser kept (`network.addDataCollector`, up to
+  10 MiB a response). In a Firefox you attached to, only the window
+  navigera opened is listened to. Classic WebDriver still has no request
+  list and says so.
 
 ## [0.16.0] - 2026-11-20
 

@@ -41,6 +41,9 @@ const COMMIT_EVENTS: &[&str] = &["browsingContext.navigationCommitted"];
 /// server without them still drives pages, and `network` then says so).
 const NETWORK_EVENTS: &[&str] = &["network.beforeRequestSent", "network.responseCompleted", "network.fetchError"];
 
+/// The largest response body the browser keeps for `network <n>`.
+const BODY_MAX: u64 = 10 << 20;
+
 /// Most requests kept, as on Chrome: older ones are dropped.
 const REQUESTS_MAX: usize = 1000;
 
@@ -120,6 +123,8 @@ pub struct Bidi {
     /// events (then `route` subscribes on its own).
     requests: Option<VecDeque<crate::cdp::logs::Request>>,
     last_request: u64,
+    /// The data collector that keeps response bodies for `network <n>`.
+    collector: Option<String>,
     /// The frames inside `own` tabs, each with its tab.
     frames: Vec<(String, String)>,
     closed: bool,
@@ -780,6 +785,7 @@ impl Bidi {
             downloads: Vec::new(),
             requests: None,
             last_request: 0,
+            collector: None,
             child: None,
             _profile: None,
             classic: None,
@@ -832,8 +838,19 @@ impl Bidi {
 
     /// Keep the request log, if the browser sends its events.
     fn log_network(&mut self, subscribe: Value, timeout: Duration) {
-        if self.send("session.subscribe", subscribe, timeout).is_ok() {
+        if self.send("session.subscribe", subscribe.clone(), timeout).is_ok() {
             self.requests = Some(VecDeque::new());
+            let mut collect =
+                json!({ "dataTypes": ["response"], "maxEncodedDataSize": BODY_MAX, "collectorType": "blob" });
+            if let Some(contexts) = subscribe.get("contexts") {
+                collect["contexts"] = contexts.clone();
+            }
+            // A Firefox before network.addDataCollector lists requests
+            // without their bodies.
+            self.collector = self
+                .send("network.addDataCollector", collect, timeout)
+                .ok()
+                .and_then(|r| r["collector"].as_str().map(str::to_string));
         }
     }
 
@@ -1619,6 +1636,17 @@ impl Wire for Bidi {
             bail!("this browser sends no WebDriver BiDi network events, so navigera has no request list here")
         };
         Ok(if clear { std::mem::take(log).into() } else { log.iter().cloned().collect() })
+    }
+
+    fn response_body(&mut self, request: &str) -> Result<(String, bool)> {
+        let Some(collector) = self.collector.clone() else {
+            bail!("this browser keeps no response bodies for WebDriver BiDi (network.addDataCollector)")
+        };
+        let p = json!({ "dataType": "response", "request": request, "collector": collector });
+        let r = self.send("network.getData", p, Duration::from_secs(30))?;
+        let bytes = &r["bytes"];
+        let value = bytes["value"].as_str().unwrap_or_default().to_string();
+        Ok((value, bytes["type"] == "base64"))
     }
 
     fn downloads(&mut self, clear: bool) -> Result<Vec<Download>> {

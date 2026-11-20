@@ -427,6 +427,10 @@ pub trait Wire: Send {
     fn requests(&mut self, _clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
         bail!("classic WebDriver does not report network requests; use --engine firefox or chrome (or --bidi with a server that has them)")
     }
+    /// A logged request's response body: (body, base64-encoded?).
+    fn response_body(&mut self, _request: &str) -> Result<(String, bool)> {
+        bail!("classic WebDriver keeps no response bodies; use --engine firefox or chrome")
+    }
     /// `downloads`: the files this session's pages downloaded, oldest
     /// first (`clear`: and forget them).
     fn downloads(&mut self, _clear: bool) -> Result<Vec<crate::cdp::downloads::Download>> {
@@ -1711,18 +1715,34 @@ impl Driver {
                         .iter()
                         .find(|r| r.n == *n)
                         .ok_or_else(|| anyhow!("network: no request #{n} (older ones are dropped after 1000)"))?;
-                    if body_file.is_some() {
-                        bail!("network --body-file: response bodies are kept on Chrome only for now; `http` fetches the URL again");
-                    }
                     let mut out = crate::cdp::logs::request_json(r);
-                    out["body"] = json!("(not kept on this engine yet; `http` fetches the URL again)");
+                    match self.wire.response_body(&r.id) {
+                        Ok((body, base64)) => {
+                            crate::protocol::body_answer(&mut out, &body, base64, body_file.as_deref())?
+                        }
+                        Err(e) => out["body"] = json!(format!("(unavailable: {e:#})")),
+                    }
                     return Ok(out);
                 }
                 let mut picked =
                     crate::cdp::logs::pick_requests(all, filter.as_deref(), kind.as_deref(), *failed, *since);
                 if let Some(path) = har {
-                    // Without bodies: this engine does not keep them yet.
-                    let har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
+                    let mut har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
+                    // The bodies the browser still holds, as on Chrome.
+                    if let Some(entries) = har.pointer_mut("/log/entries").and_then(Value::as_array_mut) {
+                        for (entry, r) in entries.iter_mut().zip(&picked) {
+                            if r.status.is_none() || r.failed.is_some() {
+                                continue;
+                            }
+                            if let Ok((body, base64)) = self.wire.response_body(&r.id) {
+                                let content = &mut entry["response"]["content"];
+                                content["text"] = json!(body);
+                                if base64 {
+                                    content["encoding"] = json!("base64");
+                                }
+                            }
+                        }
+                    }
                     crate::protocol::write_private(path, &serde_json::to_vec_pretty(&har)?)
                         .with_context(|| format!("network --har {path}"))?;
                     return Ok(json!({ "har": path, "entries": picked.len() }));

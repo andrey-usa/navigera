@@ -4407,37 +4407,7 @@ impl Driver {
                 }
             }
             match self.session.response_body(&r.id) {
-                Ok((body, base64)) => {
-                    let bytes = if base64 {
-                        use base64::Engine as _;
-                        base64::engine::general_purpose::STANDARD.decode(&body).unwrap_or_default()
-                    } else {
-                        body.clone().into_bytes()
-                    };
-                    if let Some(path) = body_file {
-                        write_own(path, &bytes)
-                            .map_err(|e| anyhow::Error::from(e).context(format!("network --body-file {path}")))?;
-                        out["body_file"] = json!(path);
-                        out["body_bytes"] = json!(bytes.len());
-                    } else if base64 {
-                        out["body"] =
-                            json!(format!("({} bytes of binary data; --body-file <path> saves it)", bytes.len()));
-                    } else {
-                        const MAX: usize = 8 * 1024;
-                        let text = String::from_utf8_lossy(&bytes);
-                        out["body"] = if text.len() > MAX {
-                            let cut = text
-                                .char_indices()
-                                .take_while(|(i, _)| *i < MAX)
-                                .last()
-                                .map(|(i, c)| i + c.len_utf8())
-                                .unwrap_or(0);
-                            json!(format!("{}… ({} bytes; --body-file <path> saves all)", &text[..cut], bytes.len()))
-                        } else {
-                            json!(text)
-                        };
-                    }
-                }
+                Ok((body, base64)) => body_answer(&mut out, &body, base64, body_file)?,
                 Err(e) => out["body"] = json!(format!("(unavailable: {e:#})")),
             }
             return Ok(out);
@@ -7283,6 +7253,35 @@ pub(crate) fn downloads_answer(items: &[crate::cdp::downloads::Download], as_jso
 }
 
 /// `scheme://host[:port]` of a URL ("" when it has none).
+/// `network <n>`'s body: into `body_file` when one is named, else inline
+/// (text up to 8 KiB; binary data as a note of its size).
+pub fn body_answer(out: &mut Value, body: &str, base64: bool, body_file: Option<&str>) -> anyhow::Result<()> {
+    let bytes = if base64 {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.decode(body).unwrap_or_default()
+    } else {
+        body.as_bytes().to_vec()
+    };
+    if let Some(path) = body_file {
+        write_own(path, &bytes).map_err(|e| anyhow::Error::from(e).context(format!("network --body-file {path}")))?;
+        out["body_file"] = json!(path);
+        out["body_bytes"] = json!(bytes.len());
+    } else if base64 {
+        out["body"] = json!(format!("({} bytes of binary data; --body-file <path> saves it)", bytes.len()));
+    } else {
+        const MAX: usize = 8 * 1024;
+        let text = String::from_utf8_lossy(&bytes);
+        out["body"] = if text.len() > MAX {
+            let cut =
+                text.char_indices().take_while(|(i, _)| *i < MAX).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
+            json!(format!("{}… ({} bytes; --body-file <path> saves all)", &text[..cut], bytes.len()))
+        } else {
+            json!(text)
+        };
+    }
+    Ok(())
+}
+
 pub fn origin_of(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else { return String::new() };
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
