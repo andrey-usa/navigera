@@ -32,6 +32,11 @@ const EVENTS: &[&str] = &[
 /// still drives pages, and `downloads` then lists none.
 const DOWNLOAD_EVENTS: &[&str] = &["browsingContext.downloadWillBegin", "browsingContext.downloadEnd"];
 
+/// A navigation's URL after its redirects, before the document's scripts
+/// (Firefox 140 on): `set geo` grants a redirect's target there. Subscribed
+/// apart, as a server without it still drives pages.
+const COMMIT_EVENTS: &[&str] = &["browsingContext.navigationCommitted"];
+
 /// In the user's browser (`--attach`), also which frames and opened tabs
 /// belong to this session's tabs: their console lines and dialogs are its
 /// own, and an event names the frame, not the tab.
@@ -91,8 +96,10 @@ pub struct Bidi {
     /// opens in the user's Firefox.
     emulations: Vec<(String, Value)>,
     /// `set geo`: the origins granted the geolocation permission while it
-    /// is on (`None`: off); `off`, and the session's end, take each back.
-    geo: Option<Vec<String>>,
+    /// is on (`None`: off), each with the setting it had before when that
+    /// was read (`set geo` reads the page's own in a Firefox you attached
+    /// to); `off`, and the session's end, give each that setting back.
+    geo: Option<Vec<(String, Option<String>)>>,
     /// `downloads`: what this session's pages downloaded, oldest first
     /// (`guid` is the download's navigation id).
     downloads: Vec<Download>,
@@ -114,6 +121,18 @@ fn page_origin(url: &str) -> Option<String> {
     let authority = rest.split(['/', '?', '#']).next()?;
     let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     (!host.is_empty()).then(|| format!("{}://{}", scheme.to_ascii_lowercase(), host.to_ascii_lowercase()))
+}
+
+/// The setting to give an origin back at `set geo off`, from the one it had
+/// before (`None`: not read): one that was `granted` keeps navigera's grant
+/// (nothing to send); one that was `denied` is denied again; else asking,
+/// which is `prompt` (Firefox: no setting of the origin's own).
+fn geo_restore(before: Option<&str>) -> Option<&'static str> {
+    match before {
+        Some("granted") => None,
+        Some("denied") => Some("denied"),
+        _ => Some("prompt"),
+    }
 }
 
 /// How to get a Firefox that `--attach firefox` can find.
@@ -648,6 +667,7 @@ impl Bidi {
     fn start(&mut self, timeout: Duration) -> Result<()> {
         self.send("session.subscribe", json!({ "events": EVENTS }), timeout)?;
         let _ = self.send("session.subscribe", json!({ "events": DOWNLOAD_EVENTS }), timeout);
+        let _ = self.send("session.subscribe", json!({ "events": COMMIT_EVENTS }), timeout);
         if self.attached {
             // A browser without these events still works: a frame's
             // console lines are then not heard.
@@ -778,7 +798,16 @@ impl Bidi {
                 }
             }
             "browsingContext.contextCreated" if self.attached => {
+                let tabs = self.own.len();
                 context_created(&mut self.own, &mut self.frames, params);
+                if self.own.len() > tabs {
+                    // A tab one of its pages opened: the session's emulations,
+                    // `set geo`'s position among them, before its page runs
+                    // (a grant is the origin's in every tab). Written, as the
+                    // reader is mid-message.
+                    let id = self.own[tabs].clone();
+                    self.emulate_in(&id, false);
+                }
             }
             "browsingContext.contextDestroyed" if self.attached => {
                 context_destroyed(&mut self.frames, params);
@@ -844,13 +873,22 @@ impl Bidi {
                 }
             }
             "browsingContext.navigationStarted" => {
-                if params["context"].as_str() == Some(self.context.as_str()) {
-                    let url = params["url"].as_str().unwrap_or("").to_string();
-                    // A link or a redirect to another origin: written now,
-                    // not waited for, as the reader is mid-message here.
-                    let _ = self.geo_grant(&url, false);
+                let context = params["context"].as_str();
+                let url = params["url"].as_str().unwrap_or("").to_string();
+                if self.ours(context) {
+                    // A link to another origin, in any tab of the session (one
+                    // its page opened too): written now, not waited for, as
+                    // the reader is mid-message here.
+                    let _ = self.geo_grant(&url, false, None);
+                }
+                if context == Some(self.context.as_str()) {
                     self.nav = Some((url, false));
                 }
+            }
+            "browsingContext.navigationCommitted" if self.ours(params["context"].as_str()) => {
+                // The URL after a redirect, which `navigationStarted` (the URL
+                // asked for) did not name.
+                let _ = self.geo_grant(params["url"].as_str().unwrap_or(""), false, None);
             }
             "browsingContext.load" if params["context"].as_str() == Some(self.context.as_str()) => {
                 if let Some((_, loaded)) = &mut self.nav {
@@ -986,10 +1024,18 @@ impl Bidi {
     /// no other kind), so it is never the whole profile's: each origin gets
     /// it as a navigation reaches it, and [`Self::geo_revoke`] takes it
     /// back. Nothing while geo is off, or for a URL with no origin.
-    fn geo_grant(&mut self, url: &str, wait: bool) -> Result<()> {
+    /// `before` is the origin's setting before, when it was read: one
+    /// already `granted` is left as it is.
+    fn geo_grant(&mut self, url: &str, wait: bool, before: Option<String>) -> Result<()> {
         let Some(granted) = &mut self.geo else { return Ok(()) };
-        let Some(origin) = page_origin(url).filter(|o| !granted.contains(o)) else { return Ok(()) };
-        granted.push(origin.clone());
+        let Some(origin) = page_origin(url).filter(|o| !granted.iter().any(|(g, _)| g == o)) else {
+            return Ok(());
+        };
+        let had = before.as_deref() == Some("granted");
+        granted.push((origin.clone(), before));
+        if had {
+            return Ok(());
+        }
         let params = json!({ "descriptor": { "name": "geolocation" }, "state": "granted", "origin": origin });
         if wait {
             self.send("permissions.setPermission", params, Duration::from_secs(10)).map(|_| ())
@@ -998,18 +1044,71 @@ impl Bidi {
         }
     }
 
-    /// Every origin [`Self::geo_grant`] granted goes back to asking.
+    /// Every origin [`Self::geo_grant`] granted gets back the setting it
+    /// had ([`geo_restore`]).
     fn geo_revoke(&mut self) {
-        for origin in self.geo.take().unwrap_or_default() {
-            let params = json!({ "descriptor": { "name": "geolocation" }, "state": "prompt", "origin": origin });
+        for (origin, before) in self.geo.take().unwrap_or_default() {
+            let Some(state) = geo_restore(before.as_deref()) else { continue };
+            let params = json!({ "descriptor": { "name": "geolocation" }, "state": state, "origin": origin });
             let _ = self.send("permissions.setPermission", params, Duration::from_secs(5));
+        }
+    }
+
+    /// The geolocation setting the active tab's origin has, read in the page
+    /// (WebDriver BiDi can set a permission, not read one), in a realm of
+    /// navigera's own: `granted`, `denied` or `prompt`; `None` when it cannot
+    /// be read.
+    fn geo_state(&mut self) -> Option<String> {
+        let r = self
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": "navigator.permissions.query({ name: 'geolocation' }).then((s) => s.state)",
+                    "awaitPromise": true,
+                    "target": { "context": self.context, "sandbox": "navigera" },
+                    "resultOwnership": "none",
+                }),
+                Duration::from_secs(5),
+            )
+            .ok()?;
+        let state = r["result"]["value"].as_str().filter(|_| r["type"] == "success")?;
+        matches!(state, "granted" | "denied" | "prompt").then(|| state.to_string())
+    }
+
+    /// The session's emulations (`set locale`, `ua`, `geo`, ...) and its
+    /// viewport, in a tab of the user's Firefox that has none of them: one
+    /// navigera opened, or one its page opened. `wait` false: written, for
+    /// a caller that is reading a message.
+    fn emulate_in(&mut self, id: &str, wait: bool) {
+        let mut calls: Vec<(String, Value)> = Vec::new();
+        if let Some(mut viewport) = self.viewport.clone() {
+            viewport["context"] = json!(id);
+            calls.push(("browsingContext.setViewport".into(), viewport));
+        }
+        for (method, mut params) in self.emulations.clone() {
+            params["contexts"] = json!([id]);
+            calls.push((method, params));
+        }
+        for (method, params) in calls {
+            if wait {
+                let _ = self.send(&method, params, Duration::from_secs(30));
+            } else {
+                let _ = self.write(&method, params);
+            }
         }
     }
 
     /// The top-level contexts of a `getTree` answer.
     fn tops_of(&mut self, tree: &Value) -> Vec<String> {
         if self.attached {
+            let tabs = self.own.len();
             adopt_opened(&mut self.own, tree);
+            // Opened tabs no `contextCreated` named: the session's
+            // emulations too, late.
+            let opened = self.own[tabs..].to_vec();
+            for id in &opened {
+                self.emulate_in(id, true);
+            }
         }
         tree["contexts"]
             .as_array()
@@ -1137,7 +1236,7 @@ impl Wire for Bidi {
         };
         self.nav = None;
         // Before the page runs: it may ask for its position as it loads.
-        let _ = self.geo_grant(url, true);
+        let _ = self.geo_grant(url, true, None);
         self.send("browsingContext.navigate", json!({ "context": self.context, "url": url, "wait": wait }), timeout)?;
         Ok(())
     }
@@ -1274,7 +1373,10 @@ impl Wire for Bidi {
                     Duration::from_secs(10),
                 )?;
                 let url = tree["contexts"][0]["url"].as_str().unwrap_or("").to_string();
-                self.geo_grant(&url, true)?;
+                // In the user's Firefox the page's origin may have a setting of
+                // the user's own: read first, to give it back at `off`.
+                let before = if self.attached && page_origin(&url).is_some() { self.geo_state() } else { None };
+                self.geo_grant(&url, true, before)?;
             }
         }
         self.emulations.retain(|(m, _)| m != method);
@@ -1497,20 +1599,17 @@ impl Wire for Bidi {
         }
         let r = self.send("browsingContext.create", params, Duration::from_secs(30))?;
         let id = r["context"].as_str().map(str::to_string).ok_or_else(|| anyhow!("the browser made no tab"))?;
-        if let Some(mut viewport) = self.viewport.clone() {
-            viewport["context"] = json!(id);
-            let _ = self.send("browsingContext.setViewport", viewport, Duration::from_secs(30));
-        }
         if self.attached {
             self.own.push(id.clone());
-            for (method, params) in self.emulations.clone() {
-                let mut params = params;
-                params["contexts"] = json!([id]);
-                let _ = self.send(&method, params, Duration::from_secs(30));
-            }
+            self.emulate_in(&id, true);
             let was = std::mem::replace(&mut self.context, id.clone());
             self.listen_in(&id, Duration::from_secs(10));
             self.context = was;
+        } else if let Some(mut viewport) = self.viewport.clone() {
+            // The emulations cover every tab of navigera's own Firefox; the
+            // viewport is a tab's.
+            viewport["context"] = json!(id);
+            let _ = self.send("browsingContext.setViewport", viewport, Duration::from_secs(30));
         }
         Ok(id)
     }
@@ -1814,7 +1913,17 @@ mod tests {
 
 #[cfg(test)]
 mod geo_tests {
-    use super::page_origin;
+    use super::{geo_restore, page_origin};
+
+    #[test]
+    fn set_geo_off_gives_an_origin_back_the_setting_it_had() {
+        // Allowed before: navigera's grant is the same setting; nothing to send.
+        assert_eq!(geo_restore(Some("granted")), None);
+        assert_eq!(geo_restore(Some("denied")), Some("denied"));
+        assert_eq!(geo_restore(Some("prompt")), Some("prompt"));
+        // Not read (an origin first reached while geo was on): asking again.
+        assert_eq!(geo_restore(None), Some("prompt"));
+    }
 
     #[test]
     fn a_page_origin_is_scheme_host_and_port() {

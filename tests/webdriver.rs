@@ -120,6 +120,16 @@ fn serve() -> String {
                             break;
                         }
                     }
+                    // `/to?u=<url>`: a redirect there (another origin's page).
+                    if let Some(to) = path.strip_prefix("/to?u=") {
+                        let head = format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nCache-Control: no-store\r\n\r\n"
+                        );
+                        if s.write_all(head.as_bytes()).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     // A form's GET adds a query.
                     let (status, body) = match path.split('?').next().unwrap_or("/") {
                         "/" => ("200 OK", INDEX),
@@ -571,8 +581,10 @@ fn emulate_ops(args: &[&str], engine: &str) {
     let set = |id: u64, what: &str, values: &[&str]| json!({ "id": id, "op": "set", "what": what, "values": values });
     let eval = |id: u64, expression: &str| json!({ "id": id, "op": "eval", "expression": expression });
     let fetch = "window.got = undefined; fetch('/more.html').then((r) => { window.got = r.status; }, () => { window.got = 'failed'; }); 0";
-    // Another server is another origin: the permission follows the tab there.
+    // Another server is another origin: the permission follows the tab there,
+    // through a redirect, and into a tab the page opens.
     let other = serve();
+    let (third, fourth) = (serve(), serve());
     let position = "new Promise((ok) => navigator.geolocation.getCurrentPosition(\
                     (p) => ok([p.coords.latitude, p.coords.longitude, p.coords.accuracy]), (e) => ok('error ' + e.code), \
                     { timeout: 5000 }))";
@@ -612,6 +624,24 @@ fn emulate_ops(args: &[&str], engine: &str) {
         eval(31, position),
         json!({ "id": 32, "op": "goto", "url": format!("{other}/more.html") }),
         eval(33, position),
+        // A redirect to an origin the session has not been to: granted where
+        // the navigation lands, not where it was asked to go.
+        json!({ "id": 45, "op": "goto", "url": format!("{site}/to?u={third}/more.html") }),
+        eval(46, "location.origin"),
+        eval(47, position),
+        // A tab the page opens, on another origin again.
+        eval(
+            48,
+            &format!(
+                "(document.body.insertAdjacentHTML('beforeend', '<button id=\"pop\" onclick=\"window.w = window.open(\\'{fourth}/more.html\\')\">Pop</button>'), 1)"
+            ),
+        ),
+        json!({ "id": 49, "op": "click", "selector": "#pop" }),
+        json!({ "id": 51, "op": "wait", "js": "!!window.w" }),
+        json!({ "id": 52, "op": "tab-select", "index": 2 }),
+        json!({ "id": 53, "op": "wait", "js": format!("location.origin === '{fourth}' && document.readyState === 'complete'") }),
+        eval(54, position),
+        json!({ "id": 55, "op": "tab-select", "index": 1 }),
         set(34, "geo", &["off"]),
         // One user agent, the one set last: a device without one (a
         // laptop) and `device off` leave a `set ua` alone, and take back
@@ -660,6 +690,9 @@ fn emulate_ops(args: &[&str], engine: &str) {
     );
     assert_eq!(nums(ok(&a, 31)), berlin, "{engine}: the page reads the position, no prompt: {}", ok(&a, 31));
     assert_eq!(nums(ok(&a, 33)), berlin, "{engine}: and so does the next origin: {}", ok(&a, 33));
+    assert_eq!(ok(&a, 46), &json!(third), "{engine}: the redirect landed on the third origin");
+    assert_eq!(nums(ok(&a, 47)), berlin, "{engine}: a redirect's target reads it too: {}", ok(&a, 47));
+    assert_eq!(nums(ok(&a, 54)), berlin, "{engine}: and so does a tab the page opened: {}", ok(&a, 54));
     assert_eq!(ok(&a, 34), &json!({ "geo": "default" }), "{engine}");
     assert_eq!(ok(&a, 39), "Bot/1.0", "{engine}: a laptop and `device off` leave a `set ua` alone");
     assert_eq!(ok(&a, 44), &json!([false, false]), "{engine}: a laptop takes back the phone's user agent");
@@ -784,6 +817,31 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
 
+/// One WebDriver BiDi command in a session of its own, ended after it:
+/// what the user set in their own Firefox before navigera attaches
+/// (Firefox serves one session at a time).
+fn bidi_once(port: &str, method: &str, params: Value) {
+    use tokio_tungstenite::tungstenite::{self, Message};
+    let stream = std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).expect("BiDi port");
+    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let url = format!("ws://127.0.0.1:{port}/session");
+    let (mut ws, _) = tungstenite::client::client(url.as_str(), stream).expect("BiDi handshake");
+    let mut ask = |id: u64, method: &str, params: Value| {
+        ws.send(Message::text(json!({ "id": id, "method": method, "params": params }).to_string())).unwrap();
+        loop {
+            let Message::Text(text) = ws.read().expect("an answer from Firefox") else { continue };
+            let v: Value = serde_json::from_str(text.as_str()).unwrap();
+            if v["id"] == id {
+                assert_eq!(v["type"], "success", "{method}: {v}");
+                return;
+            }
+        }
+    };
+    ask(1, "session.new", json!({ "capabilities": { "alwaysMatch": {} } }));
+    ask(2, method, params);
+    ask(3, "session.end", json!({}));
+}
+
 /// A Firefox the user started with remote debugging is found by name and
 /// by its port, worked in through a window of navigera's own, and left
 /// running with the user's tab as it was.
@@ -835,12 +893,25 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+    // The user's own setting for the site: location blocked.
+    let blocked = json!({ "descriptor": { "name": "geolocation" }, "state": "denied", "origin": site });
+    bidi_once(&port, "permissions.setPermission", blocked);
+    let state = "navigator.permissions.query({ name: 'geolocation' }).then((s) => s.state)";
+    let position = "new Promise((ok) => navigator.geolocation.getCurrentPosition(\
+                    (p) => ok([p.coords.latitude, p.coords.longitude]), (e) => ok('error ' + e.code), { timeout: 5000 }))";
     let script: Vec<Value> = vec![
         json!({ "id": 1, "op": "status" }),
         json!({ "id": 2, "op": "goto", "url": format!("{site}/") }),
         json!({ "id": 3, "op": "fill", "label": "Name", "value": "Ada" }),
         json!({ "id": 4, "op": "click", "role": "button", "name": "Send" }),
         json!({ "id": 5, "op": "text", "selector": "#out" }),
+        // `set geo` lets the page read the position it sets; `off` gives the
+        // site back the user's own setting, not "ask".
+        json!({ "id": 19, "op": "eval", "expression": state }),
+        json!({ "id": 20, "op": "set", "what": "geo", "values": ["52.52", "13.405"] }),
+        json!({ "id": 21, "op": "eval", "expression": position }),
+        json!({ "id": 22, "op": "set", "what": "geo", "values": ["off"] }),
+        json!({ "id": 23, "op": "eval", "expression": state }),
         json!({ "id": 6, "op": "tab-list" }),
         json!({ "id": 7, "op": "tab-new" }),
         json!({ "id": 8, "op": "tab-list" }),
@@ -870,6 +941,9 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         assert_eq!(status["engine"], "firefox", "{how}: {status}");
         assert_eq!(ok(&a, 2)["title"], "Fixture", "{how}");
         assert_eq!(ok(&a, 5), "sent Ada s false", "{how}");
+        assert_eq!(ok(&a, 19), "denied", "{how}: the setting made before navigera attached did not hold");
+        assert_eq!(ok(&a, 21), &json!([52.52, 13.405]), "{how}: the page reads the position set");
+        assert_eq!(ok(&a, 23), ok(&a, 19), "{how}: `set geo off` gives the site back the user's own setting");
         // Only what it opened counts: its window, not the user's tab.
         let tabs = |id: u64| ok(&a, id).as_array().map(Vec::len);
         assert_eq!((tabs(6), tabs(8)), (Some(1), Some(2)), "{how}: tabs {} then {}", ok(&a, 6), ok(&a, 8));

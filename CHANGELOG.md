@@ -16,9 +16,16 @@ All notable changes to this project are documented here. The format follows
   and user agent, and says that touch, `<meta name=viewport>` and a mobile
   layout are not emulated. `set geo <lat> <lon>` sets the position and
   grants the geolocation permission to the page's origin, and to each
-  origin the tab goes to after it, never to the whole profile; `set geo
-  off` takes each grant back, and so does the session's end in a Firefox
-  you attached to (navigera's own profile goes with the session). `set media print`,
+  origin the session's tabs go to after it (a redirect's target, Firefox
+  140 on, and a tab the page opens too), never to the whole profile; `set
+  geo off` takes each grant back, and so does the session's end in a
+  Firefox you attached to (navigera's own profile goes with the session).
+  There each origin gets back the setting it had when navigera could read
+  it: the page's own at `set geo` (a site you blocked stays blocked); an
+  origin first reached while geo is on goes back to asking, as WebDriver
+  BiDi cannot read a permission. In a Firefox you attached to a grant is
+  the origin's in the whole profile: until `set geo off`, a tab of yours on
+  that origin can read the browser's own position without asking. `set media print`,
   `reduced-motion` and `forced-colors`, and the settings Firefox does not
   emulate (`cpu`, `network`), say to run with `--engine chrome`. Classic WebDriver
   (Safari) has no emulation and says so; its `set device` takes a device
