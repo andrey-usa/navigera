@@ -2489,6 +2489,11 @@ impl BrowserSession {
         Ok(())
     }
 
+    /// Whether a `set …` of this kind (`viewport`, `media`, …) is in force.
+    pub fn has_override(&self, kind: &str) -> bool {
+        self.overrides.contains_key(kind)
+    }
+
     /// `set device`'s user agent (`None`: `set device off`), in the one
     /// `ua` slot `set ua` writes too, so the last of them is the one every
     /// tab has, open or new.

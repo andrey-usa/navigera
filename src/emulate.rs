@@ -179,6 +179,37 @@ pub fn device_ua_step(ua: Option<&'static str>, set_by_device: bool) -> UaStep {
     }
 }
 
+/// The page's viewport and pixel ratio: read before a viewport override is
+/// set (the page's own) and before one is taken away (what it shows under
+/// it), for [`VIEWPORT_BACK`].
+pub const VIEWPORT_NOW: &str = "() => [innerWidth, innerHeight, devicePixelRatio]";
+
+/// After `set viewport off` or `set device off`: the browser answers before
+/// the page has its own viewport back, so for a frame or more a read still
+/// sees the override's (right after `set device off` on Chrome 153, the
+/// device's size in 3 to 9 of 10 fresh sessions; over chromedriver's BiDi
+/// alike), and it gives the parts back one by one (the pixel ratio a frame
+/// before the size, seen). This answers once each part the override
+/// changed, by the page's own values (`own`), has left the one it had
+/// under it (`under`); with `own` unknown (`null`), once the size has; or
+/// after `ms`. Polled, not waited on `resize`: a page that keeps its size
+/// gets no event.
+pub const VIEWPORT_BACK: &str = "(under, own, ms) => new Promise((done) => {
+  const t0 = performance.now();
+  const look = () => {
+    const now = [innerWidth, innerHeight, devicePixelRatio];
+    const left = (i) => now[i] !== under[i];
+    const back = Array.isArray(own) ? [0, 1, 2].every((i) => own[i] === under[i] || left(i)) : left(0) || left(1);
+    if (back || performance.now() - t0 >= ms) return done(now);
+    setTimeout(look, 5);
+  };
+  look();
+})";
+
+/// How long [`VIEWPORT_BACK`] waits at most: reached only when a part the
+/// override changed keeps its value (the window was given it meanwhile).
+pub const VIEWPORT_BACK_MS: u64 = 1000;
+
 fn off(v: &str) -> bool {
     matches!(v.to_ascii_lowercase().as_str(), "off" | "reset" | "none" | "clear" | "default")
 }

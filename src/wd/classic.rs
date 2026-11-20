@@ -617,7 +617,8 @@ fn start(
         return Ok(Box::new(super::bidi::Bidi::over(session, &ws, timeout)?));
     }
     let window = String::new();
-    let mut me = Classic { s: session, window, accept_dialogs: true, prompt_text: None, dialogs: Vec::new() };
+    let mut me =
+        Classic { s: session, window, accept_dialogs: true, prompt_text: None, dialogs: Vec::new(), own_size: None };
     me.window =
         me.s.cmd("GET", "/window", None, timeout).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
     Ok(Box::new(me))
@@ -630,6 +631,9 @@ pub struct Classic {
     accept_dialogs: bool,
     prompt_text: Option<String>,
     dialogs: Vec<Value>,
+    /// The window's size before `set viewport` or `set device` first sized
+    /// it, given back at `off`.
+    own_size: Option<(i64, i64)>,
 }
 
 impl Classic {
@@ -779,9 +783,20 @@ impl Wire for Classic {
             bail!("--scale: classic WebDriver sizes the window and has no pixel-ratio override; drop --scale, or use --engine firefox or chrome");
         }
         let Some((width, height)) = size else {
-            self.s.cmd("POST", "/window/maximize", Some(json!({})), Duration::from_secs(30))?;
+            // Back to the size the window had (classic WebDriver has no
+            // viewport override to clear); a window never sized is as it was.
+            if let Some((w, h)) = self.own_size.take() {
+                let rect = json!({ "width": w, "height": h });
+                self.s.cmd("POST", "/window/rect", Some(rect), Duration::from_secs(30))?;
+            }
             return Ok(());
         };
+        if self.own_size.is_none() {
+            let rect = self.s.cmd("GET", "/window/rect", None, Duration::from_secs(10))?;
+            if let (Some(w), Some(h)) = (rect["width"].as_i64(), rect["height"].as_i64()) {
+                self.own_size = Some((w, h));
+            }
+        }
         // The command sizes the window; the viewport is that less the
         // browser's own bars, so the difference is measured and added.
         let inner = |s: &mut Session| -> Result<(i64, i64)> {

@@ -21,7 +21,9 @@ All notable changes to this project are documented here. The format follows
   you attached to (navigera's own profile goes with the session). `set media print`,
   `reduced-motion` and `forced-colors`, and the settings Firefox does not
   emulate (`cpu`, `network`), say to run with `--engine chrome`. Classic WebDriver
-  (Safari) has no emulation and says so.
+  (Safari) has no emulation and says so; its `set device` takes a device
+  without a user agent of its own (Laptop, Desktop), sizing the window, and
+  `set device off`.
 - `downloads` (`--clear`, `--json`, `--dir <path>`) and `wait --download
   [<glob>]` on the WebDriver BiDi engines (Firefox): the files the
   session's pages download, from BiDi's download events, with the path and
@@ -60,6 +62,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `set device off` and `set viewport off` answer once the page has its own
+  viewport back, on Chrome and the WebDriver engines: the browser gives it
+  back after it answers, so a read or a screenshot right after could still
+  get the device's size (7 in 12 fresh sessions locally on Chrome 153, and
+  7 in 10 through chromedriver over BiDi; 0 after). The wait is in the
+  page and ends as soon as its width, height and pixel ratio are its own
+  again.
+- `set viewport off` over classic WebDriver gives the window back the size
+  it had before `set viewport` (it maximized the window: 800x457 against
+  780x437 in a headless chromedriver).
 - The user agent around `set device` is the one set last, in the open tab
   and in each new one, on Chrome and Firefox alike. On Chrome, `set device
   off` left the device's user agent in the tabs already open (a reload

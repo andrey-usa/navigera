@@ -323,3 +323,48 @@ fn navigera_named_session_across_processes() {
     assert!(gone["error"].as_str().unwrap_or("").contains("shut down"), "{gone}");
     let _ = std::fs::remove_file(std::path::Path::new(s).with_extension("log"));
 }
+
+/// `set device off` and `set viewport off` answer once the page has its own
+/// viewport back. The browser takes an override away after it answers: a
+/// read right after `set device off` saw the device's size in 3 to 9 of 10
+/// fresh sessions (Chrome 153), most often just after the browser started,
+/// so each round is a session of its own.
+#[test]
+fn a_page_has_its_own_viewport_back_when_set_device_off_answers() {
+    if !chrome_available() {
+        eprintln!("skipping: no Chrome/Chromium/Edge binary installed");
+        return;
+    }
+    use serde_json::json;
+    let size = "() => [innerWidth, innerHeight, devicePixelRatio]";
+    for round in 0..3 {
+        let (mut child, mut stdin) = spawn_serve(&[]);
+        let mut stdout = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
+        let mut id = 0;
+        let mut op = |mut request: Value| -> Value {
+            id += 1;
+            request["id"] = json!(id);
+            let answer = roundtrip(&mut stdin, &mut stdout, &request);
+            assert_eq!(answer["ok"], true, "{request}: {answer}");
+            answer["result"].clone()
+        };
+        op(json!({"op": "goto", "url": "data:text/html,<title>viewport</title><p>viewport"}));
+        let own = op(json!({"op": "eval", "expression": size}));
+        for (device, under) in [("Laptop", json!([1366, 768, 1])), ("Desktop HD HiDPI", json!([1280, 720, 2]))] {
+            op(json!({"op": "set", "what": "device", "values": [device]}));
+            assert_eq!(op(json!({"op": "eval", "expression": size})), under, "round {round}: {device}");
+            op(json!({"op": "set", "what": "device", "values": ["off"]}));
+            let back = op(json!({"op": "eval", "expression": size}));
+            assert_eq!(back, own, "round {round}: the page's own viewport once `set device off` answers ({device})");
+        }
+        op(json!({"op": "set", "what": "viewport", "values": ["800", "600"]}));
+        assert_eq!(op(json!({"op": "eval", "expression": size})), json!([800, 600, 1]), "round {round}");
+        op(json!({"op": "set", "what": "viewport", "values": ["off"]}));
+        let back = op(json!({"op": "eval", "expression": size}));
+        assert_eq!(back, own, "round {round}: the page's own viewport once `set viewport off` answers");
+        op(json!({"op": "quit"}));
+        drop(stdin);
+        let status = child.wait().expect("serve exits after quit");
+        assert!(status.success(), "serve exit status: {status}");
+    }
+}

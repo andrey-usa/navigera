@@ -534,6 +534,35 @@ fn more_ops(args: &[&str], engine: &str, bidi: bool) {
     assert_eq!(ok(&a, 30)["bye"], true);
 }
 
+/// `set device` with a device that has no user agent of its own, then
+/// `off`, and `set viewport` then `off`: the device's viewport, then the one
+/// the window had before. (Classic WebDriver sizes the window: it takes a
+/// laptop and refuses a phone, whose user agent it cannot set.)
+fn viewport_back(args: &[&str], engine: &str) {
+    let site = serve();
+    let size = "[window.innerWidth, window.innerHeight]";
+    let set = |id: u64, what: &str, values: &[&str]| json!({ "id": id, "op": "set", "what": what, "values": values });
+    let eval = |id: u64| json!({ "id": id, "op": "eval", "expression": size });
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        eval(2),
+        set(3, "device", &["Laptop"]),
+        eval(4),
+        set(5, "device", &["off"]),
+        eval(6),
+        set(7, "viewport", &["800", "600"]),
+        set(8, "viewport", &["off"]),
+        eval(9),
+        json!({ "id": 10, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    let start = ok(&a, 2).clone();
+    assert_eq!(ok(&a, 3)["device"], "Laptop", "{engine}: {}", ok(&a, 3));
+    assert_eq!(ok(&a, 4), &json!([1366, 768]), "{engine}: the device's viewport");
+    assert_eq!(ok(&a, 6), &start, "{engine}: `set device off` gives back the viewport the window had");
+    assert_eq!(ok(&a, 9), &start, "{engine}: `set viewport off` gives back the viewport the window had");
+}
+
 /// `set` over WebDriver BiDi's `emulation.*` (Firefox): locale, timezone,
 /// the color scheme, the user agent and offline, for every tab, a new one
 /// too; what Firefox cannot emulate is refused with the engine to use.
@@ -924,6 +953,8 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     hash_links(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
     lone_surrogates(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     lone_surrogates(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
+    viewport_back(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
+    viewport_back(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
     #[cfg(unix)]
     {
         extern "C" {

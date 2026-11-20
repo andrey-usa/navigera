@@ -3399,6 +3399,9 @@ pub struct Driver {
     /// Hashes of `eval` sources V8 refused as reads, so a repeated write
     /// does not pay the refused try again (cleared at [`REFUSED_MAX`]).
     refused_reads: std::collections::HashSet<u64>,
+    /// The page's own viewport, read as `set viewport` or `set device`
+    /// first overrode it, for `off` to wait for ([`crate::emulate::VIEWPORT_BACK`]).
+    viewport_own: Option<Value>,
 }
 
 /// The rule a `route` command asks for: its URL glob and what happens to
@@ -4142,6 +4145,7 @@ impl Driver {
                 was_read: false,
                 read_error: None,
                 refused_reads: Default::default(),
+                viewport_own: None,
                 pre_read: PreRead::default(),
             });
         }
@@ -4165,6 +4169,7 @@ impl Driver {
                 was_read: false,
                 read_error: None,
                 refused_reads: Default::default(),
+                viewport_own: None,
                 pre_read: PreRead::default(),
             });
         }
@@ -4195,6 +4200,7 @@ impl Driver {
             was_read: false,
             read_error: None,
             refused_reads: Default::default(),
+            viewport_own: None,
             pre_read: PreRead::default(),
         })
     }
@@ -4227,6 +4233,7 @@ impl Driver {
             was_read: false,
             read_error: None,
             refused_reads: Default::default(),
+            viewport_own: None,
             pre_read: PreRead::default(),
         })
     }
@@ -4274,6 +4281,7 @@ impl Driver {
             was_read: false,
             read_error: None,
             refused_reads: Default::default(),
+            viewport_own: None,
             pre_read: PreRead::default(),
         })
     }
@@ -6340,12 +6348,32 @@ impl Driver {
                 if let Some(permission) = plan.grant {
                     self.session.grant(permission);
                 }
+                // A viewport override taken away reaches the page after the
+                // browser answers: what the page shows under it and its own
+                // size, for the wait below (`emulate::VIEWPORT_BACK`).
+                let sizes = plan.kind == "viewport" && !lightpanda;
+                let had = sizes && self.session.has_override("viewport");
+                let now = || self.session.evaluate::<Value>(crate::emulate::VIEWPORT_NOW).ok();
+                let under = if had && plan.calls.is_empty() { now() } else { None };
+                let own = if sizes && !had && !plan.calls.is_empty() { now() } else { None };
                 self.session
                     .set_override(plan.kind, plan.calls, plan.reset)
                     .map_err(|e| e.context(format!("set {what}")))?;
+                if own.is_some() {
+                    self.viewport_own = own;
+                }
                 if what == "device" && !lightpanda {
                     let ua = crate::emulate::device_named(values)?.map(|d| d.ua);
                     self.session.set_device_ua(ua).map_err(|e| e.context("set device"))?;
+                }
+                if let Some(under) = under {
+                    let own = self.viewport_own.take().unwrap_or(Value::Null);
+                    let back = format!(
+                        "({})({under}, {own}, {})",
+                        crate::emulate::VIEWPORT_BACK,
+                        crate::emulate::VIEWPORT_BACK_MS
+                    );
+                    let _ = self.session.evaluate::<Value>(&back);
                 }
                 Ok(plan.result)
             }

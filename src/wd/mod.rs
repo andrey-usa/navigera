@@ -648,6 +648,9 @@ pub struct Driver {
     /// The user agent in force is a device's (see
     /// [`crate::emulate::device_ua_step`]).
     ua_by_device: bool,
+    /// While `set viewport` or `set device` sizes the page: its own viewport,
+    /// read before (`null` if that read failed), for `off` to wait for.
+    viewport_own: Option<Value>,
 }
 
 impl Driver {
@@ -699,6 +702,7 @@ impl Driver {
             init_scripts: Vec::new(),
             tabs_seen: usize::MAX,
             ua_by_device: false,
+            viewport_own: None,
         })
     }
 
@@ -738,6 +742,34 @@ impl Driver {
     fn call(&mut self, function: &str, args: Value) -> Result<Value> {
         let answer = self.wire.call(function, &args.to_string(), self.timeout)?;
         page_value(&ok_text(&answer)?)
+    }
+
+    /// [`Wire::set_viewport`] for `set viewport` and `set device`. The
+    /// first size reads the page's own viewport; `off` (`None`) answers once
+    /// the page shows it again, as the browser may take an override away
+    /// after it answers ([`crate::emulate::VIEWPORT_BACK`]).
+    fn size_page(&mut self, size: Option<(u32, u32)>, scale: Option<f64>) -> Result<()> {
+        use crate::emulate::{VIEWPORT_BACK, VIEWPORT_BACK_MS, VIEWPORT_NOW};
+        if size.is_none() {
+            let Some(own) = self.viewport_own.take() else {
+                return self.wire.set_viewport(None, scale);
+            };
+            let under = self.call(VIEWPORT_NOW, json!([])).ok();
+            self.wire.set_viewport(None, scale)?;
+            if let Some(under) = under {
+                let _ = self.call(VIEWPORT_BACK, json!([under, own, VIEWPORT_BACK_MS]));
+            }
+            return Ok(());
+        }
+        let own = match self.viewport_own {
+            None => Some(self.call(VIEWPORT_NOW, json!([])).unwrap_or(Value::Null)),
+            Some(_) => None,
+        };
+        self.wire.set_viewport(size, scale)?;
+        if own.is_some() {
+            self.viewport_own = own;
+        }
+        Ok(())
     }
 
     /// [`Driver::call`] with the session's tabs, read as the call runs.
@@ -1658,7 +1690,7 @@ impl Driver {
                     }
                     _ => None,
                 };
-                self.wire.set_viewport(size, *scale).map_err(|e| e.context("set viewport"))?;
+                self.size_page(size, *scale).map_err(|e| e.context("set viewport"))?;
                 let v = self.call(VIEWPORT_SIZE, json!([]))?;
                 Ok(match size {
                     Some(_) => json!({ "viewport": v, "scale": scale }),
@@ -1709,12 +1741,10 @@ impl Driver {
                     self.ua_by_device = set;
                 }
                 let Some(d) = d else {
-                    self.wire.set_viewport(None, None).map_err(|e| e.context("set device"))?;
+                    self.size_page(None, None).map_err(|e| e.context("set device"))?;
                     return Ok(json!({ "device": "default" }));
                 };
-                self.wire
-                    .set_viewport(Some((d.width, d.height)), Some(d.scale))
-                    .map_err(|e| e.context("set device"))?;
+                self.size_page(Some((d.width, d.height)), Some(d.scale)).map_err(|e| e.context("set device"))?;
                 let mut result = json!({ "device": d.name, "viewport": [d.width, d.height], "scale": d.scale });
                 if d.mobile {
                     result["note"] = json!(format!(
