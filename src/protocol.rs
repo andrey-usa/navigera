@@ -3404,6 +3404,10 @@ pub struct Driver {
     viewport_own: Option<Value>,
 }
 
+/// `set geo`'s answer in a browser a person may be using, where navigera
+/// grants no location permission (a grant would be every site's there).
+pub(crate) const GEO_ASKS: &str = "no location permission granted: in your own browser it would reach every site in your tabs too. A page asks you, as without navigera; `set permissions grant geolocation` grants it for the whole browser until the session ends";
+
 /// The rule a `route` command asks for: its URL glob and what happens to
 /// the requests it matches.
 pub(crate) fn route_of(command: &Command) -> anyhow::Result<crate::cdp::Route> {
@@ -6345,8 +6349,13 @@ impl Driver {
             Command::Set { what, values, scale, mobile, accuracy } => {
                 let lightpanda = s.is_lightpanda();
                 let plan = crate::emulate::plan(what, values, *scale, *mobile, *accuracy, lightpanda)?;
+                let mut note = None;
                 if let Some(permission) = plan.grant {
-                    self.session.grant(permission);
+                    if !self.session.grant(permission) {
+                        note = Some(GEO_ASKS);
+                    }
+                } else if plan.kind == "geo" {
+                    self.session.ungrant("geolocation");
                 }
                 // A viewport override taken away reaches the page after the
                 // browser answers: the page's own size (read as the first
@@ -6383,7 +6392,11 @@ impl Driver {
                     );
                     let _ = self.session.evaluate::<Value>(&back);
                 }
-                Ok(plan.result)
+                let mut out = plan.result;
+                if let Some(note) = note {
+                    out["note"] = json!(note);
+                }
+                Ok(out)
             }
             Command::Get { what, name_of, target, timeout_ms } => {
                 if what == "count" {

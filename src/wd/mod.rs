@@ -1721,9 +1721,14 @@ impl Driver {
                     }
                     _ => Value::Null,
                 };
+                let on = !coordinates.is_null();
                 let params = json!({ "coordinates": coordinates });
                 self.wire.emulate(bidi::GEO, params).map_err(|e| e.context(format!("set {what}")))?;
-                Ok(plan.result)
+                let mut out = plan.result;
+                if on && bidi::persons_browser(&self.wire.describe()) {
+                    out["note"] = json!(bidi::GEO_ASKS);
+                }
+                Ok(out)
             }
             Command::Set { what, values, .. } if what == "device" => {
                 // The viewport, its pixel ratio and the user agent: what

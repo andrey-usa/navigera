@@ -18,14 +18,15 @@ All notable changes to this project are documented here. The format follows
   grants the geolocation permission to the page's origin, and to each
   origin the session's tabs go to after it (a redirect's target, Firefox
   140 on, and a tab the page opens too), never to the whole profile; `set
-  geo off` takes each grant back, and so does the session's end in a
-  Firefox you attached to (navigera's own profile goes with the session).
-  There each origin gets back the setting it had when navigera could read
-  it: the page's own at `set geo` (a site you blocked stays blocked); an
-  origin first reached while geo is on goes back to asking, as WebDriver
-  BiDi cannot read a permission. In a Firefox you attached to a grant is
-  the origin's in the whole profile: until `set geo off`, a tab of yours on
-  that origin can read the browser's own position without asking. `set media print`,
+  geo off` takes each grant back. In a Firefox you attached to that has a
+  window it grants none: a grant there is the origin's in your whole
+  profile, so a tab of yours on that origin could read where you are
+  without asking; a page asks you, as without navigera, and the answer
+  says so. In a headless one the session's end takes each grant back too,
+  and each origin gets back the setting it had when navigera could read
+  it: the page's own at `set geo` (a site blocked there stays blocked,
+  also when a navigation lands while it is read), else asking, as
+  WebDriver BiDi cannot read a permission. `set media print`,
   `reduced-motion` and `forced-colors`, and the settings Firefox does not
   emulate (`cpu`, `network`), say to run with `--engine chrome`. Classic WebDriver
   (Safari) has no emulation and says so; its `set device` takes a device
@@ -69,13 +70,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `set geo` in your own Chrome (`--attach`, `--auto-connect`) no longer
+  grants the location permission there: Chrome's grant is the browser's,
+  not a site's, so every site in your own tabs could read where you are
+  without asking until navigera quit, and `set geo off` left it (Chrome
+  153: two sites open in the user's tabs went from `prompt` to `granted`).
+  In a browser with a window `set geo` sets the position in navigera's
+  tabs, and its answer says a page asks you; `set permissions grant
+  geolocation` grants it when you want. A browser navigera started, or a
+  headless one you attached to, still gets the grant; `set geo off` now
+  takes it back (a page could read the browser's own position after it),
+  and `reset` keeps it in the new context (a page there read `error 1`,
+  denied, not the position set).
 - `set device off` and `set viewport off` answer once the page has its own
   viewport back, on Chrome and the WebDriver engines: the browser gives it
   back after it answers, so a read or a screenshot right after could still
   get the device's size (7 in 12 fresh sessions locally on Chrome 153, and
   7 in 10 through chromedriver over BiDi; after a phone, its screen size in
   7 in 20; 0 after). The wait is in the page and ends as soon as its width,
-  height and pixel ratio are its own again.
+  height and pixel ratio are its own again, or after 1 s (a window resized
+  while the device was set has other values to come back to).
 - `set viewport off` over classic WebDriver gives the window back the size
   it had before `set viewport` (it maximized the window: 800x457 against
   780x437 in a headless chromedriver).

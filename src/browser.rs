@@ -977,6 +977,9 @@ pub struct BrowserSession {
     /// `set …` overrides (keyed by what they set): applied to every open
     /// tab and replayed on tabs opened later.
     overrides: std::collections::BTreeMap<&'static str, Vec<(&'static str, serde_json::Value)>>,
+    /// The permissions `set geo` granted ([`Self::grant`]): granted again in
+    /// the context `reset` makes, taken back by `set geo off`.
+    granted: std::collections::BTreeSet<&'static str>,
     /// The `ua` override is a device's (`set device`), which a device
     /// without a user agent or `set device off` takes back
     /// ([`crate::emulate::device_ua_step`]); one from `set ua` stays.
@@ -1119,6 +1122,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
             ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
@@ -1204,6 +1208,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
             ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
@@ -1392,6 +1397,7 @@ impl BrowserSession {
             profile_exe,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
             ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
@@ -1515,6 +1521,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
             ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
@@ -1748,9 +1755,14 @@ impl BrowserSession {
             self.browser.shared().move_scope(&self.scope(), &context, !all);
             if all {
                 self.overrides.clear();
+                self.granted.clear();
                 self.ua_by_device = false;
                 self.init_scripts.clear();
                 self.init_ids.clear();
+            }
+            // A permission is its context's: `set geo`'s goes with it.
+            for permission in &self.granted {
+                let _ = self.browser.grant_permission(permission, Some(&context));
             }
             // A clock belongs to the browser context, as the page's time.
             self.clock = Clock::default();
@@ -1847,6 +1859,7 @@ impl BrowserSession {
             profile_exe: None,
             downloads_dir: None,
             overrides: Default::default(),
+            granted: Default::default(),
             ua_by_device: false,
             passkeys: Default::default(),
             no_rule_call: Default::default(),
@@ -1907,6 +1920,12 @@ impl BrowserSession {
     /// navigera's own `--profile` browser or an Electron app.
     pub fn in_users_browser(&self) -> bool {
         self.attached && self.profile_dir.is_none() && !self.is_electron()
+    }
+
+    /// The user's browser with a window (not headless): a person may be
+    /// using it, in tabs of their own that share its permissions.
+    pub fn persons_browser(&self) -> bool {
+        self.in_users_browser() && !self.attached_headless()
     }
 
     /// Where this process lists its own tabs in the user's browser, for the
@@ -3273,17 +3292,36 @@ impl BrowserSession {
         )
     }
 
-    /// Permission for the pages' origins (geolocation), in this session's
-    /// browser context.
-    pub fn grant(&self, permission: &str) {
-        let _ = self.browser.grant_permission(permission, self.context.as_deref());
+    /// `set geo`'s permission (geolocation) for every origin, in this
+    /// session's browser context. None in a browser a person may be using
+    /// ([`Self::persons_browser`]): a permission is the browser context's,
+    /// so every site in their own tabs could read where they are. False
+    /// when it was not granted for that reason.
+    pub fn grant(&mut self, permission: &'static str) -> bool {
+        if self.persons_browser() {
+            return false;
+        }
+        if self.browser.grant_permission(permission, self.context.as_deref()).is_ok() {
+            self.granted.insert(permission);
+        }
+        true
+    }
+
+    /// `set geo off`: a permission [`Self::grant`] gave goes back to asking,
+    /// so a page cannot read the browser's own position without a prompt.
+    pub fn ungrant(&mut self, permission: &str) {
+        if self.granted.remove(permission) {
+            let _ = self.browser.set_permission(permission, "prompt", self.context.as_deref());
+        }
     }
 
     /// Set browser permissions for this session's pages (`granted`, `denied`
     /// or `prompt`, the browser's own names, see `emulate::permission_names`).
-    pub fn set_permissions(&self, setting: &str, names: &[&str]) -> Result<()> {
+    /// A permission set so is no longer `set geo`'s to take back.
+    pub fn set_permissions(&mut self, setting: &str, names: &[&str]) -> Result<()> {
         for name in names {
             self.browser.set_permission(name, setting, self.context.as_deref())?;
+            self.granted.remove(*name);
         }
         Ok(())
     }
