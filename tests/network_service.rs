@@ -168,8 +168,10 @@ impl Launch {
         self.run(&["goto", url]);
         let agent = self.run(&["eval", "navigator.userAgent"])["result"].as_str().unwrap_or_default().to_string();
         let all = processes();
+        // The whole argument: `…-123` is the start of another run's `…-1234`.
+        let marked = |cmd: &str| cmd.split_whitespace().any(|arg| arg.trim_matches('"') == self.marker);
         let main: Vec<&(u32, u32, String)> =
-            all.iter().filter(|(_, _, cmd)| cmd.contains(&self.marker) && !cmd.contains("--type=")).collect();
+            all.iter().filter(|(_, _, cmd)| marked(cmd) && !cmd.contains("--type=")).collect();
         assert_eq!(main.len(), 1, "{}: one browser process carries {}: {main:?}", self.exe, self.marker);
         let (root, _, browser) = main[0];
         let mut tree = vec![*root];
