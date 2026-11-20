@@ -585,6 +585,39 @@ fn viewport_back(args: &[&str], engine: &str) {
     assert_eq!(ok(&a, 16), &start, "{engine}: `set viewport off` from the second tab, in the first");
 }
 
+/// Classic WebDriver sizes a window, not a viewport: `off` gives back the
+/// window it sized, also from another window of the session (a popup the
+/// page opened as a window of its own). It gave the first window's size
+/// to the window it was in and left the first at the size set.
+fn viewport_back_per_window(args: &[&str], engine: &str) {
+    let site = serve();
+    let size = "[window.innerWidth, window.innerHeight]";
+    let set = |id: u64, what: &str, values: &[&str]| json!({ "id": id, "op": "set", "what": what, "values": values });
+    let eval = |id: u64| json!({ "id": id, "op": "eval", "expression": size });
+    let popup = format!("window.open('{site}/more.html', '_blank', 'popup,width=520,height=410'); 1");
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        eval(2),
+        set(3, "viewport", &["800", "600"]),
+        json!({ "id": 4, "op": "eval", "expression": popup }),
+        json!({ "id": 5, "op": "wait", "js": "true", "timeout_ms": 500 }),
+        json!({ "id": 6, "op": "tab-select", "index": 1 }),
+        eval(7),
+        set(8, "viewport", &["off"]),
+        eval(9),
+        json!({ "id": 10, "op": "tab-select", "index": 0 }),
+        eval(11),
+        json!({ "id": 12, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    let start = ok(&a, 2).clone();
+    ok(&a, 6);
+    let popup_own = ok(&a, 7).clone();
+    assert_ne!(popup_own, start, "{engine}: the popup is a window of its own size");
+    assert_eq!(ok(&a, 9), &popup_own, "{engine}: `off` from the popup leaves the popup as it was");
+    assert_eq!(ok(&a, 11), &start, "{engine}: `off` from the popup gives the sized window its own back");
+}
+
 /// `set` over WebDriver BiDi's `emulation.*` (Firefox): locale, timezone,
 /// the color scheme, the user agent and offline, for every tab, a new one
 /// too; what Firefox cannot emulate is refused with the engine to use.
@@ -1040,6 +1073,7 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     lone_surrogates(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     lone_surrogates(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
     viewport_back(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
+    viewport_back_per_window(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
     #[cfg(unix)]
     {

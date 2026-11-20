@@ -102,7 +102,9 @@ All notable changes to this project are documented here. The format follows
   second tab left the first at the size set.
 - `set viewport off` over classic WebDriver gives the window back the size
   it had before `set viewport` (it maximized the window: 800x457 against
-  780x437 in a headless chromedriver).
+  780x437 in a headless chromedriver), each window it sized: `off` from
+  a window the page opened (a popup) gave that one the first window's size
+  and left the first at the size set. A failed `off` can be asked again.
 - The user agent around `set device` is the one set last, in the open tab
   and in each new one, on Chrome and Firefox alike. On Chrome, `set device
   off` left the device's user agent in the tabs already open (a reload
