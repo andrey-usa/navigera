@@ -12,12 +12,16 @@ All notable changes to this project are documented here. The format follows
   of the session's tabs in the same list as on Chrome (`#n METHOD STATUS
   type url size time`), with `--filter`, `--type`, `--failed`, `--since`,
   `--clear` and `--har`; a redirect is two entries, as on Chrome; a
-  status shows once the response starts, the size and time once it ends. A
+  status shows once the response starts, the size and time once it ends
+  (over chromedriver, which gives every event of a request its start
+  time, the time is the fetch's own, to the end of its headers). A
   response body (`network <n>`, `--body-file`) and the bodies in a HAR
   come from what the browser kept (`network.addDataCollector`, up to
-  10 MiB a response). In a Firefox you attached to, only the window
-  navigera opened is listened to. Classic WebDriver still has no request
-  list and says so.
+  10 MiB a response). In a Firefox you attached to, only navigera's own
+  tabs are listened to: its window, a tab `tab-new` opened, and a tab one
+  of its pages opened, from when navigera hears of that tab (a request it
+  sent before is not listed). Classic WebDriver still has no request list
+  and says so.
 
 ### Fixed
 
@@ -26,6 +30,10 @@ All notable changes to this project are documented here. The format follows
   the browser keeps one body per id, the last hop's. A hop that redirected
   now has no body (its HAR entry carries none), and `network <n>` names
   the hop that has it. On every engine.
+- `route` in a Firefox you attached to held the requests of the tabs the
+  session had when the first rule was set only: a tab opened after it, by
+  `tab-new` or by one of its pages, went past the rules. Each is held from
+  when navigera hears of it.
 
 ## [0.16.0] - 2026-11-20
 

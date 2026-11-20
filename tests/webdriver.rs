@@ -1008,8 +1008,15 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         json!({ "id": 22, "op": "set", "what": "geo", "values": ["off"] }),
         json!({ "id": 23, "op": "eval", "expression": state }),
         json!({ "id": 6, "op": "tab-list" }),
+        // A rule set before a tab is opened holds that tab's requests too.
+        json!({ "id": 29, "op": "route", "pattern": "*/routed*", "body": "mocked" }),
         json!({ "id": 7, "op": "tab-new" }),
         json!({ "id": 8, "op": "tab-list" }),
+        // The requests of a tab it opened are its own too.
+        json!({ "id": 24, "op": "network", "clear": true }),
+        json!({ "id": 25, "op": "goto", "url": format!("{site}/more.html") }),
+        json!({ "id": 26, "op": "network", "filter": "/more.html" }),
+        json!({ "id": 30, "op": "eval", "expression": "fetch('/routed').then((r) => r.text())" }),
         // A tab its page opens is its own too: listed, and switched to.
         json!({ "id": 10, "op": "tab-select", "index": 0 }),
         // A frame in its tab is its own: the frame's console line is
@@ -1022,6 +1029,13 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         json!({ "id": 13, "op": "wait", "js": "!!window.w && window.w.document.title === 'Next'" }),
         json!({ "id": 14, "op": "tab-list" }),
         json!({ "id": 15, "op": "tab-select", "index": 2 }),
+        // And those of a tab its page opened, from when navigera heard of it.
+        json!({ "id": 27, "op": "eval", "expression": "fetch('/more.html?from=popup').then((r) => r.status)" }),
+        json!({ "id": 28, "op": "network", "filter": "from=popup" }),
+        json!({ "id": 31, "op": "eval", "expression": "fetch('/routed?from=popup').then((r) => r.text())" }),
+        // With the rules gone, nothing is held: the site answers.
+        json!({ "id": 32, "op": "unroute" }),
+        json!({ "id": 33, "op": "eval", "expression": "fetch('/routed?from=popup').then((r) => r.status)" }),
         json!({ "id": 9, "op": "quit" }),
     ];
     let home_env: [(&str, &std::path::Path); 1] = [(var, &home)];
@@ -1047,6 +1061,17 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         assert!(console.contains("from the frame"), "{how}: a frame's console line is not heard: {console}");
         assert_eq!(tabs(14), Some(3), "{how}: a tab the page opened is not listed: {}", ok(&a, 14));
         assert_eq!(ok(&a, 15)["title"], "Next", "{how}");
+        let listed = |id: u64| ok(&a, id).as_str().unwrap_or("").to_string();
+        assert!(listed(26).contains(" GET 200 Document /more.html"), "{how}: a tab it opened: {}", listed(26));
+        assert_eq!(ok(&a, 27), 200, "{how}");
+        assert!(
+            listed(28).contains(" GET 200 Fetch /more.html?from=popup"),
+            "{how}: a tab its page opened: {}",
+            listed(28)
+        );
+        let routed = (ok(&a, 30), ok(&a, 31));
+        assert_eq!(routed, (&json!("mocked"), &json!("mocked")), "{how}: the rule in tabs opened after it");
+        assert_eq!(ok(&a, 33), 404, "{how}: the rule is gone");
         assert_eq!(ok(&a, 9)["bye"], true, "{how}");
         assert!(browser.try_wait().unwrap().is_none(), "{how}: the user's Firefox was closed");
     }

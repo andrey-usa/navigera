@@ -111,6 +111,11 @@ pub struct Bidi {
     /// them while there is one.
     routes: Vec<Route>,
     intercept: Option<String>,
+    /// In the user's browser, an intercept per tab that became this
+    /// session's after the rules were set ([`Self::adopt`]), and the
+    /// commands that ask for one whose answers have not come yet.
+    more_intercepts: Vec<String>,
+    asked_intercepts: Vec<u64>,
     /// `init-script`: the preload scripts this session added.
     preloads: Vec<String>,
     /// `set viewport`, for the tabs this session opens after it.
@@ -137,7 +142,8 @@ pub struct Bidi {
     /// events (then `route` subscribes on its own).
     requests: Option<VecDeque<crate::cdp::logs::Request>>,
     last_request: u64,
-    /// The data collector that keeps response bodies for `network <n>`.
+    /// The data collector that keeps response bodies for `network <n>` (in
+    /// the user's browser, its first tab's: [`Self::adopt`] adds one per tab).
     collector: Option<String>,
     /// The frames inside `own` tabs, each with its tab.
     frames: Vec<(String, String)>,
@@ -191,6 +197,15 @@ fn request_kind(request: &Value) -> &'static str {
         (_, "manifest") => "Manifest",
         _ => "Other",
     }
+}
+
+/// A request's end by its fetch timings (`request.timings`, in ms):
+/// `started` (in s) plus the time from `requestTime` to `responseEnd`;
+/// None while the response has not ended.
+fn timed_end(request: &Value, started: f64) -> Option<f64> {
+    let timings = &request["timings"];
+    let (from, to) = (timings["requestTime"].as_f64()?, timings["responseEnd"].as_f64()?);
+    (to > 0.0 && to >= from).then(|| started + (to - from) / 1000.0)
 }
 
 /// One `network.*` event into the request log, as Chrome's would be: a
@@ -248,7 +263,11 @@ fn log_request(log: &mut VecDeque<crate::cdp::logs::Request>, last: &mut u64, me
             r.from_cache = response["fromCache"] == true;
             if method == "network.responseCompleted" {
                 r.size = response["bytesReceived"].as_u64();
-                r.ended = at.or(Some(r.started));
+                let end = at.unwrap_or(r.started);
+                // A server that stamps every event of a request with its
+                // start (chromedriver's): the fetch's own times, which it
+                // counts from the request.
+                r.ended = Some(if end > r.started { end } else { timed_end(request, r.started).unwrap_or(end) });
             }
         }
         "network.fetchError" => {
@@ -798,6 +817,8 @@ impl Bidi {
             preloads: Vec::new(),
             routes: Vec::new(),
             intercept: None,
+            more_intercepts: Vec::new(),
+            asked_intercepts: Vec::new(),
             viewport: None,
             emulations: Vec::new(),
             geo: None,
@@ -906,9 +927,12 @@ impl Bidi {
                 // JSON in UTF-8 cannot hold: read as U+FFFD.
                 let text = t.as_str();
                 let fixed = |e| crate::cdp::lone_surrogates_replaced(text).map_or(Err(e), |f| serde_json::from_str(&f));
-                Ok(Some(
-                    serde_json::from_str(text).or_else(fixed).map_err(|e| anyhow!("the browser sent no JSON ({e})"))?,
-                ))
+                let v: Value =
+                    serde_json::from_str(text).or_else(fixed).map_err(|e| anyhow!("the browser sent no JSON ({e})"))?;
+                if !self.asked_intercepts.is_empty() && v["type"] != "event" {
+                    self.took_intercept(&v);
+                }
+                Ok(Some(v))
             }
             Ok(Message::Close(_)) => {
                 self.closed = true;
@@ -982,7 +1006,7 @@ impl Bidi {
                     // (a grant is the origin's in every tab). Written, as the
                     // reader is mid-message.
                     let id = self.own[tabs].clone();
-                    self.emulate_in(&id, false);
+                    self.adopt(&id, false);
                 }
             }
             "browsingContext.contextDestroyed" if self.attached => {
@@ -1156,6 +1180,9 @@ impl Bidi {
             }
             (Some(id), true) => {
                 let id = id.clone();
+                for more in std::mem::take(&mut self.more_intercepts) {
+                    let _ = self.send("network.removeIntercept", json!({ "intercept": more }), timeout);
+                }
                 self.send("network.removeIntercept", json!({ "intercept": id }), timeout)?;
                 self.intercept = None;
                 let mut unsubscribe = json!({ "events": ["network.beforeRequestSent"] });
@@ -1281,6 +1308,62 @@ impl Bidi {
         Ok((tree["contexts"][0]["url"].as_str().unwrap_or("").to_string(), None))
     }
 
+    /// A tab of the user's Firefox that became this session's (it opened
+    /// it, or one of its pages did): the session's emulations, its request
+    /// log, response bodies and `route` rules, which in the user's browser
+    /// cover only the tabs they name. `wait` false: written, for a caller
+    /// that is reading a message; an intercept's answer is taken in
+    /// [`Self::read_one`]. A tab a page opens is heard from its
+    /// `contextCreated` on: a request it sent before that is not listed or
+    /// held.
+    fn adopt(&mut self, id: &str, wait: bool) {
+        self.emulate_in(id, wait);
+        let mut calls = Vec::new();
+        if self.requests.is_some() {
+            calls.push(("session.subscribe", json!({ "events": NETWORK_EVENTS, "contexts": [id] })));
+        } else if self.intercept.is_some() {
+            calls.push(("session.subscribe", json!({ "events": ["network.beforeRequestSent"], "contexts": [id] })));
+        }
+        if self.collector.is_some() {
+            let collect = json!({ "dataTypes": ["response"], "maxEncodedDataSize": BODY_MAX,
+                                  "collectorType": "blob", "contexts": [id] });
+            calls.push(("network.addDataCollector", collect));
+        }
+        if self.intercept.is_some() {
+            calls.push(("network.addIntercept", json!({ "phases": ["beforeRequestSent"], "contexts": [id] })));
+        }
+        for (method, params) in calls {
+            let intercept = method == "network.addIntercept";
+            if wait {
+                if let Ok(r) = self.send(method, params, Duration::from_secs(10)) {
+                    if let Some(x) = r["intercept"].as_str().filter(|_| intercept) {
+                        self.more_intercepts.push(x.to_string());
+                    }
+                }
+            } else if let Ok(asked) = self.write(method, params) {
+                if intercept {
+                    self.asked_intercepts.push(asked);
+                }
+            }
+        }
+    }
+
+    /// The answer to an intercept [`Self::adopt`] asked for without
+    /// waiting: kept with the session's, or, the rules gone meanwhile,
+    /// removed.
+    fn took_intercept(&mut self, v: &Value) {
+        let Some(i) = v["id"].as_u64().and_then(|id| self.asked_intercepts.iter().position(|&a| a == id)) else {
+            return;
+        };
+        self.asked_intercepts.swap_remove(i);
+        let Some(x) = v["result"]["intercept"].as_str() else { return };
+        if self.intercept.is_some() {
+            self.more_intercepts.push(x.to_string());
+        } else {
+            let _ = self.write("network.removeIntercept", json!({ "intercept": x }));
+        }
+    }
+
     /// The session's emulations (`set locale`, `ua`, `geo`, ...) and its
     /// viewport, in a tab of the user's Firefox that has none of them: one
     /// navigera opened, or one its page opened. `wait` false: written, for
@@ -1310,10 +1393,10 @@ impl Bidi {
             let tabs = self.own.len();
             adopt_opened(&mut self.own, tree);
             // Opened tabs no `contextCreated` named: the session's
-            // emulations too, late.
+            // emulations and requests too, late.
             let opened = self.own[tabs..].to_vec();
             for id in &opened {
-                self.emulate_in(id, true);
+                self.adopt(id, true);
             }
         }
         tree["contexts"]
@@ -1674,10 +1757,12 @@ impl Wire for Bidi {
     }
 
     fn response_body(&mut self, request: &str) -> Result<(String, bool)> {
-        let Some(collector) = self.collector.clone() else {
+        if self.collector.is_none() {
             bail!("this browser keeps no response bodies for WebDriver BiDi (network.addDataCollector)")
-        };
-        let p = json!({ "dataType": "response", "request": request, "collector": collector });
+        }
+        // No collector named: any of the session's, one per tab in the
+        // user's browser ([`Self::adopt`]).
+        let p = json!({ "dataType": "response", "request": request });
         let r = self.send("network.getData", p, Duration::from_secs(30))?;
         let bytes = &r["bytes"];
         let value = bytes["value"].as_str().unwrap_or_default().to_string();
@@ -1854,7 +1939,7 @@ impl Wire for Bidi {
         let id = r["context"].as_str().map(str::to_string).ok_or_else(|| anyhow!("the browser made no tab"))?;
         if self.attached {
             self.own.push(id.clone());
-            self.emulate_in(&id, true);
+            self.adopt(&id, true);
             let was = std::mem::replace(&mut self.context, id.clone());
             self.listen_in(&id, Duration::from_secs(10));
             self.context = was;
@@ -2432,6 +2517,31 @@ mod network_tests {
         assert_eq!((log[0].status, log[0].ended, log[0].size), (Some(404), None, None));
         log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 404, 1009.0));
         assert_eq!((log[0].ended, log[0].size), (Some(1.009), Some(120)));
+    }
+
+    #[test]
+    fn a_server_that_stamps_each_event_with_the_start_has_its_end_from_the_timings() {
+        // chromedriver's: every event at the request's wall time, the
+        // timings counted from the request (`requestTime` 0).
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/slow", 5000.0, 0));
+        let mut slow = done("1", 200, 5000.0);
+        slow["request"]["timings"] = json!({ "timeOrigin": 5000.0, "requestTime": 0.0, "responseEnd": 2003.85 });
+        log_request(&mut log, &mut last, "network.responseCompleted", &slow);
+        assert!((log[0].ended.unwrap() - log[0].started - 2.00385).abs() < 1e-9, "{:?}", log[0].ended);
+        // Firefox's: the event at its own time, the timings since the
+        // epoch: the event's time is the end.
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("2", "http://a/x", 7000.0, 0));
+        let mut ff = done("2", 200, 7040.0);
+        ff["request"]["timings"] = json!({ "timeOrigin": 0.0, "requestTime": 6900.0, "responseEnd": 7039.5 });
+        log_request(&mut log, &mut last, "network.responseCompleted", &ff);
+        assert_eq!(log[1].ended, Some(7.04));
+        // No timings, or none ended: the event's time.
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("3", "http://a/y", 8000.0, 0));
+        let mut none = done("3", 200, 8000.0);
+        none["request"]["timings"] = json!({ "requestTime": 0.0, "responseEnd": 0.0 });
+        log_request(&mut log, &mut last, "network.responseCompleted", &none);
+        assert_eq!(log[2].ended, Some(8.0));
     }
 
     #[test]
