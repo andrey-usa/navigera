@@ -19,6 +19,14 @@ All notable changes to this project are documented here. The format follows
   navigera opened is listened to. Classic WebDriver still has no request
   list and says so.
 
+### Fixed
+
+- `network <n>` and `network --har` gave a request that redirected the
+  body of the hop it led to: a redirect's hops share the request's id, and
+  the browser keeps one body per id, the last hop's. A hop that redirected
+  now has no body (its HAR entry carries none), and `network <n>` names
+  the hop that has it. On every engine.
+
 ## [0.16.0] - 2026-11-20
 
 ### Added

@@ -787,6 +787,10 @@ fn network_ops(args: &[&str], engine: &str, bodies: bool) {
     assert_eq!(target["status"], 200, "{engine}: {target}");
     if bodies {
         assert_eq!(target["content"]["text"], NEXT, "{engine}: {target}");
+        // The redirect has none: the body under the request's id is the
+        // target's.
+        let redirect = &har["log"]["entries"][0]["response"];
+        assert_eq!((&redirect["status"], redirect["content"].get("text")), (&json!(302), None), "{engine}: {redirect}");
     }
     assert_eq!(ok(&a, 8), &json!("(no requests)"), "{engine}");
 }

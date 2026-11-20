@@ -4395,6 +4395,7 @@ impl Driver {
         since: Option<u64>,
     ) -> anyhow::Result<Value> {
         let all = self.session.requests(clear && n.is_none());
+        let redirected = crate::cdp::logs::redirected(&all);
         if let Some(n) = n {
             let r = all
                 .iter()
@@ -4405,6 +4406,10 @@ impl Driver {
                 if let Ok(data) = self.session.request_post_data(&r.id) {
                     out["post_data"] = json!(data);
                 }
+            }
+            if let Some(next) = redirected.get(&n) {
+                out["body"] = json!(crate::cdp::logs::redirect_body(*next));
+                return Ok(out);
             }
             match self.session.response_body(&r.id) {
                 Ok((body, base64)) => body_answer(&mut out, &body, base64, body_file)?,
@@ -4417,10 +4422,11 @@ impl Driver {
             let mut har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
             // Response bodies, so `route --har` can replay the file. A body
             // the browser no longer holds (an evicted or other-tab request)
-            // is left out.
+            // is left out, and so is a redirect's: the body under its id is
+            // its last hop's.
             if let Some(entries) = har.pointer_mut("/log/entries").and_then(Value::as_array_mut) {
                 for (entry, r) in entries.iter_mut().zip(&picked) {
-                    if r.status.is_none() || r.failed.is_some() {
+                    if r.status.is_none() || r.failed.is_some() || redirected.contains_key(&r.n) {
                         continue;
                     }
                     if let Ok((body, base64)) = self.session.response_body(&r.id) {

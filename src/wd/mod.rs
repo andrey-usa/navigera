@@ -1710,12 +1710,17 @@ impl Driver {
             }
             Command::Network { n, filter, kind, failed, limit, clear, har, body_file, since } => {
                 let all = self.wire.requests(*clear && n.is_none()).map_err(|e| e.context("network"))?;
+                let redirected = crate::cdp::logs::redirected(&all);
                 if let Some(n) = n {
                     let r = all
                         .iter()
                         .find(|r| r.n == *n)
                         .ok_or_else(|| anyhow!("network: no request #{n} (older ones are dropped after 1000)"))?;
                     let mut out = crate::cdp::logs::request_json(r);
+                    if let Some(next) = redirected.get(n) {
+                        out["body"] = json!(crate::cdp::logs::redirect_body(*next));
+                        return Ok(out);
+                    }
                     match self.wire.response_body(&r.id) {
                         Ok((body, base64)) => {
                             crate::protocol::body_answer(&mut out, &body, base64, body_file.as_deref())?
@@ -1728,10 +1733,11 @@ impl Driver {
                     crate::cdp::logs::pick_requests(all, filter.as_deref(), kind.as_deref(), *failed, *since);
                 if let Some(path) = har {
                     let mut har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
-                    // The bodies the browser still holds, as on Chrome.
+                    // The bodies the browser still holds, as on Chrome (a
+                    // redirect's none: the body under its id is its last hop's).
                     if let Some(entries) = har.pointer_mut("/log/entries").and_then(Value::as_array_mut) {
                         for (entry, r) in entries.iter_mut().zip(&picked) {
-                            if r.status.is_none() || r.failed.is_some() {
+                            if r.status.is_none() || r.failed.is_some() || redirected.contains_key(&r.n) {
                                 continue;
                             }
                             if let Ok((body, base64)) = self.wire.response_body(&r.id) {

@@ -552,6 +552,28 @@ pub fn pick_requests(
 }
 
 /// The full record of one request (bodies are added by the caller).
+/// The requests that redirected, each with the number of the hop it led
+/// to. A redirect's hops share the request's id, and the browser keeps one
+/// response body per id, the last hop's (Chrome's `Network.getResponseBody`,
+/// WebDriver BiDi's `network.getData`): no hop before it has a body of its
+/// own to show.
+pub fn redirected(all: &[Request]) -> HashMap<u64, u64> {
+    let mut next: HashMap<&str, u64> = HashMap::new();
+    let mut out = HashMap::new();
+    for r in all.iter().rev() {
+        if let Some(&later) = next.get(r.id.as_str()) {
+            out.insert(r.n, later);
+        }
+        next.insert(r.id.as_str(), r.n);
+    }
+    out
+}
+
+/// `network <n>`'s body for a hop that redirected ([`redirected`]).
+pub fn redirect_body(next: u64) -> String {
+    format!("(none: it redirected, to #{next}, and the browser keeps the body of a request's last hop only)")
+}
+
 pub fn request_json(r: &Request) -> Value {
     json!({
         "n": r.n,
@@ -662,6 +684,17 @@ fn chrono_like_iso(epoch_s: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_hop_that_redirected_names_the_hop_it_led_to() {
+        let r = |n: u64, id: &str| super::Request { n, id: id.into(), ..Default::default() };
+        // Two redirects of request "a" (#1 -> #3 -> #4), "b" between them.
+        let all = [r(1, "a"), r(2, "b"), r(3, "a"), r(4, "a"), r(5, "c")];
+        let hops = super::redirected(&all);
+        let mut got: Vec<_> = hops.into_iter().collect();
+        got.sort();
+        assert_eq!(got, [(1, 3), (3, 4)]);
+        assert!(super::redirect_body(3).contains("#3"));
+    }
 
     #[test]
     fn reporting_requests_are_told_apart() {
