@@ -46,24 +46,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- Fewer words for an agent to read, measured with the o200k tokenizer on a
-  TodoMVC-style page: a link to a part of the page itself shows
-  `url=#/active`, not the page's path again (`ax` 147 -> 137 tokens; a
-  hash-routed page 109 -> 102; 100 in-page links on a 500-row page
-  19,693 -> 19,293), and in compact output `check` / `uncheck` say `ok`
-  when they flipped the box, as a click does, and `{"changed":false}` when
-  it was already so (was `{"changed":true,"checked":true}`: 9 -> 2 tokens;
-  a fill, Enter, check and click batch 9 -> 2; that flow with an `ax`
-  before and after 345 -> 316).
+- Fewer words for an agent to read: a link to a part of the page itself
+  shows `url=#/active`, not the page's path again, and in compact output
+  `check` / `uncheck` say `ok` when they flipped the box, as a click does,
+  and `{"changed":false}` when it was already so (was
+  `{"changed":true,"checked":true}`).
 
 - One process fewer per Chrome on Linux and Windows: the network service
   runs in the browser process, as navigera's launch flags meant it to (they
   named the feature `NetworkServiceInProcess`; Chromium calls it
-  `NetworkServiceInProcess2`, so the flag did nothing). A start, a goto and
-  an `ax` leave the browser at 262.5 MiB PSS instead of 280.4 (Chrome 153)
-  and 171.1 instead of 181.0 (chrome-headless-shell 158), Linux, medians of
-  16; no change in time. macOS keeps it apart: only there does Chrome
-  sandbox that process by default. So does a machine whose administrator
+  `NetworkServiceInProcess2`, so the flag did nothing). macOS keeps it
+  apart: only there does Chrome sandbox that process by default. So does a machine whose administrator
   turned that sandbox on with the `NetworkServiceSandboxEnabled` policy
   (a managed policy file on Linux, the registry on Windows, for Chrome,
   Chromium, Edge or Brave): Chrome applies it only to a network service in a
@@ -134,13 +127,13 @@ All notable changes to this project are documented here. The format follows
   now passed over as the shells are, up to the caller (Linux).
 - A click on a button under a loading overlay was refused as covered on
   a second visit to the page: a request that once took over a second (a
-  slow search, a 2.5 s save) was taken for a long poll on every later
+  slow search or save) was taken for a long poll on every later
   visit, and its overlay for a cover that stays (`click --text "Cancel"`
   suggested). Requests to such URLs now count while a click waits on an
   overlay, as on the first visit; they still hold no read. And once the
   fetches an overlay waited on are in, the click looks once more: the
   page takes it away in a task after the response, which a loaded
-  machine runs late (macOS CI refused one at 2.6 s on a 2.5 s fetch).
+  machine runs late (as a macOS CI runner did).
   A cover with controls that stays is still reported after a second.
 - `wait --download` answered with the newest finished download however
   old: after one download, a click and `wait --download` gave the earlier
@@ -167,7 +160,7 @@ All notable changes to this project are documented here. The format follows
   once the page wires the element, as when it wires it later. On Chrome.
 - A lone UTF-16 surrogate in a page (half of an emoji pair, as a script
   that cuts text by length can leave) made `ax`, `text` and `eval` on
-  Chrome wait for their timeout, 35 s, and fail: Chrome sends it as
+  Chrome wait for their timeout and fail: Chrome sends it as
   `\ud800`, which JSON in UTF-8 cannot hold, and the whole answer was
   dropped; on the WebDriver engines (Firefox, Safari, chromedriver) the
   page's own `JSON.stringify` writes it the same way and the command
