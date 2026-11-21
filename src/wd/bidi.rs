@@ -119,15 +119,6 @@ const CONSOLE_MAX: usize = 1000;
 /// The most of one console entry's text that is kept, in bytes.
 const CONSOLE_TEXT_MAX: usize = 16 << 10;
 
-/// Where another connection joins the session `session.new` answered
-/// with `answer` on `url` (`ws://host:port/session`).
-fn session_endpoint(url: &str, answer: &Value) -> String {
-    match answer["sessionId"].as_str() {
-        Some(id) => format!("{}/{id}", url.trim_end_matches('/')),
-        None => url.to_string(),
-    }
-}
-
 /// A WebSocket to a BiDi endpoint (`ws://` only).
 pub(crate) fn open_ws(url: &str, timeout: Duration) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
     // The endpoint as shown: a grid's may carry a key.
@@ -152,10 +143,11 @@ pub(crate) fn open_ws(url: &str, timeout: Duration) -> Result<WebSocket<MaybeTls
 
 pub struct Bidi {
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
-    /// Where another connection joins this session (`screencast`): the
-    /// session's own endpoint, `<endpoint>/session/<id>` for a session
-    /// this connection made with `session.new`.
-    rejoin: String,
+    /// Where another connection joins this session (`screencast`): a
+    /// WebDriver server's `webSocketUrl`. None for a session this
+    /// connection made with `session.new` (Firefox): a second connection
+    /// to `/session/<id>` failed there on every OS.
+    rejoin: Option<String>,
     next_id: u64,
     /// The top-level browsing context ops act on.
     context: String,
@@ -792,7 +784,6 @@ impl Bidi {
         let session = me
             .send("session.new", json!({ "capabilities": { "alwaysMatch": always } }), timeout)
             .context("Firefox refused a BiDi session")?;
-        me.rejoin = session_endpoint(&url, &session);
         let caps = &session["capabilities"];
         me.browser = json!({
             "name": caps["browserName"].as_str().unwrap_or("firefox"),
@@ -851,7 +842,6 @@ impl Bidi {
                     continue;
                 }
             };
-            me.rejoin = session_endpoint(url, &session);
             let caps = &session["capabilities"];
             me.browser = json!({
                 "name": caps["browserName"].as_str().unwrap_or("firefox"),
@@ -885,6 +875,7 @@ impl Bidi {
     /// The BiDi side of a classic session that asked for `webSocketUrl`.
     pub fn over(session: super::classic::Session, ws_url: &str, timeout: Duration) -> Result<Self> {
         let mut me = Self::connect(ws_url, timeout)?;
+        me.rejoin = Some(ws_url.to_string());
         me.browser = session.describe();
         me.endpoint = session.endpoint();
         me.classic = Some(session);
@@ -898,7 +889,7 @@ impl Bidi {
         let shown = super::classic::mask(url);
         Ok(Self {
             ws,
-            rejoin: url.to_string(),
+            rejoin: None,
             next_id: 1,
             context: String::new(),
             console: VecDeque::new(),
@@ -2025,8 +2016,14 @@ impl Wire for Bidi {
         self.context.clone()
     }
 
-    fn screencast_from(&self) -> Option<String> {
-        Some(self.rejoin.clone())
+    fn screencast_from(&self) -> Result<String> {
+        self.rejoin.clone().ok_or_else(|| {
+            anyhow!(
+                "screencast: not on Firefox yet: BiDi sends no frames, and the second connection to the session \
+                 they are taken on is not served for a session made on Firefox's own endpoint; record with \
+                 --engine chrome, or on a WebDriver server with --bidi (chromedriver)"
+            )
+        })
     }
 
     fn front(&mut self) {

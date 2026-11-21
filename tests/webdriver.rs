@@ -795,10 +795,11 @@ fn network_ops(args: &[&str], engine: &str, bodies: bool) {
     assert_eq!(ok(&a, 8), &json!("(no requests)"), "{engine}");
 }
 
-/// `screencast` over BiDi: a frame at the start and one for each change,
-/// JPEGs, and the player; classic WebDriver says to add `--bidi`. Each
-/// state stays longer than a still page's longest gap between looks.
-fn screencast_ops(args: &[&str], engine: &str, bidi: bool) {
+/// `screencast` over a WebDriver server's BiDi: a frame at the start and
+/// one for each change, JPEGs, and the player. Each state stays longer
+/// than a still page's longest gap between looks. Where it is not served
+/// (`refused`), the start says why.
+fn screencast_ops(args: &[&str], engine: &str, refused: Option<&str>) {
     let site = serve();
     let dir = tempfile::tempdir().unwrap();
     let rec = dir.path().join("rec");
@@ -816,11 +817,12 @@ fn screencast_ops(args: &[&str], engine: &str, bidi: bool) {
         json!({ "id": 10, "op": "quit" }),
     ];
     let a = session(args, &script);
-    if !bidi {
+    if let Some(why) = refused {
         let x = a.iter().find(|x| x["id"] == 2).unwrap();
-        assert!(x["error"].as_str().is_some_and(|e| e.contains("add --bidi")), "{engine}: {x}");
+        assert!(x["error"].as_str().is_some_and(|e| e.contains(why)), "{engine}: {x}");
         return;
     }
+    ok(&a, 2);
     let done = ok(&a, 8);
     assert!(done.get("error").is_none(), "{engine}: {done}");
     // The page as it was, red, blue: each a frame of its own.
@@ -949,7 +951,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
     download_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     network_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
-    screencast_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
+    screencast_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", Some("not on Firefox yet"));
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
     hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
@@ -1190,8 +1192,8 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     lone_surrogates(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     lone_surrogates(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
     network_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi", false);
-    screencast_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi", true);
-    screencast_ops(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic", false);
+    screencast_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi", None);
+    screencast_ops(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic", Some("add --bidi"));
     viewport_back(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back_per_window(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");

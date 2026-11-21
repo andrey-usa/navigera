@@ -470,10 +470,13 @@ pub trait Wire: Send {
     /// seconds for one at every press there.
     fn front(&mut self) {}
     /// `screencast`: where a connection of its own joins this session, to
-    /// take screenshots while commands run on this one; None where the
-    /// protocol has no second connection (classic WebDriver).
-    fn screencast_from(&self) -> Option<String> {
-        None
+    /// take screenshots while commands run on this one; an error says why
+    /// where there is none.
+    fn screencast_from(&self) -> Result<String> {
+        bail!(
+            "screencast: classic WebDriver cannot look at the page while a command runs; add --bidi where the \
+             WebDriver server serves BiDi (chromedriver), or run it with --engine chrome"
+        )
     }
     /// Wait for a navigation an action started, if one did.
     fn settle(&mut self, _timeout: Duration, _watch: Watch) {}
@@ -926,7 +929,7 @@ impl Driver {
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|device|geo|locale|timezone|media|offline|ua, route, unroute, downloads, wait --download; over BiDi also network and screencast)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|device|geo|locale|timezone|media|offline|ua, route, unroute, downloads, wait --download; over BiDi also network, and screencast on a WebDriver server)",
             op_name(command),
             self.engine
         )
@@ -1324,13 +1327,7 @@ impl Driver {
                     if let Some(r) = &self.screencast {
                         bail!("screencast: already recording into {}; `screencast stop` first", r.dir().display());
                     }
-                    let Some(endpoint) = self.wire.screencast_from() else {
-                        bail!(
-                            "screencast: classic WebDriver cannot look at the page while a command runs; add --bidi \
-                             where the WebDriver server serves BiDi (chromedriver, geckodriver), or run it with \
-                             --engine chrome or --engine firefox"
-                        );
-                    };
+                    let endpoint = self.wire.screencast_from()?;
                     if size.is_some() {
                         bail!(
                             "screencast --size: not on the {} engine (a WebDriver BiDi screenshot is the viewport's \
