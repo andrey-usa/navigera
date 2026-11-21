@@ -3635,6 +3635,29 @@ impl Engine {
         matches!(self, Self::Chrome(d) if d.pre_read_due())
     }
 
+    /// How long a session may wait for its next command before it works
+    /// between commands ([`Self::pre_read_if_idle`]): often while a page a
+    /// navigation loaded waits to be read ahead, or a WebDriver recording's
+    /// next look is due.
+    pub fn tick(&self) -> Duration {
+        match self {
+            Self::Chrome(d) if d.pre_read_due() => Duration::from_millis(10),
+            Self::WebDriver(d) => d.tick(),
+            _ => Duration::from_millis(250),
+        }
+    }
+
+    /// `serve` (JSON lines on stdin) between lines: the WebDriver engines
+    /// take what the browser sent meanwhile (a dialog, a request held for a
+    /// `route` rule, a recording's looks) every so often; Chrome's event
+    /// watcher runs on its own.
+    fn serve_tick(&self) -> Option<Duration> {
+        match self {
+            Self::WebDriver(d) => Some(d.tick()),
+            _ => None,
+        }
+    }
+
     pub fn pre_read_if_idle(&mut self) {
         match self {
             Self::Chrome(d) => d.pre_read_if_idle(),
@@ -4395,6 +4418,7 @@ impl Driver {
         since: Option<u64>,
     ) -> anyhow::Result<Value> {
         let all = self.session.requests(clear && n.is_none());
+        let redirected = crate::cdp::logs::redirected(&all);
         if let Some(n) = n {
             let r = all
                 .iter()
@@ -4403,61 +4427,35 @@ impl Driver {
             let mut out = crate::cdp::logs::request_json(r);
             if r.post_data.is_none() && r.has_post_data {
                 if let Ok(data) = self.session.request_post_data(&r.id) {
-                    out["post_data"] = json!(data);
+                    out["post_data"] = json!(crate::cdp::logs::kept_post_data(&data));
                 }
             }
+            if let Some(next) = redirected.get(&n) {
+                out["body"] = json!(crate::cdp::logs::redirect_body(*next));
+                return Ok(out);
+            }
             match self.session.response_body(&r.id) {
-                Ok((body, base64)) => {
-                    let bytes = if base64 {
-                        use base64::Engine as _;
-                        base64::engine::general_purpose::STANDARD.decode(&body).unwrap_or_default()
-                    } else {
-                        body.clone().into_bytes()
-                    };
-                    if let Some(path) = body_file {
-                        write_own(path, &bytes)
-                            .map_err(|e| anyhow::Error::from(e).context(format!("network --body-file {path}")))?;
-                        out["body_file"] = json!(path);
-                        out["body_bytes"] = json!(bytes.len());
-                    } else if base64 {
-                        out["body"] =
-                            json!(format!("({} bytes of binary data; --body-file <path> saves it)", bytes.len()));
-                    } else {
-                        const MAX: usize = 8 * 1024;
-                        let text = String::from_utf8_lossy(&bytes);
-                        out["body"] = if text.len() > MAX {
-                            let cut = text
-                                .char_indices()
-                                .take_while(|(i, _)| *i < MAX)
-                                .last()
-                                .map(|(i, c)| i + c.len_utf8())
-                                .unwrap_or(0);
-                            json!(format!("{}… ({} bytes; --body-file <path> saves all)", &text[..cut], bytes.len()))
-                        } else {
-                            json!(text)
-                        };
-                    }
-                }
+                Ok((body, base64)) => body_answer(&mut out, &body, base64, body_file)?,
                 Err(e) => out["body"] = json!(format!("(unavailable: {e:#})")),
             }
             return Ok(out);
         }
-        let kind = kind.map(str::to_ascii_lowercase);
-        let mut picked: Vec<_> = all
-            .into_iter()
-            .filter(|r| filter.is_none_or(|f| r.url.contains(f)))
-            .filter(|r| kind.as_ref().is_none_or(|k| r.kind.to_ascii_lowercase() == *k))
-            .filter(|r| !failed || r.failed.is_some() || r.status.is_some_and(|s| s >= 400))
-            .filter(|r| since.is_none_or(|n| r.n > n))
-            .collect();
+        let mut picked = crate::cdp::logs::pick_requests(all, filter, kind, failed, since);
         if let Some(path) = har {
+            // A body too large for its event, as `network <n>` has it.
+            for r in picked.iter_mut().filter(|r| r.post_data.is_none() && r.has_post_data) {
+                if let Ok(data) = self.session.request_post_data(&r.id) {
+                    r.post_data = Some(crate::cdp::logs::kept_post_data(&data));
+                }
+            }
             let mut har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
             // Response bodies, so `route --har` can replay the file. A body
             // the browser no longer holds (an evicted or other-tab request)
-            // is left out.
+            // is left out, and so is a redirect's: the body under its id is
+            // its last hop's.
             if let Some(entries) = har.pointer_mut("/log/entries").and_then(Value::as_array_mut) {
                 for (entry, r) in entries.iter_mut().zip(&picked) {
-                    if r.status.is_none() || r.failed.is_some() {
+                    if r.status.is_none() || r.failed.is_some() || redirected.contains_key(&r.n) {
                         continue;
                     }
                     if let Ok((body, base64)) = self.session.response_body(&r.id) {
@@ -7290,7 +7288,36 @@ pub(crate) fn downloads_answer(items: &[crate::cdp::downloads::Download], as_jso
 }
 
 /// `scheme://host[:port]` of a URL ("" when it has none).
-fn origin_of(url: &str) -> String {
+/// `network <n>`'s body: into `body_file` when one is named, else inline
+/// (text up to 8 KiB; binary data as a note of its size).
+pub fn body_answer(out: &mut Value, body: &str, base64: bool, body_file: Option<&str>) -> anyhow::Result<()> {
+    let bytes = if base64 {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.decode(body).unwrap_or_default()
+    } else {
+        body.as_bytes().to_vec()
+    };
+    if let Some(path) = body_file {
+        write_own(path, &bytes).map_err(|e| anyhow::Error::from(e).context(format!("network --body-file {path}")))?;
+        out["body_file"] = json!(path);
+        out["body_bytes"] = json!(bytes.len());
+    } else if base64 {
+        out["body"] = json!(format!("({} bytes of binary data; --body-file <path> saves it)", bytes.len()));
+    } else {
+        const MAX: usize = 8 * 1024;
+        let text = String::from_utf8_lossy(&bytes);
+        out["body"] = if text.len() > MAX {
+            let cut =
+                text.char_indices().take_while(|(i, _)| *i < MAX).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
+            json!(format!("{}… ({} bytes; --body-file <path> saves all)", &text[..cut], bytes.len()))
+        } else {
+            json!(text)
+        };
+    }
+    Ok(())
+}
+
+pub fn origin_of(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else { return String::new() };
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     format!("{scheme}://{host}")
@@ -7390,7 +7417,7 @@ fn peak_rss_kb() -> Option<u64> {
 ///
 /// Returns the process exit code (`0` after `quit` or EOF, `1` on launch /
 /// IO failure). Logs go to stderr so stdout stays protocol-clean.
-pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn Write) -> ExitCode {
+pub fn serve<R: BufRead + Send + 'static>(config: &SessionConfig, input: R, output: &mut dyn Write) -> ExitCode {
     let mut driver = match Engine::launch(config) {
         Ok(driver) => driver,
         Err(e) => {
@@ -7404,7 +7431,30 @@ pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn W
         config.engine,
     );
 
-    for raw in input.lines() {
+    // Lines come in on a thread of their own, so that between them a
+    // WebDriver session can take what its browser sends.
+    let (lines, incoming) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in input.lines() {
+            let failed = line.is_err();
+            if lines.send(line).is_err() || failed {
+                return;
+            }
+        }
+    });
+    loop {
+        let next = match driver.serve_tick() {
+            Some(tick) => match incoming.recv_timeout(tick) {
+                Ok(line) => Some(line),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    driver.pre_read_if_idle();
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+            },
+            None => incoming.recv().ok(),
+        };
+        let Some(raw) = next else { break };
         let raw = match raw {
             Ok(line) => line,
             Err(e) => {

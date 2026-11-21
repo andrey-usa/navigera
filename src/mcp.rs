@@ -687,11 +687,7 @@ impl<'a> Server<'a> {
     /// How long to wait for the next call before [`Server::idle`]: often
     /// while a page a navigation loaded waits to be read ahead.
     fn tick(&self) -> Duration {
-        if self.driver.as_ref().is_some_and(Engine::pre_read_due) {
-            Duration::from_millis(10)
-        } else {
-            Duration::from_millis(250)
-        }
+        self.driver.as_ref().map_or(Duration::from_millis(250), Engine::tick)
     }
 
     /// Between calls, as the session server does between commands: read a

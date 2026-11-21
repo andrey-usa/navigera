@@ -114,11 +114,22 @@ fn serve() -> String {
                         return;
                     }
                     let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let mut sent = 0;
                     loop {
                         let mut h = String::new();
                         if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
                             break;
                         }
+                        if let Some((name, value)) = h.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                sent = value.trim().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                    // A request's body (a POST's) is read past, not taken
+                    // for the next request.
+                    if std::io::copy(&mut (&mut r).take(sent), &mut std::io::sink()).is_err() {
+                        return;
                     }
                     // `/to?u=<url>`: a redirect there (another origin's page).
                     if let Some(to) = path.strip_prefix("/to?u=") {
@@ -180,6 +191,11 @@ fn session_in(args: &[&str], env: &[(&str, &std::path::Path)], script: &[Value])
     let mut out = BufReader::new(child.stdout.take().unwrap());
     let mut answers = Vec::new();
     for cmd in script {
+        // A pause of the client's own, between commands.
+        if let Some(ms) = cmd["pause_ms"].as_u64() {
+            std::thread::sleep(Duration::from_millis(ms));
+            continue;
+        }
         writeln!(stdin, "{cmd}").unwrap();
         let mut line = String::new();
         out.read_line(&mut line).unwrap();
@@ -750,6 +766,128 @@ fn emulate_ops(args: &[&str], engine: &str) {
 
 /// A file a page downloads is listed, waited for and saved where
 /// `downloads --dir` says.
+/// `network`: the requests a page made, as on Chrome: a redirect is two
+/// entries, a 404 is failed, `clear` empties it, and a POST's body is kept
+/// (16 KiB of it, in bytes, what was cut said). `bodies`: the server keeps
+/// response bodies (chromedriver 147 over BiDi keeps none).
+fn network_ops(args: &[&str], engine: &str, bodies: bool) {
+    let site = serve();
+    let dir = tempfile::tempdir().unwrap();
+    let har = dir.path().join("next.har");
+    let posts_har = dir.path().join("posts.har");
+    let calls = "fetch('/to?u=' + location.origin + '/next.html').then(() => fetch('/nope')).then(r => r.status)";
+    let posts = "Promise.all([fetch('/nope?small', { method: 'POST', body: 'q=\\u00e9&n=1' }), \
+                 fetch('/nope?big', { method: 'POST', body: '\\u{1F980}'.repeat(20000) })]).then(rs => rs.length)";
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        json!({ "id": 2, "op": "network", "clear": true }),
+        json!({ "id": 3, "op": "eval", "expression": calls }),
+        json!({ "id": 4, "op": "network" }),
+        json!({ "id": 5, "op": "network", "failed": true }),
+        json!({ "id": 6, "op": "network", "filter": "/next.html", "har": har.display().to_string() }),
+        json!({ "id": 7, "op": "network", "clear": true }),
+        json!({ "id": 8, "op": "network" }),
+        json!({ "id": 10, "op": "eval", "expression": posts }),
+        json!({ "id": 11, "op": "network", "filter": "/nope?", "har": posts_har.display().to_string() }),
+        json!({ "id": 9, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    assert_eq!(ok(&a, 3), &json!(404), "{engine}");
+    let list = ok(&a, 4).as_str().unwrap_or("").to_string();
+    let lines: Vec<&str> = list.lines().collect();
+    assert_eq!(lines.len(), 3, "{engine}: {list}");
+    assert!(lines[0].contains(" GET 302 Fetch /to?u="), "{engine}: {list}");
+    assert!(lines[1].contains(" GET 200 Fetch /next.html"), "{engine}: {list}");
+    assert!(lines[2].contains(" GET 404 Fetch /nope"), "{engine}: {list}");
+    let failed = ok(&a, 5).as_str().unwrap_or("").to_string();
+    assert!(failed.lines().count() == 1 && failed.contains("/nope"), "{engine}: {failed}");
+    // The redirect (its query names the target) and the target.
+    assert_eq!(ok(&a, 6)["entries"], 2, "{engine}");
+    // The response body the browser kept, as `route --har` replays it.
+    let har: Value = serde_json::from_slice(&std::fs::read(&har).unwrap()).unwrap();
+    let target = &har["log"]["entries"][1]["response"];
+    assert_eq!(target["status"], 200, "{engine}: {target}");
+    if bodies {
+        assert_eq!(target["content"]["text"], NEXT, "{engine}: {target}");
+        // The redirect has none: the body under the request's id is the
+        // target's.
+        let redirect = &har["log"]["entries"][0]["response"];
+        assert_eq!((&redirect["status"], redirect["content"].get("text")), (&json!(302), None), "{engine}: {redirect}");
+    }
+    assert_eq!(ok(&a, 8), &json!("(no requests)"), "{engine}");
+    assert_eq!(ok(&a, 10), &json!(2), "{engine}");
+    let har: Value = serde_json::from_slice(&std::fs::read(&posts_har).unwrap()).unwrap();
+    let posted = |which: &str| {
+        let entries = har["log"]["entries"].as_array().unwrap();
+        let e = entries.iter().find(|e| e["request"]["url"].as_str().unwrap_or("").ends_with(which));
+        e.unwrap_or_else(|| panic!("{engine}: no {which} in {har}"))["request"]["postData"]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{engine}: {which} has no body: {har}"))
+            .to_string()
+    };
+    assert_eq!(posted("?small"), "q=\u{e9}&n=1", "{engine}");
+    let big = posted("?big");
+    let kept = big.len() - "…(+63636 bytes)".len();
+    assert!(
+        big.len() <= 16 << 10 && big.ends_with("…(+63636 bytes)"),
+        "{engine}: {} bytes, ends {:?}",
+        big.len(),
+        &big[kept..]
+    );
+    assert!(big[..kept].chars().all(|c| c == '\u{1F980}') && kept == 4 * 4091, "{engine}: {kept} bytes kept");
+}
+
+/// `screencast` over WebDriver BiDi (Firefox, a WebDriver server): a frame
+/// at the start and one for each change, also while no command runs,
+/// JPEGs, and the player. Each state stays longer than a still page's
+/// longest gap between looks. Where it is not served (`refused`), the start
+/// says why.
+fn screencast_ops(args: &[&str], engine: &str, refused: Option<&str>) {
+    let site = serve();
+    let dir = tempfile::tempdir().unwrap();
+    let rec = dir.path().join("rec");
+    let paint = |id: u64, color: &str| json!({ "id": id, "op": "eval", "expression": format!("document.body.style.background = '{color}'; 1") });
+    // Green for 1.5 s while no command runs, then blue again: seen only if
+    // the session looks between commands.
+    let by_itself = "setTimeout(() => { document.body.style.background = 'rgb(0, 200, 0)'; }, 200); \
+                     setTimeout(() => { document.body.style.background = 'rgb(0, 0, 200)'; }, 1700); 1";
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        json!({ "id": 2, "op": "screencast", "action": "start", "dir": rec.display().to_string() }),
+        json!({ "id": 3, "op": "wait", "ms": 1500 }),
+        paint(4, "rgb(200, 0, 0)"),
+        json!({ "id": 5, "op": "wait", "ms": 1500 }),
+        paint(6, "rgb(0, 0, 200)"),
+        json!({ "id": 7, "op": "wait", "ms": 1500 }),
+        json!({ "id": 8, "op": "eval", "expression": by_itself }),
+        json!({ "pause_ms": 2500 }),
+        json!({ "id": 9, "op": "screencast", "action": "stop" }),
+        json!({ "id": 10, "op": "screencast", "action": "stop" }),
+        json!({ "id": 11, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    if let Some(why) = refused {
+        let x = a.iter().find(|x| x["id"] == 2).unwrap();
+        assert!(x["error"].as_str().is_some_and(|e| e.contains(why)), "{engine}: {x}");
+        return;
+    }
+    ok(&a, 2);
+    let done = ok(&a, 9);
+    assert!(done.get("error").is_none(), "{engine}: {done}");
+    // The page as it was, red, blue, then green and blue again while the
+    // client paused: each a frame of its own.
+    let frames = done["frames"].as_u64().unwrap_or(0);
+    assert!(frames >= 5, "{engine}: {done}");
+    for n in 1..=frames {
+        let jpeg = std::fs::read(rec.join(format!("frame-{n:05}.jpg"))).unwrap();
+        assert_eq!(&jpeg[..2], &[0xff, 0xd8], "{engine}: frame {n} is a JPEG");
+    }
+    let player = std::fs::read_to_string(rec.join("index.html")).unwrap();
+    assert!(player.contains("frame-00001.jpg"), "{engine}");
+    let again = a.iter().find(|x| x["id"] == 10).unwrap();
+    assert!(again["error"].as_str().is_some_and(|e| e.contains("nothing is recording")), "{engine}: {again}");
+}
+
 fn download_ops(args: &[&str], engine: &str) {
     let site = serve();
     let dir = tempfile::tempdir().unwrap();
@@ -862,6 +1000,8 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     emulate_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
     download_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    network_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
+    screencast_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", None);
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
     hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
@@ -962,8 +1102,15 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         json!({ "id": 22, "op": "set", "what": "geo", "values": ["off"] }),
         json!({ "id": 23, "op": "eval", "expression": state }),
         json!({ "id": 6, "op": "tab-list" }),
+        // A rule set before a tab is opened holds that tab's requests too.
+        json!({ "id": 29, "op": "route", "pattern": "*/routed*", "body": "mocked" }),
         json!({ "id": 7, "op": "tab-new" }),
         json!({ "id": 8, "op": "tab-list" }),
+        // The requests of a tab it opened are its own too.
+        json!({ "id": 24, "op": "network", "clear": true }),
+        json!({ "id": 25, "op": "goto", "url": format!("{site}/more.html") }),
+        json!({ "id": 26, "op": "network", "filter": "/more.html" }),
+        json!({ "id": 30, "op": "eval", "expression": "fetch('/routed').then((r) => r.text())" }),
         // A tab its page opens is its own too: listed, and switched to.
         json!({ "id": 10, "op": "tab-select", "index": 0 }),
         // A frame in its tab is its own: the frame's console line is
@@ -976,6 +1123,13 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         json!({ "id": 13, "op": "wait", "js": "!!window.w && window.w.document.title === 'Next'" }),
         json!({ "id": 14, "op": "tab-list" }),
         json!({ "id": 15, "op": "tab-select", "index": 2 }),
+        // And those of a tab its page opened, from when navigera heard of it.
+        json!({ "id": 27, "op": "eval", "expression": "fetch('/more.html?from=popup').then((r) => r.status)" }),
+        json!({ "id": 28, "op": "network", "filter": "from=popup" }),
+        json!({ "id": 31, "op": "eval", "expression": "fetch('/routed?from=popup').then((r) => r.text())" }),
+        // With the rules gone, nothing is held: the site answers.
+        json!({ "id": 32, "op": "unroute" }),
+        json!({ "id": 33, "op": "eval", "expression": "fetch('/routed?from=popup').then((r) => r.status)" }),
         json!({ "id": 9, "op": "quit" }),
     ];
     let home_env: [(&str, &std::path::Path); 1] = [(var, &home)];
@@ -1001,6 +1155,17 @@ fn a_running_firefox_is_attached_to_and_left_running() {
         assert!(console.contains("from the frame"), "{how}: a frame's console line is not heard: {console}");
         assert_eq!(tabs(14), Some(3), "{how}: a tab the page opened is not listed: {}", ok(&a, 14));
         assert_eq!(ok(&a, 15)["title"], "Next", "{how}");
+        let listed = |id: u64| ok(&a, id).as_str().unwrap_or("").to_string();
+        assert!(listed(26).contains(" GET 200 Document /more.html"), "{how}: a tab it opened: {}", listed(26));
+        assert_eq!(ok(&a, 27), 200, "{how}");
+        assert!(
+            listed(28).contains(" GET 200 Fetch /more.html?from=popup"),
+            "{how}: a tab its page opened: {}",
+            listed(28)
+        );
+        let routed = (ok(&a, 30), ok(&a, 31));
+        assert_eq!(routed, (&json!("mocked"), &json!("mocked")), "{how}: the rule in tabs opened after it");
+        assert_eq!(ok(&a, 33), 404, "{how}: the rule is gone");
         assert_eq!(ok(&a, 9)["bye"], true, "{how}");
         assert!(browser.try_wait().unwrap().is_none(), "{how}: the user's Firefox was closed");
     }
@@ -1076,6 +1241,9 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     hash_links(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
     lone_surrogates(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     lone_surrogates(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
+    network_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi", false);
+    screencast_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi", None);
+    screencast_ops(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic", Some("add --bidi"));
     viewport_back(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back_per_window(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");

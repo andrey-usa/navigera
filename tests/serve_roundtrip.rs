@@ -332,6 +332,78 @@ fn navigera_named_session_across_processes() {
 /// one, a size between came back (its screen size with the page's pixel
 /// ratio) in 7 of 20 fresh sessions, but never when the phone came third
 /// (6 runs of this test passed on that code then; 2 of 8 now).
+/// Records in the page each change of its viewport and pixel ratio, with
+/// the ms since it was installed (a `resize` listener and a 5 ms poll, as
+/// `set … off`'s own wait polls), for a failure to show what the page went
+/// through around an `off`.
+const VIEWPORT_TRAIL: &str = "() => {
+  clearInterval(window.__trailTimer);
+  removeEventListener('resize', window.__trailLook);
+  const t0 = performance.now();
+  const trail = [];
+  let last = '';
+  const look = () => {
+    const now = [innerWidth, innerHeight, devicePixelRatio];
+    if (now.join() !== last) {
+      last = now.join();
+      trail.push([...now, Math.round(performance.now() - t0)]);
+    }
+  };
+  look();
+  window.__trailLook = look;
+  addEventListener('resize', look);
+  window.__trailTimer = setInterval(look, 5);
+  window.__trail = () => ({ trail, now: Math.round(performance.now() - t0) });
+  return true;
+}";
+
+/// `set <what> off`, then one read: the page's own viewport, `own`. On a
+/// failure it says how long `off` took (its wait gives up at 1 s), what the
+/// page showed from just before `off` to the read, and whether, when, the
+/// page got its own values later (read for 3 s, then after one frame).
+fn off_gives_the_page_its_own_viewport(op: &mut impl FnMut(Value) -> Value, what: &str, own: &Value, context: &str) {
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+    let size = "() => [innerWidth, innerHeight, devicePixelRatio]";
+    op(json!({"op": "eval", "expression": VIEWPORT_TRAIL}));
+    let asked = Instant::now();
+    op(json!({"op": "set", "what": what, "values": ["off"]}));
+    let took = asked.elapsed().as_millis();
+    let back = op(json!({"op": "eval", "expression": size}));
+    if back == *own {
+        return;
+    }
+    let trail = op(json!({"op": "eval", "expression": "() => window.__trail()"}));
+    let read = Instant::now();
+    let mut later = None;
+    while read.elapsed() < Duration::from_secs(3) {
+        if op(json!({"op": "eval", "expression": size})) == *own {
+            later = Some(read.elapsed().as_millis());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let later = match later {
+        Some(ms) => format!("own again {ms} ms after the read"),
+        // Not back: does a frame bring it (a page that paints none may
+        // not take a new size)?
+        None => {
+            let frame = op(json!({"op": "eval", "expression": "() => new Promise((done) => {
+              requestAnimationFrame(() => done(['after a frame', innerWidth, innerHeight, devicePixelRatio]));
+              setTimeout(() => done(['no frame in 1 s', innerWidth, innerHeight, devicePixelRatio]), 1000);
+            })"}));
+            format!("not own in 3 s after the read; then {frame}")
+        }
+    };
+    let since = op(json!({"op": "eval", "expression": "() => window.__trail()"}));
+    panic!(
+        "{context}: the page's own viewport once `set {what} off` answers: read {back}, own {own}; \
+         `off` answered in {took} ms (its wait gives up at 1000); \
+         the page from just before `off` to the read, [width, height, ratio, ms]: {trail}; \
+         {later}; the page by then: {since}"
+    );
+}
+
 #[test]
 fn a_page_has_its_own_viewport_back_when_set_device_off_answers() {
     if !chrome_available() {
@@ -364,15 +436,11 @@ fn a_page_has_its_own_viewport_back_when_set_device_off_answers() {
             let seen = op(json!({"op": "eval", "expression": size}));
             assert!(under.is_none_or(|under| seen == under), "round {round}: {device}: {seen}");
             assert_ne!(seen, own, "round {round}: {device} changed nothing the page sees");
-            op(json!({"op": "set", "what": "device", "values": ["off"]}));
-            let back = op(json!({"op": "eval", "expression": size}));
-            assert_eq!(back, own, "round {round}: the page's own viewport once `set device off` answers ({device})");
+            off_gives_the_page_its_own_viewport(&mut op, "device", &own, &format!("round {round}, {device}"));
         }
         op(json!({"op": "set", "what": "viewport", "values": ["800", "600"]}));
         assert_eq!(op(json!({"op": "eval", "expression": size})), json!([800, 600, 1]), "round {round}");
-        op(json!({"op": "set", "what": "viewport", "values": ["off"]}));
-        let back = op(json!({"op": "eval", "expression": size}));
-        assert_eq!(back, own, "round {round}: the page's own viewport once `set viewport off` answers");
+        off_gives_the_page_its_own_viewport(&mut op, "viewport", &own, &format!("round {round}, 800x600"));
         op(json!({"op": "quit"}));
         drop(stdin);
         let status = child.wait().expect("serve exits after quit");

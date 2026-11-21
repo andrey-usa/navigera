@@ -16,11 +16,15 @@ Engines, each only when found: Firefox ($NAVIGERA_FIREFOX, over WebDriver
 BiDi), chromedriver ($CHROMEDRIVER, its Chrome headless; $CHROME_BIN when
 set) over classic WebDriver and over BiDi, and Chrome itself for the text
 search. The pages: the per-op bench's page_a (bench/ladder/gen_fixtures.py:
-500 cards, about 3,000 nodes in `ax`), a page whose link opens a tab, and a
+500 cards, about 3,000 nodes in `ax`), a page whose link opens a tab, a
 2.8 MB text of 20,000 lines (plain, and with accented letters on every
-line). Exit 0: every probe ran; 2: one could not run (the table says why).
+line), and a page of 300 images, each load with URLs of its own and none
+cached: as a session loads it, and, on the BiDi engines, after a `network`
+started the request log (what listening to requests costs a load). Exit 0: every probe ran; 2: one
+could not run (the table says why).
 """
 import argparse
+import itertools
 import json
 import os
 import socket
@@ -28,15 +32,21 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ladder"))
-from gate import serve_dir  # noqa: E402
+from gate import Server, serve_dir  # noqa: E402
 from gen_fixtures import gen_page_a  # noqa: E402
 
 GREP_LINES = 20_000
+IMAGES = 300
+# A 1x1 PNG.
+PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                    "0000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
 
 
 def write_pages(dir_: Path) -> None:
@@ -55,6 +65,42 @@ def write_pages(dir_: Path) -> None:
             lines.append(f"<div>Line {i:05}: {words}, {words}, and so on to the end{mark}.</div>")
         (dir_ / f"{name}.html").write_text(
             f"<!doctype html><meta charset=utf-8><title>{name}</title>" + "".join(lines), encoding="utf-8")
+
+
+class Images(BaseHTTPRequestHandler):
+    """/images: a page of IMAGES images whose URLs no load before it used;
+    everything with no-store, so each load asks for the page and all its
+    images again, whatever the engine caches."""
+    protocol_version = "HTTP/1.1"
+    # The headers and the body go out in two writes: without this, each
+    # response on a kept-alive connection waits out the client's delayed
+    # ack (about 40 ms on Linux), and the load times that, not the engine.
+    disable_nagle_algorithm = True
+    loads = itertools.count()
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/images":
+            n = next(self.loads)
+            body = ("<!doctype html><title>images</title>"
+                    + "".join(f'<img src="/i/{n}/{i}.png">' for i in range(IMAGES))).encode()
+            kind = "text/html"
+        else:
+            body, kind = PNG, "image/png"
+        self.send_response(200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def serve_images() -> str:
+    srv = Server(("127.0.0.1", 0), Images)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{srv.server_address[1]}/images"
 
 
 def chromedriver() -> tuple[subprocess.Popen, str, str] | None:
@@ -111,17 +157,33 @@ def samples(binary: str, args: list[str], setup: list[dict], measured: dict, run
     return out
 
 
-def probes(pages: str) -> dict[str, list[tuple[str, list[dict], dict]]]:
+def base_samples(binary: str, args: list[str], setup: list[dict], measured: dict, runs: int) -> list[float]:
+    """`samples` of the base, or [] where it says it has no such op on
+    this engine (one the candidate adds)."""
+    try:
+        return samples(binary, args, setup, measured, runs)
+    except RuntimeError as e:
+        if "not on the" in str(e):
+            return []
+        raise
+
+
+def probes(pages: str, images: str) -> dict[str, list[tuple[str, list[dict], dict]]]:
     """(name, setup, measured op) per engine kind."""
     page_a = [{"op": "goto", "url": f"{pages}/page_a.html"}]
     tab = [{"op": "goto", "url": f"{pages}/tabs.html"}, {"op": "click", "selector": "#open"}]
     ax = ("ax on page_a", page_a, {"op": "ax", "format": "text"})
     click = ("click that stays on the page", page_a, {"op": "click", "selector": "#search"})
     after_tab = ("click after the page opened a tab", tab, {"op": "click", "selector": "#count"})
+    goto_images = (f"goto a page of {IMAGES} images, none cached", [], {"op": "goto", "url": images})
+    goto_logged = (f"goto a page of {IMAGES} images, none cached, the request log on", [{"op": "network"}],
+                   {"op": "goto", "url": images})
     grep = [(f"text --grep, 2.8 MB of {GREP_LINES:,} lines{what}",
              [{"op": "goto", "url": f"{pages}/{page}.html"}], {"op": "text", "grep": "zebra"})
             for page, what in (("text", ""), ("text-accented", ", accented"))]
-    return {"firefox": [ax, click, after_tab], "webdriver": [ax, click, after_tab], "chrome": grep}
+    webdriver = [ax, click, after_tab, goto_images]
+    return {"firefox": [*webdriver, goto_logged], "webdriver": webdriver, "bidi": [*webdriver, goto_logged],
+            "chrome": grep}
 
 
 def main() -> int:
@@ -139,7 +201,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         write_pages(Path(tmp))
         pages = serve_dir(Path(tmp))
-        all_probes = probes(pages)
+        all_probes = probes(pages, serve_images())
         engines = []
         if os.environ.get("NAVIGERA_FIREFOX"):
             engines.append(("Firefox (BiDi)", ["--engine", "firefox"], "firefox"))
@@ -152,7 +214,7 @@ def main() -> int:
         if driver:
             _, url, caps = driver
             engines.append(("chromedriver, classic", ["--webdriver", url, "--capabilities", caps], "webdriver"))
-            engines.append(("chromedriver, BiDi", ["--webdriver", url, "--bidi", "--capabilities", caps], "webdriver"))
+            engines.append(("chromedriver, BiDi", ["--webdriver", url, "--bidi", "--capabilities", caps], "bidi"))
         elif not notes or not notes[-1].startswith("chromedriver"):
             notes.append("chromedriver: skipped, CHROMEDRIVER is not set")
         engines.append(("Chrome", [], "chrome"))
@@ -163,17 +225,22 @@ def main() -> int:
                         continue
                     try:
                         # Interleaved: base, candidate, base, candidate (drift hits both).
-                        b = samples(args.base, eargs, setup, op, args.runs)
+                        # A probe of an op the base lacks times the candidate alone.
+                        b = base_samples(args.base, eargs, setup, op, args.runs)
                         c = samples(args.candidate, eargs, setup, op, args.runs)
-                        b += samples(args.base, eargs, setup, op, args.runs)
+                        b = b and b + samples(args.base, eargs, setup, op, args.runs)
                         c += samples(args.candidate, eargs, setup, op, args.runs)
                     except (RuntimeError, subprocess.TimeoutExpired) as e:
                         broken.append(f"{engine}: {name}")
                         rows.append(f"| {engine} | {name} | - | - | - | could not run: {str(e)[:100]} |")
                         continue
-                    bm, cm = statistics.median(b), statistics.median(c)
+                    cm = statistics.median(c)
                     spread = f"{min(c):.1f}-{max(c):.1f}"
-                    rows.append(f"| {engine} | {name} | {bm:.1f} | {cm:.1f} | {cm / bm if bm else 1:.2f}x | {spread} |")
+                    if not b:
+                        rows.append(f"| {engine} | {name} | - | {cm:.1f} | new | {spread} |")
+                    else:
+                        bm = statistics.median(b)
+                        rows.append(f"| {engine} | {name} | {bm:.1f} | {cm:.1f} | {cm / bm if bm else 1:.2f}x | {spread} |")
                     print(rows[-1], flush=True)
         finally:
             if driver:
