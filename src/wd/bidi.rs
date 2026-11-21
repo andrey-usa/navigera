@@ -329,9 +329,9 @@ fn log_request(log: &mut VecDeque<Hop>, last: &mut u64, method: &str, params: &V
                 n: *last,
                 id: id.to_string(),
                 method: request["method"].as_str().unwrap_or("GET").to_string(),
-                url: request["url"].as_str().unwrap_or("").to_string(),
+                url: crate::cdp::logs::kept_url(request["url"].as_str().unwrap_or("")),
                 kind: request_kind(request).to_string(),
-                request_headers: header_object(&request["headers"]),
+                request_headers: crate::cdp::logs::kept_headers(Some(&header_object(&request["headers"]))),
                 has_post_data: size > 0,
                 started,
                 wall: started,
@@ -356,7 +356,7 @@ fn log_request(log: &mut VecDeque<Hop>, last: &mut u64, method: &str, params: &V
             *own = phrase;
             r.status = if redirected { phrase.or(status) } else { status };
             r.mime = response["mimeType"].as_str().unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
-            r.response_headers = header_object(&response["headers"]);
+            r.response_headers = crate::cdp::logs::kept_headers(Some(&header_object(&response["headers"])));
             r.from_cache = response["fromCache"] == true;
             if method == "network.responseCompleted" {
                 r.size = response["bytesReceived"].as_u64();

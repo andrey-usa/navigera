@@ -16,6 +16,21 @@ const MAX_REQUESTS: usize = 1000;
 const MAX_TEXT: usize = 2000;
 /// Request bodies kept for `network <n>`.
 const MAX_POST_DATA: usize = 16 * 1024;
+/// Most of a request's URL the log keeps: a longer one (Chrome sends up to
+/// 2 MiB) keeps its start and says how much was cut. A server takes 8 KiB
+/// by default (nginx, Apache), so a URL a site works with is kept whole.
+const URL_KEPT: usize = 16 << 10;
+/// Most of a request's or a response's headers the log keeps, names and
+/// values: past it the rest are left out, and one header says how many.
+/// With [`URL_KEPT`] and [`MAX_POST_DATA`], an entry keeps 64 KiB at most,
+/// so the [`MAX_REQUESTS`] of a tab keep 64 MiB at most (a page that sent
+/// a thousand 64 KiB URLs with 64 KiB of headers each made 128 MiB).
+const HEADERS_KEPT: usize = 16 << 10;
+/// The header that says how many headers were left out.
+const LEFT_OUT: &str = "navigera-left-out";
+/// Most of a URL the request list shows, on the page's origin too: the
+/// whole is in `network <n>`.
+const LISTED: usize = 200;
 
 #[derive(Clone, Debug)]
 pub struct ConsoleEntry {
@@ -77,6 +92,56 @@ fn clip(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     out.push('…');
     out
+}
+
+/// `text` up to `max` bytes, cut at a character, with how much was cut.
+fn cut(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…(+{} bytes)", &text[..end], text.len() - end)
+}
+
+/// A request's URL as the log keeps it ([`URL_KEPT`]).
+pub fn kept_url(url: &str) -> String {
+    cut(url, URL_KEPT)
+}
+
+/// A request's or a response's headers as the log keeps them
+/// ([`HEADERS_KEPT`]): whole when they fit, else those that fit, the start
+/// of the first that does not, and [`LEFT_OUT`] saying what was left out.
+/// Only what is kept is copied.
+pub fn kept_headers(headers: Option<&Value>) -> Value {
+    let Some(Value::Object(all)) = headers else { return headers.cloned().unwrap_or(Value::Null) };
+    let size =
+        |name: &str, value: &Value| name.len() + value.as_str().map_or_else(|| value.to_string().len(), str::len);
+    if all.iter().map(|(k, v)| size(k, v)).sum::<usize>() <= HEADERS_KEPT {
+        return Value::Object(all.clone());
+    }
+    let mut kept = serde_json::Map::new();
+    let (mut used, mut left, mut bytes) = (0, 0usize, 0usize);
+    for (name, value) in all {
+        let need = size(name, value);
+        if used + need <= HEADERS_KEPT {
+            used += need;
+            kept.insert(name.clone(), value.clone());
+        } else if let Some(text) = value.as_str().filter(|_| used + name.len() < HEADERS_KEPT) {
+            let value = cut(text, HEADERS_KEPT - used - name.len());
+            used = HEADERS_KEPT;
+            kept.insert(name.clone(), json!(value));
+        } else {
+            left += 1;
+            bytes += need;
+        }
+    }
+    if left > 0 {
+        kept.insert(LEFT_OUT.into(), json!(format!("{left} more, {bytes} bytes")));
+    }
+    Value::Object(kept)
 }
 
 /// One console argument as the page's own `console` would show it.
@@ -370,7 +435,7 @@ impl Logs {
             }
             "Network.requestWillBeSent" => {
                 let Some(id) = params.get("requestId").and_then(Value::as_str) else { return };
-                let req = params.get("request").cloned().unwrap_or(Value::Null);
+                let req = params.get("request").unwrap_or(&Value::Null);
                 // A redirect reuses the request id: close the hop that
                 // redirected, then log the next one as its own entry.
                 if let Some(redirect) = params.get("redirectResponse") {
@@ -379,7 +444,7 @@ impl Logs {
                         self.tab(session).requests.iter_mut().rev().find(|r| r.id == id && r.ended.is_none())
                     {
                         prev.status = redirect.get("status").and_then(Value::as_u64);
-                        prev.response_headers = redirect.get("headers").cloned().unwrap_or(Value::Null);
+                        prev.response_headers = kept_headers(redirect.get("headers"));
                         prev.mime = redirect.get("mimeType").and_then(Value::as_str).unwrap_or("").to_string();
                         prev.ended = ts;
                     }
@@ -389,9 +454,9 @@ impl Logs {
                     n: self.next_request,
                     id: id.to_string(),
                     method: req.get("method").and_then(Value::as_str).unwrap_or("GET").to_string(),
-                    url: req.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
+                    url: kept_url(req.get("url").and_then(Value::as_str).unwrap_or("")),
                     kind: params.get("type").and_then(Value::as_str).unwrap_or("Other").to_string(),
-                    request_headers: req.get("headers").cloned().unwrap_or(Value::Null),
+                    request_headers: kept_headers(req.get("headers")),
                     post_data: req.get("postData").and_then(Value::as_str).map(|s| clip(s, MAX_POST_DATA)),
                     has_post_data: req.get("hasPostData").and_then(Value::as_bool) == Some(true),
                     started: params.get("timestamp").and_then(Value::as_f64).unwrap_or(0.0),
@@ -406,11 +471,11 @@ impl Logs {
             }
             "Network.responseReceived" => {
                 let Some(id) = params.get("requestId").and_then(Value::as_str) else { return };
-                let resp = params.get("response").cloned().unwrap_or(Value::Null);
+                let resp = params.get("response").unwrap_or(&Value::Null);
                 if let Some(r) = self.find_open(session, id) {
                     r.status = resp.get("status").and_then(Value::as_u64);
                     r.mime = resp.get("mimeType").and_then(Value::as_str).unwrap_or("").to_string();
-                    r.response_headers = resp.get("headers").cloned().unwrap_or(Value::Null);
+                    r.response_headers = kept_headers(resp.get("headers"));
                     r.from_cache = resp.get("fromDiskCache").and_then(Value::as_bool) == Some(true)
                         || resp.get("fromServiceWorker").and_then(Value::as_bool) == Some(true);
                     if let Some(t) = params.get("type").and_then(Value::as_str) {
@@ -495,16 +560,17 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-/// `url` relative to `origin` when it is on it.
+/// `url` relative to `origin` when it is on it, at most [`LISTED`]
+/// characters.
 fn short(url: &str, origin: &str) -> String {
     if !origin.is_empty() {
         if let Some(rest) = url.strip_prefix(origin) {
             if rest.starts_with('/') {
-                return rest.to_string();
+                return clip(rest, LISTED);
             }
         }
     }
-    clip(url, 200)
+    clip(url, LISTED)
 }
 
 /// One line per request: `#7 POST 201 Fetch /api/orders 512 B 23 ms`.
@@ -777,6 +843,39 @@ mod tests {
         let har = har(&reqs, "0");
         assert_eq!(har["log"]["entries"].as_array().unwrap().len(), 3);
         assert_eq!(har["log"]["entries"][1]["response"]["status"], 200);
+    }
+
+    /// A page's URL and headers cost the log what fits under its bounds,
+    /// however long they are, and the list shows 200 characters of a path
+    /// on the page's own origin too (a thousand 64 KiB URLs listed 62 MiB).
+    #[test]
+    fn long_urls_and_headers_are_kept_in_part_and_listed_short() {
+        let mut logs = Logs::default();
+        let url = format!("http://h/r?q={}é", "a".repeat(1 << 20));
+        let big: serde_json::Map<String, Value> =
+            (0..64).map(|i| (format!("x-pad-{i:02}"), json!("b".repeat(1024)))).collect();
+        let p = json!({"requestId": "1", "type": "Fetch", "timestamp": 1.0, "wallTime": 1.7e9,
+                       "request": {"url": url, "method": "GET", "headers": {"accept": "*/*"}}});
+        logs.on_event("Network.requestWillBeSent", &p, "s");
+        let resp = json!({"requestId": "1", "type": "Fetch",
+                          "response": {"status": 200, "mimeType": "text/plain", "headers": Value::Object(big)}});
+        logs.on_event("Network.responseReceived", &resp, "s");
+        let r = &logs.tabs["s"].requests[0];
+        assert!(r.url.len() < URL_KEPT + 32 && r.url.ends_with(" bytes)"), "{}", &r.url[r.url.len() - 40..]);
+        assert!(r.url.starts_with("http://h/r?q=aaa"));
+        assert_eq!(r.request_headers, json!({"accept": "*/*"}), "headers that fit are kept whole");
+        let headers = r.response_headers.as_object().unwrap();
+        let kept: usize = headers.iter().map(|(k, v)| k.len() + v.as_str().unwrap().len()).sum();
+        assert!(kept < HEADERS_KEPT + 64, "{kept}");
+        // 15 whole (1032 bytes each), the start of the 16th, 48 left out.
+        assert_eq!(headers[LEFT_OUT], "48 more, 49536 bytes", "{headers:?}");
+        assert!(headers["x-pad-15"].as_str().unwrap().ends_with(" bytes)"));
+        let text = requests_text(&logs.tabs["s"].requests.iter().cloned().collect::<Vec<_>>(), "http://h");
+        assert!(text.chars().count() < 260 && text.contains("/r?q=aaa"), "{text}");
+        // A URL cut inside a character keeps the whole character before.
+        assert_eq!(cut("aé", 2), "a…(+2 bytes)");
+        assert_eq!(kept_headers(None), json!(null));
+        assert_eq!(kept_headers(Some(&json!({"a": "b"}))), json!({"a": "b"}));
     }
 
     #[test]
