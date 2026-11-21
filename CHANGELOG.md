@@ -6,6 +6,86 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-21
+
+### Added
+
+- `network` on Firefox and the other WebDriver BiDi engines: the requests
+  of the session's tabs in the same list as on Chrome (`#n METHOD STATUS
+  type url size time`), with `--filter`, `--type`, `--failed`, `--since`,
+  `--clear` and `--har`; a redirect is two entries, as on Chrome; a status
+  shows once the response starts, the size and time once it ends (over
+  chromedriver, which gives every event of a request its start time, the
+  time is the fetch's own, to the end of its headers). A response body
+  (`network <n>`, `--body-file`) and the bodies in a HAR come from what
+  the browser kept (`network.addDataCollector`, up to 10 MiB a response),
+  and so does a request's body (`post_data`, a HAR's `postData`: BiDi's
+  events carry only its size), 16 KiB of it as on Chrome, where the
+  browser keeps request bodies (chromedriver 147 does; a body over 10 MiB
+  it does not keep); where it does not, `network <n>` says so, and a GET
+  has none (chromedriver gives the GET after a 303 the POST's size). In a Firefox you attached to, only navigera's own
+  tabs are listened to: its window, a tab `tab-new` opened, and a tab one
+  of its pages opened, from when navigera hears of that tab (a request it
+  sent before is not listed); a tab's bodies go when it closes,
+  however it closes (Firefox keeps what a collector collected until it is
+  removed: on Firefox 160 a closed tab's 1 MiB body could still be read).
+  The log starts at the session's first `network`, which says so, not at
+  launch: a browser that sends request events does work for each request
+  a page makes, and every goto waited for it, the log read or not (a page
+  of 300 images, median of 30 loads in fresh sessions: Firefox 581.5 ms
+  with the events from launch, 190.5 without, 0.16.0 182.8; chromedriver
+  over BiDi 367.8, 273.4 and 270.1; run 44921449861, which also found the
+  bodies kept, the reading of the events and the log costing no time
+  measurable there). Run `network` once before the load you want to see.
+  Classic WebDriver still has no request list and says so.
+- `screencast start <dir>` / `screencast stop` on Firefox and the other
+  WebDriver BiDi engines (a WebDriver server with `--bidi`, chromedriver):
+  the same frames (`frame-NNNNN.jpg` with their times) and player as on
+  Chrome, and the recording follows the session from tab to tab. BiDi
+  sends no frames when the page changes, so navigera asks for a JPEG
+  screenshot of the viewport on the session's own connection, while its
+  commands run (a browser answers one sent behind a pending evaluate or
+  navigation: Firefox 160 in 44 ms behind a 1 s evaluate) and between
+  them: a screenshot that shows what the last frame showed is dropped, and
+  while the page stays still the screenshots space out from every 100 ms
+  to one a second, so a still page costs one screenshot a second where
+  Chrome's costs none. Frames are the viewport's size (`--size` is
+  refused; `set viewport` sizes them). `stop` waits 10 s at most, and a
+  recording that kept no frame says why. Not on classic WebDriver, which
+  says so.
+
+### Fixed
+
+- `network` kept and printed a request's URL and headers whole, however
+  long: navigera kept all a page sent (Chrome sends a URL of up to 2 MiB,
+  and a tab keeps 1000 requests), and one `network` printed a same-origin
+  URL whole, 100 lines of it by default. The log now keeps 16 KiB of a
+  URL, of a request's body and of a request's or a response's headers, in
+  bytes, what says what was cut included (a body kept 16 Ki characters, up
+  to 64 KiB; a URL a server accepts, 8 KiB by default, is kept whole; so
+  is a body Chrome's event leaves out, asked of the browser after it (a
+  Blob, or a form with a file, of any size), which `network <n>` printed
+  whole and a HAR left out); what was cut says
+  how much, and a `navigera-left-out` header counts the headers left out.
+  So an entry's URL, body and headers keep 64 KiB at most and a tab's
+  under 64 MiB, each in a buffer of its own length (a cut URL's was twice
+  it). The list shows 200 characters of every URL, on the page's origin
+  too (`network <n>` has the rest). On every engine.
+- On Firefox and over WebDriver BiDi, a request a `route` rule holds and
+  a dialog waited out `wait <ms>` and each pause of `wait --selector`,
+  `--text`, `--url` and `--js`, and in `serve` the time until the next
+  command: nothing read the browser's connection meanwhile. They are
+  answered as they come now.
+- `network <n>` and `network --har` gave a request that redirected the
+  body of the hop it led to: a redirect's hops share the request's id, and
+  the browser keeps one body per id, the last hop's. A hop that redirected
+  now has no body (its HAR entry carries none), and `network <n>` names
+  the hop that has it. On every engine.
+- `route` in a Firefox you attached to held the requests of the tabs the
+  session had when the first rule was set only: a tab opened after it, by
+  `tab-new` or by one of its pages, went past the rules. Each is held from
+  when navigera hears of it.
+
 ## [0.16.0] - 2026-11-20
 
 ### Added

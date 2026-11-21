@@ -37,6 +37,79 @@ const DOWNLOAD_EVENTS: &[&str] = &["browsingContext.downloadWillBegin", "browsin
 /// apart, as a server without it still drives pages.
 const COMMIT_EVENTS: &[&str] = &["browsingContext.navigationCommitted"];
 
+/// `network`: the requests of this session's tabs, subscribed apart (a
+/// server without them still drives pages, and `network` then says so).
+const NETWORK_EVENTS: &[&str] =
+    &["network.beforeRequestSent", "network.responseStarted", "network.responseCompleted", "network.fetchError"];
+
+/// The largest response or request body the browser keeps for
+/// `network <n>` (the log keeps 16 KiB of a request's).
+const BODY_MAX: u64 = 10 << 20;
+
+/// A data collector's parameters: response bodies, and request bodies too
+/// when `requests`.
+fn collect_params(requests: bool) -> Value {
+    let types: &[&str] = if requests { &["request", "response"] } else { &["response"] };
+    json!({ "dataTypes": types, "maxEncodedDataSize": BODY_MAX, "collectorType": "blob" })
+}
+
+/// What the `network` that started the request log ([`Bidi::start_log`]) says.
+const LOG_STARTED: &str = "on this engine navigera listens to requests from the session's first `network` on, \
+     which is now (a browser listened to slows every page load); reload or goto again to list a page's requests";
+
+/// How long `network` waits for the answers of requests sent just before.
+const CATCH_UP: Duration = Duration::from_millis(150);
+
+/// Seconds since the epoch, as BiDi's timestamps (in ms) over 1000.
+fn now_s() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// One hop of a request in the log: the entry `network` lists, with what
+/// [`log_request`] places its events by.
+#[derive(Debug)]
+struct Hop {
+    r: crate::cdp::logs::Request,
+    /// Its place in the request's redirect chain (`redirectCount`), which
+    /// with the request's id names it.
+    count: u64,
+    /// The redirect status its response's own reason phrase names, when
+    /// the status it came with is no redirect's.
+    phrase: Option<u64>,
+}
+
+/// A request listed (numbered after `cleared`), sent within the last 2 s,
+/// with no status and no error yet.
+fn fresh_pending(log: &VecDeque<Hop>, cleared: u64, now: f64) -> bool {
+    log.iter()
+        .rev()
+        .take_while(|h| h.r.n > cleared)
+        .take(64)
+        .any(|h| h.r.status.is_none() && h.r.failed.is_none() && (now - h.r.started).abs() < 2.0)
+}
+
+/// The requests `network` lists: those after the last `--clear`.
+fn listed(log: &VecDeque<Hop>, cleared: u64) -> Vec<crate::cdp::logs::Request> {
+    log.iter().filter(|h| h.r.n > cleared).map(|h| h.r.clone()).collect()
+}
+
+/// The redirect status a standard reason phrase names (HTTP/1.x; HTTP/2
+/// has none).
+fn redirect_phrase(text: &str) -> Option<u64> {
+    Some(match text.trim().to_ascii_lowercase().as_str() {
+        "multiple choices" => 300,
+        "moved permanently" => 301,
+        "found" | "moved temporarily" => 302,
+        "see other" => 303,
+        "temporary redirect" => 307,
+        "permanent redirect" => 308,
+        _ => return None,
+    })
+}
+
+/// Most requests kept, as on Chrome: older ones are dropped.
+const REQUESTS_MAX: usize = 1000;
+
 /// In the user's browser (`--attach`), also which frames and opened tabs
 /// belong to this session's tabs: their console lines and dialogs are its
 /// own, and an event names the frame, not the tab.
@@ -58,8 +131,33 @@ const CONSOLE_MAX: usize = 1000;
 /// The most of one console entry's text that is kept, in bytes.
 const CONSOLE_TEXT_MAX: usize = 16 << 10;
 
+/// A WebSocket to a BiDi endpoint (`ws://` only).
+pub(crate) fn open_ws(url: &str, timeout: Duration) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
+    // The endpoint as shown: a grid's may carry a key.
+    let shown = super::classic::mask(url);
+    let rest = url.strip_prefix("ws://").ok_or_else(|| {
+        anyhow!("BiDi endpoint {shown}: only ws:// endpoints on this machine or a network are served (no wss:// yet)")
+    })?;
+    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(host)
+        .with_context(|| format!("BiDi endpoint {host}"))?
+        .next()
+        .ok_or_else(|| anyhow!("BiDi endpoint {host}: no address"))?;
+    let stream = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(10)))
+        .with_context(|| format!("could not connect to the BiDi endpoint {shown}"))?;
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(Some(timeout)).ok();
+    let (ws, _) = tungstenite::client::client(url, MaybeTlsStream::Plain(stream))
+        .map_err(|e| anyhow!("BiDi handshake with {shown} failed: {e}"))?;
+    Ok(ws)
+}
+
 pub struct Bidi {
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
+    /// `screencast start`, until `stop`: its looks go out and come back on
+    /// this connection ([`Self::read_one`]).
+    looks: Option<super::screencast::Looks>,
     next_id: u64,
     /// The top-level browsing context ops act on.
     context: String,
@@ -87,6 +185,11 @@ pub struct Bidi {
     /// them while there is one.
     routes: Vec<Route>,
     intercept: Option<String>,
+    /// In the user's browser, an intercept per tab that became this
+    /// session's after the rules were set ([`Self::adopt`]), and the
+    /// commands that ask for one whose answers have not come yet.
+    more_intercepts: Vec<String>,
+    asked_intercepts: Vec<u64>,
     /// `init-script`: the preload scripts this session added.
     preloads: Vec<String>,
     /// `set viewport`, for the tabs this session opens after it.
@@ -108,6 +211,30 @@ pub struct Bidi {
     /// `downloads`: what this session's pages downloaded, oldest first
     /// (`guid` is the download's navigation id).
     downloads: Vec<Download>,
+    /// `network`: the requests of this session's tabs, oldest first, and
+    /// the number of the last one; `None`: not listened to yet, or the
+    /// browser sends no network events (then `route` subscribes on its own).
+    requests: Option<VecDeque<Hop>>,
+    /// Whether the request log was started ([`Self::start_log`]), and
+    /// whether the `network` that started it has yet to say so.
+    log_started: bool,
+    log_note: bool,
+    last_request: u64,
+    /// The last request `network --clear` took. Those up to it stay in
+    /// the log, not shown, so that an event of theirs that comes after
+    /// does not list them again.
+    cleared: u64,
+    /// The data collector that keeps response bodies for `network <n>` (in
+    /// the user's browser, its first tab's: [`Self::adopt`] adds one per tab).
+    collector: Option<String>,
+    /// Whether the collectors keep request bodies too: a BiDi event carries
+    /// none, only its size.
+    collects_requests: bool,
+    /// In the user's browser, each tab's collector, removed when the tab
+    /// closes ([`Self::tab_gone`]), and the commands that ask for one whose
+    /// answers have not come yet (`None`: its tab closed meanwhile).
+    tab_collectors: Vec<(String, String)>,
+    asked_collectors: Vec<(u64, Option<String>)>,
     /// The frames inside `own` tabs, each with its tab.
     frames: Vec<(String, String)>,
     closed: bool,
@@ -126,6 +253,156 @@ pub fn persons_browser(browser: &Value) -> bool {
 
 /// `set geo`'s answer in such a Firefox.
 pub const GEO_ASKS: &str = "no location permission granted: in your own Firefox it would be the site's in the whole profile, your tabs too. A page asks you, as without navigera";
+
+/// A BiDi header list (`[{name, value: {type, value}}]`) as the object CDP
+/// gives (a repeated name's values joined by a newline, as Chrome does).
+fn header_object(list: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for h in list.as_array().into_iter().flatten() {
+        let (Some(name), Some(value)) = (h["name"].as_str(), h["value"]["value"].as_str()) else { continue };
+        match out.get_mut(name) {
+            Some(Value::String(had)) => {
+                had.push('\n');
+                had.push_str(value);
+            }
+            _ => {
+                out.insert(name.to_string(), json!(value));
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// A request's kind under Chrome's names, from what Fetch says it is for.
+fn request_kind(request: &Value) -> &'static str {
+    match (request["initiatorType"].as_str().unwrap_or(""), request["destination"].as_str().unwrap_or("")) {
+        ("xmlhttprequest", _) => "XHR",
+        ("fetch" | "beacon", _) => "Fetch",
+        (_, "document" | "iframe" | "frame") => "Document",
+        (_, "script" | "worker" | "sharedworker" | "serviceworker") => "Script",
+        (_, "style") => "Stylesheet",
+        (_, "image") => "Image",
+        (_, "font") => "Font",
+        (_, "audio" | "video" | "track") => "Media",
+        (_, "manifest") => "Manifest",
+        _ => "Other",
+    }
+}
+
+/// A request's end by its fetch timings (`request.timings`, in ms):
+/// `started` (in s) plus the time from `requestTime` to `responseEnd`;
+/// None while the response has not ended.
+fn timed_end(request: &Value, started: f64) -> Option<f64> {
+    let timings = &request["timings"];
+    let (from, to) = (timings["requestTime"].as_f64()?, timings["responseEnd"].as_f64()?);
+    (to > 0.0 && to >= from).then(|| started + (to - from) / 1000.0)
+}
+
+/// One `network.*` event into the request log, as Chrome's would be: each
+/// hop of a redirect (the request's id and its `redirectCount`) is an
+/// entry of its own, opened by whichever of its events comes first.
+/// chromedriver's BiDi mapper holds a hop's `beforeRequestSent` until a
+/// CDP event from the browser process has come, so the hop's response can
+/// come before it, and the hop a redirect leads to gets none at all when
+/// that event went to the hop before: a response that found no entry was
+/// dropped, and the request read as pending, or was not listed.
+///
+/// The same mix-up can give a hop that redirected the status (and raw
+/// headers) of the hop it led to, while its reason phrase stays its own:
+/// once a later hop shows it redirected, a status that is no redirect's
+/// is taken from that phrase when it names one (HTTP/2 sends none).
+fn log_request(log: &mut VecDeque<Hop>, last: &mut u64, method: &str, params: &Value) {
+    if !NETWORK_EVENTS.contains(&method) {
+        return;
+    }
+    let request = &params["request"];
+    let Some(id) = request["request"].as_str() else { return };
+    // BiDi times are milliseconds since the epoch.
+    let at = params["timestamp"].as_f64().map(|ms| ms / 1000.0);
+    let count = params["redirectCount"].as_u64().unwrap_or(0);
+    // A later hop of the request is after it in the log: one pass from the
+    // end finds the hop and whether it redirected.
+    let mut redirected = false;
+    let found = log.iter().rposition(|h| {
+        redirected |= h.r.id == id && h.count > count;
+        h.r.id == id && h.count == count
+    });
+    let i = match found {
+        // The hop announced again (an intercepted request is, for each
+        // phase it is held in), or after its response: the one entry.
+        Some(_) if method == "network.beforeRequestSent" => return,
+        Some(i) => i,
+        None => {
+            for h in log.iter_mut().filter(|h| h.r.id == id && h.count < count) {
+                // A redirect whose own response was not reported: the hop
+                // ends where the next begins.
+                if h.r.ended.is_none() && h.r.failed.is_none() {
+                    h.r.ended = at.or(Some(h.r.started));
+                }
+                if let Some(status) = h.phrase.take() {
+                    h.r.status = Some(status);
+                }
+            }
+            *last += 1;
+            let method = request["method"].as_str().unwrap_or("GET");
+            // A browser sends no body with a GET or a HEAD; chromium-bidi
+            // gives the GET after a 303 the size of the POST before it.
+            let size = if matches!(method, "GET" | "HEAD") { 0 } else { request["bodySize"].as_u64().unwrap_or(0) };
+            let started = at.unwrap_or(0.0);
+            if log.len() >= REQUESTS_MAX {
+                log.pop_front();
+            }
+            let r = crate::cdp::logs::Request {
+                n: *last,
+                id: id.to_string(),
+                method: method.to_string(),
+                url: crate::cdp::logs::kept_url(request["url"].as_str().unwrap_or("")),
+                kind: request_kind(request).to_string(),
+                request_headers: crate::cdp::logs::kept_headers(Some(&header_object(&request["headers"]))),
+                has_post_data: size > 0,
+                started,
+                wall: started,
+                ..Default::default()
+            };
+            log.push_back(Hop { r, count, phrase: None });
+            log.len() - 1
+        }
+    };
+    match method {
+        // The status and headers when they arrive (as Chrome's
+        // `responseReceived`), the size and end when the body has: a
+        // server may report only the first (chromedriver 147 over BiDi
+        // sends no `responseCompleted` for a fetch).
+        "network.responseStarted" | "network.responseCompleted" => {
+            let response = &params["response"];
+            let status = response["status"].as_u64();
+            let phrase = status
+                .filter(|s| !(300..400).contains(s))
+                .and(response["statusText"].as_str().and_then(redirect_phrase));
+            let Hop { r, phrase: own, .. } = &mut log[i];
+            *own = phrase;
+            r.status = if redirected { phrase.or(status) } else { status };
+            r.mime = response["mimeType"].as_str().unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
+            r.response_headers = crate::cdp::logs::kept_headers(Some(&header_object(&response["headers"])));
+            r.from_cache = response["fromCache"] == true;
+            if method == "network.responseCompleted" {
+                r.size = response["bytesReceived"].as_u64();
+                let end = at.unwrap_or(r.started);
+                // A server that stamps every event of a request with its
+                // start (chromedriver's): the fetch's own times, which it
+                // counts from the request.
+                r.ended = Some(if end > r.started { end } else { timed_end(request, r.started).unwrap_or(end) });
+            }
+        }
+        "network.fetchError" => {
+            let r = &mut log[i].r;
+            let why = params["errorText"].as_str().unwrap_or("failed");
+            r.failed = Some(if why.is_empty() { "failed".into() } else { why.to_string() });
+            r.ended = at.or(Some(r.started));
+        }
+        _ => {}
+    }
+}
 
 /// `scheme://host[:port]` of an http(s) URL, without its user info; None
 /// for any other (about:blank, data:, file:), which has no origin to grant.
@@ -631,27 +908,12 @@ impl Bidi {
     }
 
     fn connect(url: &str, timeout: Duration) -> Result<Self> {
+        let ws = open_ws(url, timeout)?;
         // The endpoint as shown: a grid's may carry a key.
         let shown = super::classic::mask(url);
-        let rest = url.strip_prefix("ws://").ok_or_else(|| {
-            anyhow!(
-                "BiDi endpoint {shown}: only ws:// endpoints on this machine or a network are served (no wss:// yet)"
-            )
-        })?;
-        let authority = rest.split(['/', '?']).next().unwrap_or(rest);
-        let host = authority.rsplit('@').next().unwrap_or(authority);
-        let addr = std::net::ToSocketAddrs::to_socket_addrs(host)
-            .with_context(|| format!("BiDi endpoint {host}"))?
-            .next()
-            .ok_or_else(|| anyhow!("BiDi endpoint {host}: no address"))?;
-        let stream = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(10)))
-            .with_context(|| format!("could not connect to the BiDi endpoint {shown}"))?;
-        stream.set_nodelay(true).ok();
-        stream.set_read_timeout(Some(timeout)).ok();
-        let (ws, _) = tungstenite::client::client(url, MaybeTlsStream::Plain(stream))
-            .map_err(|e| anyhow!("BiDi handshake with {shown} failed: {e}"))?;
         Ok(Self {
             ws,
+            looks: None,
             next_id: 1,
             context: String::new(),
             console: VecDeque::new(),
@@ -664,11 +926,22 @@ impl Bidi {
             preloads: Vec::new(),
             routes: Vec::new(),
             intercept: None,
+            more_intercepts: Vec::new(),
+            asked_intercepts: Vec::new(),
             viewport: None,
             emulations: Vec::new(),
             geo: None,
             geo_held: None,
             downloads: Vec::new(),
+            requests: None,
+            log_started: false,
+            log_note: false,
+            last_request: 0,
+            cleared: 0,
+            collector: None,
+            collects_requests: false,
+            tab_collectors: Vec::new(),
+            asked_collectors: Vec::new(),
             child: None,
             _profile: None,
             classic: None,
@@ -715,6 +988,64 @@ impl Bidi {
         Ok(())
     }
 
+    /// Start the request log, once, at the session's first `network`: the
+    /// network events of its tabs and the collectors that keep their
+    /// bodies. Not at launch: a browser that sends them does work for each
+    /// request a page makes, and a goto waits for it (a page of 300 images
+    /// took three times as long on Firefox 160, a third longer over
+    /// chromedriver), whether `network` is read or not. In the user's
+    /// Firefox, only navigera's own tabs ([`Self::adopt`] adds the next):
+    /// theirs are not reported to it, nor slowed by being.
+    fn start_log(&mut self, timeout: Duration) {
+        if std::mem::replace(&mut self.log_started, true) {
+            return;
+        }
+        let mut subscribe = json!({ "events": NETWORK_EVENTS });
+        if self.attached {
+            subscribe["contexts"] = json!(self.own);
+        }
+        if self.send("session.subscribe", subscribe, timeout).is_err() {
+            return;
+        }
+        self.requests = Some(VecDeque::new());
+        self.log_note = true;
+        if !self.attached {
+            self.collector = self.add_collector(None, timeout);
+            return;
+        }
+        // A collector per tab, removed when its tab closes ([`Self::tab_gone`]).
+        for tab in self.own.clone() {
+            let Some(x) = self.add_collector(Some(json!([tab])), timeout) else { break };
+            self.collector.get_or_insert_with(|| x.clone());
+            self.tab_collectors.push((tab, x));
+        }
+    }
+
+    /// A data collector for `contexts` (all the session's when None):
+    /// request bodies too where the browser keeps them; one that refuses
+    /// the data type keeps response bodies, and so do the session's later
+    /// collectors. A Firefox before network.addDataCollector lists
+    /// requests without their bodies.
+    fn add_collector(&mut self, contexts: Option<Value>, timeout: Duration) -> Option<String> {
+        let tries: &[bool] = if self.collector.is_some() { &[self.collects_requests] } else { &[true, false] };
+        for &requests in tries {
+            let mut collect = collect_params(requests);
+            if let Some(contexts) = &contexts {
+                collect["contexts"] = contexts.clone();
+            }
+            match self.send("network.addDataCollector", collect, timeout) {
+                Ok(r) => {
+                    let x = r["collector"].as_str().map(str::to_string);
+                    self.collects_requests = requests && x.is_some();
+                    return x;
+                }
+                Err(e) if requests && format!("{e:#}").contains(": invalid argument:") => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     /// Record listeners in one tab of the user's browser: its documents
     /// from the next on, and the one it shows now. A Firefox that cannot
     /// scope a preload script to a tab goes without (clicks still work;
@@ -736,34 +1067,96 @@ impl Bidi {
         Ok(id)
     }
 
-    /// One message, or None when `slice` passed without one.
+    /// One message, or None when `slice` passed without one. While a
+    /// recording is on, a look that is due goes out first, and the answer
+    /// of the one on its way is taken here, not returned.
     fn read_one(&mut self, slice: Duration) -> Result<Option<Value>> {
-        if let MaybeTlsStream::Plain(s) = self.ws.get_mut() {
-            s.set_read_timeout(Some(slice.max(Duration::from_millis(1)))).ok();
+        let until = Instant::now() + slice;
+        loop {
+            let wait = self.look(until);
+            if let MaybeTlsStream::Plain(s) = self.ws.get_mut() {
+                s.set_read_timeout(Some(wait.max(Duration::from_millis(1)))).ok();
+            }
+            match self.ws.read() {
+                Ok(Message::Text(t)) => {
+                    // Firefox writes a lone UTF-16 surrogate as `\ud800`, which
+                    // JSON in UTF-8 cannot hold: read as U+FFFD.
+                    let text = t.as_str();
+                    let fixed =
+                        |e| crate::cdp::lone_surrogates_replaced(text).map_or(Err(e), |f| serde_json::from_str(&f));
+                    let v: Value = serde_json::from_str(text)
+                        .or_else(fixed)
+                        .map_err(|e| anyhow!("the browser sent no JSON ({e})"))?;
+                    if let Some(looks) = self.looks.as_mut().filter(|l| l.answers(&v)) {
+                        looks.answered(&v);
+                        if Instant::now() < until {
+                            continue;
+                        }
+                        return Ok(None);
+                    }
+                    if v["type"] != "event" {
+                        if !self.asked_intercepts.is_empty() {
+                            self.took_intercept(&v);
+                        }
+                        if !self.asked_collectors.is_empty() {
+                            self.took_collector(&v);
+                        }
+                    }
+                    return Ok(Some(v));
+                }
+                Ok(Message::Close(_)) => {
+                    self.closed = true;
+                    bail!("the browser closed the BiDi connection")
+                }
+                Ok(_) => return Ok(None),
+                Err(tungstenite::Error::Io(e))
+                    if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+                {
+                    // A read cut short for the next look reads on.
+                    if Instant::now() >= until {
+                        return Ok(None);
+                    }
+                }
+                Err(e) => {
+                    self.closed = true;
+                    bail!("the BiDi connection failed ({e})")
+                }
+            }
         }
-        match self.ws.read() {
-            Ok(Message::Text(t)) => {
-                // Firefox writes a lone UTF-16 surrogate as `\ud800`, which
-                // JSON in UTF-8 cannot hold: read as U+FFFD.
-                let text = t.as_str();
-                let fixed = |e| crate::cdp::lone_surrogates_replaced(text).map_or(Err(e), |f| serde_json::from_str(&f));
-                Ok(Some(
-                    serde_json::from_str(text).or_else(fixed).map_err(|e| anyhow!("the browser sent no JSON ({e})"))?,
-                ))
+    }
+
+    /// A recording's look, if one is due, sent; how long a read may wait
+    /// before the recording needs it back, at most until `until`.
+    fn look(&mut self, until: Instant) -> Duration {
+        let now = Instant::now();
+        let left = until.saturating_duration_since(now);
+        let Some(looks) = self.looks.as_mut() else { return left };
+        if looks.due(now) {
+            let ask = looks.ask(&self.context);
+            self.send_look(ask);
+        }
+        self.looks.as_ref().and_then(|l| l.wake_in(Instant::now())).map_or(left, |w| w.min(left))
+    }
+
+    /// A recording's look, sent as `browsingContext.captureScreenshot`.
+    fn send_look(&mut self, ask: Value) {
+        let sent = self.write("browsingContext.captureScreenshot", ask);
+        if let Some(looks) = self.looks.as_mut() {
+            match sent {
+                Ok(id) => looks.sent(id),
+                Err(e) => looks.unsent(format!("{e:#}")),
             }
-            Ok(Message::Close(_)) => {
-                self.closed = true;
-                bail!("the browser closed the BiDi connection")
-            }
-            Ok(_) => Ok(None),
-            Err(tungstenite::Error::Io(e))
-                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
-            {
-                Ok(None)
-            }
-            Err(e) => {
-                self.closed = true;
-                bail!("the BiDi connection failed ({e})")
+        }
+    }
+
+    /// Read until `stop`'s look on its way has come back (or its time is
+    /// up), taking events meanwhile.
+    fn await_look(&mut self) {
+        while !self.closed && self.looks.as_mut().is_some_and(|l| l.waiting(Instant::now())) {
+            match self.read_one(READ_SLICE) {
+                Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
+                Ok(_) => {}
+                Err(_) => break,
             }
         }
     }
@@ -823,11 +1216,14 @@ impl Bidi {
                     // (a grant is the origin's in every tab). Written, as the
                     // reader is mid-message.
                     let id = self.own[tabs].clone();
-                    self.emulate_in(&id, false);
+                    self.adopt(&id, false);
                 }
             }
             "browsingContext.contextDestroyed" if self.attached => {
                 context_destroyed(&mut self.frames, params);
+                if let Some(id) = params["context"].as_str() {
+                    self.tab_gone(id);
+                }
             }
             "browsingContext.userPromptOpened" if self.heard(params["context"].as_str()) => {
                 // A frame's dialog blocks its tab, and the tab is what is answered.
@@ -852,9 +1248,19 @@ impl Bidi {
                     "accepted": accept,
                 }));
             }
-            "network.beforeRequestSent" if params["isBlocked"] == true => {
-                let (method, p) = self.route_answer(params);
-                let _ = self.write(method, p);
+            m @ ("network.beforeRequestSent"
+            | "network.responseStarted"
+            | "network.responseCompleted"
+            | "network.fetchError") => {
+                if self.heard(params["context"].as_str()) {
+                    if let Some(log) = &mut self.requests {
+                        log_request(log, &mut self.last_request, m, params);
+                    }
+                }
+                if m == "network.beforeRequestSent" && params["isBlocked"] == true {
+                    let (method, p) = self.route_answer(params);
+                    let _ = self.write(method, p);
+                }
             }
             "browsingContext.downloadWillBegin" if self.heard(params["context"].as_str()) => {
                 let text = |key: &str| params[key].as_str().unwrap_or("").to_string();
@@ -976,20 +1382,29 @@ impl Bidi {
                     subscribe["contexts"] = json!(self.own);
                     intercept["contexts"] = json!(self.own);
                 }
-                self.send("session.subscribe", subscribe, timeout)?;
+                // The request log already hears the event (in the user's
+                // Firefox only in the first tab: the rules hold every one).
+                if self.requests.is_none() || self.attached {
+                    self.send("session.subscribe", subscribe, timeout)?;
+                }
                 let r = self.send("network.addIntercept", intercept, timeout)?;
                 let id = r["intercept"].as_str().ok_or_else(|| anyhow!("the browser named no intercept"))?;
                 self.intercept = Some(id.to_string());
             }
             (Some(id), true) => {
                 let id = id.clone();
+                for more in std::mem::take(&mut self.more_intercepts) {
+                    let _ = self.send("network.removeIntercept", json!({ "intercept": more }), timeout);
+                }
                 self.send("network.removeIntercept", json!({ "intercept": id }), timeout)?;
                 self.intercept = None;
                 let mut unsubscribe = json!({ "events": ["network.beforeRequestSent"] });
                 if self.attached {
                     unsubscribe["contexts"] = json!(self.own);
                 }
-                let _ = self.send("session.unsubscribe", unsubscribe, timeout);
+                if self.requests.is_none() {
+                    let _ = self.send("session.unsubscribe", unsubscribe, timeout);
+                }
             }
             _ => {}
         }
@@ -1106,6 +1521,100 @@ impl Bidi {
         Ok((tree["contexts"][0]["url"].as_str().unwrap_or("").to_string(), None))
     }
 
+    /// A tab of the user's Firefox that became this session's (it opened
+    /// it, or one of its pages did): the session's emulations, its request
+    /// log, response bodies and `route` rules, which in the user's browser
+    /// cover only the tabs they name. `wait` false: written, for a caller
+    /// that is reading a message; an intercept's answer is taken in
+    /// [`Self::read_one`]. A tab a page opens is heard from its
+    /// `contextCreated` on: a request it sent before that is not listed or
+    /// held.
+    fn adopt(&mut self, id: &str, wait: bool) {
+        self.emulate_in(id, wait);
+        let mut calls = Vec::new();
+        if self.requests.is_some() {
+            calls.push(("session.subscribe", json!({ "events": NETWORK_EVENTS, "contexts": [id] })));
+        } else if self.intercept.is_some() {
+            calls.push(("session.subscribe", json!({ "events": ["network.beforeRequestSent"], "contexts": [id] })));
+        }
+        if self.collector.is_some() {
+            let mut collect = collect_params(self.collects_requests);
+            collect["contexts"] = json!([id]);
+            calls.push(("network.addDataCollector", collect));
+        }
+        if self.intercept.is_some() {
+            calls.push(("network.addIntercept", json!({ "phases": ["beforeRequestSent"], "contexts": [id] })));
+        }
+        for (method, params) in calls {
+            let intercept = method == "network.addIntercept";
+            let collector = method == "network.addDataCollector";
+            if wait {
+                if let Ok(r) = self.send(method, params, Duration::from_secs(10)) {
+                    if let Some(x) = r["intercept"].as_str().filter(|_| intercept) {
+                        self.more_intercepts.push(x.to_string());
+                    }
+                    if let Some(x) = r["collector"].as_str().filter(|_| collector) {
+                        self.tab_collectors.push((id.to_string(), x.to_string()));
+                    }
+                }
+            } else if let Ok(asked) = self.write(method, params) {
+                if intercept {
+                    self.asked_intercepts.push(asked);
+                }
+                if collector {
+                    self.asked_collectors.push((asked, Some(id.to_string())));
+                }
+            }
+        }
+    }
+
+    /// The answer to a collector [`Self::adopt`] asked for without waiting:
+    /// kept with its tab, or, the tab closed meanwhile, removed.
+    fn took_collector(&mut self, v: &Value) {
+        let Some(i) = v["id"].as_u64().and_then(|id| self.asked_collectors.iter().position(|(a, _)| *a == id)) else {
+            return;
+        };
+        let (_, tab) = self.asked_collectors.swap_remove(i);
+        let Some(x) = v["result"]["collector"].as_str() else { return };
+        match tab {
+            Some(tab) => self.tab_collectors.push((tab, x.to_string())),
+            None => {
+                let _ = self.write("network.removeDataCollector", json!({ "collector": x }));
+            }
+        }
+    }
+
+    /// A tab of the user's browser closed: its response bodies go with it.
+    /// Firefox drops no collector with its tab: what one collected could
+    /// still be read after the tab closed, until the session ends (Firefox
+    /// 160). Written, as the reader may be mid-message.
+    fn tab_gone(&mut self, tab: &str) {
+        for asked in self.asked_collectors.iter_mut().filter(|(_, t)| t.as_deref() == Some(tab)) {
+            asked.1 = None;
+        }
+        let (gone, kept) = std::mem::take(&mut self.tab_collectors).into_iter().partition(|(t, _)| t == tab);
+        self.tab_collectors = kept;
+        for (_, x) in gone {
+            let _ = self.write("network.removeDataCollector", json!({ "collector": x }));
+        }
+    }
+
+    /// The answer to an intercept [`Self::adopt`] asked for without
+    /// waiting: kept with the session's, or, the rules gone meanwhile,
+    /// removed.
+    fn took_intercept(&mut self, v: &Value) {
+        let Some(i) = v["id"].as_u64().and_then(|id| self.asked_intercepts.iter().position(|&a| a == id)) else {
+            return;
+        };
+        self.asked_intercepts.swap_remove(i);
+        let Some(x) = v["result"]["intercept"].as_str() else { return };
+        if self.intercept.is_some() {
+            self.more_intercepts.push(x.to_string());
+        } else {
+            let _ = self.write("network.removeIntercept", json!({ "intercept": x }));
+        }
+    }
+
     /// The session's emulations (`set locale`, `ua`, `geo`, ...) and its
     /// viewport, in a tab of the user's Firefox that has none of them: one
     /// navigera opened, or one its page opened. `wait` false: written, for
@@ -1135,10 +1644,10 @@ impl Bidi {
             let tabs = self.own.len();
             adopt_opened(&mut self.own, tree);
             // Opened tabs no `contextCreated` named: the session's
-            // emulations too, late.
+            // emulations and requests too, late.
             let opened = self.own[tabs..].to_vec();
             for id in &opened {
-                self.emulate_in(id, true);
+                self.adopt(id, true);
             }
         }
         tree["contexts"]
@@ -1478,6 +1987,69 @@ impl Wire for Bidi {
         self.routes.clone()
     }
 
+    fn requests(&mut self, clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
+        self.idle();
+        self.start_log(Duration::from_secs(10));
+        // A request sent in the last moments with no answer yet (in
+        // flight, or its answer on its way to us) is waited for, a little.
+        // One pending longer (a long poll) costs nothing.
+        let deadline = Instant::now() + CATCH_UP;
+        let cleared = self.cleared;
+        while Instant::now() < deadline
+            && self.requests.as_ref().is_some_and(|log| fresh_pending(log, cleared, now_s()))
+        {
+            match self.read_one(Duration::from_millis(5)) {
+                Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let Some(log) = &self.requests else {
+            bail!("this browser sends no WebDriver BiDi network events, so navigera has no request list here")
+        };
+        let shown = listed(log, cleared);
+        if clear {
+            self.cleared = self.last_request;
+        }
+        Ok(shown)
+    }
+
+    fn requests_note(&mut self) -> Option<&'static str> {
+        std::mem::take(&mut self.log_note).then_some(LOG_STARTED)
+    }
+
+    fn response_body(&mut self, request: &str) -> Result<(String, bool)> {
+        if self.collector.is_none() {
+            bail!("this browser keeps no response bodies for WebDriver BiDi (network.addDataCollector)")
+        }
+        // No collector named: any of the session's, one per tab in the
+        // user's browser ([`Self::adopt`]).
+        let p = json!({ "dataType": "response", "request": request });
+        let r = self.send("network.getData", p, Duration::from_secs(30))?;
+        let bytes = &r["bytes"];
+        let value = bytes["value"].as_str().unwrap_or_default().to_string();
+        Ok((value, bytes["type"] == "base64"))
+    }
+
+    fn request_body(&mut self, request: &str) -> Result<String> {
+        if !self.collects_requests {
+            bail!(
+                "this browser keeps no request bodies for WebDriver BiDi (network.addDataCollector, dataTypes request)"
+            )
+        }
+        let p = json!({ "dataType": "request", "request": request });
+        let r = self.send("network.getData", p, Duration::from_secs(30))?;
+        let bytes = &r["bytes"];
+        let value = bytes["value"].as_str().unwrap_or_default();
+        Ok(if bytes["type"] == "base64" {
+            use base64::Engine as _;
+            let raw = base64::engine::general_purpose::STANDARD.decode(value).context("network.getData")?;
+            String::from_utf8_lossy(&raw).into_owned()
+        } else {
+            value.to_string()
+        })
+    }
+
     fn downloads(&mut self, clear: bool) -> Result<Vec<Download>> {
         self.idle();
         Ok(if clear { std::mem::take(&mut self.downloads) } else { self.downloads.clone() })
@@ -1633,6 +2205,62 @@ impl Wire for Bidi {
         self.context.clone()
     }
 
+    fn screencast_start(&mut self, dir: &std::path::Path, quality: Option<&str>, size: Option<&str>) -> Result<()> {
+        if let Some(looks) = &self.looks {
+            bail!("screencast: already recording into {}; `screencast stop` first", looks.dir().display());
+        }
+        if size.is_some() {
+            bail!(
+                "screencast --size: not over WebDriver BiDi (its screenshot is the viewport's size); `set viewport \
+                 <w>x<h>` sizes the frames, or drop --size"
+            );
+        }
+        let opts = crate::screencast::Options::parse(quality, None)?;
+        self.looks = Some(super::screencast::Looks::start(dir, &opts)?);
+        // The first look, at the page as it is now.
+        self.idle();
+        Ok(())
+    }
+
+    fn screencast_stop(&mut self) -> Result<Value> {
+        let Some(looks) = self.looks.as_mut() else {
+            bail!("screencast: nothing is recording; `screencast start <dir>` first")
+        };
+        looks.stop();
+        self.await_look();
+        if self.looks.as_mut().is_some_and(|l| l.last_wanted(Instant::now())) && !self.closed {
+            let ask = self.looks.as_ref().map(|l| l.ask(&self.context)).unwrap_or_default();
+            self.send_look(ask);
+            self.await_look();
+        }
+        match self.looks.take() {
+            Some(looks) => looks.finish(),
+            None => bail!("screencast: nothing is recording; `screencast start <dir>` first"),
+        }
+    }
+
+    fn tick(&self) -> Option<Duration> {
+        self.looks.as_ref().and_then(|l| l.tick(Instant::now()))
+    }
+
+    fn pause(&mut self, wait: Duration) {
+        // Reading, not sleeping: a recording looks on, a dialog or a request
+        // held for a `route` rule is answered meanwhile.
+        let until = Instant::now() + wait;
+        while !self.closed {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            match self.read_one(left.min(READ_SLICE)) {
+                Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        std::thread::sleep(until.saturating_duration_since(Instant::now()));
+    }
+
     fn front(&mut self) {
         // Headless it may refuse.
         let _ = self.send("browsingContext.activate", json!({ "context": self.context }), Duration::from_secs(10));
@@ -1648,7 +2276,7 @@ impl Wire for Bidi {
         let id = r["context"].as_str().map(str::to_string).ok_or_else(|| anyhow!("the browser made no tab"))?;
         if self.attached {
             self.own.push(id.clone());
-            self.emulate_in(&id, true);
+            self.adopt(&id, true);
             let was = std::mem::replace(&mut self.context, id.clone());
             self.listen_in(&id, Duration::from_secs(10));
             self.context = was;
@@ -1678,6 +2306,8 @@ impl Wire for Bidi {
         self.own.retain(|o| o != id);
         self.frames.retain(|(_, tab)| tab != id);
         self.send("browsingContext.close", json!({ "context": id }), Duration::from_secs(10))?;
+        // Its contextDestroyed has done this, when it came first.
+        self.tab_gone(id);
         Ok(())
     }
 
@@ -1825,6 +2455,168 @@ impl Bidi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// In a Firefox you attached to, a tab's response bodies go when the
+    /// tab closes: Firefox kept a collector's bodies after its tab closed,
+    /// and navigera removed none (one per tab it took on). A page's tab
+    /// closed by the page, the session's tab closed by `tab-close`, and a
+    /// tab that closed before its collector's answer came.
+    #[test]
+    fn a_closed_tabs_collector_is_removed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let firefox = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut removed = Vec::new();
+            let destroyed = |tab: &str| {
+                json!({ "type": "event", "method": "browsingContext.contextDestroyed", "params": { "context": tab } })
+                    .to_string()
+            };
+            while let Ok(Message::Text(text)) = ws.read() {
+                let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                let result = match v["method"].as_str().unwrap_or("") {
+                    "network.addDataCollector" => {
+                        let tab = v["params"]["contexts"][0].as_str().unwrap().to_string();
+                        if tab == "late" {
+                            ws.send(Message::text(destroyed(&tab))).unwrap();
+                        }
+                        json!({ "collector": format!("c-{tab}") })
+                    }
+                    "network.removeDataCollector" => {
+                        removed.push(v["params"]["collector"].as_str().unwrap().to_string());
+                        json!({})
+                    }
+                    "session.status" if removed.is_empty() => {
+                        ws.send(Message::text(destroyed("pop"))).unwrap();
+                        json!({})
+                    }
+                    _ => json!({}),
+                };
+                ws.send(Message::text(json!({ "type": "success", "id": v["id"], "result": result }).to_string()))
+                    .unwrap();
+            }
+            removed
+        });
+        let mut b = Bidi::connect(&format!("ws://{addr}/"), Duration::from_secs(5)).unwrap();
+        b.attached = true;
+        b.context = "tab".into();
+        b.own.push("tab".into());
+        b.collector = Some("c-tab".into());
+        b.tab_collectors.push(("tab".into(), "c-tab".into()));
+        let pump = |b: &mut Bidi| b.send("session.status", json!({}), Duration::from_secs(5)).unwrap();
+        b.adopt("pop", false);
+        pump(&mut b);
+        b.tab_close("tab").unwrap();
+        b.adopt("late", false);
+        pump(&mut b);
+        pump(&mut b);
+        assert!(b.tab_collectors.is_empty() && b.asked_collectors.is_empty(), "{:?}", b.tab_collectors);
+        b.closed = true;
+        drop(b);
+        assert_eq!(firefox.join().unwrap(), ["c-pop", "c-tab", "c-late"]);
+    }
+
+    /// A session listens to no network events until its first `network`
+    /// (a browser listened to slows every load); that one subscribes, adds
+    /// the collector and says the log starts now, once.
+    #[test]
+    fn the_request_log_starts_at_the_first_network() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let firefox = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut asked = Vec::new();
+            while let Ok(Message::Text(text)) = ws.read() {
+                let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                let method = v["method"].as_str().unwrap_or("").to_string();
+                let events = v["params"]["events"].to_string();
+                asked.push(if method == "session.subscribe" { format!("{method} {events}") } else { method.clone() });
+                let result = match method.as_str() {
+                    "browsingContext.getTree" => json!({ "contexts": [{ "context": "tab" }] }),
+                    "network.addDataCollector" => json!({ "collector": "c1" }),
+                    _ => json!({}),
+                };
+                ws.send(Message::text(json!({ "type": "success", "id": v["id"], "result": result }).to_string()))
+                    .unwrap();
+            }
+            asked
+        });
+        let mut b = Bidi::connect(&format!("ws://{addr}/"), Duration::from_secs(5)).unwrap();
+        b.start(Duration::from_secs(5)).unwrap();
+        let at_start = b.send("session.status", json!({}), Duration::from_secs(5)).map(|_| ());
+        assert!(at_start.is_ok() && b.requests.is_none() && b.collector.is_none());
+        assert_eq!(b.requests(false).unwrap().len(), 0);
+        assert_eq!(b.requests_note(), Some(LOG_STARTED));
+        b.requests(false).unwrap();
+        assert_eq!((b.requests_note(), b.collector.as_deref()), (None, Some("c1")));
+        b.closed = true;
+        drop(b);
+        let asked = firefox.join().unwrap();
+        let status = asked.iter().position(|m| m == "session.status").unwrap();
+        assert!(!asked[..status].iter().any(|m| m.contains("network.")), "{asked:?}");
+        let network: Vec<_> = asked[status..].iter().filter(|m| m.contains("network.")).collect();
+        assert_eq!(network.len(), 2, "{asked:?}");
+        assert!(network[0].contains("network.beforeRequestSent") && network[1] == "network.addDataCollector");
+    }
+
+    /// A request's body is asked of the browser (a BiDi event carries only
+    /// its size) where its collectors take the `request` data type, and
+    /// read as text; a browser that refuses the type keeps response bodies,
+    /// and `network <n>` says it has none of the request's.
+    #[test]
+    fn request_bodies_come_from_a_collector_that_takes_them() {
+        use std::net::TcpListener;
+        use tungstenite::Message;
+        for takes_requests in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let firefox = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut ws = tungstenite::accept(stream).unwrap();
+                let mut asked = Vec::new();
+                while let Ok(Message::Text(text)) = ws.read() {
+                    let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                    let p = &v["params"];
+                    let answer = match v["method"].as_str().unwrap_or("") {
+                        "network.addDataCollector" => {
+                            asked.push(p["dataTypes"].clone());
+                            if p["dataTypes"].to_string().contains("request") && !takes_requests {
+                                json!({ "type": "error", "id": v["id"], "error": "invalid argument",
+                                        "message": "Expected \"dataTypes\" values to be one of response" })
+                            } else {
+                                json!({ "type": "success", "id": v["id"], "result": { "collector": "c1" } })
+                            }
+                        }
+                        "network.getData" => {
+                            assert_eq!(p["dataType"], "request");
+                            asked.push(p["request"].clone());
+                            let bytes = json!({ "type": "base64", "value": "cT3DqSZuPTE=" });
+                            json!({ "type": "success", "id": v["id"], "result": { "bytes": bytes } })
+                        }
+                        _ => json!({ "type": "success", "id": v["id"], "result": {} }),
+                    };
+                    ws.send(Message::text(answer.to_string())).unwrap();
+                }
+                asked
+            });
+            let mut b = Bidi::connect(&format!("ws://{addr}/"), Duration::from_secs(5)).unwrap();
+            b.start_log(Duration::from_secs(5));
+            assert_eq!((b.collector.as_deref(), b.collects_requests), (Some("c1"), takes_requests));
+            let body = b.request_body("r1");
+            b.closed = true;
+            drop(b);
+            let asked = firefox.join().unwrap();
+            if takes_requests {
+                assert_eq!(body.unwrap(), "q=\u{e9}&n=1");
+                assert_eq!(asked, [json!(["request", "response"]), json!("r1")]);
+            } else {
+                assert!(format!("{:#}", body.unwrap_err()).contains("no request bodies"));
+                assert_eq!(asked, [json!(["request", "response"]), json!(["response"])]);
+            }
+        }
+    }
 
     #[test]
     fn remote_values_read_as_plain_json() {
@@ -2160,5 +2952,216 @@ mod geo_tests {
         for none in ["about:blank", "data:text/html,x", "file:///tmp/a.html", "https:///nohost", ""] {
             assert_eq!(page_origin(none), None, "{none}");
         }
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::{log_request, REQUESTS_MAX};
+    use serde_json::{json, Value};
+    use std::collections::VecDeque;
+
+    fn sent(id: &str, url: &str, ms: f64, redirects: u64) -> Value {
+        json!({ "context": "c", "redirectCount": redirects, "timestamp": ms, "isBlocked": false,
+                "request": { "request": id, "url": url, "method": "POST", "bodySize": 3,
+                             "initiatorType": "fetch", "destination": "",
+                             "headers": [{ "name": "a", "value": { "type": "string", "value": "1" } },
+                                         { "name": "a", "value": { "type": "string", "value": "2" } }] } })
+    }
+
+    fn done(id: &str, status: u64, ms: f64) -> Value {
+        json!({ "context": "c", "timestamp": ms, "redirectCount": 0, "request": { "request": id },
+                "response": { "status": status, "mimeType": "text/html; charset=utf-8", "fromCache": false,
+                              "bytesReceived": 120, "headers": [] } })
+    }
+
+    /// An event of a later hop of the request.
+    fn hop(mut event: Value, n: u64) -> Value {
+        event["redirectCount"] = json!(n);
+        event
+    }
+
+    #[test]
+    fn a_redirect_is_two_entries_under_one_id() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 302, 1010.0));
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/y", 1011.0, 1));
+        log_request(&mut log, &mut last, "network.responseCompleted", &hop(done("1", 200, 1030.0), 1));
+        let got: Vec<_> = log.iter().map(|h| (h.r.n, h.r.url.as_str(), h.r.status)).collect();
+        assert_eq!(got, [(1, "http://a/x", Some(302)), (2, "http://a/y", Some(200))]);
+        let r = &log[1].r;
+        assert_eq!(
+            (r.kind.as_str(), r.mime.as_str(), r.size, r.has_post_data),
+            ("Fetch", "text/html", Some(120), true)
+        );
+        assert_eq!(r.request_headers, json!({ "a": "1\n2" }));
+        assert!((r.ended.unwrap() - r.started - 0.019).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_get_after_a_303_has_no_body_whatever_size_it_comes_with() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 303, 1010.0));
+        let mut get = sent("1", "http://a/y", 1011.0, 1);
+        get["request"]["method"] = json!("GET");
+        get["request"]["bodySize"] = json!(8);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &get);
+        let got: Vec<_> = log.iter().map(|h| (h.r.method.as_str(), h.r.has_post_data)).collect();
+        assert_eq!(got, [("POST", true), ("GET", false)]);
+    }
+
+    #[test]
+    fn an_unreported_redirect_hop_ends_where_the_next_begins_and_a_repeat_is_one_entry() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1001.0, 0));
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/y", 1005.0, 1));
+        log_request(
+            &mut log,
+            &mut last,
+            "network.fetchError",
+            &json!({ "timestamp": 1009.0, "redirectCount": 1, "request": { "request": "1" }, "errorText": "NS_ERROR_NET_RESET" }),
+        );
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].r.ended, Some(1.005));
+        assert_eq!(log[1].r.failed.as_deref(), Some("NS_ERROR_NET_RESET"));
+    }
+
+    /// chromedriver's mapper (chromium-bidi) holds `beforeRequestSent`
+    /// for a CDP event from the browser process; a hop's response that
+    /// comes first opens its entry, and the announcement after it adds no
+    /// second one.
+    #[test]
+    fn a_hop_heard_of_first_by_its_response_is_one_entry() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        let mut started = done("1", 404, 1000.0);
+        started["request"] = sent("1", "http://a/nope", 1000.0, 0)["request"].clone();
+        log_request(&mut log, &mut last, "network.responseStarted", &started);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/nope", 1000.0, 0));
+        let got: Vec<_> = log.iter().map(|h| (h.r.n, h.r.url.as_str(), h.r.status, h.r.kind.as_str())).collect();
+        assert_eq!(got, [(1, "http://a/nope", Some(404), "Fetch")]);
+        assert!(!super::fresh_pending(&log, 0, 1.0), "answered: not waited for");
+    }
+
+    /// The hop a redirect leads to, of which chromedriver sent only the
+    /// response (its `beforeRequestSent` never came): listed, after the
+    /// hop that redirected, which keeps its own status.
+    #[test]
+    fn the_hop_a_redirect_leads_to_is_listed_without_its_announcement() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("7", "http://a/to", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.responseStarted", &done("7", 302, 1000.0));
+        log_request(&mut log, &mut last, "network.responseCompleted", &done("7", 302, 1000.0));
+        let mut target = hop(done("7", 200, 1003.0), 1);
+        target["request"] = sent("7", "http://a/next.html", 1003.0, 1)["request"].clone();
+        log_request(&mut log, &mut last, "network.responseStarted", &target);
+        // A late event of the first hop is its own, not the target's.
+        log_request(&mut log, &mut last, "network.responseStarted", &done("7", 302, 1000.0));
+        let got: Vec<_> = log.iter().map(|h| (h.r.n, h.count, h.r.url.as_str(), h.r.status)).collect();
+        assert_eq!(got, [(1, 0, "http://a/to", Some(302)), (2, 1, "http://a/next.html", Some(200))]);
+        assert!(log[0].r.ended.is_some() && log[1].r.ended.is_none());
+    }
+
+    /// chromedriver's mapper can give a hop that redirected the status of
+    /// the hop it led to (its CDP record took the next hop's raw response
+    /// when that came before the redirect), its reason phrase its own:
+    /// the hop after it shows it redirected, the phrase gives its status.
+    #[test]
+    fn a_redirect_reported_with_the_next_hops_status_takes_its_own_phrase() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("7", "http://a/to", 1000.0, 0));
+        let mut mixed = done("7", 200, 1000.0);
+        mixed["response"]["statusText"] = json!("Found");
+        log_request(&mut log, &mut last, "network.responseStarted", &mixed);
+        assert_eq!(log[0].r.status, Some(200), "no later hop yet: as reported");
+        log_request(&mut log, &mut last, "network.responseCompleted", &mixed);
+        let mut target = hop(done("7", 200, 1000.0), 1);
+        target["request"] = sent("7", "http://a/next.html", 1000.0, 1)["request"].clone();
+        target["response"]["statusText"] = json!("OK");
+        log_request(&mut log, &mut last, "network.responseStarted", &target);
+        assert_eq!((log[0].r.status, log[1].r.status), (Some(302), Some(200)));
+        // A late event of the redirect, the later hop known: at once.
+        log_request(&mut log, &mut last, "network.responseStarted", &mixed);
+        assert_eq!(log[0].r.status, Some(302));
+        // A phrase of no redirect, or a request that did not redirect,
+        // keeps the status it came with.
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("8", "http://a/made", 1001.0, 0));
+        let mut created = done("8", 201, 1001.0);
+        created["response"]["statusText"] = json!("Found");
+        log_request(&mut log, &mut last, "network.responseStarted", &created);
+        assert_eq!(log[2].r.status, Some(201));
+    }
+
+    /// `network --clear` hides what it took: an event of a cleared request
+    /// that comes after does not list it again.
+    #[test]
+    fn a_cleared_request_stays_cleared_when_its_events_come_after() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        let cleared = last;
+        log_request(&mut log, &mut last, "network.responseStarted", &done("1", 200, 1000.0));
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("2", "http://a/y", 1001.0, 0));
+        let shown: Vec<_> = super::listed(&log, cleared).into_iter().map(|r| (r.n, r.url)).collect();
+        assert_eq!(shown, [(2, "http://a/y".to_string())]);
+        assert_eq!(log[0].r.status, Some(200), "the hidden entry took its event");
+        // A cleared request still pending is not waited for.
+        assert!(!super::fresh_pending(&log, last, 1.0));
+        assert!(super::fresh_pending(&log, cleared, 1.0));
+    }
+
+    #[test]
+    fn a_response_that_only_started_has_its_status_and_no_end() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.responseStarted", &done("1", 404, 1004.0));
+        assert_eq!((log[0].r.status, log[0].r.ended, log[0].r.size), (Some(404), None, None));
+        log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 404, 1009.0));
+        assert_eq!((log[0].r.ended, log[0].r.size), (Some(1.009), Some(120)));
+    }
+
+    #[test]
+    fn a_server_that_stamps_each_event_with_the_start_has_its_end_from_the_timings() {
+        // chromedriver's: every event at the request's wall time, the
+        // timings counted from the request (`requestTime` 0).
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/slow", 5000.0, 0));
+        let mut slow = done("1", 200, 5000.0);
+        slow["request"]["timings"] = json!({ "timeOrigin": 5000.0, "requestTime": 0.0, "responseEnd": 2003.85 });
+        log_request(&mut log, &mut last, "network.responseCompleted", &slow);
+        assert!((log[0].r.ended.unwrap() - log[0].r.started - 2.00385).abs() < 1e-9, "{:?}", log[0].r.ended);
+        // Firefox's: the event at its own time, the timings since the
+        // epoch: the event's time is the end.
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("2", "http://a/x", 7000.0, 0));
+        let mut ff = done("2", 200, 7040.0);
+        ff["request"]["timings"] = json!({ "timeOrigin": 0.0, "requestTime": 6900.0, "responseEnd": 7039.5 });
+        log_request(&mut log, &mut last, "network.responseCompleted", &ff);
+        assert_eq!(log[1].r.ended, Some(7.04));
+        // No timings, or none ended: the event's time.
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("3", "http://a/y", 8000.0, 0));
+        let mut none = done("3", 200, 8000.0);
+        none["request"]["timings"] = json!({ "requestTime": 0.0, "responseEnd": 0.0 });
+        log_request(&mut log, &mut last, "network.responseCompleted", &none);
+        assert_eq!(log[2].r.ended, Some(8.0));
+    }
+
+    #[test]
+    fn only_a_request_sent_just_now_without_an_answer_is_waited_for() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 100_000.0, 0));
+        assert!(super::fresh_pending(&log, 0, 101.0));
+        assert!(!super::fresh_pending(&log, 0, 103.0), "a long poll is not waited for");
+        log_request(&mut log, &mut last, "network.responseStarted", &done("1", 200, 100_500.0));
+        assert!(!super::fresh_pending(&log, 0, 101.0));
+    }
+
+    #[test]
+    fn the_log_keeps_the_newest_thousand() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        for i in 0..REQUESTS_MAX + 5 {
+            log_request(&mut log, &mut last, "network.beforeRequestSent", &sent(&i.to_string(), "http://a/", 0.0, 0));
+        }
+        assert_eq!((log.len(), log[0].r.n, last), (REQUESTS_MAX, 6, REQUESTS_MAX as u64 + 5));
     }
 }

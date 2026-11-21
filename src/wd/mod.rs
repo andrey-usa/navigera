@@ -12,6 +12,7 @@
 
 pub mod bidi;
 pub mod classic;
+pub mod screencast;
 
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,9 @@ pub fn engine_name(config: &SessionConfig) -> &'static str {
         _ => "webdriver",
     }
 }
+
+/// How often an idle session reads what the browser sent meanwhile.
+const IDLE_TICK: Duration = Duration::from_millis(250);
 
 /// The page read as Chrome's DOM snapshot columns (see `snapshot.js`).
 const SNAPSHOT: &str = include_str!("snapshot.js");
@@ -422,6 +426,24 @@ pub trait Wire: Send {
             "classic WebDriver has no emulation; use --engine firefox or chrome (or --bidi with a server that has it)"
         )
     }
+    /// `network`: the requests of this session's tabs, oldest first
+    /// (`clear`: and forget them).
+    fn requests(&mut self, _clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
+        bail!("classic WebDriver does not report network requests; use --engine firefox or chrome (or --bidi with a server that has them)")
+    }
+    /// What the `requests` just before it should say with its list: that
+    /// the log started then (WebDriver BiDi starts it at the first `network`).
+    fn requests_note(&mut self) -> Option<&'static str> {
+        None
+    }
+    /// A logged request's response body: (body, base64-encoded?).
+    fn response_body(&mut self, _request: &str) -> Result<(String, bool)> {
+        bail!("classic WebDriver keeps no response bodies; use --engine firefox or chrome")
+    }
+    /// A logged request's body, where its events carried only its size.
+    fn request_body(&mut self, _request: &str) -> Result<String> {
+        bail!("classic WebDriver keeps no request bodies; use --engine firefox or chrome")
+    }
     /// `downloads`: the files this session's pages downloaded, oldest
     /// first (`clear`: and forget them).
     fn downloads(&mut self, _clear: bool) -> Result<Vec<crate::cdp::downloads::Download>> {
@@ -459,6 +481,28 @@ pub trait Wire: Send {
     /// another: a tab behind another gets no frames, and a driver waits
     /// seconds for one at every press there.
     fn front(&mut self) {}
+    /// `screencast start`: record the tab the session acts on into `dir`
+    /// ([`screencast`]); an error says why where it cannot.
+    fn screencast_start(&mut self, _dir: &std::path::Path, _quality: Option<&str>, _size: Option<&str>) -> Result<()> {
+        bail!(
+            "screencast: classic WebDriver cannot look at the page while a command runs; add --bidi where the \
+             WebDriver server serves BiDi (chromedriver), or run it with --engine firefox or chrome"
+        )
+    }
+    /// `screencast stop`: what was recorded.
+    fn screencast_stop(&mut self) -> Result<Value> {
+        bail!("screencast: nothing is recording; `screencast start <dir>` first")
+    }
+    /// How soon the session should read the connection again between
+    /// commands ([`Wire::idle`]), when sooner than its usual tick: a
+    /// recording's next look.
+    fn tick(&self) -> Option<Duration> {
+        None
+    }
+    /// Wait `wait` (`wait <ms>`, a poll's pause).
+    fn pause(&mut self, wait: Duration) {
+        std::thread::sleep(wait);
+    }
     /// Wait for a navigation an action started, if one did.
     fn settle(&mut self, _timeout: Duration, _watch: Watch) {}
     fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>>;
@@ -724,6 +768,12 @@ impl Driver {
         self.wire.idle();
     }
 
+    /// How long the session may wait for its next command before
+    /// [`Self::idle`]: its usual tick, or sooner for a recording's look.
+    pub fn tick(&self) -> Duration {
+        self.wire.tick().map_or(IDLE_TICK, |t| t.clamp(Duration::from_millis(10), IDLE_TICK))
+    }
+
     pub fn take_dialogs(&mut self) -> Vec<Value> {
         self.wire.dialogs()
     }
@@ -902,7 +952,7 @@ impl Driver {
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|device|geo|locale|timezone|media|offline|ua, route, unroute, downloads, wait --download)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|device|geo|locale|timezone|media|offline|ua, route, unroute, downloads, wait --download; over BiDi also network and screencast)",
             op_name(command),
             self.engine
         )
@@ -1247,7 +1297,7 @@ impl Driver {
                     .map_or_else(crate::browser::element_wait, |ms| Duration::from_millis(ms.max(1.0) as u64));
                 let started = Instant::now();
                 if let Some(ms) = ms {
-                    std::thread::sleep(Duration::from_millis(ms.max(0.0) as u64));
+                    self.wire.pause(Duration::from_millis(ms.max(0.0) as u64));
                 }
                 let poll = |me: &mut Self, js: &str, args: Value, what: &str| -> Result<()> {
                     loop {
@@ -1257,7 +1307,7 @@ impl Driver {
                         if started.elapsed() >= timeout {
                             bail!("wait: {what} within {} ms (wait longer with --timeout-ms)", timeout.as_millis());
                         }
-                        std::thread::sleep(Duration::from_millis(50));
+                        me.wire.pause(Duration::from_millis(50));
                     }
                 };
                 if let Some(sel) = selector {
@@ -1286,7 +1336,7 @@ impl Driver {
                                 timeout.as_millis()
                             );
                         }
-                        std::thread::sleep(Duration::from_millis(50));
+                        self.wire.pause(Duration::from_millis(50));
                     }
                 }
                 if let Some(src) = js {
@@ -1295,6 +1345,15 @@ impl Driver {
                 }
                 Ok(json!({ "waited_ms": started.elapsed().as_millis() as u64 }))
             }
+            Command::Screencast { action, dir, quality, size } => match (action.as_str(), dir) {
+                ("start", Some(dir)) => {
+                    let dir = std::path::Path::new(dir);
+                    self.wire.screencast_start(dir, quality.as_deref(), size.as_deref())?;
+                    Ok(json!({ "screencast": dir.display().to_string(), "recording": self.url() }))
+                }
+                ("stop", _) => self.wire.screencast_stop(),
+                _ => bail!("screencast start <dir> | stop"),
+            },
             Command::Pdf { path, landscape, background } => {
                 let bytes = self.wire.pdf(*landscape, *background).context("pdf")?;
                 let path = path.clone().unwrap_or_else(|| {
@@ -1699,6 +1758,81 @@ impl Driver {
                     None => json!({ "viewport": "default" }),
                 })
             }
+            Command::Network { n, filter, kind, failed, limit, clear, har, body_file, since } => {
+                let all = self.wire.requests(*clear && n.is_none()).map_err(|e| e.context("network"))?;
+                let started = self.wire.requests_note();
+                let redirected = crate::cdp::logs::redirected(&all);
+                if let Some(n) = n {
+                    let r = all.iter().find(|r| r.n == *n).ok_or_else(|| match started {
+                        Some(why) => anyhow!("network: no request #{n}: {why}"),
+                        None => anyhow!("network: no request #{n} (older ones are dropped after 1000)"),
+                    })?;
+                    let mut r = r.clone();
+                    let missing = self.post_data(&mut r).err();
+                    let mut out = crate::cdp::logs::request_json(&r);
+                    if let Some(e) = missing {
+                        out["post_data"] = json!(format!("(unavailable: {e:#})"));
+                    }
+                    if let Some(next) = redirected.get(n) {
+                        out["body"] = json!(crate::cdp::logs::redirect_body(*next));
+                        return Ok(out);
+                    }
+                    match self.wire.response_body(&r.id) {
+                        Ok((body, base64)) => {
+                            crate::protocol::body_answer(&mut out, &body, base64, body_file.as_deref())?
+                        }
+                        Err(e) => out["body"] = json!(format!("(unavailable: {e:#})")),
+                    }
+                    return Ok(out);
+                }
+                let mut picked =
+                    crate::cdp::logs::pick_requests(all, filter.as_deref(), kind.as_deref(), *failed, *since);
+                if let Some(path) = har {
+                    for r in &mut picked {
+                        let _ = self.post_data(r);
+                    }
+                    let mut har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
+                    // The bodies the browser still holds, as on Chrome (a
+                    // redirect's none: the body under its id is its last hop's).
+                    if let Some(entries) = har.pointer_mut("/log/entries").and_then(Value::as_array_mut) {
+                        for (entry, r) in entries.iter_mut().zip(&picked) {
+                            if r.status.is_none() || r.failed.is_some() || redirected.contains_key(&r.n) {
+                                continue;
+                            }
+                            if let Ok((body, base64)) = self.wire.response_body(&r.id) {
+                                let content = &mut entry["response"]["content"];
+                                content["text"] = json!(body);
+                                if base64 {
+                                    content["encoding"] = json!("base64");
+                                }
+                            }
+                        }
+                    }
+                    crate::protocol::write_private(path, &serde_json::to_vec_pretty(&har)?)
+                        .with_context(|| format!("network --har {path}"))?;
+                    let mut out = json!({ "har": path, "entries": picked.len() });
+                    if let Some(why) = started {
+                        out["note"] = json!(why);
+                    }
+                    return Ok(out);
+                }
+                let limit = limit.unwrap_or(100);
+                if picked.len() > limit {
+                    picked.drain(..picked.len() - limit);
+                }
+                if picked.is_empty() {
+                    return Ok(json!(match started {
+                        Some(why) => format!("(no requests yet: {why})"),
+                        None => "(no requests)".into(),
+                    }));
+                }
+                let url = self.url();
+                let list = crate::cdp::logs::requests_text(&picked, &crate::protocol::origin_of(&url));
+                Ok(json!(match started {
+                    Some(why) => format!("{list}\n({why})"),
+                    None => list,
+                }))
+            }
             Command::Downloads { dir: Some(dir), .. } => {
                 let dir = std::path::Path::new(dir);
                 std::fs::create_dir_all(dir).with_context(|| format!("downloads --dir {}", dir.display()))?;
@@ -1857,6 +1991,15 @@ impl Driver {
         self.console.extend(fresh);
         let over = self.console.len().saturating_sub(CONSOLE_KEPT);
         self.console.drain(..over);
+    }
+
+    /// A request's body from the browser, where its events said only that
+    /// it had one (WebDriver BiDi), kept as the log keeps one: 16 KiB.
+    fn post_data(&mut self, r: &mut crate::cdp::logs::Request) -> Result<()> {
+        if r.post_data.is_none() && r.has_post_data {
+            r.post_data = Some(crate::cdp::logs::kept_post_data(&self.wire.request_body(&r.id)?));
+        }
+        Ok(())
     }
 }
 

@@ -2,7 +2,7 @@
 //! this, and a program that embeds navigera (bitti) can offer the same
 //! commands, its own executable then serving the sessions it starts.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use crate::protocol::{self, ArgsError};
@@ -79,10 +79,6 @@ fn run(parsed: &protocol::ParsedArgs, output: &mut dyn Write) -> ExitCode {
     }
     match &parsed.command {
         Some(command) => protocol::oneshot(config, command, output),
-        None => {
-            let stdin = io::stdin();
-            let mut input: Box<dyn BufRead> = Box::new(stdin.lock());
-            protocol::serve(config, input.as_mut(), output)
-        }
+        None => protocol::serve(config, io::BufReader::new(io::stdin()), output),
     }
 }

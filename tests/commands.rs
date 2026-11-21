@@ -789,6 +789,35 @@ fn har_replay_and_modified_responses() {
             .unwrap_or_else(|| panic!("[{engine}] {recorded}"));
         assert!(echo["response"]["content"]["text"].as_str().unwrap_or("").contains("widget"), "[{engine}] {echo}");
 
+        // A hop that redirected has no body of its own: the browser keeps
+        // the last hop's under the request's id.
+        a.ok(&["network", "--clear"]);
+        a.ok(&["eval", "fetch('/api/sign-in', { method: 'POST', body: 'x' }).then((r) => r.text())"]);
+        a.ok(&["wait", "--idle"]);
+        let list = a.text(&["network", "--filter", "/api/"]);
+        let hop = list
+            .lines()
+            .find(|l| l.contains(" POST 303 "))
+            .and_then(|l| l.split_whitespace().next())
+            .map(|n| n.trim_start_matches('#').to_string())
+            .unwrap_or_else(|| panic!("[{engine}] {list}"));
+        let shown = a.ok(&["network", &hop]);
+        assert!(shown["body"].as_str().unwrap_or("").contains("redirected"), "[{engine}] {shown}");
+        let hops = std::env::temp_dir().join(format!("nv-hops-{engine}-{}.har", std::process::id()));
+        a.ok(&["network", "--filter", "/api/", "--har", hops.to_str().unwrap()]);
+        let recorded: Value = serde_json::from_slice(&std::fs::read(&hops).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&hops);
+        let bodies: Vec<(u64, bool)> = recorded["log"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                let text = e["response"]["content"]["text"].as_str();
+                (e["response"]["status"].as_u64().unwrap_or(0), text.is_some_and(|t| t.contains("fresh")))
+            })
+            .collect();
+        assert_eq!(bodies, [(303, false), (200, true)], "[{engine}] {recorded}");
+
         drop(site);
         a.ok(&["route", "--har", har.to_str().unwrap()]);
         a.ok(&["goto", &format!("{base}/console")]);
