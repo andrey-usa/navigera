@@ -20,8 +20,10 @@ All notable changes to this project are documented here. The format follows
   10 MiB a response). In a Firefox you attached to, only navigera's own
   tabs are listened to: its window, a tab `tab-new` opened, and a tab one
   of its pages opened, from when navigera hears of that tab (a request it
-  sent before is not listed). Classic WebDriver still has no request list
-  and says so.
+  sent before is not listed); a tab's response bodies go when it closes,
+  however it closes (Firefox keeps what a collector collected until it
+  is removed: on Firefox 160 a closed tab's 1 MiB body could still be
+  read). Classic WebDriver still has no request list and says so.
 - `screencast start <dir>` / `screencast stop` on Firefox and the other
   WebDriver BiDi engines (a WebDriver server with `--bidi`, chromedriver):
   the same frames (`frame-NNNNN.jpg` with their times) and player as on

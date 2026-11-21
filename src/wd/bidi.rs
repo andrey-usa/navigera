@@ -211,6 +211,11 @@ pub struct Bidi {
     /// The data collector that keeps response bodies for `network <n>` (in
     /// the user's browser, its first tab's: [`Self::adopt`] adds one per tab).
     collector: Option<String>,
+    /// In the user's browser, each tab's collector, removed when the tab
+    /// closes ([`Self::tab_gone`]), and the commands that ask for one whose
+    /// answers have not come yet (`None`: its tab closed meanwhile).
+    tab_collectors: Vec<(String, String)>,
+    asked_collectors: Vec<(u64, Option<String>)>,
     /// The frames inside `own` tabs, each with its tab.
     frames: Vec<(String, String)>,
     closed: bool,
@@ -910,6 +915,8 @@ impl Bidi {
             last_request: 0,
             cleared: 0,
             collector: None,
+            tab_collectors: Vec::new(),
+            asked_collectors: Vec::new(),
             child: None,
             _profile: None,
             classic: None,
@@ -943,6 +950,9 @@ impl Bidi {
             // Only its own window's requests: the user's tabs are not
             // reported to it, nor slowed by being.
             self.log_network(json!({ "events": NETWORK_EVENTS, "contexts": [self.context] }), timeout);
+            if let Some(x) = self.collector.clone() {
+                self.tab_collectors.push((self.context.clone(), x));
+            }
             return Ok(());
         }
         self.log_network(json!({ "events": NETWORK_EVENTS }), timeout);
@@ -1026,8 +1036,13 @@ impl Bidi {
                         }
                         return Ok(None);
                     }
-                    if !self.asked_intercepts.is_empty() && v["type"] != "event" {
-                        self.took_intercept(&v);
+                    if v["type"] != "event" {
+                        if !self.asked_intercepts.is_empty() {
+                            self.took_intercept(&v);
+                        }
+                        if !self.asked_collectors.is_empty() {
+                            self.took_collector(&v);
+                        }
                     }
                     return Ok(Some(v));
                 }
@@ -1148,6 +1163,9 @@ impl Bidi {
             }
             "browsingContext.contextDestroyed" if self.attached => {
                 context_destroyed(&mut self.frames, params);
+                if let Some(id) = params["context"].as_str() {
+                    self.tab_gone(id);
+                }
             }
             "browsingContext.userPromptOpened" if self.heard(params["context"].as_str()) => {
                 // A frame's dialog blocks its tab, and the tab is what is answered.
@@ -1471,17 +1489,55 @@ impl Bidi {
         }
         for (method, params) in calls {
             let intercept = method == "network.addIntercept";
+            let collector = method == "network.addDataCollector";
             if wait {
                 if let Ok(r) = self.send(method, params, Duration::from_secs(10)) {
                     if let Some(x) = r["intercept"].as_str().filter(|_| intercept) {
                         self.more_intercepts.push(x.to_string());
+                    }
+                    if let Some(x) = r["collector"].as_str().filter(|_| collector) {
+                        self.tab_collectors.push((id.to_string(), x.to_string()));
                     }
                 }
             } else if let Ok(asked) = self.write(method, params) {
                 if intercept {
                     self.asked_intercepts.push(asked);
                 }
+                if collector {
+                    self.asked_collectors.push((asked, Some(id.to_string())));
+                }
             }
+        }
+    }
+
+    /// The answer to a collector [`Self::adopt`] asked for without waiting:
+    /// kept with its tab, or, the tab closed meanwhile, removed.
+    fn took_collector(&mut self, v: &Value) {
+        let Some(i) = v["id"].as_u64().and_then(|id| self.asked_collectors.iter().position(|(a, _)| *a == id)) else {
+            return;
+        };
+        let (_, tab) = self.asked_collectors.swap_remove(i);
+        let Some(x) = v["result"]["collector"].as_str() else { return };
+        match tab {
+            Some(tab) => self.tab_collectors.push((tab, x.to_string())),
+            None => {
+                let _ = self.write("network.removeDataCollector", json!({ "collector": x }));
+            }
+        }
+    }
+
+    /// A tab of the user's browser closed: its response bodies go with it.
+    /// Firefox drops no collector with its tab: what one collected could
+    /// still be read after the tab closed, until the session ends (Firefox
+    /// 160). Written, as the reader may be mid-message.
+    fn tab_gone(&mut self, tab: &str) {
+        for asked in self.asked_collectors.iter_mut().filter(|(_, t)| t.as_deref() == Some(tab)) {
+            asked.1 = None;
+        }
+        let (gone, kept) = std::mem::take(&mut self.tab_collectors).into_iter().partition(|(t, _)| t == tab);
+        self.tab_collectors = kept;
+        for (_, x) in gone {
+            let _ = self.write("network.removeDataCollector", json!({ "collector": x }));
         }
     }
 
@@ -2168,6 +2224,8 @@ impl Wire for Bidi {
         self.own.retain(|o| o != id);
         self.frames.retain(|(_, tab)| tab != id);
         self.send("browsingContext.close", json!({ "context": id }), Duration::from_secs(10))?;
+        // Its contextDestroyed has done this, when it came first.
+        self.tab_gone(id);
         Ok(())
     }
 
@@ -2315,6 +2373,67 @@ impl Bidi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// In a Firefox you attached to, a tab's response bodies go when the
+    /// tab closes: Firefox kept a collector's bodies after its tab closed,
+    /// and navigera removed none (one per tab it took on). A page's tab
+    /// closed by the page, the session's tab closed by `tab-close`, and a
+    /// tab that closed before its collector's answer came.
+    #[test]
+    fn a_closed_tabs_collector_is_removed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let firefox = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut removed = Vec::new();
+            let destroyed = |tab: &str| {
+                json!({ "type": "event", "method": "browsingContext.contextDestroyed", "params": { "context": tab } })
+                    .to_string()
+            };
+            while let Ok(Message::Text(text)) = ws.read() {
+                let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                let result = match v["method"].as_str().unwrap_or("") {
+                    "network.addDataCollector" => {
+                        let tab = v["params"]["contexts"][0].as_str().unwrap().to_string();
+                        if tab == "late" {
+                            ws.send(Message::text(destroyed(&tab))).unwrap();
+                        }
+                        json!({ "collector": format!("c-{tab}") })
+                    }
+                    "network.removeDataCollector" => {
+                        removed.push(v["params"]["collector"].as_str().unwrap().to_string());
+                        json!({})
+                    }
+                    "session.status" if removed.is_empty() => {
+                        ws.send(Message::text(destroyed("pop"))).unwrap();
+                        json!({})
+                    }
+                    _ => json!({}),
+                };
+                ws.send(Message::text(json!({ "type": "success", "id": v["id"], "result": result }).to_string()))
+                    .unwrap();
+            }
+            removed
+        });
+        let mut b = Bidi::connect(&format!("ws://{addr}/"), Duration::from_secs(5)).unwrap();
+        b.attached = true;
+        b.context = "tab".into();
+        b.own.push("tab".into());
+        b.collector = Some("c-tab".into());
+        b.tab_collectors.push(("tab".into(), "c-tab".into()));
+        let pump = |b: &mut Bidi| b.send("session.status", json!({}), Duration::from_secs(5)).unwrap();
+        b.adopt("pop", false);
+        pump(&mut b);
+        b.tab_close("tab").unwrap();
+        b.adopt("late", false);
+        pump(&mut b);
+        pump(&mut b);
+        assert!(b.tab_collectors.is_empty() && b.asked_collectors.is_empty(), "{:?}", b.tab_collectors);
+        b.closed = true;
+        drop(b);
+        assert_eq!(firefox.join().unwrap(), ["c-pop", "c-tab", "c-late"]);
+    }
 
     #[test]
     fn remote_values_read_as_plain_json() {
