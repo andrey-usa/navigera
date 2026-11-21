@@ -22,6 +22,18 @@ All notable changes to this project are documented here. The format follows
   of its pages opened, from when navigera hears of that tab (a request it
   sent before is not listed). Classic WebDriver still has no request list
   and says so.
+- `screencast start <dir>` / `screencast stop` on Firefox and the other
+  WebDriver BiDi engines: the same frames (`frame-NNNNN.jpg` with their
+  times) and player as on Chrome, and the recording follows the session
+  from tab to tab. BiDi sends no frames when the page changes, so navigera
+  takes a JPEG screenshot of the viewport on a second connection to the
+  session while commands run on the first: a screenshot that shows what
+  the last frame showed is dropped, and while the page stays still the
+  screenshots space out from every 100 ms to one a second, so a still page
+  costs one screenshot a second where Chrome's costs none. Frames are the
+  viewport's size (`--size` is refused; `set viewport` sizes them).
+  Classic WebDriver cannot look while a command runs: it says to add
+  `--bidi`.
 
 ### Fixed
 

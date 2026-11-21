@@ -88,7 +88,7 @@ pub struct Recording {
     client: CdpClient,
 }
 
-fn epoch_ms() -> f64 {
+pub(crate) fn epoch_ms() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
 }
 
@@ -195,7 +195,7 @@ impl Recording {
 
 /// Frames left in `dir` by an earlier recording, so the player's list is
 /// the only one there.
-fn clear_frames(dir: &Path) {
+pub(crate) fn clear_frames(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let name = e.file_name();
@@ -267,9 +267,14 @@ fn save_frame(p: &Value, dir: &Path, started: f64, frames: &Mutex<Vec<Frame>>) -
     let bytes = base64::engine::general_purpose::STANDARD.decode(data).context("screencast: a frame's data")?;
     // When the page showed it (seconds since the epoch), else now.
     let at = p["metadata"]["timestamp"].as_f64().map(|s| s * 1000.0).unwrap_or_else(epoch_ms);
-    let mut frames = frames.lock().unwrap();
+    push_frame(dir, started, &mut frames.lock().unwrap(), &bytes, at)
+}
+
+/// `bytes` (a JPEG) as the next frame of the recording in `dir`, shown at
+/// `at` (epoch ms) of a recording that started at `started`.
+pub(crate) fn push_frame(dir: &Path, started: f64, frames: &mut Vec<Frame>, bytes: &[u8], at: f64) -> Result<()> {
     let file = format!("frame-{:05}.jpg", frames.len() + 1);
-    crate::protocol::write_own(dir.join(&file), &bytes).with_context(|| format!("screencast: writing {file}"))?;
+    crate::protocol::write_own(dir.join(&file), bytes).with_context(|| format!("screencast: writing {file}"))?;
     let ms = (at - started).max(0.0) as u64;
     // A frame stamped before the one before it (two tabs' clocks) plays
     // right after it.

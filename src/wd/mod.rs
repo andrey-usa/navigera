@@ -12,6 +12,7 @@
 
 pub mod bidi;
 pub mod classic;
+pub mod screencast;
 
 use std::time::{Duration, Instant};
 
@@ -468,6 +469,12 @@ pub trait Wire: Send {
     /// another: a tab behind another gets no frames, and a driver waits
     /// seconds for one at every press there.
     fn front(&mut self) {}
+    /// `screencast`: where a connection of its own joins this session, to
+    /// take screenshots while commands run on this one; None where the
+    /// protocol has no second connection (classic WebDriver).
+    fn screencast_from(&self) -> Option<String> {
+        None
+    }
     /// Wait for a navigation an action started, if one did.
     fn settle(&mut self, _timeout: Duration, _watch: Watch) {}
     fn screenshot(&mut self, full_page: bool) -> Result<Vec<u8>>;
@@ -660,6 +667,8 @@ pub struct Driver {
     /// While `set viewport` or `set device` sizes the page: its own viewport,
     /// read before (`null` if that read failed), for `off` to wait for.
     viewport_own: Option<Value>,
+    /// `screencast start`, until `stop`.
+    screencast: Option<screencast::Recorder>,
 }
 
 impl Driver {
@@ -712,6 +721,7 @@ impl Driver {
             tabs_seen: usize::MAX,
             ua_by_device: false,
             viewport_own: None,
+            screencast: None,
         })
     }
 
@@ -742,7 +752,12 @@ impl Driver {
     }
 
     pub fn run_op(&mut self, command: &Command) -> Result<Outcome> {
-        let result = self.dispatch(command)?;
+        let result = self.dispatch(command);
+        // A recording goes on in the tab the session acts on now.
+        if let Some(r) = &self.screencast {
+            r.follow(&self.wire.current_tab());
+        }
+        let result = result?;
         let dialogs = self.wire.dialogs();
         Ok(Outcome { result, dialogs, new_tabs: Vec::new(), notes: Vec::new(), recovered: None })
     }
@@ -911,7 +926,7 @@ impl Driver {
 
     fn not_here(&self, command: &Command) -> anyhow::Error {
         anyhow!(
-            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|device|geo|locale|timezone|media|offline|ua, route, unroute, downloads, wait --download)",
+            "{}: not on the {} engine yet; run it with --engine chrome (the WebDriver engines do goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, pdf, tabs, cookies, console, upload, drag, mouse, keydown, keyup, storage, init-script, set viewport|device|geo|locale|timezone|media|offline|ua, route, unroute, downloads, wait --download; over BiDi also network and screencast)",
             op_name(command),
             self.engine
         )
@@ -1304,6 +1319,37 @@ impl Driver {
                 }
                 Ok(json!({ "waited_ms": started.elapsed().as_millis() as u64 }))
             }
+            Command::Screencast { action, dir, quality, size } => match (action.as_str(), dir) {
+                ("start", Some(dir)) => {
+                    if let Some(r) = &self.screencast {
+                        bail!("screencast: already recording into {}; `screencast stop` first", r.dir().display());
+                    }
+                    let Some(endpoint) = self.wire.screencast_from() else {
+                        bail!(
+                            "screencast: classic WebDriver cannot look at the page while a command runs; add --bidi \
+                             where the WebDriver server serves BiDi (chromedriver, geckodriver), or run it with \
+                             --engine chrome or --engine firefox"
+                        );
+                    };
+                    if size.is_some() {
+                        bail!(
+                            "screencast --size: not on the {} engine (a WebDriver BiDi screenshot is the viewport's \
+                             size); `set viewport <w>x<h>` sizes the frames, or drop --size",
+                            self.engine
+                        );
+                    }
+                    let opts = crate::screencast::Options::parse(quality.as_deref(), None)?;
+                    let dir = std::path::Path::new(dir);
+                    let tab = self.wire.current_tab();
+                    self.screencast = Some(screencast::Recorder::start(&endpoint, &tab, dir, &opts, self.timeout)?);
+                    Ok(json!({ "screencast": dir.display().to_string(), "recording": self.url() }))
+                }
+                ("stop", _) => match self.screencast.take() {
+                    Some(r) => r.stop(),
+                    None => bail!("screencast: nothing is recording; `screencast start <dir>` first"),
+                },
+                _ => bail!("screencast start <dir> | stop"),
+            },
             Command::Pdf { path, landscape, background } => {
                 let bytes = self.wire.pdf(*landscape, *background).context("pdf")?;
                 let path = path.clone().unwrap_or_else(|| {
@@ -1926,6 +1972,7 @@ impl Driver {
 
 impl Drop for Driver {
     fn drop(&mut self) {
+        self.screencast = None;
         self.wire.close();
     }
 }

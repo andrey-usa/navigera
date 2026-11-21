@@ -119,8 +119,43 @@ const CONSOLE_MAX: usize = 1000;
 /// The most of one console entry's text that is kept, in bytes.
 const CONSOLE_TEXT_MAX: usize = 16 << 10;
 
+/// Where another connection joins the session `session.new` answered
+/// with `answer` on `url` (`ws://host:port/session`).
+fn session_endpoint(url: &str, answer: &Value) -> String {
+    match answer["sessionId"].as_str() {
+        Some(id) => format!("{}/{id}", url.trim_end_matches('/')),
+        None => url.to_string(),
+    }
+}
+
+/// A WebSocket to a BiDi endpoint (`ws://` only).
+pub(crate) fn open_ws(url: &str, timeout: Duration) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
+    // The endpoint as shown: a grid's may carry a key.
+    let shown = super::classic::mask(url);
+    let rest = url.strip_prefix("ws://").ok_or_else(|| {
+        anyhow!("BiDi endpoint {shown}: only ws:// endpoints on this machine or a network are served (no wss:// yet)")
+    })?;
+    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(host)
+        .with_context(|| format!("BiDi endpoint {host}"))?
+        .next()
+        .ok_or_else(|| anyhow!("BiDi endpoint {host}: no address"))?;
+    let stream = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(10)))
+        .with_context(|| format!("could not connect to the BiDi endpoint {shown}"))?;
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(Some(timeout)).ok();
+    let (ws, _) = tungstenite::client::client(url, MaybeTlsStream::Plain(stream))
+        .map_err(|e| anyhow!("BiDi handshake with {shown} failed: {e}"))?;
+    Ok(ws)
+}
+
 pub struct Bidi {
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
+    /// Where another connection joins this session (`screencast`): the
+    /// session's own endpoint, `<endpoint>/session/<id>` for a session
+    /// this connection made with `session.new`.
+    rejoin: String,
     next_id: u64,
     /// The top-level browsing context ops act on.
     context: String,
@@ -757,6 +792,7 @@ impl Bidi {
         let session = me
             .send("session.new", json!({ "capabilities": { "alwaysMatch": always } }), timeout)
             .context("Firefox refused a BiDi session")?;
+        me.rejoin = session_endpoint(&url, &session);
         let caps = &session["capabilities"];
         me.browser = json!({
             "name": caps["browserName"].as_str().unwrap_or("firefox"),
@@ -815,6 +851,7 @@ impl Bidi {
                     continue;
                 }
             };
+            me.rejoin = session_endpoint(url, &session);
             let caps = &session["capabilities"];
             me.browser = json!({
                 "name": caps["browserName"].as_str().unwrap_or("firefox"),
@@ -856,27 +893,12 @@ impl Bidi {
     }
 
     fn connect(url: &str, timeout: Duration) -> Result<Self> {
+        let ws = open_ws(url, timeout)?;
         // The endpoint as shown: a grid's may carry a key.
         let shown = super::classic::mask(url);
-        let rest = url.strip_prefix("ws://").ok_or_else(|| {
-            anyhow!(
-                "BiDi endpoint {shown}: only ws:// endpoints on this machine or a network are served (no wss:// yet)"
-            )
-        })?;
-        let authority = rest.split(['/', '?']).next().unwrap_or(rest);
-        let host = authority.rsplit('@').next().unwrap_or(authority);
-        let addr = std::net::ToSocketAddrs::to_socket_addrs(host)
-            .with_context(|| format!("BiDi endpoint {host}"))?
-            .next()
-            .ok_or_else(|| anyhow!("BiDi endpoint {host}: no address"))?;
-        let stream = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(10)))
-            .with_context(|| format!("could not connect to the BiDi endpoint {shown}"))?;
-        stream.set_nodelay(true).ok();
-        stream.set_read_timeout(Some(timeout)).ok();
-        let (ws, _) = tungstenite::client::client(url, MaybeTlsStream::Plain(stream))
-            .map_err(|e| anyhow!("BiDi handshake with {shown} failed: {e}"))?;
         Ok(Self {
             ws,
+            rejoin: url.to_string(),
             next_id: 1,
             context: String::new(),
             console: VecDeque::new(),
@@ -2001,6 +2023,10 @@ impl Wire for Bidi {
 
     fn current_tab(&self) -> String {
         self.context.clone()
+    }
+
+    fn screencast_from(&self) -> Option<String> {
+        Some(self.rejoin.clone())
     }
 
     fn front(&mut self) {

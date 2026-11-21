@@ -42,7 +42,9 @@ console and dialogs, and upload, drag, mouse, keydown, keyup, storage and
 (answer, abort or replay a request from a HAR; `--modify` is Chrome's),
 `downloads` and `wait --download`, `network` (the requests of every tab
 of the session: the list, a response body, `--har` with the bodies the
-browser kept, up to 10 MiB each),
+browser kept, up to 10 MiB each), `screencast` (screenshots of the
+viewport on a second connection while commands run, a frame for each
+change, at most every 100 ms and one a second on a still page),
 and `set locale`, `timezone`, `media dark|light`, `ua`, `offline`, `geo`
 and `device` for every tab of the session (Firefox 160 emulates no other
 media feature; `device` is the viewport, pixel ratio and user agent, no
@@ -50,7 +52,8 @@ touch; `geo` grants the permission to each origin the tab visits, and takes
 it back at `set geo off`).
 An op only Chrome has (`cdp`, `passkey`, throttling; `network` over
 classic WebDriver) says to
-use `--engine chrome`. Safari's driver has no
+use `--engine chrome`; `screencast` over classic WebDriver says to add
+`--bidi`. Safari's driver has no
 headless mode, runs one session per machine and blocks user input while it
 runs (Apple's limits). The `webdriver` workflow runs one scenario on Firefox
 (Linux, macOS, Windows), Safari (macOS) and chromedriver over both protocols.

@@ -795,6 +795,47 @@ fn network_ops(args: &[&str], engine: &str, bodies: bool) {
     assert_eq!(ok(&a, 8), &json!("(no requests)"), "{engine}");
 }
 
+/// `screencast` over BiDi: a frame at the start and one for each change,
+/// JPEGs, and the player; classic WebDriver says to add `--bidi`. Each
+/// state stays longer than a still page's longest gap between looks.
+fn screencast_ops(args: &[&str], engine: &str, bidi: bool) {
+    let site = serve();
+    let dir = tempfile::tempdir().unwrap();
+    let rec = dir.path().join("rec");
+    let paint = |id: u64, color: &str| json!({ "id": id, "op": "eval", "expression": format!("document.body.style.background = '{color}'; 1") });
+    let script: Vec<Value> = vec![
+        json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
+        json!({ "id": 2, "op": "screencast", "action": "start", "dir": rec.display().to_string() }),
+        json!({ "id": 3, "op": "wait", "ms": 1500 }),
+        paint(4, "rgb(200, 0, 0)"),
+        json!({ "id": 5, "op": "wait", "ms": 1500 }),
+        paint(6, "rgb(0, 0, 200)"),
+        json!({ "id": 7, "op": "wait", "ms": 1500 }),
+        json!({ "id": 8, "op": "screencast", "action": "stop" }),
+        json!({ "id": 9, "op": "screencast", "action": "stop" }),
+        json!({ "id": 10, "op": "quit" }),
+    ];
+    let a = session(args, &script);
+    if !bidi {
+        let x = a.iter().find(|x| x["id"] == 2).unwrap();
+        assert!(x["error"].as_str().is_some_and(|e| e.contains("add --bidi")), "{engine}: {x}");
+        return;
+    }
+    let done = ok(&a, 8);
+    assert!(done.get("error").is_none(), "{engine}: {done}");
+    // The page as it was, red, blue: each a frame of its own.
+    let frames = done["frames"].as_u64().unwrap_or(0);
+    assert!(frames >= 3, "{engine}: {done}");
+    for n in 1..=frames {
+        let jpeg = std::fs::read(rec.join(format!("frame-{n:05}.jpg"))).unwrap();
+        assert_eq!(&jpeg[..2], &[0xff, 0xd8], "{engine}: frame {n} is a JPEG");
+    }
+    let player = std::fs::read_to_string(rec.join("index.html")).unwrap();
+    assert!(player.contains("frame-00001.jpg"), "{engine}");
+    let again = a.iter().find(|x| x["id"] == 9).unwrap();
+    assert!(again["error"].as_str().is_some_and(|e| e.contains("nothing is recording")), "{engine}: {again}");
+}
+
 fn download_ops(args: &[&str], engine: &str) {
     let site = serve();
     let dir = tempfile::tempdir().unwrap();
@@ -908,6 +949,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
     download_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     network_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
+    screencast_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
     hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }
@@ -1148,6 +1190,8 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     lone_surrogates(&["--webdriver", &url, "--capabilities", &caps], "webdriver");
     lone_surrogates(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver");
     network_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi", false);
+    screencast_ops(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi", true);
+    screencast_ops(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic", false);
     viewport_back(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back_per_window(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
