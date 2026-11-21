@@ -128,6 +128,12 @@ pub fn kept_url(url: &str) -> String {
     cut(url, URL_KEPT)
 }
 
+/// A request's body as the log keeps it ([`MAX_POST_DATA`]), also one the
+/// browser is asked for after its event.
+pub fn kept_post_data(body: &str) -> String {
+    cut(body, MAX_POST_DATA)
+}
+
 /// A request's or a response's headers as the log keeps them
 /// ([`HEADERS_KEPT`]): whole when they fit, else those that fit, the start
 /// of the first that does not, and [`LEFT_OUT`] saying what was left out.
@@ -477,7 +483,7 @@ impl Logs {
                     url: kept_url(req.get("url").and_then(Value::as_str).unwrap_or("")),
                     kind: params.get("type").and_then(Value::as_str).unwrap_or("Other").to_string(),
                     request_headers: kept_headers(req.get("headers")),
-                    post_data: req.get("postData").and_then(Value::as_str).map(|s| cut(s, MAX_POST_DATA)),
+                    post_data: req.get("postData").and_then(Value::as_str).map(kept_post_data),
                     has_post_data: req.get("hasPostData").and_then(Value::as_bool) == Some(true),
                     started: params.get("timestamp").and_then(Value::as_f64).unwrap_or(0.0),
                     wall: params.get("wallTime").and_then(Value::as_f64).unwrap_or(0.0),

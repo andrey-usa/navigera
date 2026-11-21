@@ -435,6 +435,10 @@ pub trait Wire: Send {
     fn response_body(&mut self, _request: &str) -> Result<(String, bool)> {
         bail!("classic WebDriver keeps no response bodies; use --engine firefox or chrome")
     }
+    /// A logged request's body, where its events carried only its size.
+    fn request_body(&mut self, _request: &str) -> Result<String> {
+        bail!("classic WebDriver keeps no request bodies; use --engine firefox or chrome")
+    }
     /// `downloads`: the files this session's pages downloaded, oldest
     /// first (`clear`: and forget them).
     fn downloads(&mut self, _clear: bool) -> Result<Vec<crate::cdp::downloads::Download>> {
@@ -1757,7 +1761,12 @@ impl Driver {
                         .iter()
                         .find(|r| r.n == *n)
                         .ok_or_else(|| anyhow!("network: no request #{n} (older ones are dropped after 1000)"))?;
-                    let mut out = crate::cdp::logs::request_json(r);
+                    let mut r = r.clone();
+                    let missing = self.post_data(&mut r).err();
+                    let mut out = crate::cdp::logs::request_json(&r);
+                    if let Some(e) = missing {
+                        out["post_data"] = json!(format!("(unavailable: {e:#})"));
+                    }
                     if let Some(next) = redirected.get(n) {
                         out["body"] = json!(crate::cdp::logs::redirect_body(*next));
                         return Ok(out);
@@ -1773,6 +1782,9 @@ impl Driver {
                 let mut picked =
                     crate::cdp::logs::pick_requests(all, filter.as_deref(), kind.as_deref(), *failed, *since);
                 if let Some(path) = har {
+                    for r in &mut picked {
+                        let _ = self.post_data(r);
+                    }
                     let mut har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
                     // The bodies the browser still holds, as on Chrome (a
                     // redirect's none: the body under its id is its last hop's).
@@ -1962,6 +1974,15 @@ impl Driver {
         self.console.extend(fresh);
         let over = self.console.len().saturating_sub(CONSOLE_KEPT);
         self.console.drain(..over);
+    }
+
+    /// A request's body from the browser, where its events said only that
+    /// it had one (WebDriver BiDi), kept as the log keeps one: 16 KiB.
+    fn post_data(&mut self, r: &mut crate::cdp::logs::Request) -> Result<()> {
+        if r.post_data.is_none() && r.has_post_data {
+            r.post_data = Some(crate::cdp::logs::kept_post_data(&self.wire.request_body(&r.id)?));
+        }
+        Ok(())
     }
 }
 

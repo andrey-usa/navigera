@@ -42,8 +42,16 @@ const COMMIT_EVENTS: &[&str] = &["browsingContext.navigationCommitted"];
 const NETWORK_EVENTS: &[&str] =
     &["network.beforeRequestSent", "network.responseStarted", "network.responseCompleted", "network.fetchError"];
 
-/// The largest response body the browser keeps for `network <n>`.
+/// The largest response or request body the browser keeps for
+/// `network <n>` (the log keeps 16 KiB of a request's).
 const BODY_MAX: u64 = 10 << 20;
+
+/// A data collector's parameters: response bodies, and request bodies too
+/// when `requests`.
+fn collect_params(requests: bool) -> Value {
+    let types: &[&str] = if requests { &["request", "response"] } else { &["response"] };
+    json!({ "dataTypes": types, "maxEncodedDataSize": BODY_MAX, "collectorType": "blob" })
+}
 
 /// How long `network` waits for the answers of requests sent just before.
 const CATCH_UP: Duration = Duration::from_millis(150);
@@ -211,6 +219,9 @@ pub struct Bidi {
     /// The data collector that keeps response bodies for `network <n>` (in
     /// the user's browser, its first tab's: [`Self::adopt`] adds one per tab).
     collector: Option<String>,
+    /// Whether the collectors keep request bodies too: a BiDi event carries
+    /// none, only its size.
+    collects_requests: bool,
     /// In the user's browser, each tab's collector, removed when the tab
     /// closes ([`Self::tab_gone`]), and the commands that ask for one whose
     /// answers have not come yet (`None`: its tab closed meanwhile).
@@ -915,6 +926,7 @@ impl Bidi {
             last_request: 0,
             cleared: 0,
             collector: None,
+            collects_requests: false,
             tab_collectors: Vec::new(),
             asked_collectors: Vec::new(),
             child: None,
@@ -974,17 +986,24 @@ impl Bidi {
     fn log_network(&mut self, subscribe: Value, timeout: Duration) {
         if self.send("session.subscribe", subscribe.clone(), timeout).is_ok() {
             self.requests = Some(VecDeque::new());
-            let mut collect =
-                json!({ "dataTypes": ["response"], "maxEncodedDataSize": BODY_MAX, "collectorType": "blob" });
-            if let Some(contexts) = subscribe.get("contexts") {
-                collect["contexts"] = contexts.clone();
+            // Request bodies too where the browser keeps them; one that
+            // refuses the data type keeps response bodies. A Firefox before
+            // network.addDataCollector lists requests without their bodies.
+            for requests in [true, false] {
+                let mut collect = collect_params(requests);
+                if let Some(contexts) = subscribe.get("contexts") {
+                    collect["contexts"] = contexts.clone();
+                }
+                match self.send("network.addDataCollector", collect, timeout) {
+                    Ok(r) => {
+                        self.collector = r["collector"].as_str().map(str::to_string);
+                        self.collects_requests = requests && self.collector.is_some();
+                        break;
+                    }
+                    Err(e) if requests && format!("{e:#}").contains(": invalid argument:") => {}
+                    Err(_) => break,
+                }
             }
-            // A Firefox before network.addDataCollector lists requests
-            // without their bodies.
-            self.collector = self
-                .send("network.addDataCollector", collect, timeout)
-                .ok()
-                .and_then(|r| r["collector"].as_str().map(str::to_string));
         }
     }
 
@@ -1480,8 +1499,8 @@ impl Bidi {
             calls.push(("session.subscribe", json!({ "events": ["network.beforeRequestSent"], "contexts": [id] })));
         }
         if self.collector.is_some() {
-            let collect = json!({ "dataTypes": ["response"], "maxEncodedDataSize": BODY_MAX,
-                                  "collectorType": "blob", "contexts": [id] });
+            let mut collect = collect_params(self.collects_requests);
+            collect["contexts"] = json!([id]);
             calls.push(("network.addDataCollector", collect));
         }
         if self.intercept.is_some() {
@@ -1968,6 +1987,25 @@ impl Wire for Bidi {
         Ok((value, bytes["type"] == "base64"))
     }
 
+    fn request_body(&mut self, request: &str) -> Result<String> {
+        if !self.collects_requests {
+            bail!(
+                "this browser keeps no request bodies for WebDriver BiDi (network.addDataCollector, dataTypes request)"
+            )
+        }
+        let p = json!({ "dataType": "request", "request": request });
+        let r = self.send("network.getData", p, Duration::from_secs(30))?;
+        let bytes = &r["bytes"];
+        let value = bytes["value"].as_str().unwrap_or_default();
+        Ok(if bytes["type"] == "base64" {
+            use base64::Engine as _;
+            let raw = base64::engine::general_purpose::STANDARD.decode(value).context("network.getData")?;
+            String::from_utf8_lossy(&raw).into_owned()
+        } else {
+            value.to_string()
+        })
+    }
+
     fn downloads(&mut self, clear: bool) -> Result<Vec<Download>> {
         self.idle();
         Ok(if clear { std::mem::take(&mut self.downloads) } else { self.downloads.clone() })
@@ -2433,6 +2471,63 @@ mod tests {
         b.closed = true;
         drop(b);
         assert_eq!(firefox.join().unwrap(), ["c-pop", "c-tab", "c-late"]);
+    }
+
+    /// A request's body is asked of the browser (a BiDi event carries only
+    /// its size) where its collectors take the `request` data type, and
+    /// read as text; a browser that refuses the type keeps response bodies,
+    /// and `network <n>` says it has none of the request's.
+    #[test]
+    fn request_bodies_come_from_a_collector_that_takes_them() {
+        use std::net::TcpListener;
+        use tungstenite::Message;
+        for takes_requests in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let firefox = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut ws = tungstenite::accept(stream).unwrap();
+                let mut asked = Vec::new();
+                while let Ok(Message::Text(text)) = ws.read() {
+                    let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                    let p = &v["params"];
+                    let answer = match v["method"].as_str().unwrap_or("") {
+                        "network.addDataCollector" => {
+                            asked.push(p["dataTypes"].clone());
+                            if p["dataTypes"].to_string().contains("request") && !takes_requests {
+                                json!({ "type": "error", "id": v["id"], "error": "invalid argument",
+                                        "message": "Expected \"dataTypes\" values to be one of response" })
+                            } else {
+                                json!({ "type": "success", "id": v["id"], "result": { "collector": "c1" } })
+                            }
+                        }
+                        "network.getData" => {
+                            assert_eq!(p["dataType"], "request");
+                            asked.push(p["request"].clone());
+                            let bytes = json!({ "type": "base64", "value": "cT3DqSZuPTE=" });
+                            json!({ "type": "success", "id": v["id"], "result": { "bytes": bytes } })
+                        }
+                        _ => json!({ "type": "success", "id": v["id"], "result": {} }),
+                    };
+                    ws.send(Message::text(answer.to_string())).unwrap();
+                }
+                asked
+            });
+            let mut b = Bidi::connect(&format!("ws://{addr}/"), Duration::from_secs(5)).unwrap();
+            b.log_network(json!({ "events": NETWORK_EVENTS }), Duration::from_secs(5));
+            assert_eq!((b.collector.as_deref(), b.collects_requests), (Some("c1"), takes_requests));
+            let body = b.request_body("r1");
+            b.closed = true;
+            drop(b);
+            let asked = firefox.join().unwrap();
+            if takes_requests {
+                assert_eq!(body.unwrap(), "q=\u{e9}&n=1");
+                assert_eq!(asked, [json!(["request", "response"]), json!("r1")]);
+            } else {
+                assert!(format!("{:#}", body.unwrap_err()).contains("no request bodies"));
+                assert_eq!(asked, [json!(["request", "response"]), json!(["response"])]);
+            }
+        }
     }
 
     #[test]

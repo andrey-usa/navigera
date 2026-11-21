@@ -114,11 +114,22 @@ fn serve() -> String {
                         return;
                     }
                     let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let mut sent = 0;
                     loop {
                         let mut h = String::new();
                         if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
                             break;
                         }
+                        if let Some((name, value)) = h.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                sent = value.trim().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                    // A request's body (a POST's) is read past, not taken
+                    // for the next request.
+                    if std::io::copy(&mut (&mut r).take(sent), &mut std::io::sink()).is_err() {
+                        return;
                     }
                     // `/to?u=<url>`: a redirect there (another origin's page).
                     if let Some(to) = path.strip_prefix("/to?u=") {
@@ -756,13 +767,17 @@ fn emulate_ops(args: &[&str], engine: &str) {
 /// A file a page downloads is listed, waited for and saved where
 /// `downloads --dir` says.
 /// `network`: the requests a page made, as on Chrome: a redirect is two
-/// entries, a 404 is failed, `clear` empties it. `bodies`: the server keeps
+/// entries, a 404 is failed, `clear` empties it, and a POST's body is kept
+/// (16 KiB of it, in bytes, what was cut said). `bodies`: the server keeps
 /// response bodies (chromedriver 147 over BiDi keeps none).
 fn network_ops(args: &[&str], engine: &str, bodies: bool) {
     let site = serve();
     let dir = tempfile::tempdir().unwrap();
     let har = dir.path().join("next.har");
+    let posts_har = dir.path().join("posts.har");
     let calls = "fetch('/to?u=' + location.origin + '/next.html').then(() => fetch('/nope')).then(r => r.status)";
+    let posts = "Promise.all([fetch('/nope?small', { method: 'POST', body: 'q=\\u00e9&n=1' }), \
+                 fetch('/nope?big', { method: 'POST', body: '\\u{1F980}'.repeat(20000) })]).then(rs => rs.length)";
     let script: Vec<Value> = vec![
         json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
         json!({ "id": 2, "op": "network", "clear": true }),
@@ -772,6 +787,8 @@ fn network_ops(args: &[&str], engine: &str, bodies: bool) {
         json!({ "id": 6, "op": "network", "filter": "/next.html", "har": har.display().to_string() }),
         json!({ "id": 7, "op": "network", "clear": true }),
         json!({ "id": 8, "op": "network" }),
+        json!({ "id": 10, "op": "eval", "expression": posts }),
+        json!({ "id": 11, "op": "network", "filter": "/nope?", "har": posts_har.display().to_string() }),
         json!({ "id": 9, "op": "quit" }),
     ];
     let a = session(args, &script);
@@ -798,6 +815,26 @@ fn network_ops(args: &[&str], engine: &str, bodies: bool) {
         assert_eq!((&redirect["status"], redirect["content"].get("text")), (&json!(302), None), "{engine}: {redirect}");
     }
     assert_eq!(ok(&a, 8), &json!("(no requests)"), "{engine}");
+    assert_eq!(ok(&a, 10), &json!(2), "{engine}");
+    let har: Value = serde_json::from_slice(&std::fs::read(&posts_har).unwrap()).unwrap();
+    let posted = |which: &str| {
+        let entries = har["log"]["entries"].as_array().unwrap();
+        let e = entries.iter().find(|e| e["request"]["url"].as_str().unwrap_or("").ends_with(which));
+        e.unwrap_or_else(|| panic!("{engine}: no {which} in {har}"))["request"]["postData"]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{engine}: {which} has no body: {har}"))
+            .to_string()
+    };
+    assert_eq!(posted("?small"), "q=\u{e9}&n=1", "{engine}");
+    let big = posted("?big");
+    let kept = big.len() - "…(+63636 bytes)".len();
+    assert!(
+        big.len() <= 16 << 10 && big.ends_with("…(+63636 bytes)"),
+        "{engine}: {} bytes, ends {:?}",
+        big.len(),
+        &big[kept..]
+    );
+    assert!(big[..kept].chars().all(|c| c == '\u{1F980}') && kept == 4 * 4091, "{engine}: {kept} bytes kept");
 }
 
 /// `screencast` over WebDriver BiDi (Firefox, a WebDriver server): a frame

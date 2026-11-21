@@ -4427,7 +4427,7 @@ impl Driver {
             let mut out = crate::cdp::logs::request_json(r);
             if r.post_data.is_none() && r.has_post_data {
                 if let Ok(data) = self.session.request_post_data(&r.id) {
-                    out["post_data"] = json!(data);
+                    out["post_data"] = json!(crate::cdp::logs::kept_post_data(&data));
                 }
             }
             if let Some(next) = redirected.get(&n) {
@@ -4442,6 +4442,12 @@ impl Driver {
         }
         let mut picked = crate::cdp::logs::pick_requests(all, filter, kind, failed, since);
         if let Some(path) = har {
+            // A body too large for its event, as `network <n>` has it.
+            for r in picked.iter_mut().filter(|r| r.post_data.is_none() && r.has_post_data) {
+                if let Ok(data) = self.session.request_post_data(&r.id) {
+                    r.post_data = Some(crate::cdp::logs::kept_post_data(&data));
+                }
+            }
             let mut har = crate::cdp::logs::har(&picked, env!("CARGO_PKG_VERSION"));
             // Response bodies, so `route --har` can replay the file. A body
             // the browser no longer holds (an evicted or other-tab request)
