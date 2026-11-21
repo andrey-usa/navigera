@@ -1,0 +1,67 @@
+name: exp-goto
+
+# Experiment branch only: what a goto of a page of 300 images pays for the
+# request log over WebDriver BiDi, by variant (NAVIGERA_EXP knobs in this
+# branch's build) against the last release. Not for merging.
+on:
+  push:
+    branches: [experiment-31]
+
+permissions:
+  contents: read
+
+jobs:
+  variants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-musl
+          cache-on-failure: false
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: musl-tools
+      - name: The knob build (static musl, as a release builds it)
+        run: cargo build --locked --release --bin navigera --target x86_64-unknown-linux-musl
+      - name: v0.16.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/base"
+          gh release download v0.16.0 --repo "$GITHUB_REPOSITORY" \
+            --pattern navigera-x86_64-unknown-linux-musl.tar.gz --dir "$RUNNER_TEMP/base"
+          tar -xzf "$RUNNER_TEMP/base/navigera-x86_64-unknown-linux-musl.tar.gz" -C "$RUNNER_TEMP/base"
+      - name: Firefox stable and the runner's chromedriver
+        run: |
+          curl -fsSL --retry 4 --retry-all-errors 'https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64&lang=en-US' -o "$RUNNER_TEMP/firefox.tar.xz"
+          mkdir -p "$RUNNER_TEMP/firefox"
+          tar -xJf "$RUNNER_TEMP/firefox.tar.xz" -C "$RUNNER_TEMP/firefox" --strip-components=1
+          echo "NAVIGERA_FIREFOX=$RUNNER_TEMP/firefox/firefox" >> "$GITHUB_ENV"
+          echo "CHROMEDRIVER=$CHROMEWEBDRIVER/chromedriver" >> "$GITHUB_ENV"
+          echo "CHROME_BIN=$(command -v google-chrome)" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/firefox/firefox" --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          nproc
+      - name: Variants
+        run: |
+          k=target/x86_64-unknown-linux-musl/release/navigera
+          b="$RUNNER_TEMP/base/navigera"
+          for engine in firefox bidi; do
+            python3 bench/exp/goto_variants.py --engine "$engine" --rounds 10 --gotos 3 \
+              --out "$RUNNER_TEMP/variants.jsonl" \
+              --env nocollect:NAVIGERA_EXP=nocollect --env nonet:NAVIGERA_EXP=nonet \
+              --env nolog:NAVIGERA_EXP=nolog --env noparse:NAVIGERA_EXP=noparse --env lean:NAVIGERA_EXP=lean \
+              base="$b" next="$k" nocollect="$k" nonet="$k" nolog="$k" noparse="$k" lean="$k"
+          done
+          python3 bench/exp/goto_variants.py --engine classic --rounds 6 --gotos 3 \
+            --out "$RUNNER_TEMP/variants.jsonl" base="$b" next="$k"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: variants
+          path: ${{ runner.temp }}/variants.jsonl

@@ -983,9 +983,20 @@ impl Bidi {
     }
 
     /// Keep the request log, if the browser sends its events.
-    fn log_network(&mut self, subscribe: Value, timeout: Duration) {
+    fn log_network(&mut self, mut subscribe: Value, timeout: Duration) {
+        // Experiment knobs: what a goto pays for the request log.
+        let knob = std::env::var("NAVIGERA_EXP").unwrap_or_default();
+        if knob == "nonet" {
+            return;
+        }
+        if knob == "lean" {
+            subscribe["events"] = json!(["network.beforeRequestSent", "network.responseCompleted", "network.fetchError"]);
+        }
         if self.send("session.subscribe", subscribe.clone(), timeout).is_ok() {
             self.requests = Some(VecDeque::new());
+            if knob == "nocollect" {
+                return;
+            }
             // Request bodies too where the browser keeps them; one that
             // refuses the data type keeps response bodies. A Firefox before
             // network.addDataCollector lists requests without their bodies.
@@ -1043,6 +1054,11 @@ impl Bidi {
                     // Firefox writes a lone UTF-16 surrogate as `\ud800`, which
                     // JSON in UTF-8 cannot hold: read as U+FFFD.
                     let text = t.as_str();
+                    if std::env::var("NAVIGERA_EXP").as_deref() == Ok("noparse")
+                        && text.get(..96).unwrap_or(text).contains("\"method\":\"network.")
+                    {
+                        continue;
+                    }
                     let fixed =
                         |e| crate::cdp::lone_surrogates_replaced(text).map_or(Err(e), |f| serde_json::from_str(&f));
                     let v: Value = serde_json::from_str(text)
@@ -1213,7 +1229,7 @@ impl Bidi {
             | "network.responseStarted"
             | "network.responseCompleted"
             | "network.fetchError") => {
-                if self.heard(params["context"].as_str()) {
+                if self.heard(params["context"].as_str()) && std::env::var("NAVIGERA_EXP").as_deref() != Ok("nolog") {
                     if let Some(log) = &mut self.requests {
                         log_request(log, &mut self.last_request, m, params);
                     }
