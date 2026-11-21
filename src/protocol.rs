@@ -3635,6 +3635,29 @@ impl Engine {
         matches!(self, Self::Chrome(d) if d.pre_read_due())
     }
 
+    /// How long a session may wait for its next command before it works
+    /// between commands ([`Self::pre_read_if_idle`]): often while a page a
+    /// navigation loaded waits to be read ahead, or a WebDriver recording's
+    /// next look is due.
+    pub fn tick(&self) -> Duration {
+        match self {
+            Self::Chrome(d) if d.pre_read_due() => Duration::from_millis(10),
+            Self::WebDriver(d) => d.tick(),
+            _ => Duration::from_millis(250),
+        }
+    }
+
+    /// `serve` (JSON lines on stdin) between lines: the WebDriver engines
+    /// take what the browser sent meanwhile (a dialog, a request held for a
+    /// `route` rule, a recording's looks) every so often; Chrome's event
+    /// watcher runs on its own.
+    fn serve_tick(&self) -> Option<Duration> {
+        match self {
+            Self::WebDriver(d) => Some(d.tick()),
+            _ => None,
+        }
+    }
+
     pub fn pre_read_if_idle(&mut self) {
         match self {
             Self::Chrome(d) => d.pre_read_if_idle(),
@@ -7388,7 +7411,7 @@ fn peak_rss_kb() -> Option<u64> {
 ///
 /// Returns the process exit code (`0` after `quit` or EOF, `1` on launch /
 /// IO failure). Logs go to stderr so stdout stays protocol-clean.
-pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn Write) -> ExitCode {
+pub fn serve<R: BufRead + Send + 'static>(config: &SessionConfig, input: R, output: &mut dyn Write) -> ExitCode {
     let mut driver = match Engine::launch(config) {
         Ok(driver) => driver,
         Err(e) => {
@@ -7402,7 +7425,30 @@ pub fn serve(config: &SessionConfig, input: &mut dyn BufRead, output: &mut dyn W
         config.engine,
     );
 
-    for raw in input.lines() {
+    // Lines come in on a thread of their own, so that between them a
+    // WebDriver session can take what its browser sends.
+    let (lines, incoming) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in input.lines() {
+            let failed = line.is_err();
+            if lines.send(line).is_err() || failed {
+                return;
+            }
+        }
+    });
+    loop {
+        let next = match driver.serve_tick() {
+            Some(tick) => match incoming.recv_timeout(tick) {
+                Ok(line) => Some(line),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    driver.pre_read_if_idle();
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+            },
+            None => incoming.recv().ok(),
+        };
+        let Some(raw) = next else { break };
         let raw = match raw {
             Ok(line) => line,
             Err(e) => {

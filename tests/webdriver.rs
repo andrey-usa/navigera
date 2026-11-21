@@ -180,6 +180,11 @@ fn session_in(args: &[&str], env: &[(&str, &std::path::Path)], script: &[Value])
     let mut out = BufReader::new(child.stdout.take().unwrap());
     let mut answers = Vec::new();
     for cmd in script {
+        // A pause of the client's own, between commands.
+        if let Some(ms) = cmd["pause_ms"].as_u64() {
+            std::thread::sleep(Duration::from_millis(ms));
+            continue;
+        }
         writeln!(stdin, "{cmd}").unwrap();
         let mut line = String::new();
         out.read_line(&mut line).unwrap();
@@ -795,15 +800,20 @@ fn network_ops(args: &[&str], engine: &str, bodies: bool) {
     assert_eq!(ok(&a, 8), &json!("(no requests)"), "{engine}");
 }
 
-/// `screencast` over a WebDriver server's BiDi: a frame at the start and
-/// one for each change, JPEGs, and the player. Each state stays longer
-/// than a still page's longest gap between looks. Where it is not served
-/// (`refused`), the start says why.
+/// `screencast` over WebDriver BiDi (Firefox, a WebDriver server): a frame
+/// at the start and one for each change, also while no command runs,
+/// JPEGs, and the player. Each state stays longer than a still page's
+/// longest gap between looks. Where it is not served (`refused`), the start
+/// says why.
 fn screencast_ops(args: &[&str], engine: &str, refused: Option<&str>) {
     let site = serve();
     let dir = tempfile::tempdir().unwrap();
     let rec = dir.path().join("rec");
     let paint = |id: u64, color: &str| json!({ "id": id, "op": "eval", "expression": format!("document.body.style.background = '{color}'; 1") });
+    // Green for 1.5 s while no command runs, then blue again: seen only if
+    // the session looks between commands.
+    let by_itself = "setTimeout(() => { document.body.style.background = 'rgb(0, 200, 0)'; }, 200); \
+                     setTimeout(() => { document.body.style.background = 'rgb(0, 0, 200)'; }, 1700); 1";
     let script: Vec<Value> = vec![
         json!({ "id": 1, "op": "goto", "url": format!("{site}/more.html") }),
         json!({ "id": 2, "op": "screencast", "action": "start", "dir": rec.display().to_string() }),
@@ -812,9 +822,11 @@ fn screencast_ops(args: &[&str], engine: &str, refused: Option<&str>) {
         json!({ "id": 5, "op": "wait", "ms": 1500 }),
         paint(6, "rgb(0, 0, 200)"),
         json!({ "id": 7, "op": "wait", "ms": 1500 }),
-        json!({ "id": 8, "op": "screencast", "action": "stop" }),
+        json!({ "id": 8, "op": "eval", "expression": by_itself }),
+        json!({ "pause_ms": 2500 }),
         json!({ "id": 9, "op": "screencast", "action": "stop" }),
-        json!({ "id": 10, "op": "quit" }),
+        json!({ "id": 10, "op": "screencast", "action": "stop" }),
+        json!({ "id": 11, "op": "quit" }),
     ];
     let a = session(args, &script);
     if let Some(why) = refused {
@@ -823,18 +835,19 @@ fn screencast_ops(args: &[&str], engine: &str, refused: Option<&str>) {
         return;
     }
     ok(&a, 2);
-    let done = ok(&a, 8);
+    let done = ok(&a, 9);
     assert!(done.get("error").is_none(), "{engine}: {done}");
-    // The page as it was, red, blue: each a frame of its own.
+    // The page as it was, red, blue, then green and blue again while the
+    // client paused: each a frame of its own.
     let frames = done["frames"].as_u64().unwrap_or(0);
-    assert!(frames >= 3, "{engine}: {done}");
+    assert!(frames >= 5, "{engine}: {done}");
     for n in 1..=frames {
         let jpeg = std::fs::read(rec.join(format!("frame-{n:05}.jpg"))).unwrap();
         assert_eq!(&jpeg[..2], &[0xff, 0xd8], "{engine}: frame {n} is a JPEG");
     }
     let player = std::fs::read_to_string(rec.join("index.html")).unwrap();
     assert!(player.contains("frame-00001.jpg"), "{engine}");
-    let again = a.iter().find(|x| x["id"] == 9).unwrap();
+    let again = a.iter().find(|x| x["id"] == 10).unwrap();
     assert!(again["error"].as_str().is_some_and(|e| e.contains("nothing is recording")), "{engine}: {again}");
 }
 
@@ -951,7 +964,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     lone_surrogates(&["--engine", "firefox", "--executable", &firefox], "firefox");
     download_ops(&["--engine", "firefox", "--executable", &firefox], "firefox");
     network_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", true);
-    screencast_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", Some("not on Firefox yet"));
+    screencast_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", None);
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
     hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
 }

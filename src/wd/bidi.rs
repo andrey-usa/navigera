@@ -143,11 +143,9 @@ pub(crate) fn open_ws(url: &str, timeout: Duration) -> Result<WebSocket<MaybeTls
 
 pub struct Bidi {
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
-    /// Where another connection joins this session (`screencast`): a
-    /// WebDriver server's `webSocketUrl`. None for a session this
-    /// connection made with `session.new` (Firefox): a second connection
-    /// to `/session/<id>` failed there on every OS.
-    rejoin: Option<String>,
+    /// `screencast start`, until `stop`: its looks go out and come back on
+    /// this connection ([`Self::read_one`]).
+    looks: Option<super::screencast::Looks>,
     next_id: u64,
     /// The top-level browsing context ops act on.
     context: String,
@@ -875,7 +873,6 @@ impl Bidi {
     /// The BiDi side of a classic session that asked for `webSocketUrl`.
     pub fn over(session: super::classic::Session, ws_url: &str, timeout: Duration) -> Result<Self> {
         let mut me = Self::connect(ws_url, timeout)?;
-        me.rejoin = Some(ws_url.to_string());
         me.browser = session.describe();
         me.endpoint = session.endpoint();
         me.classic = Some(session);
@@ -889,7 +886,7 @@ impl Bidi {
         let shown = super::classic::mask(url);
         Ok(Self {
             ws,
-            rejoin: None,
+            looks: None,
             next_id: 1,
             context: String::new(),
             console: VecDeque::new(),
@@ -1002,37 +999,91 @@ impl Bidi {
         Ok(id)
     }
 
-    /// One message, or None when `slice` passed without one.
+    /// One message, or None when `slice` passed without one. While a
+    /// recording is on, a look that is due goes out first, and the answer
+    /// of the one on its way is taken here, not returned.
     fn read_one(&mut self, slice: Duration) -> Result<Option<Value>> {
-        if let MaybeTlsStream::Plain(s) = self.ws.get_mut() {
-            s.set_read_timeout(Some(slice.max(Duration::from_millis(1)))).ok();
-        }
-        match self.ws.read() {
-            Ok(Message::Text(t)) => {
-                // Firefox writes a lone UTF-16 surrogate as `\ud800`, which
-                // JSON in UTF-8 cannot hold: read as U+FFFD.
-                let text = t.as_str();
-                let fixed = |e| crate::cdp::lone_surrogates_replaced(text).map_or(Err(e), |f| serde_json::from_str(&f));
-                let v: Value =
-                    serde_json::from_str(text).or_else(fixed).map_err(|e| anyhow!("the browser sent no JSON ({e})"))?;
-                if !self.asked_intercepts.is_empty() && v["type"] != "event" {
-                    self.took_intercept(&v);
+        let until = Instant::now() + slice;
+        loop {
+            let wait = self.look(until);
+            if let MaybeTlsStream::Plain(s) = self.ws.get_mut() {
+                s.set_read_timeout(Some(wait.max(Duration::from_millis(1)))).ok();
+            }
+            match self.ws.read() {
+                Ok(Message::Text(t)) => {
+                    // Firefox writes a lone UTF-16 surrogate as `\ud800`, which
+                    // JSON in UTF-8 cannot hold: read as U+FFFD.
+                    let text = t.as_str();
+                    let fixed =
+                        |e| crate::cdp::lone_surrogates_replaced(text).map_or(Err(e), |f| serde_json::from_str(&f));
+                    let v: Value = serde_json::from_str(text)
+                        .or_else(fixed)
+                        .map_err(|e| anyhow!("the browser sent no JSON ({e})"))?;
+                    if let Some(looks) = self.looks.as_mut().filter(|l| l.answers(&v)) {
+                        looks.answered(&v);
+                        if Instant::now() < until {
+                            continue;
+                        }
+                        return Ok(None);
+                    }
+                    if !self.asked_intercepts.is_empty() && v["type"] != "event" {
+                        self.took_intercept(&v);
+                    }
+                    return Ok(Some(v));
                 }
-                Ok(Some(v))
+                Ok(Message::Close(_)) => {
+                    self.closed = true;
+                    bail!("the browser closed the BiDi connection")
+                }
+                Ok(_) => return Ok(None),
+                Err(tungstenite::Error::Io(e))
+                    if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+                {
+                    // A read cut short for the next look reads on.
+                    if Instant::now() >= until {
+                        return Ok(None);
+                    }
+                }
+                Err(e) => {
+                    self.closed = true;
+                    bail!("the BiDi connection failed ({e})")
+                }
             }
-            Ok(Message::Close(_)) => {
-                self.closed = true;
-                bail!("the browser closed the BiDi connection")
+        }
+    }
+
+    /// A recording's look, if one is due, sent; how long a read may wait
+    /// before the recording needs it back, at most until `until`.
+    fn look(&mut self, until: Instant) -> Duration {
+        let now = Instant::now();
+        let left = until.saturating_duration_since(now);
+        let Some(looks) = self.looks.as_mut() else { return left };
+        if looks.due(now) {
+            let ask = looks.ask(&self.context);
+            self.send_look(ask);
+        }
+        self.looks.as_ref().and_then(|l| l.wake_in(Instant::now())).map_or(left, |w| w.min(left))
+    }
+
+    /// A recording's look, sent as `browsingContext.captureScreenshot`.
+    fn send_look(&mut self, ask: Value) {
+        let sent = self.write("browsingContext.captureScreenshot", ask);
+        if let Some(looks) = self.looks.as_mut() {
+            match sent {
+                Ok(id) => looks.sent(id),
+                Err(e) => looks.unsent(format!("{e:#}")),
             }
-            Ok(_) => Ok(None),
-            Err(tungstenite::Error::Io(e))
-                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
-            {
-                Ok(None)
-            }
-            Err(e) => {
-                self.closed = true;
-                bail!("the BiDi connection failed ({e})")
+        }
+    }
+
+    /// Read until `stop`'s look on its way has come back (or its time is
+    /// up), taking events meanwhile.
+    fn await_look(&mut self) {
+        while !self.closed && self.looks.as_mut().is_some_and(|l| l.waiting(Instant::now())) {
+            match self.read_one(READ_SLICE) {
+                Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
+                Ok(_) => {}
+                Err(_) => break,
             }
         }
     }
@@ -2016,14 +2067,60 @@ impl Wire for Bidi {
         self.context.clone()
     }
 
-    fn screencast_from(&self) -> Result<String> {
-        self.rejoin.clone().ok_or_else(|| {
-            anyhow!(
-                "screencast: not on Firefox yet: BiDi sends no frames, and the second connection to the session \
-                 they are taken on is not served for a session made on Firefox's own endpoint; record with \
-                 --engine chrome, or on a WebDriver server with --bidi (chromedriver)"
-            )
-        })
+    fn screencast_start(&mut self, dir: &std::path::Path, quality: Option<&str>, size: Option<&str>) -> Result<()> {
+        if let Some(looks) = &self.looks {
+            bail!("screencast: already recording into {}; `screencast stop` first", looks.dir().display());
+        }
+        if size.is_some() {
+            bail!(
+                "screencast --size: not over WebDriver BiDi (its screenshot is the viewport's size); `set viewport \
+                 <w>x<h>` sizes the frames, or drop --size"
+            );
+        }
+        let opts = crate::screencast::Options::parse(quality, None)?;
+        self.looks = Some(super::screencast::Looks::start(dir, &opts)?);
+        // The first look, at the page as it is now.
+        self.idle();
+        Ok(())
+    }
+
+    fn screencast_stop(&mut self) -> Result<Value> {
+        let Some(looks) = self.looks.as_mut() else {
+            bail!("screencast: nothing is recording; `screencast start <dir>` first")
+        };
+        looks.stop();
+        self.await_look();
+        if self.looks.as_mut().is_some_and(|l| l.last_wanted(Instant::now())) && !self.closed {
+            let ask = self.looks.as_ref().map(|l| l.ask(&self.context)).unwrap_or_default();
+            self.send_look(ask);
+            self.await_look();
+        }
+        match self.looks.take() {
+            Some(looks) => looks.finish(),
+            None => bail!("screencast: nothing is recording; `screencast start <dir>` first"),
+        }
+    }
+
+    fn tick(&self) -> Option<Duration> {
+        self.looks.as_ref().and_then(|l| l.tick(Instant::now()))
+    }
+
+    fn pause(&mut self, wait: Duration) {
+        // Reading, not sleeping: a recording looks on, a dialog or a request
+        // held for a `route` rule is answered meanwhile.
+        let until = Instant::now() + wait;
+        while !self.closed {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            match self.read_one(left.min(READ_SLICE)) {
+                Ok(Some(v)) if v["type"] == "event" => self.on_event(v),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        std::thread::sleep(until.saturating_duration_since(Instant::now()));
     }
 
     fn front(&mut self) {

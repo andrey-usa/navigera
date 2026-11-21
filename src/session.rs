@@ -356,8 +356,9 @@ pub fn serve_socket(config: &SessionConfig, name: &str) -> ExitCode {
         // Between commands: a storage snapshot an op skipped for being too
         // soon after the last one is taken once the session is idle, and a
         // page a `goto` loaded is read ahead of its `ax` once it is quiet
-        // (looked for often while one is due).
-        let tick = if driver.pre_read_due() { Duration::from_millis(10) } else { Duration::from_millis(250) };
+        // (looked for often while one is due, as is a WebDriver recording's
+        // next look).
+        let tick = driver.tick();
         let (stream, arrived) = match incoming.recv_timeout(tick) {
             Ok(next) => next,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {

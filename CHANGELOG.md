@@ -22,22 +22,29 @@ All notable changes to this project are documented here. The format follows
   of its pages opened, from when navigera hears of that tab (a request it
   sent before is not listed). Classic WebDriver still has no request list
   and says so.
-- `screencast start <dir>` / `screencast stop` on a WebDriver server
-  over BiDi (`--webdriver <url> --bidi`, chromedriver): the same frames
-  (`frame-NNNNN.jpg` with their times) and player as on Chrome, and the
-  recording follows the session from tab to tab. BiDi sends no frames when
-  the page changes, so navigera takes a JPEG screenshot of the viewport on
-  a second connection to the session while commands run on the first: a
-  screenshot that shows what the last frame showed is dropped, and while
-  the page stays still the screenshots space out from every 100 ms to one
-  a second, so a still page costs one screenshot a second where Chrome's
-  costs none. Frames are the viewport's size (`--size` is refused; `set
-  viewport` sizes them). Not on Firefox yet (a second connection to a
-  session navigera made on its endpoint is not served there) nor on classic
-  WebDriver; both say so.
+- `screencast start <dir>` / `screencast stop` on Firefox and the other
+  WebDriver BiDi engines (a WebDriver server with `--bidi`, chromedriver):
+  the same frames (`frame-NNNNN.jpg` with their times) and player as on
+  Chrome, and the recording follows the session from tab to tab. BiDi
+  sends no frames when the page changes, so navigera asks for a JPEG
+  screenshot of the viewport on the session's own connection, while its
+  commands run (a browser answers one sent behind a pending evaluate or
+  navigation: Firefox 160 in 44 ms behind a 1 s evaluate) and between
+  them: a screenshot that shows what the last frame showed is dropped, and
+  while the page stays still the screenshots space out from every 100 ms
+  to one a second, so a still page costs one screenshot a second where
+  Chrome's costs none. Frames are the viewport's size (`--size` is
+  refused; `set viewport` sizes them). `stop` waits 10 s at most, and a
+  recording that kept no frame says why. Not on classic WebDriver, which
+  says so.
 
 ### Fixed
 
+- On Firefox and over WebDriver BiDi, a request a `route` rule holds and
+  a dialog waited out `wait <ms>` and each pause of `wait --selector`,
+  `--text`, `--url` and `--js`, and in `serve` the time until the next
+  command: nothing read the browser's connection meanwhile. They are
+  answered as they come now.
 - `network <n>` and `network --har` gave a request that redirected the
   body of the hop it led to: a redirect's hops share the request's id, and
   the browser keeps one body per id, the last hop's. A hop that redirected
