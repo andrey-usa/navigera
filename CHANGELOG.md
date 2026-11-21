@@ -6,6 +6,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- MCP: every tool on `tools/list` declares the four annotations
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`),
+  so a client can tell a read (`browser_snapshot`, `browser_wait_for`,
+  `browser_more`) from an action a page may turn into a submit, a delete
+  or a message (`browser_click`, `browser_fill`, `browser_type`,
+  `browser_press_key`, `browser_select_option`, `browser_evaluate`,
+  `browser_run`), and ask before it. Only the reads said anything before.
+  The tool formats of the model APIs have no field for them; the mock
+  model of `bench/ide-eval` now reports whether an agent passed them on.
+- MCP: seven tool descriptions say when to use the tool and what to use
+  instead: `browser_fill` against `browser_type`, `browser_select_option`
+  for custom dropdowns (ARIA comboboxes) as well as `<select>`,
+  `browser_scroll` (clicks need no scrolling first), `browser_navigate`
+  (back, forward and reload are `browser_history`), `browser_evaluate`,
+  and `browser_more`, which now also names `browser_handle_dialog`. An
+  empty `required` is left out of a schema. What the model reads of
+  `tools/list` is 7,978 bytes (7,677 in 0.16.0), under the 8,000 the
+  tests hold it to; `browser_more` answers 10,325 bytes (10,435).
+
+### Behaviour changes
+
+- A client that asks before a destructive MCP tool may stop asking before
+  `browser_navigate` and `browser_scroll`: they now say they destroy
+  nothing. Left unsaid, a client had to assume they might.
+
 ## [0.16.0] - 2026-11-20
 
 ### Added
