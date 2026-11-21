@@ -14,7 +14,7 @@ const MAX_CONSOLE: usize = 1000;
 const MAX_REQUESTS: usize = 1000;
 /// Longest console text kept (a logged 2 MB JSON string is not useful).
 const MAX_TEXT: usize = 2000;
-/// Request bodies kept for `network <n>`.
+/// Most of a request's body the log keeps for `network <n>`, in bytes.
 const MAX_POST_DATA: usize = 16 * 1024;
 /// Most of a request's URL the log keeps: a longer one (Chrome sends up to
 /// 2 MiB) keeps its start and says how much was cut. A server takes 8 KiB
@@ -22,9 +22,10 @@ const MAX_POST_DATA: usize = 16 * 1024;
 const URL_KEPT: usize = 16 << 10;
 /// Most of a request's or a response's headers the log keeps, names and
 /// values: past it the rest are left out, and one header says how many.
-/// With [`URL_KEPT`] and [`MAX_POST_DATA`], an entry keeps 64 KiB at most,
-/// so the [`MAX_REQUESTS`] of a tab keep 64 MiB at most (a page that sent
-/// a thousand 64 KiB URLs with 64 KiB of headers each made 128 MiB).
+/// With [`URL_KEPT`] and [`MAX_POST_DATA`], counted in bytes with what says
+/// what was cut, an entry's URL, body and headers keep 64 KiB at most, so
+/// the [`MAX_REQUESTS`] of a tab stay under 64 MiB (a page that sent a
+/// thousand 64 KiB URLs with 64 KiB of headers each made 128 MiB).
 const HEADERS_KEPT: usize = 16 << 10;
 /// The header that says how many headers were left out.
 const LEFT_OUT: &str = "navigera-left-out";
@@ -94,16 +95,32 @@ fn clip(s: &str, max: usize) -> String {
     out
 }
 
-/// `text` up to `max` bytes, cut at a character, with how much was cut.
+/// The bytes of `…(+N bytes)` but N's digits, which say what [`cut`] cut.
+const CUT_SAYS: usize = "…(+ bytes)".len();
+
+/// Decimal digits of `n`.
+fn digits(n: usize) -> usize {
+    n.checked_ilog10().map_or(1, |d| d as usize + 1)
+}
+
+/// `text` in `max` bytes at most: whole when it fits, else its start, cut
+/// at a character, and how many bytes were cut (`max` leaves room for
+/// that). Its buffer is its length: a `format!` grew a 16 KiB cut to 32
+/// KiB, and the log keeps a thousand of them.
 fn cut(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
-    let mut end = max;
+    // Less than all of `text` is cut, so its length's digits are room enough.
+    let mut end = max.saturating_sub(CUT_SAYS + digits(text.len()));
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…(+{} bytes)", &text[..end], text.len() - end)
+    let says = format!("…(+{} bytes)", text.len() - end);
+    let mut out = String::with_capacity(end + says.len());
+    out.push_str(&text[..end]);
+    out.push_str(&says);
+    out
 }
 
 /// A request's URL as the log keeps it ([`URL_KEPT`]).
@@ -119,20 +136,23 @@ pub fn kept_headers(headers: Option<&Value>) -> Value {
     let Some(Value::Object(all)) = headers else { return headers.cloned().unwrap_or(Value::Null) };
     let size =
         |name: &str, value: &Value| name.len() + value.as_str().map_or_else(|| value.to_string().len(), str::len);
-    if all.iter().map(|(k, v)| size(k, v)).sum::<usize>() <= HEADERS_KEPT {
+    let total: usize = all.iter().map(|(k, v)| size(k, v)).sum();
+    if total <= HEADERS_KEPT {
         return Value::Object(all.clone());
     }
+    // Room for what says what was left out: at most every header, `total` bytes.
+    let budget = HEADERS_KEPT - (LEFT_OUT.len() + " more,  bytes".len() + digits(all.len()) + digits(total));
     let mut kept = serde_json::Map::new();
     let (mut used, mut left, mut bytes) = (0, 0usize, 0usize);
     for (name, value) in all {
         let need = size(name, value);
-        if used + need <= HEADERS_KEPT {
+        let room = budget.saturating_sub(used + name.len());
+        if used + need <= budget {
             used += need;
             kept.insert(name.clone(), value.clone());
-        } else if let Some(text) = value.as_str().filter(|_| used + name.len() < HEADERS_KEPT) {
-            let value = cut(text, HEADERS_KEPT - used - name.len());
-            used = HEADERS_KEPT;
-            kept.insert(name.clone(), json!(value));
+        } else if let Some(text) = value.as_str().filter(|t| room > CUT_SAYS + digits(t.len())) {
+            kept.insert(name.clone(), json!(cut(text, room)));
+            used = budget;
         } else {
             left += 1;
             bytes += need;
@@ -457,7 +477,7 @@ impl Logs {
                     url: kept_url(req.get("url").and_then(Value::as_str).unwrap_or("")),
                     kind: params.get("type").and_then(Value::as_str).unwrap_or("Other").to_string(),
                     request_headers: kept_headers(req.get("headers")),
-                    post_data: req.get("postData").and_then(Value::as_str).map(|s| clip(s, MAX_POST_DATA)),
+                    post_data: req.get("postData").and_then(Value::as_str).map(|s| cut(s, MAX_POST_DATA)),
                     has_post_data: req.get("hasPostData").and_then(Value::as_bool) == Some(true),
                     started: params.get("timestamp").and_then(Value::as_f64).unwrap_or(0.0),
                     wall: params.get("wallTime").and_then(Value::as_f64).unwrap_or(0.0),
@@ -854,26 +874,42 @@ mod tests {
         let url = format!("http://h/r?q={}é", "a".repeat(1 << 20));
         let big: serde_json::Map<String, Value> =
             (0..64).map(|i| (format!("x-pad-{i:02}"), json!("b".repeat(1024)))).collect();
+        // A body of 4-byte characters: 16 Ki of them were 64 KiB.
+        let body = "😀".repeat(1 << 15);
         let p = json!({"requestId": "1", "type": "Fetch", "timestamp": 1.0, "wallTime": 1.7e9,
-                       "request": {"url": url, "method": "GET", "headers": {"accept": "*/*"}}});
+                       "request": {"url": url, "method": "POST", "headers": {"accept": "*/*"}, "postData": body}});
         logs.on_event("Network.requestWillBeSent", &p, "s");
         let resp = json!({"requestId": "1", "type": "Fetch",
                           "response": {"status": 200, "mimeType": "text/plain", "headers": Value::Object(big)}});
         logs.on_event("Network.responseReceived", &resp, "s");
         let r = &logs.tabs["s"].requests[0];
-        assert!(r.url.len() < URL_KEPT + 32 && r.url.ends_with(" bytes)"), "{}", &r.url[r.url.len() - 40..]);
+        // 1048591 bytes: 16365 kept, 12 + 7 say what was cut.
+        assert!(r.url.len() == URL_KEPT && r.url.ends_with("a…(+1032226 bytes)"), "{}", &r.url[r.url.len() - 40..]);
+        assert_eq!(r.url.capacity(), r.url.len(), "a cut URL's buffer is its length");
         assert!(r.url.starts_with("http://h/r?q=aaa"));
+        let post = r.post_data.as_deref().unwrap();
+        assert!(
+            post.len() <= MAX_POST_DATA && post.len() > MAX_POST_DATA - 32 && post.starts_with('😀'),
+            "{}",
+            post.len()
+        );
         assert_eq!(r.request_headers, json!({"accept": "*/*"}), "headers that fit are kept whole");
         let headers = r.response_headers.as_object().unwrap();
         let kept: usize = headers.iter().map(|(k, v)| k.len() + v.as_str().unwrap().len()).sum();
-        assert!(kept < HEADERS_KEPT + 64, "{kept}");
+        assert!(kept <= HEADERS_KEPT && kept > HEADERS_KEPT - 64, "{kept}, what says what was left out included");
         // 15 whole (1032 bytes each), the start of the 16th, 48 left out.
         assert_eq!(headers[LEFT_OUT], "48 more, 49536 bytes", "{headers:?}");
         assert!(headers["x-pad-15"].as_str().unwrap().ends_with(" bytes)"));
         let text = requests_text(&logs.tabs["s"].requests.iter().cloned().collect::<Vec<_>>(), "http://h");
         assert!(text.chars().count() < 260 && text.contains("/r?q=aaa"), "{text}");
         // A URL cut inside a character keeps the whole character before.
-        assert_eq!(cut("aé", 2), "a…(+2 bytes)");
+        assert_eq!(cut(&format!("a{}", "é".repeat(10)), 16), "a…(+20 bytes)");
+        assert_eq!(cut("abc", 3), "abc");
+        for max in 0..40 {
+            let text = "é".repeat(30);
+            let c = cut(&text, max);
+            assert!(c.len() <= max.max(CUT_SAYS + 2) && c.is_char_boundary(c.len()), "{max}: {c}");
+        }
         assert_eq!(kept_headers(None), json!(null));
         assert_eq!(kept_headers(Some(&json!({"a": "b"}))), json!({"a": "b"}));
     }

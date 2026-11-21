@@ -44,12 +44,15 @@ All notable changes to this project are documented here. The format follows
   long: a page could grow navigera's memory by what it sent (Chrome sends
   a URL of up to 2 MiB, and a tab keeps 1000 requests), and one `network`
   printed a same-origin URL whole, 100 lines of it by default. The log
-  now keeps 16 KiB of a URL and 16 KiB of a request's or a response's
-  headers (a URL a server accepts, 8 KiB by default, is kept whole); what
-  was cut says how much, and a `navigera-left-out` header counts the
-  headers left out. So an entry keeps 64 KiB at most with its request
-  body, a tab 64 MiB. The list shows 200 characters of every URL, on the
-  page's origin too (`network <n>` has the rest). On every engine.
+  now keeps 16 KiB of a URL, of a request's body and of a request's or a
+  response's headers, in bytes, what says what was cut included (a body
+  kept 16 Ki characters, up to 64 KiB; a URL a server accepts, 8 KiB by
+  default, is kept whole); what was cut says how much, and a
+  `navigera-left-out` header counts the headers left out. So an entry's
+  URL, body and headers keep 64 KiB at most and a tab's under 64 MiB, each
+  in a buffer of its own length (a cut URL's was twice it). The list shows
+  200 characters of every URL, on the page's origin too (`network <n>`
+  has the rest). On every engine.
 - On Firefox and over WebDriver BiDi, a request a `route` rule holds and
   a dialog waited out `wait <ms>` and each pause of `wait --selector`,
   `--text`, `--url` and `--js`, and in `serve` the time until the next
