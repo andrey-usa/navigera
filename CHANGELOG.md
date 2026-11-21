@@ -19,8 +19,9 @@ All notable changes to this project are documented here. The format follows
   the browser kept (`network.addDataCollector`, up to 10 MiB a response),
   and so does a request's body (`post_data`, a HAR's `postData`: BiDi's
   events carry only its size), 16 KiB of it as on Chrome, where the
-  browser keeps request bodies (chromedriver 147 does); where it does not,
-  `network <n>` says so. In a Firefox you attached to, only navigera's own
+  browser keeps request bodies (chromedriver 147 does; a body over 10 MiB
+  it does not keep); where it does not, `network <n>` says so, and a GET
+  has none (chromedriver gives the GET after a 303 the POST's size). In a Firefox you attached to, only navigera's own
   tabs are listened to: its window, a tab `tab-new` opened, and a tab one
   of its pages opened, from when navigera hears of that tab (a request it
   sent before is not listed); a tab's bodies go when it closes,
@@ -52,8 +53,9 @@ All notable changes to this project are documented here. The format follows
   URL, of a request's body and of a request's or a response's headers, in
   bytes, what says what was cut included (a body kept 16 Ki characters, up
   to 64 KiB; a URL a server accepts, 8 KiB by default, is kept whole; so
-  is a body asked of the browser after its event, one too large for it,
-  which `network <n>` printed whole and a HAR left out); what was cut says
+  is a body Chrome's event leaves out, asked of the browser after it (a
+  Blob, or a form with a file, of any size), which `network <n>` printed
+  whole and a HAR left out); what was cut says
   how much, and a `navigera-left-out` header counts the headers left out.
   So an entry's URL, body and headers keep 64 KiB at most and a tab's
   under 64 MiB, each in a buffer of its own length (a cut URL's was twice

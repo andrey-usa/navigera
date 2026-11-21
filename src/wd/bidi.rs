@@ -336,7 +336,10 @@ fn log_request(log: &mut VecDeque<Hop>, last: &mut u64, method: &str, params: &V
                 }
             }
             *last += 1;
-            let size = request["bodySize"].as_u64().unwrap_or(0);
+            let method = request["method"].as_str().unwrap_or("GET");
+            // A browser sends no body with a GET or a HEAD; chromium-bidi
+            // gives the GET after a 303 the size of the POST before it.
+            let size = if matches!(method, "GET" | "HEAD") { 0 } else { request["bodySize"].as_u64().unwrap_or(0) };
             let started = at.unwrap_or(0.0);
             if log.len() >= REQUESTS_MAX {
                 log.pop_front();
@@ -344,7 +347,7 @@ fn log_request(log: &mut VecDeque<Hop>, last: &mut u64, method: &str, params: &V
             let r = crate::cdp::logs::Request {
                 n: *last,
                 id: id.to_string(),
-                method: request["method"].as_str().unwrap_or("GET").to_string(),
+                method: method.to_string(),
                 url: crate::cdp::logs::kept_url(request["url"].as_str().unwrap_or("")),
                 kind: request_kind(request).to_string(),
                 request_headers: crate::cdp::logs::kept_headers(Some(&header_object(&request["headers"]))),
@@ -2909,6 +2912,19 @@ mod network_tests {
         );
         assert_eq!(r.request_headers, json!({ "a": "1\n2" }));
         assert!((r.ended.unwrap() - r.started - 0.019).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_get_after_a_303_has_no_body_whatever_size_it_comes_with() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/x", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.responseCompleted", &done("1", 303, 1010.0));
+        let mut get = sent("1", "http://a/y", 1011.0, 1);
+        get["request"]["method"] = json!("GET");
+        get["request"]["bodySize"] = json!(8);
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &get);
+        let got: Vec<_> = log.iter().map(|h| (h.r.method.as_str(), h.r.has_post_data)).collect();
+        assert_eq!(got, [("POST", true), ("GET", false)]);
     }
 
     #[test]
