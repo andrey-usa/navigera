@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-21
+
 ### Added
 
 - `network` on Firefox and the other WebDriver BiDi engines: the requests
