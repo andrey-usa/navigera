@@ -19,7 +19,8 @@ search. The pages: the per-op bench's page_a (bench/ladder/gen_fixtures.py:
 500 cards, about 3,000 nodes in `ax`), a page whose link opens a tab, a
 2.8 MB text of 20,000 lines (plain, and with accented letters on every
 line), and a page of 300 images, each load with URLs of its own and none
-cached (what a request log costs a load). Exit 0: every probe ran; 2: one
+cached: as a session loads it, and, on the BiDi engines, after a `network`
+started the request log (what listening to requests costs a load). Exit 0: every probe ran; 2: one
 could not run (the table says why).
 """
 import argparse
@@ -156,6 +157,17 @@ def samples(binary: str, args: list[str], setup: list[dict], measured: dict, run
     return out
 
 
+def base_samples(binary: str, args: list[str], setup: list[dict], measured: dict, runs: int) -> list[float]:
+    """`samples` of the base, or [] where it says it has no such op on
+    this engine (one the candidate adds)."""
+    try:
+        return samples(binary, args, setup, measured, runs)
+    except RuntimeError as e:
+        if "not on the" in str(e):
+            return []
+        raise
+
+
 def probes(pages: str, images: str) -> dict[str, list[tuple[str, list[dict], dict]]]:
     """(name, setup, measured op) per engine kind."""
     page_a = [{"op": "goto", "url": f"{pages}/page_a.html"}]
@@ -164,10 +176,13 @@ def probes(pages: str, images: str) -> dict[str, list[tuple[str, list[dict], dic
     click = ("click that stays on the page", page_a, {"op": "click", "selector": "#search"})
     after_tab = ("click after the page opened a tab", tab, {"op": "click", "selector": "#count"})
     goto_images = (f"goto a page of {IMAGES} images, none cached", [], {"op": "goto", "url": images})
+    goto_logged = (f"goto a page of {IMAGES} images, none cached, the request log on", [{"op": "network"}],
+                   {"op": "goto", "url": images})
     grep = [(f"text --grep, 2.8 MB of {GREP_LINES:,} lines{what}",
              [{"op": "goto", "url": f"{pages}/{page}.html"}], {"op": "text", "grep": "zebra"})
             for page, what in (("text", ""), ("text-accented", ", accented"))]
-    return {"firefox": [ax, click, after_tab, goto_images], "webdriver": [ax, click, after_tab, goto_images],
+    webdriver = [ax, click, after_tab, goto_images]
+    return {"firefox": [*webdriver, goto_logged], "webdriver": webdriver, "bidi": [*webdriver, goto_logged],
             "chrome": grep}
 
 
@@ -199,7 +214,7 @@ def main() -> int:
         if driver:
             _, url, caps = driver
             engines.append(("chromedriver, classic", ["--webdriver", url, "--capabilities", caps], "webdriver"))
-            engines.append(("chromedriver, BiDi", ["--webdriver", url, "--bidi", "--capabilities", caps], "webdriver"))
+            engines.append(("chromedriver, BiDi", ["--webdriver", url, "--bidi", "--capabilities", caps], "bidi"))
         elif not notes or not notes[-1].startswith("chromedriver"):
             notes.append("chromedriver: skipped, CHROMEDRIVER is not set")
         engines.append(("Chrome", [], "chrome"))
@@ -210,17 +225,22 @@ def main() -> int:
                         continue
                     try:
                         # Interleaved: base, candidate, base, candidate (drift hits both).
-                        b = samples(args.base, eargs, setup, op, args.runs)
+                        # A probe of an op the base lacks times the candidate alone.
+                        b = base_samples(args.base, eargs, setup, op, args.runs)
                         c = samples(args.candidate, eargs, setup, op, args.runs)
-                        b += samples(args.base, eargs, setup, op, args.runs)
+                        b = b and b + samples(args.base, eargs, setup, op, args.runs)
                         c += samples(args.candidate, eargs, setup, op, args.runs)
                     except (RuntimeError, subprocess.TimeoutExpired) as e:
                         broken.append(f"{engine}: {name}")
                         rows.append(f"| {engine} | {name} | - | - | - | could not run: {str(e)[:100]} |")
                         continue
-                    bm, cm = statistics.median(b), statistics.median(c)
+                    cm = statistics.median(c)
                     spread = f"{min(c):.1f}-{max(c):.1f}"
-                    rows.append(f"| {engine} | {name} | {bm:.1f} | {cm:.1f} | {cm / bm if bm else 1:.2f}x | {spread} |")
+                    if not b:
+                        rows.append(f"| {engine} | {name} | - | {cm:.1f} | new | {spread} |")
+                    else:
+                        bm = statistics.median(b)
+                        rows.append(f"| {engine} | {name} | {bm:.1f} | {cm:.1f} | {cm / bm if bm else 1:.2f}x | {spread} |")
                     print(rows[-1], flush=True)
         finally:
             if driver:

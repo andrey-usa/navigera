@@ -27,6 +27,14 @@ All notable changes to this project are documented here. The format follows
   sent before is not listed); a tab's bodies go when it closes,
   however it closes (Firefox keeps what a collector collected until it is
   removed: on Firefox 160 a closed tab's 1 MiB body could still be read).
+  The log starts at the session's first `network`, which says so, not at
+  launch: a browser that sends request events does work for each request
+  a page makes, and every goto waited for it, the log read or not (a page
+  of 300 images, median of 30 loads in fresh sessions: Firefox 581.5 ms
+  with the events from launch, 190.5 without, 0.16.0 182.8; chromedriver
+  over BiDi 367.8, 273.4 and 270.1; run 44921449861, which also found the
+  bodies kept, the reading of the events and the log costing no time
+  measurable there). Run `network` once before the load you want to see.
   Classic WebDriver still has no request list and says so.
 - `screencast start <dir>` / `screencast stop` on Firefox and the other
   WebDriver BiDi engines (a WebDriver server with `--bidi`, chromedriver):

@@ -431,6 +431,11 @@ pub trait Wire: Send {
     fn requests(&mut self, _clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
         bail!("classic WebDriver does not report network requests; use --engine firefox or chrome (or --bidi with a server that has them)")
     }
+    /// What the `requests` just before it should say with its list: that
+    /// the log started then (WebDriver BiDi starts it at the first `network`).
+    fn requests_note(&mut self) -> Option<&'static str> {
+        None
+    }
     /// A logged request's response body: (body, base64-encoded?).
     fn response_body(&mut self, _request: &str) -> Result<(String, bool)> {
         bail!("classic WebDriver keeps no response bodies; use --engine firefox or chrome")
@@ -1755,12 +1760,13 @@ impl Driver {
             }
             Command::Network { n, filter, kind, failed, limit, clear, har, body_file, since } => {
                 let all = self.wire.requests(*clear && n.is_none()).map_err(|e| e.context("network"))?;
+                let started = self.wire.requests_note();
                 let redirected = crate::cdp::logs::redirected(&all);
                 if let Some(n) = n {
-                    let r = all
-                        .iter()
-                        .find(|r| r.n == *n)
-                        .ok_or_else(|| anyhow!("network: no request #{n} (older ones are dropped after 1000)"))?;
+                    let r = all.iter().find(|r| r.n == *n).ok_or_else(|| match started {
+                        Some(why) => anyhow!("network: no request #{n}: {why}"),
+                        None => anyhow!("network: no request #{n} (older ones are dropped after 1000)"),
+                    })?;
                     let mut r = r.clone();
                     let missing = self.post_data(&mut r).err();
                     let mut out = crate::cdp::logs::request_json(&r);
@@ -1804,17 +1810,28 @@ impl Driver {
                     }
                     crate::protocol::write_private(path, &serde_json::to_vec_pretty(&har)?)
                         .with_context(|| format!("network --har {path}"))?;
-                    return Ok(json!({ "har": path, "entries": picked.len() }));
+                    let mut out = json!({ "har": path, "entries": picked.len() });
+                    if let Some(why) = started {
+                        out["note"] = json!(why);
+                    }
+                    return Ok(out);
                 }
                 let limit = limit.unwrap_or(100);
                 if picked.len() > limit {
                     picked.drain(..picked.len() - limit);
                 }
                 if picked.is_empty() {
-                    return Ok(json!("(no requests)"));
+                    return Ok(json!(match started {
+                        Some(why) => format!("(no requests yet: {why})"),
+                        None => "(no requests)".into(),
+                    }));
                 }
                 let url = self.url();
-                Ok(json!(crate::cdp::logs::requests_text(&picked, &crate::protocol::origin_of(&url))))
+                let list = crate::cdp::logs::requests_text(&picked, &crate::protocol::origin_of(&url));
+                Ok(json!(match started {
+                    Some(why) => format!("{list}\n({why})"),
+                    None => list,
+                }))
             }
             Command::Downloads { dir: Some(dir), .. } => {
                 let dir = std::path::Path::new(dir);

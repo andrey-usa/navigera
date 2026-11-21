@@ -53,6 +53,10 @@ fn collect_params(requests: bool) -> Value {
     json!({ "dataTypes": types, "maxEncodedDataSize": BODY_MAX, "collectorType": "blob" })
 }
 
+/// What the `network` that started the request log ([`Bidi::start_log`]) says.
+const LOG_STARTED: &str = "on this engine navigera listens to requests from the session's first `network` on, \
+     which is now (a browser listened to slows every page load); reload or goto again to list a page's requests";
+
 /// How long `network` waits for the answers of requests sent just before.
 const CATCH_UP: Duration = Duration::from_millis(150);
 
@@ -208,9 +212,13 @@ pub struct Bidi {
     /// (`guid` is the download's navigation id).
     downloads: Vec<Download>,
     /// `network`: the requests of this session's tabs, oldest first, and
-    /// the number of the last one; `None`: the browser sends no network
-    /// events (then `route` subscribes on its own).
+    /// the number of the last one; `None`: not listened to yet, or the
+    /// browser sends no network events (then `route` subscribes on its own).
     requests: Option<VecDeque<Hop>>,
+    /// Whether the request log was started ([`Self::start_log`]), and
+    /// whether the `network` that started it has yet to say so.
+    log_started: bool,
+    log_note: bool,
     last_request: u64,
     /// The last request `network --clear` took. Those up to it stay in
     /// the log, not shown, so that an event of theirs that comes after
@@ -926,6 +934,8 @@ impl Bidi {
             geo_held: None,
             downloads: Vec::new(),
             requests: None,
+            log_started: false,
+            log_note: false,
             last_request: 0,
             cleared: 0,
             collector: None,
@@ -962,15 +972,8 @@ impl Bidi {
             self.context = made["context"].as_str().ok_or_else(|| anyhow!("the browser opened no window"))?.to_string();
             self.own.push(self.context.clone());
             self.listen_in(&self.context.clone(), timeout);
-            // Only its own window's requests: the user's tabs are not
-            // reported to it, nor slowed by being.
-            self.log_network(json!({ "events": NETWORK_EVENTS, "contexts": [self.context] }), timeout);
-            if let Some(x) = self.collector.clone() {
-                self.tab_collectors.push((self.context.clone(), x));
-            }
             return Ok(());
         }
-        self.log_network(json!({ "events": NETWORK_EVENTS }), timeout);
         self.send("script.addPreloadScript", json!({ "functionDeclaration": LISTEN }), timeout)?;
         let tree = self.send("browsingContext.getTree", json!({ "maxDepth": 0 }), timeout)?;
         self.context = tree["contexts"]
@@ -985,29 +988,62 @@ impl Bidi {
         Ok(())
     }
 
-    /// Keep the request log, if the browser sends its events.
-    fn log_network(&mut self, subscribe: Value, timeout: Duration) {
-        if self.send("session.subscribe", subscribe.clone(), timeout).is_ok() {
-            self.requests = Some(VecDeque::new());
-            // Request bodies too where the browser keeps them; one that
-            // refuses the data type keeps response bodies. A Firefox before
-            // network.addDataCollector lists requests without their bodies.
-            for requests in [true, false] {
-                let mut collect = collect_params(requests);
-                if let Some(contexts) = subscribe.get("contexts") {
-                    collect["contexts"] = contexts.clone();
+    /// Start the request log, once, at the session's first `network`: the
+    /// network events of its tabs and the collectors that keep their
+    /// bodies. Not at launch: a browser that sends them does work for each
+    /// request a page makes, and a goto waits for it (a page of 300 images
+    /// took three times as long on Firefox 160, a third longer over
+    /// chromedriver), whether `network` is read or not. In the user's
+    /// Firefox, only navigera's own tabs ([`Self::adopt`] adds the next):
+    /// theirs are not reported to it, nor slowed by being.
+    fn start_log(&mut self, timeout: Duration) {
+        if std::mem::replace(&mut self.log_started, true) {
+            return;
+        }
+        let mut subscribe = json!({ "events": NETWORK_EVENTS });
+        if self.attached {
+            subscribe["contexts"] = json!(self.own);
+        }
+        if self.send("session.subscribe", subscribe, timeout).is_err() {
+            return;
+        }
+        self.requests = Some(VecDeque::new());
+        self.log_note = true;
+        if !self.attached {
+            self.collector = self.add_collector(None, timeout);
+            return;
+        }
+        // A collector per tab, removed when its tab closes ([`Self::tab_gone`]).
+        for tab in self.own.clone() {
+            let Some(x) = self.add_collector(Some(json!([tab])), timeout) else { break };
+            self.collector.get_or_insert_with(|| x.clone());
+            self.tab_collectors.push((tab, x));
+        }
+    }
+
+    /// A data collector for `contexts` (all the session's when None):
+    /// request bodies too where the browser keeps them; one that refuses
+    /// the data type keeps response bodies, and so do the session's later
+    /// collectors. A Firefox before network.addDataCollector lists
+    /// requests without their bodies.
+    fn add_collector(&mut self, contexts: Option<Value>, timeout: Duration) -> Option<String> {
+        let tries: &[bool] = if self.collector.is_some() { &[self.collects_requests] } else { &[true, false] };
+        for &requests in tries {
+            let mut collect = collect_params(requests);
+            if let Some(contexts) = &contexts {
+                collect["contexts"] = contexts.clone();
+            }
+            match self.send("network.addDataCollector", collect, timeout) {
+                Ok(r) => {
+                    let x = r["collector"].as_str().map(str::to_string);
+                    self.collects_requests = requests && x.is_some();
+                    return x;
                 }
-                match self.send("network.addDataCollector", collect, timeout) {
-                    Ok(r) => {
-                        self.collector = r["collector"].as_str().map(str::to_string);
-                        self.collects_requests = requests && self.collector.is_some();
-                        break;
-                    }
-                    Err(e) if requests && format!("{e:#}").contains(": invalid argument:") => {}
-                    Err(_) => break,
-                }
+                Err(e) if requests && format!("{e:#}").contains(": invalid argument:") => {}
+                Err(_) => return None,
             }
         }
+        None
     }
 
     /// Record listeners in one tab of the user's browser: its documents
@@ -1953,6 +1989,7 @@ impl Wire for Bidi {
 
     fn requests(&mut self, clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
         self.idle();
+        self.start_log(Duration::from_secs(10));
         // A request sent in the last moments with no answer yet (in
         // flight, or its answer on its way to us) is waited for, a little.
         // One pending longer (a long poll) costs nothing.
@@ -1975,6 +2012,10 @@ impl Wire for Bidi {
             self.cleared = self.last_request;
         }
         Ok(shown)
+    }
+
+    fn requests_note(&mut self) -> Option<&'static str> {
+        std::mem::take(&mut self.log_note).then_some(LOG_STARTED)
     }
 
     fn response_body(&mut self, request: &str) -> Result<(String, bool)> {
@@ -2476,6 +2517,50 @@ mod tests {
         assert_eq!(firefox.join().unwrap(), ["c-pop", "c-tab", "c-late"]);
     }
 
+    /// A session listens to no network events until its first `network`
+    /// (a browser listened to slows every load); that one subscribes, adds
+    /// the collector and says the log starts now, once.
+    #[test]
+    fn the_request_log_starts_at_the_first_network() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let firefox = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut asked = Vec::new();
+            while let Ok(Message::Text(text)) = ws.read() {
+                let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                let method = v["method"].as_str().unwrap_or("").to_string();
+                let events = v["params"]["events"].to_string();
+                asked.push(if method == "session.subscribe" { format!("{method} {events}") } else { method.clone() });
+                let result = match method.as_str() {
+                    "browsingContext.getTree" => json!({ "contexts": [{ "context": "tab" }] }),
+                    "network.addDataCollector" => json!({ "collector": "c1" }),
+                    _ => json!({}),
+                };
+                ws.send(Message::text(json!({ "type": "success", "id": v["id"], "result": result }).to_string()))
+                    .unwrap();
+            }
+            asked
+        });
+        let mut b = Bidi::connect(&format!("ws://{addr}/"), Duration::from_secs(5)).unwrap();
+        b.start(Duration::from_secs(5)).unwrap();
+        let at_start = b.send("session.status", json!({}), Duration::from_secs(5)).map(|_| ());
+        assert!(at_start.is_ok() && b.requests.is_none() && b.collector.is_none());
+        assert_eq!(b.requests(false).unwrap().len(), 0);
+        assert_eq!(b.requests_note(), Some(LOG_STARTED));
+        b.requests(false).unwrap();
+        assert_eq!((b.requests_note(), b.collector.as_deref()), (None, Some("c1")));
+        b.closed = true;
+        drop(b);
+        let asked = firefox.join().unwrap();
+        let status = asked.iter().position(|m| m == "session.status").unwrap();
+        assert!(!asked[..status].iter().any(|m| m.contains("network.")), "{asked:?}");
+        let network: Vec<_> = asked[status..].iter().filter(|m| m.contains("network.")).collect();
+        assert_eq!(network.len(), 2, "{asked:?}");
+        assert!(network[0].contains("network.beforeRequestSent") && network[1] == "network.addDataCollector");
+    }
+
     /// A request's body is asked of the browser (a BiDi event carries only
     /// its size) where its collectors take the `request` data type, and
     /// read as text; a browser that refuses the type keeps response bodies,
@@ -2517,7 +2602,7 @@ mod tests {
                 asked
             });
             let mut b = Bidi::connect(&format!("ws://{addr}/"), Duration::from_secs(5)).unwrap();
-            b.log_network(json!({ "events": NETWORK_EVENTS }), Duration::from_secs(5));
+            b.start_log(Duration::from_secs(5));
             assert_eq!((b.collector.as_deref(), b.collects_requests), (Some("c1"), takes_requests));
             let body = b.request_body("r1");
             b.closed = true;

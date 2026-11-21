@@ -41,8 +41,10 @@ console and dialogs, and upload, drag, mouse, keydown, keyup, storage and
 `set viewport`. Over BiDi also `init-script`, and `route` and `unroute`
 (answer, abort or replay a request from a HAR; `--modify` is Chrome's),
 `downloads` and `wait --download`, `network` (the requests of every tab
-of the session: the list, a response body, `--har` with the bodies the
-browser kept, up to 10 MiB each), `screencast` (screenshots of the
+of the session from its first `network` on, as a browser listened to
+slows every load: run `network` once before the load you want to see;
+the list, a response body, `--har` with the bodies the browser kept, up
+to 10 MiB each), `screencast` (screenshots of the
 viewport on the session's connection while commands run and between them,
 a frame for each change, at most every 100 ms and one a second on a still
 page),
