@@ -4493,11 +4493,34 @@ impl BrowserSession {
                 shot = tab.screenshot_as(timeout, full_page, quality);
             }
         }
+        // Still without them: say in the session log what was read and
+        // where, and what the page holds now (before the marks go), so a
+        // rare failure can tell marks drawn elsewhere from marks missing.
+        let failed = match (&shot, proof) {
+            (Ok(image), Some((x, y))) => crate::annotate::shows_mark(image, x, y) == Some(false),
+            _ => false,
+        };
+        if let (true, Ok(image), Some((x, y))) = (failed, &shot, proof) {
+            let page = tab
+                .evaluate(
+                    "[!!document.getElementById('__nv_marks'), innerWidth, innerHeight, devicePixelRatio, scrollX, \
+                     scrollY, document.visibilityState, document.hasFocus()]",
+                    timeout,
+                )
+                .map_or_else(|e| format!("({e:#})"), |v| v.to_string());
+            let census = crate::annotate::mark_census(image);
+            eprintln!(
+                "[screenshot] --annotate: no labels at the proof point ({x}, {y}): pixel {:?}; image {census}; \
+                 drawn with dpr {dpr}, viewport {vw}x{vh}, scroll ({sx}, {sy}), {} boxes; page now {page}",
+                crate::annotate::pixel_at(image, x, y),
+                shown.len()
+            );
+        }
         let _ = tab.evaluate(crate::annotate::REMOVE, timeout);
         let shot = shot?;
-        // Still without them: an image that claims labels it does not
-        // show would have an agent act on the wrong thing.
-        if proof.and_then(|(x, y)| crate::annotate::shows_mark(&shot, x, y)) == Some(false) {
+        // An image that claims labels it does not show would have an
+        // agent act on the wrong thing.
+        if failed {
             bail!(
                 "the browser's capture does not show the labels (4 captures). A dialog or popover shown on top of \
                  the page hides them: close it first. Otherwise take it again, or act on the refs `ax` prints"
