@@ -67,3 +67,19 @@ so navigera fills in what its CDP leaves out: shadow roots and password
 fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
 The differences that remain are listed in
 [docs/navigera.md](navigera.md#lightpanda-and-your-own-browser).
+
+**Obscura** (`--engine obscura`) and **Moli** (`--engine moli`), both
+experimental, are newer headless engines that are their own CDP server,
+like Lightpanda; navigera starts each as `<engine> serve`. Unlike
+Lightpanda they open tabs and lay pages out, so they take Chrome's paths.
+CI downloads each one's newest stable release on every push (0.2.7 and
+1.1.27 at this writing) and runs
+[`tests/cdp_servers.rs`](../tests/cdp_servers.rs) on it: navigation, the
+accessibility tree and acting on its refs, fill, a form submitted with the
+keyboard (the server checks the sign-in), a checkbox click, a select, tabs,
+a screenshot, and the engine's server gone after `quit`. Run with either
+one as the default engine (`NAVIGERA_ENGINE`), the rest of the suite shows
+how far each is from Chrome; the differences agents meet are listed in
+[docs/navigera.md](navigera.md#obscura-and-moli). Moli's
+biggest one, for now: it keeps the layout it built at the first geometry
+read, so content a page's scripts render later has no box to click.

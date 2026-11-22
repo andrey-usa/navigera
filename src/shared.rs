@@ -65,11 +65,12 @@ const HOST_START: Duration = Duration::from_secs(60);
 /// Does a session started with `config` go on the shared browser? Not
 /// when it asked for its own (`--own-browser`, `NAVIGERA_SHARED_BROWSER=0`),
 /// or works in a browser it does not launch (`--attach`, `--profile`), or
-/// runs Lightpanda (one context per process), or asked for a DevTools port
+/// runs an engine that is its own CDP server (the host launches Chrome;
+/// Lightpanda has one context per process), or asked for a DevTools port
 /// on Linux/macOS (`--transport ws`, to open DevTools on it).
 pub fn wanted(config: &SessionConfig) -> bool {
     if config.own_browser
-        || crate::browser::is_lightpanda(&config.engine)
+        || crate::browser::is_cdp_server(&config.engine)
         || crate::wd::wanted(config)
         || config.attach.is_some()
         || config.profile.is_some()

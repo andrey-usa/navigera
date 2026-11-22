@@ -837,8 +837,8 @@ pub fn start(config: &SessionConfig, name: &str, output: &mut dyn Write) -> Exit
         // run would quietly test the wrong engine.
         let wanted = if crate::wd::wanted(config) {
             crate::wd::engine_name(config)
-        } else if crate::browser::is_lightpanda(&config.engine) {
-            "lightpanda"
+        } else if let Some(server) = crate::browser::CdpServer::from_engine(&config.engine) {
+            server.name()
         } else {
             "chrome"
         };

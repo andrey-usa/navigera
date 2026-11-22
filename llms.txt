@@ -20,8 +20,9 @@ Each page below is markdown. The whole site in one file: https://andrey-usa.gith
 ## Concepts
 
 - [How navigera works](https://andrey-usa.github.io/navigera/concepts/how-it-works.md): The three ways to run navigera; what it does between commands: waits, settling, tabs, dialogs.
-- [Supported browsers](https://andrey-usa.github.io/navigera/concepts/browsers.md): Which browsers and engines navigera drives, CI coverage, and how one is found or installed.
+- [Supported browsers](https://andrey-usa.github.io/navigera/concepts/browsers.md): Which browsers and engines navigera drives, CI coverage, and how one is found.
 - [Lightpanda and your own browser](https://andrey-usa.github.io/navigera/concepts/lightpanda.md): The Lightpanda engine; your own browser, `--attach` and `--profile`.
+- [Obscura and Moli](https://andrey-usa.github.io/navigera/concepts/obscura-moli.md): Two more CDP server engines.
 - [Electron and natural mode](https://andrey-usa.github.io/navigera/concepts/electron.md): Electron apps, `--electron`; `--natural`: a headless run a page cannot tell.
 
 ## Reference

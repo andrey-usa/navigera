@@ -497,3 +497,43 @@ jobs:
             --markdown "$RUNNER_TEMP/cdp-check.md" || rc=$?
           python3 bench/ladder/annotate.py "$RUNNER_TEMP/cdp-check.md" "cdp check ${{ matrix.browser.label }}"
           exit $rc
+
+  # Obscura and Moli, the headless engines that are their own CDP server
+  # (`--engine obscura`, `--engine moli`): their newest stable release on
+  # every push, through tests/cdp_servers.rs (navigation, the tree and its
+  # refs, input, tabs, a screenshot, cleanup).
+  engines:
+    name: engine ${{ matrix.engine }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [obscura, moli]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          cache-on-failure: false
+      - name: Obscura binary
+        if: matrix.engine == 'obscura'
+        uses: ./.github/actions/obscura
+      - name: Moli binary
+        if: matrix.engine == 'moli'
+        uses: ./.github/actions/moli
+      - name: e2e tests on ${{ matrix.engine }}
+        timeout-minutes: 10
+        env:
+          ENGINE: ${{ matrix.engine }}
+        run: |
+          set -o pipefail
+          # A missing binary fails the job instead of skipping the tests.
+          export "NAVIGERA_REQUIRE_${ENGINE^^}=1"
+          if ! cargo test --locked --features http --test cdp_servers --no-fail-fast 2>&1 | tee /tmp/test.log; then
+            sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
+            python3 bench/ladder/annotate.py /tmp/test-tail.log "cargo test failure ($ENGINE)"
+            exit 1
+          fi

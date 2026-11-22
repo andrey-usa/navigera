@@ -1221,6 +1221,11 @@ fn check_profile_flags(config: &SessionConfig) -> Result<(), String> {
 /// browser, whichever serves remote debugging (`--auto-connect` too).
 const DEFAULT_ATTACH: &str = crate::cdp::attach::AUTO;
 
+/// What `--engine` takes (`panda` is Lightpanda's short name; `webdriver`
+/// is what `--webdriver` sets, and may be given by hand).
+const KNOWN_ENGINES: &[&str] =
+    &["chrome", "lightpanda", "panda", "obscura", "moli", "firefox", "safari", "safari-preview", "webdriver"];
+
 /// `--tab <current|new>`: where an attached session starts.
 fn parse_start_tab(raw: &str) -> Result<bool, String> {
     match raw {
@@ -1514,7 +1519,11 @@ pub fn usage_full(program: &str) -> String {
             "--wait-ms <ms>",
             "how long an element command waits for its element (default 5000): on `start`, for the session; on one command, for that command".into(),
         ),
-        ("--chromium <path>", "the browser binary ($CHROME_BIN; --executable for any engine); --engine lightpanda ($NAVIGERA_ENGINE); --headed".into()),
+        ("--chromium <path>", "the browser binary ($CHROME_BIN; --executable for any engine); --headed".into()),
+        (
+            "--engine lightpanda|obscura|moli",
+            "experimental headless engines that are their own CDP server, started as `<engine> serve` ($NAVIGERA_ENGINE; the binary from --chromium, $LIGHTPANDA_BIN / $OBSCURA_BIN / $MOLI_BIN, or PATH); Lightpanda has one tab and no layout".into(),
+        ),
         (
             "--engine firefox|safari|safari-preview",
             "experimental WebDriver engines: Firefox over WebDriver BiDi ($NAVIGERA_FIREFOX), Safari through safaridriver on macOS (run `safaridriver --enable` once; safari-preview: Safari Technology Preview). They do the core ops (goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, tabs, cookies, console, dialogs); a Chrome-only op says to use --engine chrome".into(),
@@ -1716,8 +1725,11 @@ fn check_electron_flags(config: &SessionConfig) -> Result<(), String> {
     if config.electron.is_some() && (config.attach.is_some() || config.profile.is_some()) {
         return Err("--electron, --attach and --profile are alternatives: pick one".into());
     }
-    if config.electron.is_some() && crate::browser::is_lightpanda(&config.engine) {
-        return Err("--electron runs an Electron app; --engine lightpanda is a browser of its own".into());
+    if config.electron.is_some() && crate::browser::is_cdp_server(&config.engine) {
+        return Err(format!(
+            "--electron runs an Electron app; --engine {} is a browser of its own",
+            config.engine.trim()
+        ));
     }
     Ok(())
 }
@@ -1890,8 +1902,8 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
     if config.attach.is_some() && config.profile.is_some() {
         return Err("--attach and --profile are alternatives: pick one".into());
     }
-    if (config.attach.is_some() || config.profile.is_some()) && crate::browser::is_lightpanda(&config.engine) {
-        return Err("--attach/--profile drive Chrome; drop --engine lightpanda".into());
+    if (config.attach.is_some() || config.profile.is_some()) && crate::browser::is_cdp_server(&config.engine) {
+        return Err(format!("--attach/--profile drive Chrome; drop --engine {}", config.engine.trim()));
     }
     Ok(())
 }
@@ -2315,6 +2327,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     }
     if config.capabilities.is_none() {
         config.capabilities = std::env::var("NAVIGERA_CAPABILITIES").ok().filter(|v| !v.trim().is_empty());
+    }
+    config.engine = config.engine.trim().to_ascii_lowercase();
+    if !KNOWN_ENGINES.contains(&config.engine.as_str()) {
+        return invalid(format!(
+            "--engine takes chrome, lightpanda, obscura, moli, firefox, safari or safari-preview, not {:?}",
+            config.engine
+        ));
     }
     if config.webdriver.is_some() && config.engine == "chrome" {
         config.engine = "webdriver".into();
@@ -6542,7 +6561,7 @@ impl Driver {
             }
             Command::Status {} => {
                 let mut state = self.state_json();
-                state["engine"] = json!(if self.session.is_lightpanda() { "lightpanda" } else { "chrome" });
+                state["engine"] = json!(self.session.engine_name());
                 state["executable"] = json!(self.session.executable());
                 state["endpoint"] = json!(crate::cdp::attach::shown(&self.session.endpoint()));
                 state["attached"] = json!(self.session.is_attached());
@@ -9539,6 +9558,25 @@ mod tests {
         assert!(parse_args(argv(&["navigera", "-s", "me", "start", "--profile", "a", "--from-profile", "x"])).is_err());
         assert_eq!(parse_args(argv(&["navigera", "profiles"])).unwrap().local, Some(Local::Profiles));
         assert!(parse_args(argv(&["navigera", "--engine", "lightpanda", "-s", "me", "start", "--attach"])).is_err());
+    }
+
+    #[test]
+    fn engine_names_are_checked_and_cdp_servers_take_no_browser_source() {
+        for engine in ["obscura", "moli", "lightpanda", "Moli"] {
+            let p = parse_args(argv(&["navigera", "--engine", engine, "-s", "me", "start"])).unwrap();
+            assert_eq!(p.config.engine, engine.to_ascii_lowercase());
+            for source in [&["--attach"][..], &["--profile", "work"], &["--electron", "/opt/app"]] {
+                let mut args = vec!["navigera", "--engine", engine, "-s", "me", "start"];
+                args.extend_from_slice(source);
+                assert!(parse_args(argv(&args)).is_err(), "{engine} {source:?}");
+            }
+        }
+        // A misspelled engine was Chrome without a word; it is refused.
+        match parse_args(argv(&["navigera", "--engine", "molli", "-s", "me", "start"])) {
+            Err(ArgsError::Invalid(why)) => assert!(why.contains("obscura, moli"), "{why}"),
+            other => panic!("expected an invalid engine, got {:?}", other.map(|p| p.config.engine)),
+        }
+        assert_eq!(parse_args(argv(&["navigera", "-s", "me", "start"])).unwrap().config.engine, "chrome");
     }
 
     #[test]

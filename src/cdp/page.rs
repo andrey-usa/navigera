@@ -8778,7 +8778,13 @@ impl Page {
         };
         // The page's root, for the header line (and, unscoped, the seed).
         let main_root = self.send("Accessibility.getRootAXNode", json!({}), timeout)?;
-        let main_root = main_root.get("node").cloned().unwrap_or(Value::Null);
+        let main_root = match main_root.get("node") {
+            Some(node) if node.is_object() => node.clone(),
+            // An engine that answers without a root (Obscura 0.2.7: `{}`,
+            // as it answers getChildAXNodes) would print an empty tree:
+            // read the full tree instead.
+            _ => bail!("Accessibility.getRootAXNode answered no node"),
+        };
         let (seed, scoped_backend) = match root_backend_id {
             Some(backend) => {
                 let res = self.send("Accessibility.getPartialAXTree", json!({ "backendNodeId": backend }), timeout)?;
@@ -8894,13 +8900,21 @@ impl Page {
             }
         };
         let root = nodes.iter().find(|n| n.get("parentId").is_none());
-        let title = root.map(|n| ax_str(n, "name").to_string()).unwrap_or_default();
-        let url = root
+        let mut title = root.map(|n| ax_str(n, "name").to_string()).unwrap_or_default();
+        let mut url = root
             .and_then(|n| n.get("properties").and_then(Value::as_array))
             .and_then(|props| props.iter().find(|p| p.get("name").and_then(Value::as_str) == Some("url")))
             .and_then(|p| p.get("value").and_then(|v| v.get("value")).and_then(Value::as_str))
             .unwrap_or_default()
             .to_string();
+        if title.is_empty() && url.is_empty() {
+            // A root node with neither (Obscura 0.2.7): the page's own, for
+            // the header and for the links the tree prints against its URL.
+            if let Ok(page) = self.evaluate_raw("[document.title, location.href]", timeout) {
+                title = page[0].as_str().unwrap_or_default().to_string();
+                url = page[1].as_str().unwrap_or_default().to_string();
+            }
+        }
         let (origin, page) = ax::origin_and_page(&url);
         let root_backend_id = match &opts.scope {
             Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),

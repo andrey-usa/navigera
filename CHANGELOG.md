@@ -6,6 +6,39 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `--engine obscura` and `--engine moli` (experimental): two more
+  headless engines that are their own CDP server, started as
+  `obscura serve --allow-private-network` and `moli serve --layout` on a
+  free port, the binary from `$OBSCURA_BIN` / `$MOLI_BIN`, `PATH` or
+  `--chromium`. Unlike Lightpanda both open tabs and contexts and lay pages
+  out, so they take Chrome's paths (popups, downloads, the click checks);
+  each session gets a browser of its own, as Lightpanda's does. `status`
+  names the engine. Tested on Obscura 0.2.7 and Moli 1.1.27: CI's new
+  `engine` jobs download each one's newest stable release on every push
+  and run `tests/cdp_servers.rs` (navigation, the tree and its refs, fill,
+  a keyboard-submitted sign-in the server records, a checkbox, a select,
+  tabs, a screenshot, the server gone after `quit`). What differs from
+  Chrome is in docs/navigera.md: on Obscura, dialogs are always dismissed
+  and a click can't reach into a shadow root; on Moli 1.1.27, content a
+  script adds after the first geometry read has no box, and boxes don't
+  follow a scroll.
+
+### Fixed
+
+- `ax` on an engine whose `Accessibility.getRootAXNode` answers without a
+  node (Obscura 0.2.7 answers `{}`) printed an empty page: it reads the
+  whole tree then, and a root node with no title and no URL gets the
+  page's own in the header and for the links the tree prints.
+
+### Behaviour changes
+
+- `--engine` (and `$NAVIGERA_ENGINE`) takes chrome, lightpanda, obscura,
+  moli, firefox, safari or safari-preview, in any letter case. A misspelled
+  or unknown name used to start Chrome without a word; it is refused now,
+  and `--engine Firefox` is Firefox where it was Chrome.
+
 ## [0.17.0] - 2026-11-21
 
 ### Added

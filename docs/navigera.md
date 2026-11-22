@@ -27,7 +27,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | `--wait-ms <ms>` | element ops' wait when they name no timeout, and on one `wait` for a condition, its timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
 | `--download-dir <dir>` | where downloaded files go (`$NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own in `navigera-<uid>` under the system temp directory, which only you can enter) |
 | `--chromium <path>` | browser binary (also `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`) |
-| `--engine chrome\|lightpanda` (`$NAVIGERA_ENGINE`), `--headed` | engine; visible window |
+| `--engine chrome\|lightpanda\|obscura\|moli` (`$NAVIGERA_ENGINE`), `--headed` | engine (an unknown name is refused); visible window |
 | `--idle-timeout-s <s>` | a session server shuts down after this idle time (default 600, 0 = never; also `start --idle <s>`). `status` and `sessions` don't count as use |
 | `--own-browser` | with `start` (or `mcp`): a browser of the session's own instead of a context on the shared browser (`$NAVIGERA_SHARED_BROWSER=0`) |
 | `--parent <pid>` | with `start`: the session quits when that process exits (checked twice a second; `$NAVIGERA_PARENT_PID`) |
@@ -628,7 +628,7 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   POST reopens with GET). A command running at the crash fails and is not
   retried; a second crash within 10 s of a recovery ends the session. A browser of its
   own instead: `start --own-browser` (or `NAVIGERA_SHARED_BROWSER=0`);
-  `--attach`, `--profile`, `--electron`, Lightpanda and `--transport ws` on Linux/macOS
+  `--attach`, `--profile`, `--electron`, Lightpanda, Obscura, Moli and `--transport ws` on Linux/macOS
   always get one.
 
 ## Lightpanda and your own browser
@@ -659,7 +659,6 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
     of it (60 products where Chrome shows 12), and `ax` is that much longer.
   - `status` reports the engine of a running session; `start` on a session
     that runs the other engine fails instead of reusing it.
-
 **Your own browser: `--attach` and `--profile`** (with `start`, or `serve`):
 
 | Way | what it connects to | closes the browser? |
@@ -702,6 +701,47 @@ connection for all commands): a one-shot command with `--attach` is
 refused. Chrome 136–143 can't serve its default profile at all (the
 `--remote-debugging-port` switch is ignored for it, and the inspect toggle
 arrives in 144): use `--profile` there, which works on any version.
+
+## Obscura and Moli
+
+Two more experimental headless engines that are their own CDP server, like
+Lightpanda: navigera starts each as `<engine> serve` on a free port.
+Unlike Lightpanda they open tabs and contexts and lay pages out, so they
+take Chrome's paths; each session gets a browser of its own.
+
+- **`--engine obscura`** (experimental; tested on Obscura 0.2.7, its newest
+  stable release) starts `obscura serve --allow-private-network`: Obscura
+  refuses loopback and private addresses otherwise, and a local dev server
+  is what agents test. The binary comes from `$OBSCURA_BIN` or `PATH`, or
+  from `--chromium`. Tabs, contexts, layout and screenshots work as on
+  Chrome. Differences:
+  - popups: a page opened with `target=_blank` loads in the current tab
+    (Obscura opens no target for it); `tab-new` works.
+  - dialogs: Obscura raises no dialog event and dismisses every dialog:
+    `confirm()` returns false and `prompt()` null, whatever `dialog` says.
+  - shadow roots: its hit test stops at the shadow host, so a click on an
+    element inside an open shadow root reaches the host and the element's
+    own handler doesn't run (the response says so in `click_missed`).
+  - its accessibility tree's root has no name and no URL, and
+    `Accessibility.getRootAXNode` answers nothing: `ax` reads the whole tree
+    and takes the title and URL from the page.
+  - a multiple `<select>` takes one option (`select --add` is refused), and
+    there is no `Clipboard` API.
+- **`--engine moli`** (experimental; tested on Moli 1.1.27) starts
+  `moli serve --layout`: without `--layout` Moli answers geometry from a
+  fixed compatibility layout and paints nothing. The binary comes from
+  `$MOLI_BIN` or `PATH`, or from `--chromium`. Tabs, popups (as tabs),
+  dialogs and screenshots work as on Chrome. Differences:
+  - layout: Moli builds it at the first geometry read and keeps it until a
+    screenshot. An element a script adds afterwards has no box and no
+    `innerText` (a click can't reach it, `wait --text` doesn't see it,
+    `text` reads it empty), and boxes don't move with a scroll, so an
+    element below the first screen can't be clicked. Pages the server
+    renders, acted on near their top, work; content a page's scripts render
+    later does not yet.
+  - refs are Moli's node ids, large numbers (`[ref=2000000017]`).
+  - a `<select>`'s value in `ax` is the selected option's value, not its
+    label.
 
 ## Electron and natural mode
 

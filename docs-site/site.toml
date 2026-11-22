@@ -76,7 +76,7 @@ source = [{ file = "docs/navigera.md", preamble = true }, { file = "docs/naviger
 [[part.page]]
 title = "Supported browsers"
 path = "concepts/browsers.md"
-about = "Which browsers and engines navigera drives, CI coverage, and how one is found or installed."
+about = "Which browsers and engines navigera drives, CI coverage, and how one is found."
 source = [{ file = "README.md", section = "Supported browsers", intro = "More: [Lightpanda and your own browser](lightpanda.md), [Electron and natural mode](electron.md)." }, { file = "docs/browsers.md" }, { file = "docs/navigera.md", section = "Browsers and engines", keep_heading = true }]
 
 [[part.page]]
@@ -84,6 +84,12 @@ title = "Lightpanda and your own browser"
 path = "concepts/lightpanda.md"
 about = "The Lightpanda engine; your own browser, `--attach` and `--profile`."
 source = { file = "docs/navigera.md", section = "Lightpanda and your own browser" }
+
+[[part.page]]
+title = "Obscura and Moli"
+path = "concepts/obscura-moli.md"
+about = "Two more CDP server engines."
+source = { file = "docs/navigera.md", section = "Obscura and Moli" }
 
 [[part.page]]
 title = "Electron and natural mode"

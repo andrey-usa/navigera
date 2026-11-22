@@ -1,0 +1,47 @@
+name: moli
+description: >
+  Downloads Moli's newest stable release (the highest plain X.Y.Z tag,
+  never a draft or a pre-release), or the stable tag given, for x86_64
+  Linux, and sets MOLI_BIN and MOLI_RELEASE for the later steps.
+inputs:
+  release:
+    description: a stable release tag to use instead of the newest (e.g. v1.1.27)
+    default: ""
+outputs:
+  release:
+    description: the tag downloaded
+    value: ${{ steps.get.outputs.release }}
+runs:
+  using: composite
+  steps:
+    - id: get
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE: ${{ inputs.release }}
+      run: |  # zizmor: ignore[github-env] runner-local values, no event input
+        set -euo pipefail
+        tag="$RELEASE"
+        stable='^v?[0-9]+\.[0-9]+\.[0-9]+$'
+        if [ -z "$tag" ]; then
+          # The highest plain version among releases that are not drafts or
+          # pre-releases, compared without a leading `v`.
+          tag=$(gh api --paginate "repos/lexmount/moli/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | grep -E "$stable" | awk '{v = $0; sub(/^v/, "", v); print v, $0}' \
+            | sort -V -k1,1 | tail -1 | cut -d' ' -f2 || true)
+        fi
+        if ! printf '%s' "$tag" | grep -qE "$stable"; then
+          echo "::error title=moli::not a stable Moli release: '${tag}'"
+          exit 1
+        fi
+        dir="$RUNNER_TEMP/moli"
+        mkdir -p "$dir"
+        gh release download "$tag" --repo lexmount/moli \
+          --pattern moli-x86_64-unknown-linux-gnu.tar.gz --dir "$dir" --clobber
+        # The archive's one top directory is `moli-<tag>-<target>/`.
+        tar -xzf "$dir/moli-x86_64-unknown-linux-gnu.tar.gz" -C "$dir" --strip-components=1
+        echo "MOLI_BIN=$dir/moli" >> "$GITHUB_ENV"
+        echo "MOLI_RELEASE=$tag" >> "$GITHUB_ENV"
+        echo "release=$tag" >> "$GITHUB_OUTPUT"
+        echo "::notice title=moli::$tag: $("$dir/moli" --version)"

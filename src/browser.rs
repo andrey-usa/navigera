@@ -770,53 +770,107 @@ fn read_protocol(host: &str, port: u16) -> Result<serde_json::Value> {
     Ok(protocol)
 }
 
-/// True when `--engine` selects the Lightpanda CDP server instead of Chromium.
-pub fn is_lightpanda(engine: &str) -> bool {
-    matches!(engine.trim().to_ascii_lowercase().as_str(), "lightpanda" | "panda")
+/// A browser that is its own CDP server, started as `<binary> serve` rather
+/// than with Chromium's flags: `--engine lightpanda`, `obscura` or `moli`.
+/// navigera starts it on a free port, reads `/json/version` and drives it
+/// over CDP like Chrome; what each engine lacks is told apart below, not
+/// assumed from Lightpanda.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CdpServer {
+    Lightpanda,
+    Obscura,
+    Moli,
 }
 
-/// Resolve the `lightpanda` binary for direct `lightpanda serve` launch.
+impl CdpServer {
+    /// The server `--engine` names, if it names one.
+    pub fn from_engine(engine: &str) -> Option<Self> {
+        match engine.trim().to_ascii_lowercase().as_str() {
+            "lightpanda" | "panda" => Some(Self::Lightpanda),
+            "obscura" => Some(Self::Obscura),
+            "moli" => Some(Self::Moli),
+            _ => None,
+        }
+    }
+
+    /// The engine's name, as `status` and a session's engine check say it,
+    /// and its binary's name on `PATH`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Lightpanda => "lightpanda",
+            Self::Obscura => "obscura",
+            Self::Moli => "moli",
+        }
+    }
+
+    /// The variable that names the binary.
+    pub fn bin_var(self) -> &'static str {
+        match self {
+            Self::Lightpanda => "LIGHTPANDA_BIN",
+            Self::Obscura => "OBSCURA_BIN",
+            Self::Moli => "MOLI_BIN",
+        }
+    }
+
+    /// One context and one tab per process, no layout and no DOM snapshot:
+    /// Lightpanda. Obscura and Moli open tabs and contexts, lay pages out
+    /// and answer `DOMSnapshot`, so they take Chrome's paths.
+    pub fn single_target(self) -> bool {
+        matches!(self, Self::Lightpanda)
+    }
+}
+
+/// True when `--engine` selects the Lightpanda CDP server instead of Chromium.
+pub fn is_lightpanda(engine: &str) -> bool {
+    CdpServer::from_engine(engine) == Some(CdpServer::Lightpanda)
+}
+
+/// True when `--engine` selects a browser that is its own CDP server
+/// (Lightpanda, Obscura, Moli) rather than Chrome.
+pub fn is_cdp_server(engine: &str) -> bool {
+    CdpServer::from_engine(engine).is_some()
+}
+
+/// Resolve the binary of a CDP server engine for its `serve` launch.
 ///
 /// Order: explicit `--chromium <path>` (kept as the generic binary override),
-/// `$LIGHTPANDA_BIN`, then `lightpanda` on `PATH`.
-fn resolve_lightpanda_bin(cli_override: Option<&str>) -> Result<String> {
+/// the engine's variable (`$LIGHTPANDA_BIN`, `$OBSCURA_BIN`, `$MOLI_BIN`),
+/// then the engine's name on `PATH`.
+fn resolve_server_bin(server: CdpServer, cli_override: Option<&str>) -> Result<String> {
+    let (name, var) = (server.name(), server.bin_var());
     if let Some(path) = cli_override {
         if !path.trim().is_empty() {
-            // `--chromium` doubles as the lightpanda override, so a Chromium
+            // `--chromium` doubles as the engine's override, so a Chromium
             // path that leaked in from $CHROME_BIN-style defaults would be
             // launched as `chrome serve --port …` and then time out waiting
             // for a /json/version that never comes. Fail fast instead.
             let file =
                 Path::new(path).file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
             if ["chrome", "chromium", "msedge", "edge", "brave"].iter().any(|b| file.contains(b)) {
-                bail!(
-                    "--engine lightpanda was given a Chromium binary ({path}); pass the lightpanda binary via --chromium or $LIGHTPANDA_BIN"
-                );
+                bail!("--engine {name} was given a Chromium binary ({path}); pass the {name} binary via --chromium or ${var}");
             }
             return Ok(path.to_string());
         }
     }
-    if let Ok(path) = std::env::var("LIGHTPANDA_BIN") {
+    if let Ok(path) = std::env::var(var) {
         if !path.trim().is_empty() {
             return Ok(path);
         }
     }
-    if let Ok(path) = which_lightpanda() {
+    if let Some(path) = on_path(name) {
         return Ok(path);
     }
-    bail!("lightpanda binary not found — install it or set --chromium <path> / $LIGHTPANDA_BIN")
+    bail!("{name} binary not found — install it or set --chromium <path> / ${var}")
 }
 
-/// `lightpanda` on `PATH` (no external `which` dependency).
-fn which_lightpanda() -> Result<String> {
+/// `name` on `PATH` (no external `which` dependency).
+fn on_path(name: &str) -> Option<String> {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(if cfg!(windows) { "lightpanda.exe" } else { "lightpanda" });
-        if candidate.is_file() {
-            return Ok(candidate.to_string_lossy().into_owned());
-        }
-    }
-    anyhow::bail!("lightpanda not on PATH")
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(&file))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
 }
 
 /// A browser navigera connects to instead of launching its own.
@@ -951,6 +1005,9 @@ pub struct BrowserSession {
     /// True when the underlying engine is Lightpanda (one tab; popups are
     /// followed in place).
     lightpanda: bool,
+    /// The engine's name as `status` says it: `chrome`, or the CDP server
+    /// (`lightpanda`, `obscura`, `moli`).
+    engine: &'static str,
     timeout_ms: f64,
     /// (tab target, navigation generation) whose load we stopped waiting
     /// for after a full navigation timeout (a page that streams forever,
@@ -1069,17 +1126,18 @@ impl BrowserSession {
             bail!("--transport pipe needs Linux/macOS; Windows uses ws (the default there)");
         }
         let launch_started = std::time::Instant::now();
-        let lightpanda = is_lightpanda(engine);
+        let server = CdpServer::from_engine(engine);
+        let lightpanda = server == Some(CdpServer::Lightpanda);
         let runtime = engine_runtime()?;
         let handle = runtime.handle().clone();
 
-        let (browser, exe) = if lightpanda {
-            // Lightpanda is a CDP server, not a Chromium executable: start
-            // `lightpanda serve` directly and connect to its CDP endpoint.
-            // No Chromium flags, no shim, no X server involved.
-            let bin = resolve_lightpanda_bin(executable)?;
-            let browser = Browser::launch_lightpanda(&handle, &bin)?;
-            crate::timing::log(&format!("[browser] engine=lightpanda launched {} via {bin}", browser.ws_url()));
+        let (browser, exe) = if let Some(server) = server {
+            // A CDP server, not a Chromium executable: start `<bin> serve`
+            // directly and connect to its CDP endpoint. No Chromium flags,
+            // no shim, no X server involved.
+            let bin = resolve_server_bin(server, executable)?;
+            let browser = Browser::launch_server(&handle, server, &bin)?;
+            crate::timing::log(&format!("[browser] engine={} launched {} via {bin}", server.name(), browser.ws_url()));
             (browser, bin)
         } else {
             launch_chrome(&handle, headless, executable, &transport)?
@@ -1110,6 +1168,7 @@ impl BrowserSession {
             active: 0,
             exe,
             lightpanda,
+            engine: server.map_or("chrome", CdpServer::name),
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -1196,6 +1255,7 @@ impl BrowserSession {
             active: 0,
             exe,
             lightpanda: false,
+            engine: "chrome",
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -1385,6 +1445,7 @@ impl BrowserSession {
             active,
             exe: what,
             lightpanda: false,
+            engine: "chrome",
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -1509,6 +1570,7 @@ impl BrowserSession {
             active,
             exe,
             lightpanda: false,
+            engine: "chrome",
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -1850,6 +1912,7 @@ impl BrowserSession {
             active: 0,
             exe: self.exe.clone(),
             lightpanda: false,
+            engine: "chrome",
             timeout_ms: self.timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -4418,6 +4481,12 @@ impl BrowserSession {
     /// True when this session drives Lightpanda rather than Chromium.
     pub fn is_lightpanda(&self) -> bool {
         self.lightpanda
+    }
+
+    /// The engine's name as `status` says it (`chrome`, `lightpanda`,
+    /// `obscura`, `moli`).
+    pub fn engine_name(&self) -> &'static str {
+        self.engine
     }
 
     /// An Electron app (`start --electron`): its windows are the app's own.
