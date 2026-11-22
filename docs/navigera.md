@@ -733,6 +733,13 @@ take Chrome's paths; each session gets a browser of its own.
   - its accessibility tree's root has no name and no URL, and
     `Accessibility.getRootAXNode` answers nothing: `ax` reads the whole tree
     and takes the title and URL from the page.
+  - its accessibility tree is the top document's light DOM only: no
+    shadow root's content and no frame's document. navigera asks each
+    engine it starts as a CDP server once whether an open shadow root's
+    button is in its tree; where it is not, `ax` lists what open shadow
+    roots and same-origin frames hold after the tree, under
+    `- shadow root of <tag>` and `- document of <iframe> "<title>"`,
+    without refs (target those elements with `--text`).
   - a multiple `<select>` takes one option (`select --add` is refused), and
     there is no `Clipboard` API.
   - `eval`: Obscura runs a script it is asked to check for side effects, so

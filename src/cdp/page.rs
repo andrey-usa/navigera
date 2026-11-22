@@ -3226,7 +3226,7 @@ fn shifted_char(c: char) -> char {
 /// live region: `{host, tag, role, name, value?, checked?, level?}`, `host`
 /// numbering the shadow roots in document order. `scope` limits it to roots
 /// under the element a selector names.
-const SHADOW_AX: &str = r#"(scope) => {
+const SHADOW_AX: &str = r#"(scope, withFrames) => {
   const top = scope ? document.querySelector(scope) : document;
   if (!top) return [];
   const out = [];
@@ -3278,9 +3278,17 @@ const SHADOW_AX: &str = r#"(scope) => {
     try { return getComputedStyle(el).display === 'none'; } catch (e) { return false; }
   };
   let hosts = 0;
-  const visit = (root, host, tag) => {
+  const visit = (root, host, tag, frame) => {
     for (const el of root.querySelectorAll('*')) {
-      if (el.shadowRoot) visit(el.shadowRoot, ++hosts, el.localName);
+      if (el.shadowRoot) visit(el.shadowRoot, ++hosts, el.localName, null);
+      if (withFrames && (el.localName === 'iframe' || el.localName === 'frame') && !hidden(el)) {
+        let doc = null;
+        try { doc = el.contentDocument; } catch (e) {}
+        if (doc && doc.documentElement) {
+          const label = squash(el.getAttribute('title') || el.getAttribute('name') || el.getAttribute('src') || '');
+          visit(doc, ++hosts, el.localName, label);
+        }
+      }
       if (host === 0 || out.length >= 200) continue;
       try {
         const role = roleOf(el);
@@ -3289,6 +3297,7 @@ const SHADOW_AX: &str = r#"(scope) => {
         const live = /^(status|alert|log)$/.test(role);
         if (live && !name) continue;
         const entry = { host, tag, role, name };
+        if (frame !== null) entry.frame = frame;
         if (/^(textbox|searchbox|spinbutton|combobox|slider)$/.test(role) && el.value) entry.value = String(el.value);
         if (role === 'checkbox' || role === 'radio') entry.checked = !!el.checked;
         if (role === 'heading') entry.level = +el.tagName.slice(1) || 2;
@@ -3296,7 +3305,7 @@ const SHADOW_AX: &str = r#"(scope) => {
       } catch (e) {}
     }
   };
-  visit(top, 0, '');
+  visit(top, 0, '', null);
   return out;
 }"#;
 
@@ -8283,6 +8292,22 @@ impl Page {
     }
 
     fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        let tree = self.ax_tree_read(timeout, opts)?;
+        // An engine whose tree leaves shadow roots out (Obscura 0.2.7, see
+        // `events::AX_SHADOW_PAGE`): what they hold is listed from the page,
+        // and the documents of frames too where no `Iframe` line holds one.
+        let page_side =
+            self.shared.ax_shadow_mode.load(std::sync::atomic::Ordering::Relaxed) == super::events::AX_SHADOW_PAGE;
+        match tree {
+            Value::String(text) if page_side && !opts.json => {
+                let frames = !text.lines().any(|l| l.trim_start().starts_with("- Iframe") && l.ends_with(':'));
+                Ok(Value::String(self.page_side_ax(text, opts, frames, timeout)))
+            }
+            tree => Ok(tree),
+        }
+    }
+
+    fn ax_tree_read(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
         self.fresh_layout(timeout);
         // Only a read that arms a journal leaves one standing for itself,
         // and its snapshot.
@@ -9022,25 +9047,35 @@ impl Page {
         crate::timing::record("ax_render", started);
         self.remember_refs(&rendered.refs, &url, root_backend_id);
         let mut text = rendered.text;
-        // Lightpanda's tree stops at a shadow root; what is inside is read
-        // from the page instead, without refs (see SHADOW_AX).
-        let scope = match &opts.scope {
-            None => Some(Value::Null),
-            Some(Target::Selector(sel)) => Some(json!(sel)),
-            Some(_) => None,
-        };
-        if let (true, Some(scope)) = (self.shared.is_single_target(), scope) {
-            if let Ok(Value::Array(found)) = self.evaluate_raw(&format!("({SHADOW_AX})({scope})"), timeout) {
-                let shadow = ax::render_shadow(&found);
-                if !shadow.is_empty() {
-                    if !text.ends_with('\n') {
-                        text.push('\n');
-                    }
-                    text.push_str(shadow.trim_end());
-                }
-            }
+        // Lightpanda's tree stops at a shadow root: what is inside is read
+        // from the page instead (see `page_side_ax`).
+        if self.shared.is_single_target() {
+            text = self.page_side_ax(text, opts, false, timeout);
         }
         Ok(Value::String(text))
+    }
+
+    /// `text` with what open shadow roots (and, with `frames`, same-origin
+    /// frames' documents) hold appended, read from the page without refs
+    /// (see SHADOW_AX): for an engine whose tree has no such nodes.
+    fn page_side_ax(&self, mut text: String, opts: &AxOptions, frames: bool, timeout: Duration) -> String {
+        let scope = match &opts.scope {
+            None => Value::Null,
+            Some(Target::Selector(sel)) => json!(sel),
+            Some(_) => return text,
+        };
+        let started = std::time::Instant::now();
+        if let Ok(Value::Array(found)) = self.evaluate_raw(&format!("({SHADOW_AX})({scope}, {frames})"), timeout) {
+            let shadow = ax::render_shadow(&found);
+            if !shadow.is_empty() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(shadow.trim_end());
+            }
+        }
+        crate::timing::record("ax_page_side", started);
+        text
     }
 
     /// Close this tab the way a user (and Playwright) does: `Page.close` on

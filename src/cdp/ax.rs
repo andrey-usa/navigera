@@ -1295,9 +1295,12 @@ fn thousands(n: usize) -> String {
 }
 
 /// Lines for what [`crate::cdp::page`]'s `SHADOW_AX` found inside shadow
-/// roots, appended to a Lightpanda snapshot: one heading per root, then its
-/// elements as the tree would show them, but with no refs -- the engine gives
-/// those nodes no id -- and the targeting that does reach them said once.
+/// roots (and, where the engine's tree leaves them out, same-origin frames),
+/// appended to the snapshot of an engine whose tree has no such nodes
+/// (Lightpanda, Obscura 0.2.7): one heading per root or frame, then its
+/// elements as the tree would show them, but with no refs -- the engine's
+/// tree has no node to point at -- and the targeting that does reach them
+/// said once.
 pub fn render_shadow(found: &[Value]) -> String {
     let mut out = String::new();
     let mut host = 0;
@@ -1308,9 +1311,12 @@ pub fn render_shadow(found: &[Value]) -> String {
         if h != host {
             host = h;
             let tag = e.get("tag").and_then(Value::as_str).unwrap_or("element");
+            let what = match e.get("frame").and_then(Value::as_str) {
+                Some(label) => format!("document of <{tag}> {}", serde_json::to_string(label).unwrap_or_default()),
+                None => format!("shadow root of <{tag}>"),
+            };
             out.push_str(&format!(
-                "- shadow root of <{tag}> (Lightpanda leaves it out of the tree and gives it no refs; \
-                 target it with --text \"<name>\"):\n"
+                "- {what} (the engine's tree leaves it out, so no refs; target it with --text \"<name>\"):\n"
             ));
         }
         let mut line = format!("  - {role}");
@@ -1650,6 +1656,15 @@ mod tests {
         assert!(text.contains("  - heading \"Prefs\" [level=3]\n"), "{text}");
         assert!(!text.contains("[ref="), "{text}");
         assert_eq!(render_shadow(&[]), "");
+        // A same-origin frame's document, where the engine's tree has none.
+        let found = vec![
+            json!({"host": 1, "tag": "iframe", "frame": "Support request form", "role": "textbox", "name": "Message"}),
+            json!({"host": 1, "tag": "iframe", "frame": "Support request form", "role": "radio", "name": "High", "checked": true}),
+        ];
+        let text = render_shadow(&found);
+        assert!(text.starts_with("- document of <iframe> \"Support request form\" ("), "{text}");
+        assert!(text.contains("  - textbox \"Message\"\n"), "{text}");
+        assert!(text.contains("  - radio \"High\" [checked]\n"), "{text}");
     }
 
     /// A lazy fetch over a map from parent id to child objects.

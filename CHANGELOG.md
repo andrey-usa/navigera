@@ -75,6 +75,18 @@ All notable changes to this project are documented here. The format follows
   ([run 45055641714](https://github.com/andrey-usa/navigera/actions/runs/45055641714)).
   Chrome takes no extra step. The scripted agent eval on Moli went from
   9/21 to 21/21 ([run 45057911369](https://github.com/andrey-usa/navigera/actions/runs/45057911369)).
+- On Obscura, `ax` showed nothing of what a shadow root or an iframe
+  holds: Obscura 0.2.7's accessibility tree is the top document's light
+  DOM only, and it answers the top document's tree for any frame, so the
+  cart's coupon field and the support page's form were missing. navigera
+  asks each browser it starts as a CDP server once whether a button in an
+  open shadow root is in its tree, and where it is not, lists what open
+  shadow roots and same-origin frames hold after the tree, from the page and
+  without refs, as on Lightpanda (`--text` reaches them). Chrome takes no
+  extra step. The walk takes 0.1 ms on the support page and 0.7 ms on
+  4,506 elements in Chrome 153's V8 (behind a proxy that answers the tree
+  as Obscura does); CI's `engine` jobs check both on Obscura 0.2.7 and
+  Moli 1.1.27.
 - On Lightpanda, a click on an element that was disabled for the moment
   (a "Load more" reading "Loading…") went to it at once, did nothing, and
   counted: the wait for it to be enabled ended with the wait for it to stop

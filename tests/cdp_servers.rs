@@ -327,3 +327,50 @@ fn late_content_on_obscura() {
 fn late_content_on_moli() {
     late_content("moli");
 }
+
+/// `ax` shows what an open shadow root (the cart's coupon widget) and a
+/// same-origin iframe (the support form) hold, whether the engine's tree
+/// has them or navigera lists them from the page.
+fn frames_and_shadow_roots(engine: &'static str) {
+    let Some(bin) = binary(engine) else {
+        eprintln!("skipping: no {engine} binary");
+        return;
+    };
+    let Some(site) = acme() else {
+        eprintln!("skipping: python3 not available for the fixture site");
+        return;
+    };
+    let agent = Agent::new(engine, bin, "inner");
+    agent.ok(&["goto", &format!("{}/cart", site.base)]);
+    agent.ok(&[
+        "eval",
+        "fetch('/api/cart', { method: 'POST', headers: { 'content-type': 'application/json' }, \
+         body: JSON.stringify({ id: 101, set: 1 }) }).then((r) => r.status)",
+    ]);
+    agent.ok(&["goto", &format!("{}/cart", site.base)]);
+    agent.ok(&["wait", "--text", "Apply coupon"]);
+    let cart = agent.ax();
+    for want in ["\"Coupon code\"", "button \"Apply coupon\""] {
+        assert!(cart.contains(want), "{engine}: {want} missing from the cart's tree:\n{cart}");
+    }
+    agent.ok(&["goto", &format!("{}/support", site.base)]);
+    agent.ok(&["wait", "--text", "Submit request", "--frame", "iframe"]);
+    let support = agent.ax();
+    for want in ["textbox \"Message\"", "radio \"High\"", "button \"Submit request\""] {
+        assert!(support.contains(want), "{engine}: {want} missing from the support page's tree:\n{support}");
+    }
+    // Each element once: listed from the page only where the tree has none.
+    assert_eq!(support.matches("textbox \"Message\"").count(), 1, "{engine}:\n{support}");
+    assert_eq!(cart.matches("button \"Apply coupon\"").count(), 1, "{engine}:\n{cart}");
+    agent.ok(&["quit"]);
+}
+
+#[test]
+fn frames_and_shadow_roots_on_obscura() {
+    frames_and_shadow_roots("obscura");
+}
+
+#[test]
+fn frames_and_shadow_roots_on_moli() {
+    frames_and_shadow_roots("moli");
+}

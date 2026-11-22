@@ -293,7 +293,23 @@ pub struct Shared {
     /// [`LAYOUT_ASK`] (not known yet) or [`LAYOUT_SHOT`] (it keeps the
     /// layout it first built until a screenshot: see [`ask_layout`]).
     pub layout_mode: std::sync::atomic::AtomicU8,
+    /// Whether the engine's accessibility tree holds what an open shadow
+    /// root shows: [`AX_SHADOW_TREE`] (Chrome, and every browser navigera
+    /// did not start as a CDP server), [`AX_SHADOW_ASK`] (not known yet) or
+    /// [`AX_SHADOW_PAGE`] (it leaves shadow roots out: see [`ask_ax_shadow`]).
+    pub ax_shadow_mode: std::sync::atomic::AtomicU8,
 }
+
+/// [`Shared::ax_shadow_mode`]: the engine's tree has shadow roots in it.
+pub const AX_SHADOW_TREE: u8 = 0;
+/// [`Shared::ax_shadow_mode`]: a CDP server engine, not asked yet.
+pub const AX_SHADOW_ASK: u8 = 1;
+/// [`Shared::ax_shadow_mode`]: the engine's tree is the top document's
+/// light DOM only (Obscura 0.2.7: `Accessibility.getFullAXTree` walks
+/// the document's children, never a shadow root, and answers the top
+/// document's tree whatever `frameId` it is given). `ax` lists what open
+/// shadow roots and same-origin frames hold from the page, as on Lightpanda.
+pub const AX_SHADOW_PAGE: u8 = 2;
 
 /// [`Shared::layout_mode`]: the layout follows the page (the default).
 pub const LAYOUT_LIVE: u8 = 0;
@@ -1115,6 +1131,7 @@ impl Shared {
 pub async fn arm_dialog(client: &CdpClient, shared: &Shared, session: &str) {
     if !shared.is_single_target() {
         ask_layout(client, shared, session).await;
+        ask_ax_shadow(client, shared, session).await;
         if page_dialogs(client, shared, session).await {
             install_page_dialogs(client, shared, session).await;
         }
@@ -1205,6 +1222,62 @@ async fn ask_layout(client: &CdpClient, shared: &Shared, session: &str) {
     crate::timing::record("layout_probe", started);
     crate::timing::log(&format!("[layout] {}", if mode == LAYOUT_SHOT { "kept until a screenshot" } else { "live" }));
 }
+
+/// Whether `session`'s engine puts what an open shadow root shows in its
+/// accessibility tree, asked once per browser (only of a CDP server engine:
+/// [`AX_SHADOW_ASK`]), with its first tab: a button named
+/// [`AX_SHADOW_PROBE`] in an open shadow root, then the engine's tree,
+/// searched for that name. Any failure leaves the tree as it is
+/// ([`AX_SHADOW_TREE`]), and nothing is asked again.
+async fn ask_ax_shadow(client: &CdpClient, shared: &Shared, session: &str) {
+    if shared.ax_shadow_mode.load(Ordering::Relaxed) != AX_SHADOW_ASK {
+        return;
+    }
+    const WAIT: Duration = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let eval = |expression: String| {
+        client.send("Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(session), WAIT)
+    };
+    let name = json!(AX_SHADOW_PROBE);
+    let added = eval(format!(
+        "(() => {{ const made = !document.documentElement; \
+         if (made) document.appendChild(document.createElement('html')); \
+         const r = document.body || document.documentElement; \
+         if (!r.attachShadow) return false; const h = document.createElement('div'); \
+         const b = document.createElement('button'); b.textContent = {name}; \
+         h.attachShadow({{ mode: 'open' }}).appendChild(b); r.appendChild(h); \
+         Object.defineProperty(window, '__nvAxProbe', {{ value: [h, made], configurable: true, enumerable: false }}); \
+         return true; }})()"
+    ))
+    .await;
+    let mut mode = AX_SHADOW_TREE;
+    if added.is_ok_and(|r| r.pointer("/result/value") == Some(&json!(true))) {
+        // An engine that keeps its first layout builds the tree from it.
+        if shared.layout_mode.load(Ordering::Relaxed) == LAYOUT_SHOT {
+            let _ = client.send("Page.captureScreenshot", layout_shot_params(), Some(session), WAIT).await;
+        }
+        if let Ok(tree) = client.send("Accessibility.getFullAXTree", json!({}), Some(session), WAIT).await {
+            if !tree.to_string().contains(AX_SHADOW_PROBE) {
+                mode = AX_SHADOW_PAGE;
+            }
+        }
+    }
+    let _ = eval(
+        "(() => { const p = window.__nvAxProbe; if (!p) return; delete window.__nvAxProbe; \
+         const r = p[0].parentNode; p[0].remove(); if (p[1] && r) r.remove(); })()"
+            .to_string(),
+    )
+    .await;
+    shared.ax_shadow_mode.store(mode, Ordering::Relaxed);
+    crate::timing::record("ax_shadow_probe", started);
+    crate::timing::log(&format!(
+        "[ax] shadow roots {}",
+        if mode == AX_SHADOW_PAGE { "listed from the page" } else { "in the engine's tree" }
+    ));
+}
+
+/// See [`ask_ax_shadow`]: the probe button's name.
+const AX_SHADOW_PROBE: &str = "navigera-ax-shadow-probe";
 
 /// See [`ask_layout`]: a geometry read, then a 10 px box added to the
 /// document element, and its width.

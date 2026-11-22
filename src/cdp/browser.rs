@@ -159,11 +159,13 @@ impl Browser {
             // Tabs, contexts and popups as Chrome has them: the same setup,
             // target discovery included. The server leads its own process
             // group, so closing it takes its workers along. Whether its
-            // dialogs are announced, and whether its layout follows the
-            // page, is asked with its first tab.
+            // dialogs are announced, whether its layout follows the page
+            // and whether its tree holds shadow roots is asked with its
+            // first tab.
             let browser = Self::finish(handle, client, Some(child), None, ws_url);
             browser.shared.dialogs_mode.store(events::DIALOGS_ASK, std::sync::atomic::Ordering::Relaxed);
             browser.shared.layout_mode.store(events::LAYOUT_ASK, std::sync::atomic::Ordering::Relaxed);
+            browser.shared.ax_shadow_mode.store(events::AX_SHADOW_ASK, std::sync::atomic::Ordering::Relaxed);
             return Ok(browser);
         }
         let shared = Arc::new(Shared::default());
