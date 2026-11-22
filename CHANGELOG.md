@@ -55,8 +55,11 @@ All notable changes to this project are documented here. The format follows
   documents there, which answer as `dialog` says and report each dialog as
   on Chrome. Which engines need them is asked once per browser, and only of
   an engine that is its own CDP server: one whose `confirm` is the
-  browser's own (not a constructor) opens no dialog for it (about 1.5 ms,
-  Moli), any other is called once and watched for the dialog event.
+  browser's own (not a constructor) opens no dialog for it (1.3-2.5 ms for
+  Chrome 153's behind a proxy that hides its dialog events, as Obscura
+  does), any other is called once and watched for the dialog event. CI's
+  `engine` jobs check the answers and the reports on Obscura 0.2.7 and
+  Moli 1.1.27 ([run 45052209468](https://github.com/andrey-usa/navigera/actions/runs/45052209468)).
 - On Lightpanda, a click on an element that was disabled for the moment
   (a "Load more" reading "Loading…") went to it at once, did nothing, and
   counted: the wait for it to be enabled ended with the wait for it to stop
