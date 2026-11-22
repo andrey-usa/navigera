@@ -63,27 +63,21 @@ fn mark(what: String) {
 }
 
 /// A page over HTTP, so the browser has fetched through its network service.
-/// Each connection is read on a thread of its own. A server that reads one
-/// connection at a time waits on a connection that sends nothing and never
-/// takes the request on the next: one such connection held open makes
-/// `goto` wait out navigera's 35 s for Page.navigate's answer, the way
-/// Edge's first launch failed now and then on Windows.
-/// `NAVIGERA_TEST_SERIAL_SERVER=1` serves one connection at a time, as the
-/// test did before, to compare the two where it failed.
+/// Each connection is read on a thread of its own: Edge 157 on Windows may
+/// open a connection it sends nothing on and send the request on another,
+/// and a server that read one connection at a time waited on the first
+/// until navigera gave up on Page.navigate at 35 s (2 of 120 repeats on
+/// windows-2025, 0 of 120 with a thread per connection: runs 45015728760
+/// and 45015731300).
 fn serve_page() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
     let url = format!("http://{}/", listener.local_addr().unwrap());
-    let serial = std::env::var_os("NAVIGERA_TEST_SERIAL_SERVER").is_some();
     std::thread::spawn(move || {
         for (n, stream) in listener.incoming().enumerate() {
             let Ok(stream) = stream else { continue };
             let peer = stream.peer_addr().map(|a| a.port()).unwrap_or(0);
             mark(format!("server: connection {n} from port {peer} accepted"));
-            if serial {
-                answer(n, stream);
-            } else {
-                std::thread::spawn(move || answer(n, stream));
-            }
+            std::thread::spawn(move || answer(n, stream));
         }
     });
     url
@@ -91,9 +85,7 @@ fn serve_page() -> String {
 
 /// Read a request from connection `n` and answer it with the page.
 fn answer(n: usize, mut stream: TcpStream) {
-    if std::env::var_os("NAVIGERA_TEST_SERIAL_SERVER").is_none() {
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    }
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let mut request = [0u8; 4096];
     let read = stream.read(&mut request);
     let got = *read.as_ref().unwrap_or(&0);
@@ -299,7 +291,7 @@ impl Launch {
         let status = quick(&["status"]);
         let endpoint = serde_json::from_str::<Value>(&status)
             .ok()
-            .and_then(|v| v["endpoint"].as_str().map(str::to_string))
+            .and_then(|v| v["result"]["endpoint"].as_str().map(str::to_string))
             .unwrap_or_default();
         out += &format!("\nstatus: {status}\ndevtools /json/list: {}", devtools_list(&endpoint));
         out += &format!("\ntab-list: {}", quick(&["tab-list"]));
