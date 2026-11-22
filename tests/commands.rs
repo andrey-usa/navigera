@@ -104,8 +104,17 @@ impl Agent {
 
     fn response(&self, args: &[&str]) -> Value {
         let r = self.run(args);
-        assert_eq!(r["ok"], true, "[{}] {args:?} failed: {r}", self.engine);
+        assert_eq!(r["ok"], true, "[{}] {args:?} failed: {r}\n{}", self.engine, self.log_tail());
         r
+    }
+
+    /// The last lines of the session's own log (beside its socket), where
+    /// navigera says what it saw on a failure CI cannot reproduce.
+    fn log_tail(&self) -> String {
+        let log = std::path::Path::new(&self.session).with_extension("log");
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        format!("session log, last lines:\n{}", lines[lines.len().saturating_sub(15)..].join("\n"))
     }
 
     fn ok(&self, args: &[&str]) -> Value {
