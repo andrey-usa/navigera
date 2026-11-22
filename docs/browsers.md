@@ -61,8 +61,9 @@ headless mode, runs one session per machine and blocks user input while it
 runs (Apple's limits). The `webdriver` workflow runs one scenario on Firefox
 (Linux, macOS, Windows), Safari (macOS) and chromedriver over both protocols.
 
-**Lightpanda** 1.0 (`--engine lightpanda`) runs the same end-to-end suite in
-CI, on 1.0.1 and the nightly. It is a different engine (one tab, no layout),
+**Lightpanda** 1.0 (`--engine lightpanda`) runs its own end-to-end tests and
+its leg of the commands suite in CI on every push, on its newest stable
+release (never the nightly). It is a different engine (one tab, no layout),
 so navigera fills in what its CDP leaves out: shadow roots and password
 fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
 The differences that remain are listed in

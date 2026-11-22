@@ -45,6 +45,12 @@ fn engines() -> Vec<(&'static str, Option<PathBuf>)> {
     out
 }
 
+/// `lightpanda version` of the binary a Lightpanda agent runs (`1.0.5`).
+fn lightpanda_release(bin: &Option<PathBuf>) -> Option<String> {
+    let out = Command::new(bin.as_ref()?).arg("version").stdin(Stdio::null()).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().trim_start_matches('v').to_string())
+}
+
 struct Site {
     child: Child,
     base: String,
@@ -276,8 +282,19 @@ fn drag_drops_a_card_and_moves_a_slider() {
         assert_eq!(r["drag"]["dropped"], true, "[{engine}] {r}");
         let r = a.ok(&["drag", "#card", "#out"]);
         assert_eq!(r["drag"]["dropped"], false, "[{engine}] {r}");
-        a.ok(&["drag", "#knob", "#track"]);
-        assert_eq!(a.ok(&["eval", "out.textContent"]), "knob 140px", "[{engine}]");
+        // Lightpanda 1.0.3 and 1.0.4 put the block-level track and its knob at
+        // left 0 (240 before and from 1.0.5 on), where the hit test finds
+        // another element, so neither has an on-screen point (T-0277): that
+        // known bug, on those releases only, is the answer expected there.
+        let known_bug =
+            engine == "lightpanda" && matches!(lightpanda_release(&a.bin).as_deref(), Some("1.0.3" | "1.0.4"));
+        if known_bug {
+            let r = a.run(&["drag", "#knob", "#track"]);
+            assert!(r["error"].as_str().is_some_and(|e| e.contains("no on-screen point")), "[{engine}] {r}");
+        } else {
+            a.ok(&["drag", "#knob", "#track"]);
+            assert_eq!(a.ok(&["eval", "out.textContent"]), "knob 140px", "[{engine}]");
+        }
         assert!(a.err(&["drag", "#card", "#nowhere", "--timeout-ms", "300"]).contains("drag"), "[{engine}]");
     }
 }

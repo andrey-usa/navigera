@@ -98,7 +98,7 @@ browser behind a WebDriver server (`--webdriver <url>`) run the core ops,
 experimental too. CI runs the end-to-end
 suite on the current Chrome Stable and the three milestones before it,
 chrome-headless-shell, Chrome Beta, the runner's Chrome on Linux and
-Windows, and Lightpanda; every CDP call navigera makes is checked against
+Windows, and Lightpanda, Obscura and Moli; every CDP call navigera makes is checked against
 the protocol each browser serves. Details: [Supported
 browsers](https://andrey-usa.github.io/navigera/concepts/browsers.html).
 

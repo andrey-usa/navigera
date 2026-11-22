@@ -332,7 +332,7 @@ pub const DEEP: &str = r#"(() => {
 /// element and its ancestors (`__nvPath`), to tell whether anything
 /// listened for the click (see [`Page::wired_later`]); with `gel` (see
 /// [`GEL`]), counted as the press comes.
-const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects, youngMs, gel) {
+const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects, youngMs, gel, enabledMs) {
     const deadline = Date.now() + (force ? 0 : settleMs);
     // navigera's own listeners, told from the page's by PATH_LISTENERS.
     const ours = (f) => { f.__nv = true; return f; };
@@ -646,7 +646,11 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         Object.defineProperty(top, '__nvFx', { value: fx, configurable: true, enumerable: false, writable: true });
     };
     const disabled = () => !!(el.disabled || el.closest('fieldset[disabled]'));
-    while (!force && disabled() && Date.now() < deadline) await new Promise((res) => setTimeout(res, 50));
+    // A disabled element is waited for the element wait, also where nothing
+    // moves (no layout: settleMs is 0): a "Load more" that reads "Loading…"
+    // got the click while disabled there, which did nothing and counted.
+    const enabledBy = Date.now() + (force ? 0 : (enabledMs ?? settleMs));
+    while (!force && disabled() && Date.now() < enabledBy) await new Promise((res) => setTimeout(res, 50));
     if (!force && strict && disabled()) return { disabled: true };
     const describe = (n) => {
         if (!n) return null;
@@ -5716,6 +5720,7 @@ impl Page {
                     json!(effects),
                     json!(young_ms),
                     gel.clone(),
+                    json!(wait.as_millis() as u64),
                 ],
                 wait,
                 timeout,

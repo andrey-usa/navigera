@@ -1127,6 +1127,16 @@ const UNTIL_GONE_MAX: u32 = 50;
 /// flight for this long is not waiting for one.
 const DISABLED_QUIET: Duration = Duration::from_millis(500);
 
+/// What a page shows and holds, hashed in the page: its text, its form
+/// controls' values and states, its URL. `click --until-gone` compares it
+/// around a click on an engine whose clicks navigera does not watch
+/// (Lightpanda), to tell a click that changed nothing.
+const PAGE_SIGNATURE: &str = "(() => { const d = document; \
+    const t = (d.body ? d.body.textContent : '') + '\\u0000' + location.href + '\\u0000' + \
+    [...d.querySelectorAll('input, select, textarea')].map((e) => e.type === 'checkbox' || e.type === 'radio' ? e.checked : e.value).join('\\u0001'); \
+    let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } \
+    return t.length + ':' + (h >>> 0); })()";
+
 /// `until_gone` in JSON: `true` for the default limit, or the limit.
 fn until_gone_limit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
     use serde::de::Error;
@@ -5570,7 +5580,19 @@ impl Driver {
         let wait =
             timeout_ms.map(|ms| Duration::from_secs_f64(ms / 1000.0)).unwrap_or_else(crate::browser::element_wait);
         let mut clicks = 1;
+        // Lightpanda's clicks are DOM events navigera does not watch, so no
+        // `no_effect` comes back: the page before a click (the second on),
+        // compared once what the click fetched has landed.
+        let unwatched = s.is_lightpanda();
+        let mut before: Option<String> = None;
         loop {
+            if let Some(before) = before.take() {
+                let window = s.network_quiet_window().min(AFTER_ACTION_QUIET);
+                s.action_settle_wait(window, NETWORK_QUIET_MAX);
+                if s.evaluate_with_timeout::<String>(PAGE_SIGNATURE, timeout_ms).ok().as_ref() == Some(&before) {
+                    return (clicks, format!("click {clicks} changed nothing on the page"));
+                }
+            }
             if point.get("no_effect").is_some() {
                 // The first click's note says what to check; a later one
                 // is how a list that stops growing ends.
@@ -5632,6 +5654,9 @@ impl Driver {
             // Each click is an action of its own: what it fetches is its
             // traffic (not a poll of the URL the last one fetched), and its
             // render is what the settle proof waits for.
+            if unwatched {
+                before = s.evaluate_with_timeout::<String>(PAGE_SIGNATURE, timeout_ms).ok();
+            }
             s.mark_action();
             match s.click_target(&next, opts, timeout_ms) {
                 Ok(p) => *point = p,

@@ -25,8 +25,25 @@ All notable changes to this project are documented here. The format follows
   script adds after the first geometry read has no box, and boxes don't
   follow a scroll.
 
+- Lightpanda is back in CI (out since 1.0.3 broke the drag test, T-0277):
+  the `engine lightpanda` job runs tests/lightpanda.rs and Lightpanda's leg
+  of tests/commands.rs on its newest stable release. 1.0.5 fixed the
+  layout bug behind T-0277 (the drag fixture's track at left 0); on 1.0.3
+  and 1.0.4 the drag test expects that bug's answer, and only there.
+
 ### Fixed
 
+- On Lightpanda, a click on an element that was disabled for the moment
+  (a "Load more" reading "Loading…") went to it at once, did nothing, and
+  counted: the wait for it to be enabled ended with the wait for it to stop
+  moving, which is none on an engine with no layout. It is the element
+  wait now, as on Chrome; `click --until-gone --max 2` loaded one page
+  there instead of two.
+- `click --until-gone` on Lightpanda went on to its limit (50 clicks) on a
+  button that had stopped changing anything: navigera does not watch what
+  Lightpanda's clicks change. It compares the page (its text, form values
+  and URL, hashed in the page) before a click and once what the click
+  fetched has landed, and stops at the click that changed nothing.
 - `ax` on an engine whose `Accessibility.getRootAXNode` answers without a
   node (Obscura 0.2.7 answers `{}`) printed an empty page: it reads the
   whole tree then, and a root node with no title and no URL gets the
