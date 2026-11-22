@@ -3953,7 +3953,7 @@ impl BrowserSession {
     /// with nothing settled after it, and one that returned a promise ran
     /// twice (a `fetch` POST went out twice).
     pub fn evaluate_read(&self, source: &str, timeout_ms: Option<f64>) -> Result<Option<serde_json::Value>> {
-        if self.is_lightpanda() || !self.checks_side_effects(self.timeout(timeout_ms)) {
+        if self.is_lightpanda() || !self.checks_side_effects(self.timeout(timeout_ms))? {
             return Ok(None);
         }
         let marked = format!("{source}\n//# sourceURL={}\n", crate::clock::USER_EVAL_URL);
@@ -3962,19 +3962,22 @@ impl BrowserSession {
 
     /// [`cdp::Page::checks_side_effects`], asked once per browser (its
     /// answer is the engine's, kept in `Shared::side_effects` for every
-    /// session on it). When the question itself fails the answer is no and
-    /// is not kept: the eval runs as an action, and the next one asks again.
-    fn checks_side_effects(&self, timeout: Duration) -> bool {
+    /// session on it). An error is the browser's, as a read's is: the
+    /// caller reports it as the op's (a request that never reached a
+    /// crashed shared browser is what relaunches it), and the next eval
+    /// asks again.
+    fn checks_side_effects(&self, timeout: Duration) -> Result<bool> {
         use std::sync::atomic::Ordering::Relaxed;
         let known = &self.browser.shared().side_effects;
-        match known.load(Relaxed) {
+        Ok(match known.load(Relaxed) {
             SIDE_EFFECTS_CHECKED => true,
             SIDE_EFFECTS_RUN => false,
-            _ => self.active_tab().checks_side_effects(timeout).is_ok_and(|checks| {
+            _ => {
+                let checks = self.active_tab().checks_side_effects(timeout)?;
                 known.store(if checks { SIDE_EFFECTS_CHECKED } else { SIDE_EFFECTS_RUN }, Relaxed);
                 checks
-            }),
-        }
+            }
+        })
     }
 
     /// Click the element `target` names (trusted mouse click when hittable).
