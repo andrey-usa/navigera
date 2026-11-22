@@ -185,16 +185,26 @@ fn first_pass(engine: &'static str) {
         "fetch('/api/tickets', {method: 'POST', headers: {'content-type': 'application/json'}, \
          body: JSON.stringify({category: 'Billing', priority: 'low', message: 'once'})}).then(r => r.status)",
     ]);
-    assert_eq!(posted, 200, "{posted}");
+    // Obscura answers a whole number as a float (200.0).
+    assert_eq!(posted.as_f64(), Some(200.0), "{posted}");
     let tickets = server_state(&site.base)["tickets"].as_array().map(Vec::len);
     assert_eq!(tickets, Some(1), "one eval, one POST");
-    // Which of the two the engine is, as navigera found it: where V8's check
-    // holds (Moli) an eval that changes nothing is a read, with nothing
-    // armed on the page first; where the script runs anyway (Obscura) every
-    // eval is an action, the arm first.
-    agent.ok(&["goto", &url("/docs")]);
-    let armed = if engine == "obscura" { "object" } else { "undefined" };
-    assert_eq!(agent.ok(&["eval", "typeof window.__nvMut"]), armed, "{engine}: eval as a read or as an action");
+    // What navigera asks each browser before it tries an eval as a read:
+    // V8 refuses the write under the check (Moli hands `Runtime` to V8's
+    // own inspector); Obscura runs it (a no-op: `undefined` is not
+    // writable). There every eval is an action, the change watch armed
+    // first.
+    let probe = agent.ok(&[
+        "cdp",
+        "Runtime.evaluate",
+        r#"{"expression":"globalThis.undefined = undefined","returnByValue":true,"throwOnSideEffect":true}"#,
+    ]);
+    let refused = probe["result"]["exceptionDetails"]["exception"]["className"] == "EvalError";
+    assert_eq!(refused, engine != "obscura", "{engine}: {probe}");
+    if !refused {
+        agent.ok(&["goto", &url("/docs")]);
+        assert_eq!(agent.ok(&["eval", "typeof window.__nvMut"]), "object", "{engine}: an eval ran as a read");
+    }
 
     // A click that changes a control's state: the first box not ticked
     // (near the top: Moli 1.1.27 keeps an element's box where it was before
