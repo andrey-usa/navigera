@@ -278,7 +278,36 @@ pub struct Shared {
     /// 0 not asked yet, else [`SIDE_EFFECTS_CHECKED`] or [`SIDE_EFFECTS_RUN`]
     /// (see `BrowserSession::evaluate_read`).
     pub side_effects: std::sync::atomic::AtomicU8,
+    /// How the engine's dialogs are answered: [`DIALOGS_NATIVE`] (it
+    /// announces each and waits for the answer: Chrome, and every browser
+    /// navigera did not start as a CDP server), [`DIALOGS_ASK`] (not known
+    /// yet) or [`DIALOGS_PAGE`] (its own answer at once and tell no one:
+    /// navigera's page-side functions answer instead, see [`arm_dialog`]).
+    pub dialogs_mode: std::sync::atomic::AtomicU8,
+    /// The engine announced the dialog [`arm_dialog`] opened to ask.
+    pub dialog_probe_seen: AtomicBool,
+    /// Page-side dialogs: page session id -> its new-document script.
+    pub dialog_scripts: Mutex<HashMap<String, String>>,
 }
+
+/// [`Shared::dialogs_mode`]: the engine announces dialogs (the default).
+pub const DIALOGS_NATIVE: u8 = 0;
+/// [`Shared::dialogs_mode`]: a CDP server engine, not asked yet.
+pub const DIALOGS_ASK: u8 = 1;
+/// [`Shared::dialogs_mode`]: the engine's own dialogs answer at once and
+/// raise no event (Obscura 0.2.7: `confirm()` false, `prompt()` null).
+pub const DIALOGS_PAGE: u8 = 2;
+
+/// The message of the dialog that asks an engine whether it announces
+/// dialogs; answered unseen, never reported.
+const DIALOG_PROBE: &str = "navigera: is this dialog announced?";
+/// The binding navigera's page-side dialog functions report through.
+const DIALOG_BINDING: &str = "__navigeraDialog";
+/// Page-side dialogs kept until a response reports them: a page that calls
+/// the binding in a loop costs this many, not memory without bound.
+const PAGE_DIALOGS_MAX: usize = 256;
+/// A page-side dialog's message, at most (a char boundary at or below).
+const PAGE_DIALOG_MESSAGE_MAX: usize = 16 * 1024;
 
 /// [`Shared::side_effects`]: the engine refuses them (V8: Chrome, Moli).
 pub const SIDE_EFFECTS_CHECKED: u8 = 1;
@@ -860,6 +889,7 @@ impl Shared {
         self.scopes.lock().unwrap().remove(session_id);
         self.nav.lock().unwrap().remove(session_id);
         self.net.lock().unwrap().remove(session_id);
+        self.dialog_scripts.lock().unwrap().remove(session_id);
     }
 
     /// (fetch/XHR requests in flight, when the last one started or ended).
@@ -1060,11 +1090,18 @@ impl Shared {
     }
 }
 
-/// Arm the session's dialog policy on Lightpanda, where a dialog takes the
-/// response armed before it opens. One armed response covers one dialog.
+/// Arm the session's dialog policy where it has to be in place before a
+/// dialog opens: on Lightpanda, where a dialog takes the response armed
+/// beforehand (one armed response covers one dialog), and on an engine
+/// whose own dialogs answer at once and tell no one (Obscura 0.2.7), where
+/// navigera's page-side functions answer per the policy and report each.
+/// Chrome waits for the answer: the watcher sends it then.
 pub async fn arm_dialog(client: &CdpClient, shared: &Shared, session: &str) {
     if !shared.is_single_target() {
-        return; // Chrome waits for the answer: the watcher sends it then.
+        if page_dialogs(client, shared, session).await {
+            install_page_dialogs(client, shared, session).await;
+        }
+        return;
     }
     let policy = shared.policy_for(&shared.scope_of(session));
     let mut params = json!({ "accept": policy.accept });
@@ -1078,6 +1115,129 @@ pub async fn arm_dialog(client: &CdpClient, shared: &Shared, session: &str) {
         // An engine without the LP domain dismisses every dialog.
         Err(_) => map.remove(session),
     };
+}
+
+/// Whether `session`'s engine needs page-side dialogs, asked once per
+/// browser (only of a CDP server engine: [`DIALOGS_ASK`]). A `confirm` that
+/// is a browser's own operation (no `prototype`: not a constructor) is
+/// taken as is, with no dialog opened. Any other is called: a dialog the
+/// engine announces is answered by the watcher, unseen; one it answers by
+/// itself with no event is a stub (Obscura 0.2.7's `function () { return
+/// false; }`). Any failure keeps the engine's dialogs as they are, and
+/// nothing is asked again.
+async fn page_dialogs(client: &CdpClient, shared: &Shared, session: &str) -> bool {
+    match shared.dialogs_mode.load(Ordering::Relaxed) {
+        DIALOGS_ASK => {}
+        mode => return mode == DIALOGS_PAGE,
+    }
+    shared.dialog_probe_seen.store(false, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let asked = client
+        .send(
+            "Runtime.evaluate",
+            json!({ "expression": dialog_probe_expression(), "returnByValue": true }),
+            Some(session),
+            Duration::from_secs(5),
+        )
+        .await;
+    crate::timing::record("dialog_probe", started);
+    // An announced dialog comes before the answer of the eval that opened
+    // it; the watcher, a task of its own, may still be on its way to it.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    while shared.behind(client) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    crate::timing::record("dialog_probe_wait", started);
+    // null: the browser's own `confirm`, not called.
+    let called =
+        asked.is_ok_and(|r| r.get("exceptionDetails").is_none() && r.pointer("/result/value") == Some(&json!(false)));
+    let page = called && !shared.dialog_probe_seen.load(Ordering::SeqCst);
+    shared.dialogs_mode.store(if page { DIALOGS_PAGE } else { DIALOGS_NATIVE }, Ordering::Relaxed);
+    crate::timing::log(&format!("[dialogs] {}", if page { "page-side" } else { "the engine's" }));
+    page
+}
+
+/// See [`page_dialogs`]: null where `confirm` is a browser's own operation,
+/// else what calling it with [`DIALOG_PROBE`] answers.
+fn dialog_probe_expression() -> String {
+    format!("typeof confirm !== 'function' || !('prototype' in confirm) ? null : confirm({})", json!(DIALOG_PROBE))
+}
+
+/// Put navigera's `alert`/`confirm`/`prompt` in `session`'s documents, the
+/// one it shows and every one after, answering per its scope's policy and
+/// reporting each through [`DIALOG_BINDING`]. Again after a policy change:
+/// the shown document takes the new answer, the next ones the new script.
+async fn install_page_dialogs(client: &CdpClient, shared: &Shared, session: &str) {
+    const WAIT: Duration = Duration::from_secs(10);
+    let started = std::time::Instant::now();
+    let policy = shared.policy_for(&shared.scope_of(session));
+    let old = shared.dialog_scripts.lock().unwrap().remove(session);
+    let first = old.is_none();
+    let bind = async {
+        if first {
+            let _ = client.send("Runtime.addBinding", json!({ "name": DIALOG_BINDING }), Some(session), WAIT).await;
+        }
+    };
+    let remove = async {
+        if let Some(id) = old {
+            let params = json!({ "identifier": id });
+            let _ = client.send("Page.removeScriptToEvaluateOnNewDocument", params, Some(session), WAIT).await;
+        }
+    };
+    let params = json!({ "source": page_dialog_script(&policy), "runImmediately": true });
+    let add = client.send("Page.addScriptToEvaluateOnNewDocument", params, Some(session), WAIT);
+    let (_, _, added) = tokio::join!(bind, remove, add);
+    crate::timing::record("dialog_install", started);
+    if let Some(id) = added.ok().and_then(|r| r.get("identifier").and_then(Value::as_str).map(str::to_string)) {
+        shared.dialog_scripts.lock().unwrap().insert(session.to_string(), id);
+    }
+}
+
+/// The page-side dialog functions with `policy`'s answer. Run again in a
+/// document that has them, it only changes the answer.
+fn page_dialog_script(policy: &DialogPolicy) -> String {
+    format!(
+        r#"(() => {{
+  const policy = {{ accept: {accept}, text: {text} }};
+  const key = Symbol.for('navigera.dialogs');
+  if (typeof globalThis[key] === 'function') {{ globalThis[key](policy); return; }}
+  let p = policy;
+  Object.defineProperty(globalThis, key, {{ value: (next) => {{ p = next; }} }});
+  const str = (v) => (v === undefined ? '' : String(v));
+  const report = (type, message) => {{
+    try {{ globalThis.{binding}(JSON.stringify({{ type, message, accepted: p.accept }})); }} catch (e) {{}}
+  }};
+  const put = (name, fn) =>
+    Object.defineProperty(globalThis, name, {{ value: fn, writable: true, configurable: true, enumerable: true }});
+  put('alert', function alert(message) {{ report('alert', str(message)); }});
+  put('confirm', function confirm(message) {{ report('confirm', str(message)); return p.accept; }});
+  put('prompt', function prompt(message, value) {{
+    report('prompt', str(message));
+    return p.accept ? (p.text ?? str(value)) : null;
+  }});
+}})()"#,
+        accept = policy.accept,
+        text = policy.prompt_text.as_ref().map_or_else(|| "null".to_string(), |t| json!(t).to_string()),
+        binding = DIALOG_BINDING,
+    )
+}
+
+/// A dialog navigera's page-side functions reported: `{type, message,
+/// accepted}` from the binding's payload, which the page can also call,
+/// so it is read as data with bounds (a known type, the message clipped).
+fn page_dialog(payload: &Value) -> Option<Value> {
+    let v: Value = serde_json::from_str(payload.as_str()?).ok()?;
+    let kind = v.get("type").and_then(Value::as_str).filter(|t| matches!(*t, "alert" | "confirm" | "prompt"))?;
+    let mut message = v.get("message").and_then(Value::as_str).unwrap_or("");
+    if message.len() > PAGE_DIALOG_MESSAGE_MAX {
+        let mut end = PAGE_DIALOG_MESSAGE_MAX;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message = &message[..end];
+    }
+    let accepted = v.get("accepted").and_then(Value::as_bool).unwrap_or(false);
+    Some(json!({ "type": kind, "message": message, "accepted": accepted }))
 }
 
 /// Lightpanda opens `target=_blank` / `window.open` pages as top-level
@@ -1256,6 +1416,29 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
         shared.downloads.lock().unwrap().on_event(method, &params, &scope);
     }
     match method {
+        "Page.javascriptDialogOpening"
+            if shared.dialogs_mode.load(Ordering::Relaxed) == DIALOGS_ASK
+                && params.get("message").and_then(Value::as_str) == Some(DIALOG_PROBE) =>
+        {
+            // The engine announces dialogs (see `page_dialogs`): answered
+            // unseen, it is no dialog of the page's.
+            shared.dialog_probe_seen.store(true, Ordering::SeqCst);
+            let client = client.clone();
+            let session = session.to_string();
+            tokio::spawn(async move {
+                let s = Some(session.as_str()).filter(|s| !s.is_empty());
+                let answer = json!({ "accept": false });
+                let _ = client.send("Page.handleJavaScriptDialog", answer, s, Duration::from_secs(10)).await;
+            });
+        }
+        "Runtime.bindingCalled" if params.get("name").and_then(Value::as_str) == Some(DIALOG_BINDING) => {
+            if let Some(dialog) = params.get("payload").and_then(page_dialog) {
+                let mut dialogs = shared.dialogs.lock().unwrap();
+                if dialogs.len() < PAGE_DIALOGS_MAX {
+                    dialogs.push((shared.scope_of(session), dialog));
+                }
+            }
+        }
         "Page.javascriptDialogOpening" if shared.is_single_target() => {
             // Already answered by the page's engine: report what it got (the
             // armed response, else a dismissal) and arm the next one.
@@ -1968,5 +2151,33 @@ mod tests {
         assert!(shared.routes.lock().unwrap().contains_key("ctx-a2"));
         shared.move_scope("ctx-b", "ctx-b2", false);
         assert!(shared.policy_for("ctx-b2").accept);
+    }
+
+    #[test]
+    fn a_page_side_dialog_report_is_read_as_data_with_bounds() {
+        let payload = |v: Value| json!(v.to_string());
+        let d = page_dialog(&payload(json!({"type": "confirm", "message": "Delete?", "accepted": true}))).unwrap();
+        assert_eq!(d, json!({"type": "confirm", "message": "Delete?", "accepted": true}));
+        // The page can call the binding too: only the three kinds, and a
+        // message clipped on a character boundary.
+        assert!(page_dialog(&payload(json!({"type": "beforeunload", "message": ""}))).is_none());
+        assert!(page_dialog(&json!("not json")).is_none());
+        assert!(page_dialog(&json!(7)).is_none());
+        let long = "é".repeat(PAGE_DIALOG_MESSAGE_MAX);
+        let d = page_dialog(&payload(json!({"type": "alert", "message": long}))).unwrap();
+        let m = d["message"].as_str().unwrap();
+        assert!(m.len() <= PAGE_DIALOG_MESSAGE_MAX && m.len() >= PAGE_DIALOG_MESSAGE_MAX - 1, "{}", m.len());
+        assert_eq!(d["accepted"], false, "no accepted field reads as dismissed");
+    }
+
+    #[test]
+    fn the_page_side_script_carries_the_policy_as_literals() {
+        let s = page_dialog_script(&DialogPolicy { accept: false, prompt_text: None });
+        assert!(s.contains("accept: false, text: null"), "{s}");
+        let s = page_dialog_script(&DialogPolicy { accept: true, prompt_text: Some("a'b\"c</script>".into()) });
+        assert!(s.contains(r#"accept: true, text: "a'b\"c</script>""#), "{s}");
+        assert!(s.contains(DIALOG_BINDING));
+        // Asked only where `confirm` is not the browser's own operation.
+        assert!(dialog_probe_expression().starts_with("typeof confirm !== 'function' || !('prototype' in confirm)"));
     }
 }

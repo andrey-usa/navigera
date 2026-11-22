@@ -21,8 +21,8 @@ All notable changes to this project are documented here. The format follows
   and run `tests/cdp_servers.rs` (navigation, the tree and its refs, fill,
   a keyboard-submitted sign-in the server records, a checkbox, a select,
   tabs, a screenshot, the server gone after `quit`). What differs from
-  Chrome is in docs/navigera.md: on Obscura, dialogs are always dismissed
-  and a click can't reach into a shadow root; on Moli 1.1.27, content a
+  Chrome is in docs/navigera.md: on Obscura, a click can't reach into a
+  shadow root; on Moli 1.1.27, content a
   script adds after the first geometry read has no box, and boxes don't
   follow a scroll.
 
@@ -48,6 +48,15 @@ All notable changes to this project are documented here. The format follows
   every `eval` runs as an action, as on Lightpanda. Chrome and Moli refuse
   it, and their reads stay reads.
 - `status` in a `fork` of an Obscura or Moli session said engine `chrome`.
+- On Obscura, `dialog` changed nothing and no dialog was reported: Obscura
+  0.2.7's `confirm()` answers false and `prompt()` null at once, with no
+  dialog event, so an accepted "Place order?" was dismissed without a word.
+  navigera puts its own `alert`, `confirm` and `prompt` in each tab's
+  documents there, which answer as `dialog` says and report each dialog as
+  on Chrome. Which engines need them is asked once per browser, and only of
+  an engine that is its own CDP server: one whose `confirm` is the
+  browser's own (not a constructor) opens no dialog for it (about 1.5 ms,
+  Moli), any other is called once and watched for the dialog event.
 - On Lightpanda, a click on an element that was disabled for the moment
   (a "Load more" reading "Loading…") went to it at once, did nothing, and
   counted: the wait for it to be enabled ended with the wait for it to stop

@@ -202,6 +202,27 @@ fn first_pass(engine: &'static str) {
     let refused = probe["result"]["exceptionDetails"]["exception"]["className"] == "EvalError";
     assert_eq!(refused, engine != "obscura", "{engine}: {probe}");
 
+    // Dialogs: answered per the session's policy and reported, on an engine
+    // that announces them (Moli) and on one whose own `confirm()` answers
+    // false and `prompt()` null at once and tells no one (Obscura 0.2.7):
+    // there navigera's page-side functions answer instead.
+    let r = agent.run(&["eval", "confirm('Delete it?')"]);
+    assert_eq!(r["result"], true, "{engine}: accepted by default: {r}");
+    assert_eq!(r["dialogs"][0]["type"], "confirm", "{engine}: {r}");
+    assert_eq!(r["dialogs"][0]["message"], "Delete it?", "{engine}: {r}");
+    agent.ok(&["dialog", "--dismiss"]);
+    let r = agent.run(&["eval", "[confirm('Really?'), prompt('Name?', 'x')]"]);
+    assert_eq!(r["result"], serde_json::json!([false, null]), "{engine}: {r}");
+    assert_eq!(r["dialogs"].as_array().map(Vec::len), Some(2), "{engine}: {r}");
+    assert_eq!(r["dialogs"][1]["type"], "prompt", "{engine}: {r}");
+    assert_eq!(r["dialogs"][1]["accepted"], false, "{engine}: {r}");
+    // A new document keeps the policy.
+    agent.ok(&["dialog", "--accept", "--prompt-text", "Ada"]);
+    agent.ok(&["goto", &url("/docs")]);
+    let r = agent.run(&["eval", "prompt('Name?')"]);
+    assert_eq!(r["result"], "Ada", "{engine}: {r}");
+    assert_eq!(r["dialogs"][0]["accepted"], true, "{engine}: {r}");
+
     // A click that changes a control's state: the first box not ticked
     // (near the top: Moli 1.1.27 keeps an element's box where it was before
     // a scroll), and a select.

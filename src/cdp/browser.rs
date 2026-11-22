@@ -158,8 +158,11 @@ impl Browser {
         if !server.single_target() {
             // Tabs, contexts and popups as Chrome has them: the same setup,
             // target discovery included. The server leads its own process
-            // group, so closing it takes its workers along.
-            return Ok(Self::finish(handle, client, Some(child), None, ws_url));
+            // group, so closing it takes its workers along. Whether its
+            // dialogs are announced is asked with its first tab.
+            let browser = Self::finish(handle, client, Some(child), None, ws_url);
+            browser.shared.dialogs_mode.store(events::DIALOGS_ASK, std::sync::atomic::Ordering::Relaxed);
+            return Ok(browser);
         }
         let shared = Arc::new(Shared::default());
         shared.single_target.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -545,9 +548,15 @@ impl Browser {
     /// default one) are answered from now on.
     pub fn set_dialog_policy(&self, scope: &str, policy: DialogPolicy) {
         self.shared.policy.lock().unwrap().insert(scope.to_string(), policy);
-        if self.shared.is_single_target() {
+        let page_side = self.shared.dialogs_mode.load(std::sync::atomic::Ordering::Relaxed) == events::DIALOGS_PAGE;
+        if self.shared.is_single_target() || page_side {
             let sessions: Vec<String> = self.shared.sessions.lock().unwrap().keys().cloned().collect();
             for session in sessions {
+                // Page-side functions answer per their own scope's policy:
+                // only this scope's change.
+                if page_side && self.shared.scope_of(&session) != scope {
+                    continue;
+                }
                 self.block_on(events::arm_dialog(&self.client, &self.shared, &session));
             }
         }
@@ -577,6 +586,7 @@ impl Browser {
                 Arc::clone(&self.shared),
             );
             page.enable().await?;
+            events::arm_dialog(&self.client, &self.shared, &session_id).await;
             // The popup's navigation started before we attached: read where
             // it stands so the next op waits for it instead of reading the
             // initial about:blank.

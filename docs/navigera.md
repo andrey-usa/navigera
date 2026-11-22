@@ -718,8 +718,15 @@ take Chrome's paths; each session gets a browser of its own.
   Chrome. Differences:
   - popups: a page opened with `target=_blank` loads in the current tab
     (Obscura opens no target for it); `tab-new` works.
-  - dialogs: Obscura raises no dialog event and dismisses every dialog:
-    `confirm()` returns false and `prompt()` null, whatever `dialog` says.
+  - dialogs: Obscura's own `alert`, `confirm` and `prompt` answer at once
+    and raise no event (`confirm()` false, `prompt()` null). navigera puts
+    its own in each tab's documents: they answer as `dialog` says and each
+    dialog is reported as on Chrome. A page's script sees them as plain
+    functions; they are checked in the top document only, not in frames.
+  - input during a navigation the page started (a script or a form): a key
+    or click sent meanwhile answers only once the new document has loaded
+    (Obscura #921): 1.5 s for a document that takes 1.5 s, where Chrome
+    answers in under 3 ms.
   - shadow roots: its hit test stops at the shadow host, so a click on an
     element inside an open shadow root reaches the host and the element's
     own handler doesn't run (the response says so in `click_missed`).
@@ -746,6 +753,9 @@ take Chrome's paths; each session gets a browser of its own.
   - refs are Moli's node ids, large numbers (`[ref=2000000017]`).
   - a `<select>`'s value in `ax` is the selected option's value, not its
     label.
+  - roles in `ax`: a file input is `file` where Chrome says `button`, and a
+    `<details>` summary's toggle is `button` where Chrome says
+    `DisclosureTriangle`.
 
 ## Electron and natural mode
 
