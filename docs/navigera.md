@@ -728,6 +728,9 @@ take Chrome's paths; each session gets a browser of its own.
     and takes the title and URL from the page.
   - a multiple `<select>` takes one option (`select --add` is refused), and
     there is no `Clipboard` API.
+  - `eval`: Obscura runs a script it is asked to check for side effects, so
+    navigera can't tell a read from a change there and runs every `eval` as
+    an action (the page's change watch armed first), never as a read.
 - **`--engine moli`** (experimental; tested on Moli 1.1.27) starts
   `moli serve --layout`: without `--layout` Moli answers geometry from a
   fixed compatibility layout and paints nothing. The binary comes from

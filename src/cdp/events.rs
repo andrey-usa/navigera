@@ -274,7 +274,17 @@ pub struct Shared {
     /// Several sessions share this browser (`BrowserSession::fork`): each
     /// takes only the tabs its own tabs opened or closed.
     pub forked: std::sync::atomic::AtomicBool,
+    /// Whether the engine refuses side effects under `throwOnSideEffect`:
+    /// 0 not asked yet, else [`SIDE_EFFECTS_CHECKED`] or [`SIDE_EFFECTS_RUN`]
+    /// (see `BrowserSession::evaluate_read`).
+    pub side_effects: std::sync::atomic::AtomicU8,
 }
+
+/// [`Shared::side_effects`]: the engine refuses them (V8: Chrome, Moli).
+pub const SIDE_EFFECTS_CHECKED: u8 = 1;
+/// [`Shared::side_effects`]: the engine runs what it is asked to check
+/// (Obscura 0.2.7).
+pub const SIDE_EFFECTS_RUN: u8 = 2;
 
 /// What the `WebMCP` domain reported.
 #[derive(Default)]

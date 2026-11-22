@@ -177,6 +177,25 @@ fn first_pass(engine: &'static str) {
     agent.ok(&["wait", "--url", "/account"]);
     assert_eq!(server_state(&site.base)["logins"][0], "demo@acme.test", "the server saw the sign-in");
 
+    // An eval with an effect runs once: Obscura 0.2.7 runs what it is asked
+    // to check under `throwOnSideEffect`, and the read tried first sent this
+    // POST twice (the check, then the awaited read).
+    let posted = agent.ok(&[
+        "eval",
+        "fetch('/api/tickets', {method: 'POST', headers: {'content-type': 'application/json'}, \
+         body: JSON.stringify({category: 'Billing', priority: 'low', message: 'once'})}).then(r => r.status)",
+    ]);
+    assert_eq!(posted, 200, "{posted}");
+    let tickets = server_state(&site.base)["tickets"].as_array().map(Vec::len);
+    assert_eq!(tickets, Some(1), "one eval, one POST");
+    // Which of the two the engine is, as navigera found it: where V8's check
+    // holds (Moli) an eval that changes nothing is a read, with nothing
+    // armed on the page first; where the script runs anyway (Obscura) every
+    // eval is an action, the arm first.
+    agent.ok(&["goto", &url("/docs")]);
+    let armed = if engine == "obscura" { "object" } else { "undefined" };
+    assert_eq!(agent.ok(&["eval", "typeof window.__nvMut"]), armed, "{engine}: eval as a read or as an action");
+
     // A click that changes a control's state: the first box not ticked
     // (near the top: Moli 1.1.27 keeps an element's box where it was before
     // a scroll), and a select.

@@ -4526,6 +4526,22 @@ impl Page {
         self.evaluate_raw(&call_if_function(expression), timeout)
     }
 
+    /// Whether this engine refuses, under `throwOnSideEffect`, what would
+    /// change the page, as V8 does with an `EvalError`. Obscura 0.2.7 reads
+    /// no such parameter and runs the script. Asked with a write to the
+    /// global `undefined`, which is not writable: a checking engine refuses
+    /// it, and where the script runs it changes nothing, so the page sees
+    /// nothing either way. Any other answer (another exception, a value)
+    /// counts as not checking.
+    pub fn checks_side_effects(&self, timeout: Duration) -> Result<bool> {
+        let res = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": "globalThis.undefined = undefined", "returnByValue": true, "throwOnSideEffect": true }),
+            timeout,
+        )?;
+        Ok(res.pointer("/exceptionDetails/exception/className").and_then(Value::as_str) == Some("EvalError"))
+    }
+
     /// [`Self::evaluate`] for a read: run only if V8 can show the expression
     /// changes nothing (`throwOnSideEffect`), the way a console's eager
     /// preview does. V8 stops a refused expression before its first side

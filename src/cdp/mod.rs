@@ -37,7 +37,7 @@ pub use client::CLOSED as CONNECTION_CLOSED;
 pub use client::NEVER_REACHED;
 pub use client::SESSION_GONE;
 pub use client::{NeverReached, NEVER_REACHED_CODE};
-pub use events::{glob_match, DialogPolicy, HarEntry, Route, RouteAction};
+pub use events::{glob_match, DialogPolicy, HarEntry, Route, RouteAction, SIDE_EFFECTS_CHECKED, SIDE_EFFECTS_RUN};
 pub use page::{
     locate_fn as locate_js, presses, AxOptions, ClickOptions, Locator, Page, RawCdp, Restated, Target, DEEP,
     DEFAULT_ELEMENT_WAIT,

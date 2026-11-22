@@ -34,6 +34,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- On Obscura, an `eval` with an effect could have it twice. navigera tries
+  an `eval` as a read first, under V8's side-effect check
+  (`throwOnSideEffect`), and Obscura 0.2.7 reads no such check and runs the
+  script: a `fetch` POST, which returns a promise, went out twice (the
+  check, then the awaited read: two webhooks from one `eval` in the agent
+  eval's `api` task, 3 of 3 runs,
+  [run 45018633839](https://github.com/andrey-usa/navigera/actions/runs/45018633839)),
+  and an effect with no promise was answered as a read, with nothing
+  settled after it. navigera now asks each browser once whether it refuses
+  a side effect there (a write to the global `undefined`, which is not
+  writable, so it changes nothing where it runs) and where it does not,
+  every `eval` runs as an action, as on Lightpanda. Chrome and Moli refuse
+  it, and their reads stay reads.
+- `status` in a `fork` of an Obscura or Moli session said engine `chrome`.
 - On Lightpanda, a click on an element that was disabled for the moment
   (a "Load more" reading "Loading…") went to it at once, did nothing, and
   counted: the wait for it to be enabled ended with the wait for it to stop

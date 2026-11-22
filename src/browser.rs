@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
 
-use crate::cdp::{self, AxOptions, Browser, DialogPolicy, LaunchOptions, Page, Target, DEFAULT_ELEMENT_WAIT};
+use crate::cdp::{
+    self, AxOptions, Browser, DialogPolicy, LaunchOptions, Page, Target, DEFAULT_ELEMENT_WAIT, SIDE_EFFECTS_CHECKED,
+    SIDE_EFFECTS_RUN,
+};
 
 /// Tokio runtime for the CDP engine: 2 workers is plenty for a sequential
 /// CLI, and keeps RSS/CPU far below a default multi-thread runtime.
@@ -1912,7 +1915,7 @@ impl BrowserSession {
             active: 0,
             exe: self.exe.clone(),
             lightpanda: false,
-            engine: "chrome",
+            engine: self.engine,
             timeout_ms: self.timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -3944,13 +3947,34 @@ impl BrowserSession {
     /// `eval` as a read (see [`cdp::Page::evaluate_read`]): its answer when
     /// V8 shows the source, taken as one expression, changes nothing; else
     /// None, and the caller runs it with [`Self::evaluate_user`]. Not on
-    /// Lightpanda, whose side-effect checks are not V8's.
+    /// Lightpanda, whose side-effect checks are not V8's, nor on an engine
+    /// that runs what it is asked to check (Obscura 0.2.7): there an eval
+    /// with an effect had it during the check and was answered as a read,
+    /// with nothing settled after it, and one that returned a promise ran
+    /// twice (a `fetch` POST went out twice).
     pub fn evaluate_read(&self, source: &str, timeout_ms: Option<f64>) -> Result<Option<serde_json::Value>> {
-        if self.is_lightpanda() {
+        if self.is_lightpanda() || !self.checks_side_effects(self.timeout(timeout_ms)) {
             return Ok(None);
         }
         let marked = format!("{source}\n//# sourceURL={}\n", crate::clock::USER_EVAL_URL);
         self.active_tab().evaluate_read(&marked, self.timeout(timeout_ms))
+    }
+
+    /// [`cdp::Page::checks_side_effects`], asked once per browser (its
+    /// answer is the engine's, kept in `Shared::side_effects` for every
+    /// session on it). When the question itself fails the answer is no and
+    /// is not kept: the eval runs as an action, and the next one asks again.
+    fn checks_side_effects(&self, timeout: Duration) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let known = &self.browser.shared().side_effects;
+        match known.load(Relaxed) {
+            SIDE_EFFECTS_CHECKED => true,
+            SIDE_EFFECTS_RUN => false,
+            _ => self.active_tab().checks_side_effects(timeout).is_ok_and(|checks| {
+                known.store(if checks { SIDE_EFFECTS_CHECKED } else { SIDE_EFFECTS_RUN }, Relaxed);
+                checks
+            }),
+        }
     }
 
     /// Click the element `target` names (trusted mouse click when hittable).
