@@ -25,10 +25,10 @@ All notable changes to this project are documented here. The format follows
   script adds after the first geometry read has no box, and boxes don't
   follow a scroll.
 
-- Lightpanda is back in CI (out since 1.0.3 broke the drag test, T-0277):
+- Lightpanda is back in CI (out since 1.0.3 broke the drag test):
   the `engine lightpanda` job runs tests/lightpanda.rs and Lightpanda's leg
   of tests/commands.rs on its newest stable release. 1.0.5 fixed the
-  layout bug behind T-0277 (the drag fixture's track at left 0); on 1.0.3
+  layout bug behind it (the drag fixture's track at left 0); on 1.0.3
   and 1.0.4 the drag test expects that bug's answer, and only there.
 
 ### Fixed

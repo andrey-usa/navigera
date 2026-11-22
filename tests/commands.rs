@@ -284,7 +284,7 @@ fn drag_drops_a_card_and_moves_a_slider() {
         assert_eq!(r["drag"]["dropped"], false, "[{engine}] {r}");
         // Lightpanda 1.0.3 and 1.0.4 put the block-level track and its knob at
         // left 0 (240 before and from 1.0.5 on), where the hit test finds
-        // another element, so neither has an on-screen point (T-0277): that
+        // another element, so neither has an on-screen point: that
         // known bug, on those releases only, is the answer expected there.
         let known_bug =
             engine == "lightpanda" && matches!(lightpanda_release(&a.bin).as_deref(), Some("1.0.3" | "1.0.4"));
