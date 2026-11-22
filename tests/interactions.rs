@@ -2478,20 +2478,38 @@ fn a_short_quiet_window_reads_a_chained_list_early() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("quiet-window", &[]);
     let steps = std::env::temp_dir().join(format!("nv-quiet-window-{}.txt", std::process::id()));
-    std::fs::write(&steps, format!("goto {}/two-fetch\nax\n", site.url)).unwrap();
+    std::fs::write(
+        &steps,
+        format!(
+            "goto {}/two-fetch\nax\neval \"JSON.stringify({{...window.__t, read: performance.now()}})\"\n",
+            site.url
+        ),
+    )
+    .unwrap();
     let steps = steps.display().to_string();
-    let read = || s.ok(&["batch", &steps])["results"][0]["result"].as_str().unwrap_or_default().to_string();
+    // The tree, and for a failure the batch's whole answer with the call's
+    // time: its `eval` step gives the page's clock when Alpha was drawn,
+    // when Beta's fetch started and when it was drawn, and when the read
+    // ended. A read that ends past Beta's fetch with a 250 ms window came
+    // late (the page's gap is 400 ms): the times say how late.
+    let read = || {
+        let t = std::time::Instant::now();
+        let r = s.ok(&["batch", &steps]);
+        let tree = r["results"][0]["result"].as_str();
+        let said = format!("{} ms: {r}", t.elapsed().as_millis());
+        (tree.unwrap_or_default().to_string(), said)
+    };
 
-    let tree = read();
-    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
+    let (tree, said) = read();
+    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{said}");
 
     s.ok(&["set", "network-quiet", "250"]);
-    let tree = read();
-    assert!(tree.contains("Alpha") && !tree.contains("Beta"), "{tree}");
+    let (tree, said) = read();
+    assert!(tree.contains("Alpha") && !tree.contains("Beta"), "{said}");
 
     s.ok(&["set", "network-quiet", "500"]);
-    let tree = read();
-    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
+    let (tree, said) = read();
+    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{said}");
     let _ = std::fs::remove_file(&steps);
 }
 

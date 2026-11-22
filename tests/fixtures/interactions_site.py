@@ -307,11 +307,16 @@ PAGES["/two-fetch"] = ("two fetch", "", """
 <script>
 // Half a list, then a 400 ms gap with no request, then the other half:
 // a quiet window shorter than the gap reads only the first half.
+// window.__t: when each step happened on the page's clock, for a test
+// that fails to say whether its read came late.
+const t = window.__t = {};
 fetch('/slow-echo?ms=100').then(() => {
   document.getElementById('list').innerHTML = '<li>Alpha</li>';
+  t.alpha = performance.now();
   return new Promise(r => setTimeout(r, 400));
-}).then(() => fetch('/slow-echo?ms=100')).then(() => {
+}).then(() => { t.second = performance.now(); return fetch('/slow-echo?ms=100'); }).then(() => {
   document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
+  t.beta = performance.now();
 });
 </script>""")
 
