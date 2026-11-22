@@ -16,7 +16,9 @@ name: agent-eval
 # baseline runs.
 #
 # `navigera-lightpanda` and `navigera-shell` run navigera on Lightpanda
-# (NAVIGERA_ENGINE=lightpanda) and on chrome-headless-shell ($CHROME_BIN).
+# (NAVIGERA_ENGINE=lightpanda) and on chrome-headless-shell ($CHROME_BIN);
+# `navigera-obscura` and `navigera-moli` on Obscura and on Moli
+# (NAVIGERA_ENGINE=obscura / moli, each on its newest stable release).
 #
 # `agent: openai` drives the same eval from an OpenAI-compatible endpoint
 # instead of Gemini CLI (run.py --agent openai): the model is any id the
@@ -36,10 +38,16 @@ on:
   workflow_dispatch:
     inputs:
       tools:
-        description: "comma-separated: navigera,navigera-lightpanda,navigera-shell,agent-browser,agent-browser-lightpanda,playwright-cli (none: no agent runs)"
+        description: "comma-separated: navigera,navigera-lightpanda,navigera-obscura,navigera-moli,navigera-shell,agent-browser,agent-browser-lightpanda,playwright-cli (none: no agent runs)"
         default: "navigera,navigera-lightpanda,agent-browser,playwright-cli"
       lightpanda:
         description: "Lightpanda stable release tag for the navigera-lightpanda tools (empty: the newest stable)"
+        default: ""
+      obscura:
+        description: "Obscura stable release tag for the navigera-obscura tool (empty: the newest stable)"
+        default: ""
+      moli:
+        description: "Moli stable release tag for the navigera-moli tool (empty: the newest stable)"
         default: ""
       tasks:
         description: "comma-separated task ids (lookup,purchase,account,docs,support,preferences,api,purchase-live) or all (local tasks)"
@@ -93,6 +101,7 @@ jobs:
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
           slot = {"navigera": "GEMINI_API_KEY", "navigera-lightpanda": "GEMINI_API_KEY_2", "navigera-shell": "GEMINI_API_KEY_3",
+                  "navigera-obscura": "GEMINI_API_KEY_2", "navigera-moli": "GEMINI_API_KEY_3",
                   "agent-browser": "GEMINI_API_KEY_2", "agent-browser-lightpanda": "GEMINI_API_KEY",
                   "playwright-cli": "GEMINI_API_KEY_3"}
           # Windows legs take the next slot over, so `os: both` spreads the
@@ -140,6 +149,16 @@ jobs:
         uses: ./.github/actions/lightpanda
         with:
           release: ${{ inputs.lightpanda }}
+      - name: Obscura binary (navigera-obscura tool)
+        if: matrix.run.tool == 'navigera-obscura'
+        uses: ./.github/actions/obscura
+        with:
+          release: ${{ inputs.obscura }}
+      - name: Moli binary (navigera-moli tool)
+        if: matrix.run.tool == 'navigera-moli'
+        uses: ./.github/actions/moli
+        with:
+          release: ${{ inputs.moli }}
       - name: chrome-headless-shell (navigera-shell tools)
         if: contains(matrix.run.tool, 'shell')
         run: |
@@ -151,7 +170,7 @@ jobs:
           echo "CHROME_BIN=$bin" >> "$GITHUB_ENV"
           echo "::notice title=agent eval chrome::$("$bin" --version)"
       - name: Scripted baseline (site + checks + harness, no model)
-        if: matrix.run.tool == 'navigera' || matrix.run.tool == 'navigera-lightpanda' || matrix.run.tool == 'navigera-shell'
+        if: startsWith(matrix.run.tool, 'navigera')
         run: |
           rc=0
           python bench/agent-eval/run.py --agent scripted --reps "$REPS" --out out/scripted --require-pass || rc=$?

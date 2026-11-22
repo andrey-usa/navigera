@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       tools:
-        description: "comma-separated: navigera,navigera-lightpanda,navigera-shell,agent-browser,agent-browser-lightpanda"
+        description: "comma-separated: navigera,navigera-lightpanda,navigera-obscura,navigera-moli,navigera-shell,agent-browser,agent-browser-lightpanda"
         default: "navigera,navigera-lightpanda,navigera-shell,agent-browser,agent-browser-lightpanda"
       tasks:
         description: "comma-separated task ids (lookup,purchase,account,docs,support,preferences) or all"
@@ -31,6 +31,12 @@ on:
         default: "deepseek/deepseek-v4.1-flash,inception/mercury-3"
       lightpanda:
         description: "Lightpanda stable release tag for the navigera-lightpanda tools (empty: the newest stable)"
+        default: ""
+      obscura:
+        description: "Obscura stable release tag for the navigera-obscura tool (empty: the newest stable)"
+        default: ""
+      moli:
+        description: "Moli stable release tag for the navigera-moli tool (empty: the newest stable)"
         default: ""
 
 permissions:
@@ -54,7 +60,7 @@ jobs:
         run: |
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
-          known = ["navigera", "navigera-lightpanda", "navigera-shell",
+          known = ["navigera", "navigera-lightpanda", "navigera-obscura", "navigera-moli", "navigera-shell",
                    "agent-browser", "agent-browser-lightpanda"]
           tools = [t.strip() for t in os.environ["TOOLS"].split(",") if t.strip() in known]
           print("matrix=" + json.dumps([{"tool": t} for t in tools]))
@@ -114,14 +120,25 @@ jobs:
         run: |
           npm install -g agent-browser@0.43.0
           npm ls -g --depth=0
-      # The variant setup steps are agent-eval.yml's: Lightpanda jobs get
-      # the release binary on $LIGHTPANDA_BIN, shell jobs point
+      # The variant setup steps are agent-eval.yml's: Lightpanda, Obscura
+      # and Moli jobs get the release binary on $LIGHTPANDA_BIN /
+      # $OBSCURA_BIN / $MOLI_BIN, shell jobs point
       # $CHROME_BIN at chrome-headless-shell instead.
       - name: Lightpanda binary (navigera-lightpanda tools)
         if: contains(matrix.run.tool, 'lightpanda')
         uses: ./.github/actions/lightpanda
         with:
           release: ${{ inputs.lightpanda }}
+      - name: Obscura binary (navigera-obscura tool)
+        if: matrix.run.tool == 'navigera-obscura'
+        uses: ./.github/actions/obscura
+        with:
+          release: ${{ inputs.obscura }}
+      - name: Moli binary (navigera-moli tool)
+        if: matrix.run.tool == 'navigera-moli'
+        uses: ./.github/actions/moli
+        with:
+          release: ${{ inputs.moli }}
       - name: chrome-headless-shell (navigera-shell tools)
         if: contains(matrix.run.tool, 'shell')
         run: |

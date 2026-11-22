@@ -75,6 +75,18 @@ TOOLS = {
         "repo": "https://github.com/andrey-usa/navigera",
         "engine": "lightpanda",
     },
+    # navigera on Obscura and on Moli, the CDP servers it starts as
+    # `<engine> serve` ($OBSCURA_BIN / $MOLI_BIN, set by the job).
+    "navigera-obscura": {
+        "cmd": "navigera", "skill": "navigera",
+        "repo": "https://github.com/andrey-usa/navigera",
+        "engine": "obscura",
+    },
+    "navigera-moli": {
+        "cmd": "navigera", "skill": "navigera",
+        "repo": "https://github.com/andrey-usa/navigera",
+        "engine": "moli",
+    },
     "navigera-shell": {
         "cmd": "navigera", "skill": "navigera",
         "repo": "https://github.com/andrey-usa/navigera",
@@ -95,6 +107,10 @@ TOOLS = {
         "repo": "https://github.com/microsoft/playwright-cli",
     },
 }
+
+# The binary each engine tool needs; the scripted baseline runs a tool when
+# its variable is set.
+ENGINE_BIN = {"lightpanda": "LIGHTPANDA_BIN", "obscura": "OBSCURA_BIN", "moli": "MOLI_BIN"}
 
 SKILLED_PROMPT = """You are in {workdir}. The command-line browser tool `{cmd}` is installed, and its usage guide is available to you as the skill "{skill}" (the file `.agents/skills/{skill}/SKILL.md` in this directory). Read that skill first, then use `{cmd}` (through shell commands) for every browser interaction. Do not drive a browser through other libraries or scripts, and do not fetch the website with curl, wget or similar.
 
@@ -132,7 +148,7 @@ PASS_ENV = ["CHROME_BIN", "RUSTUP_HOME", "CARGO_HOME", "NPM_CONFIG_PREFIX",
             "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS",
             "PLAYWRIGHT_MCP_EXECUTABLE_PATH", "PLAYWRIGHT_MCP_SANDBOX",
             "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "DO_NOT_TRACK", "DISABLE_TELEMETRY", "CI",
-            "LIGHTPANDA_BIN", "NAVIGERA_ENGINE", "LIGHTPANDA_DISABLE_TELEMETRY",
+            "LIGHTPANDA_BIN", "OBSCURA_BIN", "MOLI_BIN", "NAVIGERA_ENGINE", "LIGHTPANDA_DISABLE_TELEMETRY",
             "AGENT_BROWSER_ENGINE",
             # Windows: what a desktop session has (npm, Node and PowerShell
             # look things up there; Gemini CLI keeps only TEMP/USERPROFILE/…).
@@ -235,8 +251,9 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
         "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1",
         "DO_NOT_TRACK": "1", "DISABLE_TELEMETRY": "1", "LIGHTPANDA_DISABLE_TELEMETRY": "1", "CI": "true",
     }
-    if os.environ.get("LIGHTPANDA_BIN"):
-        env["LIGHTPANDA_BIN"] = os.environ["LIGHTPANDA_BIN"]
+    for var in ENGINE_BIN.values():
+        if os.environ.get(var):
+            env[var] = os.environ[var]
     # The agent reads navigera's default output, as a user's agent does: the
     # JSON mode this harness sets for itself is longer, and has no report of
     # what an action changed.
@@ -712,7 +729,12 @@ def scripted_plan(tool: str, task: str, base: str) -> list[list[str]]:
                                           "'application/json'}, body: JSON.stringify({url: "
                                           "'https://hooks.example.test/acme', events: ['order.shipped']})})"
                                           ".then(r => r.text())"]]
-    return [s + p for p in plans[task]] + [s + ["quit"]]
+    plan = [s + p for p in plans[task]]
+    if TOOLS[tool].get("engine"):
+        # Which engine the session runs on, from navigera itself: a plan that
+        # passed on Chrome would otherwise read the same.
+        plan.insert(1, s + ["status"])
+    return plan + [s + ["quit"]]
 
 
 def run_scripted(tool: str, task: str, base: str, work: Path, env: dict) -> dict:
@@ -725,6 +747,14 @@ def run_scripted(tool: str, task: str, base: str, work: Path, env: dict) -> dict
                            encoding="utf-8", errors="replace", timeout=120)
         shells.append("navigera " + " ".join(argv))
         outputs.append(p.stdout)
+        if argv[-1] == "status" and p.returncode == 0:
+            engine = status_engine(p.stdout)
+            if engine != TOOLS[tool]["engine"]:
+                subprocess.run([exe("navigera", env), *plan[-1]], cwd=work, env=env, capture_output=True, timeout=60)
+                return {"exit": 1, "timed_out": False, "wall_s": round(time.time() - started, 1), "text": "",
+                        "shell_commands": shells, "tools_used": [], "requests": 0, "engine": engine,
+                        "errors": [f"status says engine {engine!r}, want {TOOLS[tool]['engine']!r}"]}
+            continue
         if p.returncode != 0:
             # The session must not outlive a failed plan: the next run would
             # find it and drive the wrong browser.
@@ -733,9 +763,27 @@ def run_scripted(tool: str, task: str, base: str, work: Path, env: dict) -> dict
                     "text": "", "shell_commands": shells, "tools_used": [], "requests": 0,
                     "errors": [p.stdout[-500:] + p.stderr[-500:]], "stderr_tail": p.stderr[-800:]}
     last = outputs[-2] if len(outputs) > 1 else ""
-    return {"exit": 0, "timed_out": False, "wall_s": round(time.time() - started, 1),
-            "text": "FINAL ANSWER: " + " ".join(last.split())[-600:], "shell_commands": shells,
-            "tools_used": ["run_shell_command"] * len(shells), "requests": 0, "errors": []}
+    res = {"exit": 0, "timed_out": False, "wall_s": round(time.time() - started, 1),
+           "text": "FINAL ANSWER: " + " ".join(last.split())[-600:], "shell_commands": shells,
+           "tools_used": ["run_shell_command"] * len(shells), "requests": 0, "errors": []}
+    if TOOLS[tool].get("engine"):
+        res["engine"] = TOOLS[tool]["engine"]
+    return res
+
+
+def status_engine(out: str):
+    """The `engine` of a `status` answer (JSON lines), or None."""
+    for line in out.splitlines():
+        try:
+            doc = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(doc, dict):
+            found = doc.get("engine", (doc.get("result") or {}).get("engine")
+                            if isinstance(doc.get("result"), dict) else None)
+            if found:
+                return found
+    return None
 
 
 TOOL_PATTERNS = ("agent-browser", "playwright-cli", "cli-daemon", "navigera")
@@ -1055,9 +1103,13 @@ def merge(paths: list[str], out: Path) -> int:
 
 # --- main -------------------------------------------------------------------
 
+DEFAULT_TOOLS = "navigera,navigera-lightpanda,agent-browser,playwright-cli"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tools", default="navigera,navigera-lightpanda,agent-browser,playwright-cli")
+    ap.add_argument("--tools", default=None, help=f"comma-separated (default {DEFAULT_TOOLS}; "
+                    "--agent scripted: navigera and each engine whose binary is set)")
     ap.add_argument("--tasks", default="all")
     ap.add_argument("--mode", choices=["skilled", "onboard"], default="skilled")
     ap.add_argument("--agent", choices=["gemini", "openai", "claude", "scripted"], default="gemini")
@@ -1090,14 +1142,15 @@ def main() -> int:
         tasks = [t for t in tasks if not t.get("live")]
     if args.mode == "onboard":
         tasks = [t for t in tasks if t["id"] in ("lookup", "docs")][:1] or tasks[:1]
-    tools = [t for t in args.tools.split(",") if t]
+    tools = [t for t in (args.tools or DEFAULT_TOOLS).split(",") if t]
     if args.agent == "scripted":
-        tools = ["navigera"]
-        if os.environ.get("LIGHTPANDA_BIN"):
-            tools.append("navigera-lightpanda")
-        # An explicit --tools narrows the scripted set (e.g. lightpanda-only
-        # on a box with no Chrome).
-        tools = [t for t in tools if t in args.tools.split(",")]
+        # navigera on Chrome, and on each engine whose binary is set; an
+        # explicit --tools narrows that set (e.g. lightpanda-only on a box
+        # with no Chrome).
+        tools = ["navigera"] + [t for t, spec in TOOLS.items() if t.startswith("navigera-")
+                                and os.environ.get(ENGINE_BIN.get(spec.get("engine"), ""))]
+        if args.tools:
+            tools = [t for t in tools if t in args.tools.split(",")]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     runs = []
@@ -1122,6 +1175,10 @@ def main() -> int:
                         else run_scripted(tool, task["id"], site.base, work, env)
                     answer = final_answer(res["text"])
                     ok, why = check(task, answer, site, tool)
+                    if not task.get("live"):
+                        # The browsers that loaded the site's pages (User-Agent
+                        # product tokens): where a run's engine shows there.
+                        rec["browsers"] = site.get("/__state").get("browsers")
                     shells = res["shell_commands"]
                     rec.update(res)
                     # Model quota or outage, not the tool: reported apart and

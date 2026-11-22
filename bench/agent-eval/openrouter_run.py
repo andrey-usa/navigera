@@ -7,8 +7,9 @@ prompt, same checks — with the Gemini CLI swapped for a direct
 chat-completions loop against OpenRouter. The model gets one tool,
 run_shell_command (the shell tool the Gemini harness gives the agent),
 and drives the browser tool named by --tool through it: plain navigera
-(Chrome), navigera-lightpanda, navigera-shell, or agent-browser (on
-Chrome, or on its Lightpanda engine).
+(Chrome), navigera-lightpanda, navigera-obscura, navigera-moli,
+navigera-shell, or agent-browser (on Chrome, or on its Lightpanda
+engine).
 
   openrouter_run.py --tool navigera-lightpanda \
                     --models deepseek/deepseek-v4.1-flash,inception/mercury-3 \
@@ -220,7 +221,8 @@ def render(tool: str, models: list, runs: list) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tool", default="navigera",
-                    help="run.py tool variant: navigera, navigera-lightpanda, navigera-shell, "
+                    help="run.py tool variant: navigera, navigera-lightpanda, navigera-obscura, "
+                         "navigera-moli, navigera-shell, "
                          "agent-browser or agent-browser-lightpanda")
     ap.add_argument("--models", default=DEFAULT_MODELS)
     ap.add_argument("--tasks", default="lookup,support")
