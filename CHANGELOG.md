@@ -69,12 +69,13 @@ All notable changes to this project are documented here. The format follows
   evals don't). navigera asks each browser it starts as a CDP server once
   whether a box added after a read gets a width, and where only a
   screenshot gives it one, takes a 1x1 screenshot before it reads boxes or
-  text (an element op, `text`, `ax`, each 100 ms of a `wait`), only when
-  the document, its DOM, its scroll or its viewport changed since the last
-  one: it costs a layout of the whole page, 1.7 ms on 19 nodes and 157 ms
+  text (an element op, `text`, `ax`, `eval`, each 100 ms of a `wait`),
+  only when a document (the page's or a same-origin frame's), its DOM, its
+  scroll or its viewport changed since the last one: it costs a layout of the whole page, 1.7 ms on 19 nodes and 157 ms
   on 4,505 on Moli 1.1.27, where a whole-page shot takes 56 / 236 ms
   ([run 45055641714](https://github.com/andrey-usa/navigera/actions/runs/45055641714)).
-  Chrome takes no extra step.
+  Chrome takes no extra step. The scripted agent eval on Moli went from
+  9/21 to 18/21 ([run 45056667009](https://github.com/andrey-usa/navigera/actions/runs/45056667009)).
 - On Lightpanda, a click on an element that was disabled for the moment
   (a "Load more" reading "Loading…") went to it at once, did nothing, and
   counted: the wait for it to be enabled ended with the wait for it to stop

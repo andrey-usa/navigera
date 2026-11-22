@@ -1034,12 +1034,15 @@ const SETTLE_ARM: &str = r#"(() => {
 /// What decides whether [`Page::fresh_layout`] lays the page out again:
 /// the document (a random id kept in it), its DOM changes so far (a
 /// `MutationObserver` count; without one, a new value each time), its
-/// scroll and its viewport. Changes inside shadow roots aren't counted.
-const LAYOUT_TOKEN: &str = "(() => { let c = window.__nvLay; if (!c) { c = { n: 0, id: Math.random() }; \
-     try { new MutationObserver((r) => { c.n += r.length; }).observe(document, \
+/// scroll and its viewport, and the same of each same-origin frame in it.
+/// Changes inside shadow roots aren't counted.
+const LAYOUT_TOKEN: &str = "(() => { const tok = (w) => { try { let c = w.__nvLay; if (!c) { c = { n: 0, id: Math.random() }; \
+     try { new w.MutationObserver((r) => { c.n += r.length; }).observe(w.document, \
      { subtree: true, childList: true, characterData: true, attributes: true }); } catch (e) { c.n = NaN; } \
-     Object.defineProperty(window, '__nvLay', { value: c, configurable: true, enumerable: false }); } \
-     return [c.id, Number.isNaN(c.n) ? Math.random() : c.n, scrollX, scrollY, innerWidth, innerHeight].join(' '); })()";
+     Object.defineProperty(w, '__nvLay', { value: c, configurable: true, enumerable: false }); } \
+     let s = [c.id, Number.isNaN(c.n) ? Math.random() : c.n, w.scrollX, w.scrollY, w.innerWidth, w.innerHeight].join(' '); \
+     for (let i = 0; i < w.frames.length; i++) s += '|' + tok(w.frames[i]); return s; } catch (e) { return 'x'; } }; \
+     return tok(window); })()";
 
 /// [`SETTLE_ARM`] again in a document that has it: the kept function, or
 /// -1 when the document has none (a new one, or the counter stopped).

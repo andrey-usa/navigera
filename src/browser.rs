@@ -3960,6 +3960,9 @@ impl BrowserSession {
             return Ok(None);
         }
         let marked = format!("{source}\n//# sourceURL={}\n", crate::clock::USER_EVAL_URL);
+        // A read of boxes or text on an engine that keeps its first layout
+        // (Moli) sees what the page shows now.
+        self.active_tab().fresh_layout(self.timeout(timeout_ms));
         self.active_tab().evaluate_read(&marked, self.timeout(timeout_ms))
     }
 

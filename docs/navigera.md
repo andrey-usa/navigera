@@ -746,11 +746,12 @@ take Chrome's paths; each session gets a browser of its own.
   - layout: Moli builds it at the first geometry read and keeps it until a
     screenshot, so an element a script adds afterwards has no box and no
     `innerText` there. navigera takes a 1x1 screenshot before it reads
-    boxes or text (an element op, `text`, `ax`, each 100 ms of a `wait`)
-    when the document, its DOM, its scroll or its viewport changed since
-    the last one: a whole layout, 1.7 ms on a small page, 157 ms on 4,500
-    nodes. Changes inside a shadow root aren't counted, and an `eval` of
-    your own reads the layout as it is.
+    boxes or text (an element op, `text`, `ax`, `eval`, each 100 ms of a
+    `wait`) when a document (the page's or a same-origin frame's), its DOM,
+    its scroll or its viewport changed since the last one: a whole layout,
+    1.7 ms on a small page, 157 ms on 4,500 nodes. Changes inside a shadow
+    root aren't counted, and an `eval` that changes the page and then reads
+    a box reads the layout from before its change.
   - refs are Moli's node ids, large numbers (`[ref=2000000017]`).
   - a `<select>`'s value in `ax` is the selected option's value, not its
     label.
