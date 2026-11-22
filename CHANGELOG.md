@@ -22,9 +22,8 @@ All notable changes to this project are documented here. The format follows
   a keyboard-submitted sign-in the server records, a checkbox, a select,
   tabs, a screenshot, the server gone after `quit`). What differs from
   Chrome is in docs/navigera.md: on Obscura, a click can't reach into a
-  shadow root; on Moli 1.1.27, content a
-  script adds after the first geometry read has no box, and boxes don't
-  follow a scroll.
+  shadow root; Moli 1.1.27 lays a page out again only for a screenshot
+  (navigera takes a 1x1 one when the page changed, below).
 
 - Lightpanda is back in CI (out since 1.0.3 broke the drag test):
   the `engine lightpanda` job runs tests/lightpanda.rs and Lightpanda's leg
@@ -75,7 +74,7 @@ All notable changes to this project are documented here. The format follows
   on 4,505 on Moli 1.1.27, where a whole-page shot takes 56 / 236 ms
   ([run 45055641714](https://github.com/andrey-usa/navigera/actions/runs/45055641714)).
   Chrome takes no extra step. The scripted agent eval on Moli went from
-  9/21 to 18/21 ([run 45056667009](https://github.com/andrey-usa/navigera/actions/runs/45056667009)).
+  9/21 to 21/21 ([run 45057911369](https://github.com/andrey-usa/navigera/actions/runs/45057911369)).
 - On Lightpanda, a click on an element that was disabled for the moment
   (a "Load more" reading "Loading…") went to it at once, did nothing, and
   counted: the wait for it to be enabled ended with the wait for it to stop
