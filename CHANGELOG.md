@@ -15,8 +15,9 @@ All notable changes to this project are documented here. The format follows
   `--chromium`. Unlike Lightpanda both open tabs and contexts and lay pages
   out, so they take Chrome's paths (popups, downloads, the click checks);
   each session gets a browser of its own, as Lightpanda's does. `status`
-  names the engine. Tested on Obscura 0.2.7 and Moli 1.1.27: CI's new
-  `engine` jobs download each one's newest stable release on every push
+  names the engine. Tested on Obscura 0.2.7 and Moli 1.1.27
+  ([run 44971507816](https://github.com/andrey-usa/navigera/actions/runs/44971507816)):
+  CI's new `engine` jobs download each one's newest stable release on every push
   and run `tests/cdp_servers.rs` (navigation, the tree and its refs, fill,
   a keyboard-submitted sign-in the server records, a checkbox, a select,
   tabs, a screenshot, the server gone after `quit`). What differs from
@@ -84,9 +85,14 @@ All notable changes to this project are documented here. The format follows
   a page makes, and every goto waited for it, the log read or not (a page
   of 300 images, median of 30 loads in fresh sessions: Firefox 581.5 ms
   with the events from launch, 190.5 without, 0.16.0 182.8; chromedriver
-  over BiDi 367.8, 273.4 and 270.1; run 44921449861, which also found the
-  bodies kept, the reading of the events and the log costing no time
-  measurable there). Run `network` once before the load you want to see.
+  over BiDi 367.8, 273.4 and 270.1;
+  [run 44921449861](https://github.com/andrey-usa/navigera/actions/runs/44921449861),
+  which also found the bodies kept, the reading of the events and the log
+  costing no time measurable there). Against 0.16.0 that goto is now 0.97x
+  on Firefox and 0.99x over chromedriver's BiDi, and 539.5 / 396.7 ms with
+  the log on (medians of 20,
+  [run 44923122326](https://github.com/andrey-usa/navigera/actions/runs/44923122326)).
+  Run `network` once before the load you want to see.
   Classic WebDriver still has no request list and says so.
 - `screencast start <dir>` / `screencast stop` on Firefox and the other
   WebDriver BiDi engines (a WebDriver server with `--bidi`, chromedriver):

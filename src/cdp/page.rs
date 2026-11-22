@@ -5707,6 +5707,11 @@ impl Page {
             _ => None,
         };
         let gel = gel.as_deref().map_or(Value::Null, object_arg);
+        // How long a disabled element is waited for: the element wait. On
+        // Chrome that is the settle wait CLICK_PREP falls back to (also when
+        // a cover is looked at again with what is left of it); with no
+        // layout there is no settle wait, so it is given on its own.
+        let enabled = if self.shared.is_single_target() { json!(wait.as_millis() as u64) } else { Value::Null };
         let prep = |settle: &Value| {
             self.on_element(
                 target,
@@ -5720,7 +5725,7 @@ impl Page {
                     json!(effects),
                     json!(young_ms),
                     gel.clone(),
-                    json!(wait.as_millis() as u64),
+                    enabled.clone(),
                 ],
                 wait,
                 timeout,

@@ -44,7 +44,11 @@ console and dialogs, and upload, drag, mouse, keydown, keyup, storage and
 of the session from its first `network` on, as a browser listened to
 slows every load: run `network` once before the load you want to see;
 the list, a response body, `--har` with the bodies the browser kept, up
-to 10 MiB each), `screencast` (screenshots of the
+to 10 MiB each; chromedriver 157 sends a request body that is not UTF-8
+as its base64 labelled as text, which no client can tell from a text body
+that reads the same, so navigera shows that text; Firefox labels it
+base64),
+`screencast` (screenshots of the
 viewport on the session's connection while commands run and between them,
 a frame for each change, at most every 100 ms and one a second on a still
 page),

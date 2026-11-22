@@ -659,6 +659,7 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
     of it (60 products where Chrome shows 12), and `ax` is that much longer.
   - `status` reports the engine of a running session; `start` on a session
     that runs the other engine fails instead of reusing it.
+
 **Your own browser: `--attach` and `--profile`** (with `start`, or `serve`):
 
 | Way | what it connects to | closes the browser? |
