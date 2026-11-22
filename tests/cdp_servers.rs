@@ -90,9 +90,10 @@ struct Agent {
 }
 
 impl Agent {
-    fn new(engine: &'static str, bin: PathBuf) -> Self {
+    /// `test` names the session's socket: the tests of one engine run at once.
+    fn new(engine: &'static str, bin: PathBuf, test: &str) -> Self {
         let session =
-            std::env::temp_dir().join(format!("nv-{engine}-first-{}.sock", std::process::id())).display().to_string();
+            std::env::temp_dir().join(format!("nv-{engine}-{test}-{}.sock", std::process::id())).display().to_string();
         let agent = Agent { session, engine, bin };
         agent.ok(&["start", "--idle-timeout-s", "300"]);
         agent
@@ -152,7 +153,7 @@ fn first_pass(engine: &'static str) {
         return;
     };
     let url = |path: &str| format!("{}{path}", site.base);
-    let agent = Agent::new(engine, bin.clone());
+    let agent = Agent::new(engine, bin.clone(), "first");
 
     // The session runs the engine asked for, from its binary.
     let status = agent.ok(&["status"]);
@@ -289,7 +290,7 @@ fn late_content(engine: &'static str) {
         eprintln!("skipping: python3 not available for the fixture site");
         return;
     };
-    let agent = Agent::new(engine, bin);
+    let agent = Agent::new(engine, bin, "late");
     agent.ok(&["goto", &format!("{}/login", site.base)]);
     // The first look lays the page out.
     agent.ax();
