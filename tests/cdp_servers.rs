@@ -192,8 +192,8 @@ fn first_pass(engine: &'static str) {
     // What navigera asks each browser before it tries an eval as a read:
     // V8 refuses the write under the check (Moli hands `Runtime` to V8's
     // own inspector); Obscura runs it (a no-op: `undefined` is not
-    // writable). There every eval is an action, the change watch armed
-    // first.
+    // writable), so there every eval is an action. The one POST above is
+    // the proof: the read tried first would have sent it twice.
     let probe = agent.ok(&[
         "cdp",
         "Runtime.evaluate",
@@ -201,10 +201,6 @@ fn first_pass(engine: &'static str) {
     ]);
     let refused = probe["result"]["exceptionDetails"]["exception"]["className"] == "EvalError";
     assert_eq!(refused, engine != "obscura", "{engine}: {probe}");
-    if !refused {
-        agent.ok(&["goto", &url("/docs")]);
-        assert_eq!(agent.ok(&["eval", "typeof window.__nvMut"]), "object", "{engine}: an eval ran as a read");
-    }
 
     // A click that changes a control's state: the first box not ticked
     // (near the top: Moli 1.1.27 keeps an element's box where it was before
