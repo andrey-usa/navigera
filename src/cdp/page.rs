@@ -1031,6 +1031,16 @@ const SETTLE_ARM: &str = r#"(() => {
     return c.arm();
 })()"#;
 
+/// What decides whether [`Page::fresh_layout`] lays the page out again:
+/// the document (a random id kept in it), its DOM changes so far (a
+/// `MutationObserver` count; without one, a new value each time), its
+/// scroll and its viewport. Changes inside shadow roots aren't counted.
+const LAYOUT_TOKEN: &str = "(() => { let c = window.__nvLay; if (!c) { c = { n: 0, id: Math.random() }; \
+     try { new MutationObserver((r) => { c.n += r.length; }).observe(document, \
+     { subtree: true, childList: true, characterData: true, attributes: true }); } catch (e) { c.n = NaN; } \
+     Object.defineProperty(window, '__nvLay', { value: c, configurable: true, enumerable: false }); } \
+     return [c.id, Number.isNaN(c.n) ? Math.random() : c.n, scrollX, scrollY, innerWidth, innerHeight].join(' '); })()";
+
 /// [`SETTLE_ARM`] again in a document that has it: the kept function, or
 /// -1 when the document has none (a new one, or the counter stopped).
 const SETTLE_REARM: &str = "(() => { const c = window.__nvMut; return c && c.arm ? c.arm() : -1; })()";
@@ -3655,6 +3665,9 @@ pub struct Page {
     primed: Arc<std::sync::Mutex<Option<u64>>>,
     /// The journal of the last [`Page::pre_read`] (0: none yet).
     pre_journal: Arc<std::sync::atomic::AtomicU64>,
+    /// What [`LAYOUT_TOKEN`] read when [`Page::fresh_layout`] last had the
+    /// page laid out again.
+    layout_token: Arc<std::sync::Mutex<Option<String>>>,
     /// The navigation generation whose document holds the settle arm, plus
     /// one (0: none known); see [`SETTLE_REARM`].
     armed_generation: Arc<std::sync::atomic::AtomicU64>,
@@ -3838,7 +3851,38 @@ impl Page {
             primed: Default::default(),
             pre_journal: Default::default(),
             armed_generation: Default::default(),
+            layout_token: Default::default(),
         }
+    }
+
+    /// The engine keeps its first layout until a screenshot (Moli 1.1.27,
+    /// see [`super::events::LAYOUT_SHOT`]).
+    pub fn layout_kept(&self) -> bool {
+        self.shared.layout_mode.load(std::sync::atomic::Ordering::Relaxed) == super::events::LAYOUT_SHOT
+    }
+
+    /// Before a read of the page's boxes or text on an engine that keeps
+    /// its first layout until a screenshot: lay the page out again with a
+    /// 1x1 screenshot, only when the document, its DOM (a change count),
+    /// its scroll or its viewport changed since the last time (it costs a
+    /// layout of the whole page: 157 ms on 4,505 nodes on Moli 1.1.27).
+    /// Nothing elsewhere. True when it did.
+    pub fn fresh_layout(&self, timeout: Duration) -> bool {
+        if !self.layout_kept() {
+            return false;
+        }
+        let started = std::time::Instant::now();
+        let Ok(token) = self.evaluate_raw(LAYOUT_TOKEN, timeout) else { return false };
+        let token = token.to_string();
+        if self.layout_token.lock().unwrap().as_deref() == Some(token.as_str()) {
+            return false;
+        }
+        if self.send("Page.captureScreenshot", super::events::layout_shot_params(), timeout).is_err() {
+            return false;
+        }
+        crate::timing::record("layout_refresh", started);
+        *self.layout_token.lock().unwrap() = Some(token);
+        true
     }
 
     /// Remember what a snapshot's refs were (see [`Page::refind`]).
@@ -5332,6 +5376,7 @@ impl Page {
         wait: Duration,
         timeout: Duration,
     ) -> Result<Value> {
+        self.fresh_layout(timeout);
         let arg_list: Vec<String> = args.iter().map(|v| plain_arg(v).to_string()).collect();
         let extra = if arg_list.is_empty() { String::new() } else { format!(", {}", arg_list.join(", ")) };
         let wait_ms = wait_budget_ms(wait, timeout);
@@ -5748,6 +5793,12 @@ impl Page {
             )
         };
         let mut point = prep(&settle)?;
+        // An engine that keeps its first layout (Moli) shows no box for an
+        // element a script added while the click waited for it: once more
+        // after laying the page out again, with no second wait.
+        if point.get("hidden").and_then(Value::as_bool) == Some(true) && self.fresh_layout(timeout) {
+            point = prep(&json!(0))?;
+        }
         // A cover with controls that stayed put is reported early, unless
         // the page is still fetching: then it may be a loading overlay
         // about to go, and the rest of the element wait is spent on it.
@@ -7205,6 +7256,7 @@ impl Page {
 
     /// The page's whole text as it reads (`innerText` of the body).
     pub fn page_text(&self, timeout: Duration) -> Result<String> {
+        self.fresh_layout(timeout);
         let value = self
             .evaluate_raw(&ascii_safe("(document.body || document.documentElement || {}).innerText ?? ''"), timeout)?;
         Ok(from_ascii_safe(value)?.as_str().unwrap_or_default().to_string())
@@ -7215,6 +7267,7 @@ impl Page {
     /// it is not rendered (hidden, a script, or an engine without layout).
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
+        self.fresh_layout(timeout);
         // Code and styles inside the element aren't text a user reads (an
         // element that is itself a script, e.g. a JSON blob, keeps its own).
         let value = self.evaluate_raw(
@@ -8227,6 +8280,7 @@ impl Page {
     }
 
     fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        self.fresh_layout(timeout);
         // Only a read that arms a journal leaves one standing for itself,
         // and its snapshot.
         *self.journal.lock().unwrap() = None;

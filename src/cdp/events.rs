@@ -288,7 +288,23 @@ pub struct Shared {
     pub dialog_probe_seen: AtomicBool,
     /// Page-side dialogs: page session id -> its new-document script.
     pub dialog_scripts: Mutex<HashMap<String, String>>,
+    /// Whether the engine's layout follows the page: [`LAYOUT_LIVE`]
+    /// (Chrome, and every browser navigera did not start as a CDP server),
+    /// [`LAYOUT_ASK`] (not known yet) or [`LAYOUT_SHOT`] (it keeps the
+    /// layout it first built until a screenshot: see [`ask_layout`]).
+    pub layout_mode: std::sync::atomic::AtomicU8,
 }
+
+/// [`Shared::layout_mode`]: the layout follows the page (the default).
+pub const LAYOUT_LIVE: u8 = 0;
+/// [`Shared::layout_mode`]: a CDP server engine, not asked yet.
+pub const LAYOUT_ASK: u8 = 1;
+/// [`Shared::layout_mode`]: the engine keeps the layout it built at the
+/// first geometry read until a screenshot (Moli 1.1.27): an element a
+/// script adds afterwards has no box, no `innerText` and no hit. A 1x1
+/// screenshot lays the page out again (Moli 1.1.27 on ubuntu-24.04:
+/// 1.7 ms on 19 nodes, 157 ms on 4,505; a whole-page shot 56 / 236 ms).
+pub const LAYOUT_SHOT: u8 = 2;
 
 /// [`Shared::dialogs_mode`]: the engine announces dialogs (the default).
 pub const DIALOGS_NATIVE: u8 = 0;
@@ -1098,6 +1114,7 @@ impl Shared {
 /// Chrome waits for the answer: the watcher sends it then.
 pub async fn arm_dialog(client: &CdpClient, shared: &Shared, session: &str) {
     if !shared.is_single_target() {
+        ask_layout(client, shared, session).await;
         if page_dialogs(client, shared, session).await {
             install_page_dialogs(client, shared, session).await;
         }
@@ -1155,6 +1172,56 @@ async fn page_dialogs(client: &CdpClient, shared: &Shared, session: &str) -> boo
     shared.dialogs_mode.store(if page { DIALOGS_PAGE } else { DIALOGS_NATIVE }, Ordering::Relaxed);
     crate::timing::log(&format!("[dialogs] {}", if page { "page-side" } else { "the engine's" }));
     page
+}
+
+/// Whether `session`'s engine keeps its first layout until a screenshot,
+/// asked once per browser (only of a CDP server engine: [`LAYOUT_ASK`]),
+/// with its first tab: a 10 px box added after a geometry read has no
+/// width there, and has it after a 1x1 screenshot. Where it has no width
+/// either way, nothing navigera sends would help: the layout is taken as
+/// it is. Any failure does the same, and nothing is asked again.
+async fn ask_layout(client: &CdpClient, shared: &Shared, session: &str) {
+    if shared.layout_mode.load(Ordering::Relaxed) != LAYOUT_ASK {
+        return;
+    }
+    const WAIT: Duration = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let width = |r: anyhow::Result<Value>| r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_f64));
+    let eval = |expression: &str| {
+        client.send("Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(session), WAIT)
+    };
+    let mut mode = LAYOUT_LIVE;
+    if let Some(w) = width(eval(LAYOUT_PROBE_ADD).await) {
+        if w < 1.0 {
+            let shot = client.send("Page.captureScreenshot", layout_shot_params(), Some(session), WAIT).await;
+            if shot.is_ok() && width(eval(LAYOUT_PROBE_TAKE).await).is_some_and(|w| w >= 1.0) {
+                mode = LAYOUT_SHOT;
+            }
+        }
+    }
+    // Taken out whatever was answered (no-op once taken).
+    let _ = eval(LAYOUT_PROBE_TAKE).await;
+    shared.layout_mode.store(mode, Ordering::Relaxed);
+    crate::timing::record("layout_probe", started);
+    crate::timing::log(&format!("[layout] {}", if mode == LAYOUT_SHOT { "kept until a screenshot" } else { "live" }));
+}
+
+/// See [`ask_layout`]: a geometry read, then a 10 px box added to the
+/// document element, and its width.
+const LAYOUT_PROBE_ADD: &str = "(() => { const r = document.documentElement; if (!r) return null; \
+     r.getBoundingClientRect(); const d = document.createElement('div'); \
+     d.style.cssText = 'display:block;width:10px;height:10px'; r.appendChild(d); \
+     Object.defineProperty(window, '__nvLayProbe', { value: d, configurable: true, enumerable: false }); \
+     return d.getBoundingClientRect().width; })()";
+
+/// See [`ask_layout`]: the probe box's width now, and the box taken out.
+const LAYOUT_PROBE_TAKE: &str = "(() => { const d = window.__nvLayProbe; if (!d) return null; \
+     delete window.__nvLayProbe; const w = d.getBoundingClientRect().width; d.remove(); return w; })()";
+
+/// The screenshot that lays a [`LAYOUT_SHOT`] engine's page out again: one
+/// pixel, the least to paint and encode.
+pub fn layout_shot_params() -> Value {
+    json!({ "clip": { "x": 0, "y": 0, "width": 1, "height": 1, "scale": 1 } })
 }
 
 /// See [`page_dialogs`]: null where `confirm` is a browser's own operation,

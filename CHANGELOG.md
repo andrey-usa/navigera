@@ -60,6 +60,21 @@ All notable changes to this project are documented here. The format follows
   does), any other is called once and watched for the dialog event. CI's
   `engine` jobs check the answers and the reports on Obscura 0.2.7 and
   Moli 1.1.27 ([run 45052209468](https://github.com/andrey-usa/navigera/actions/runs/45052209468)).
+- On Moli, content a page's script added after the first look could not
+  be clicked, waited for or read: Moli 1.1.27 keeps the layout it builds at
+  the first geometry read until a screenshot, so a late button had no box
+  (`no box on screen`), `wait --text` and `wait --selector` never saw it,
+  and `text` read it empty. Nothing else it answers over CDP lays the page
+  out again (`Emulation.setScrollbarsHidden`, `Page.getLayoutMetrics` and
+  evals don't). navigera asks each browser it starts as a CDP server once
+  whether a box added after a read gets a width, and where only a
+  screenshot gives it one, takes a 1x1 screenshot before it reads boxes or
+  text (an element op, `text`, `ax`, each 100 ms of a `wait`), only when
+  the document, its DOM, its scroll or its viewport changed since the last
+  one: it costs a layout of the whole page, 1.7 ms on 19 nodes and 157 ms
+  on 4,505 on Moli 1.1.27, where a whole-page shot takes 56 / 236 ms
+  ([run 45055641714](https://github.com/andrey-usa/navigera/actions/runs/45055641714)).
+  Chrome takes no extra step.
 - On Lightpanda, a click on an element that was disabled for the moment
   (a "Load more" reading "Loading…") went to it at once, did nothing, and
   counted: the wait for it to be enabled ended with the wait for it to stop

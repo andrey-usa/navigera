@@ -338,6 +338,9 @@ const NO_SANDBOX: &str = "--no-sandbox";
 /// How long a `wait` watches in the page before it looks again from here
 /// (a navigation, cross-origin frames, the budget).
 const WATCH: Duration = Duration::from_millis(300);
+/// [`WATCH`] on an engine that keeps its first layout until a screenshot:
+/// one poll, laid out again before each (see `Page::fresh_layout`).
+const WATCH_KEPT_LAYOUT: Duration = Duration::from_millis(100);
 
 /// `--natural`: the browser looks like the browser it is, not like an
 /// automated one. Set once per process, before the browser starts.
@@ -4277,7 +4280,13 @@ impl BrowserSession {
             // checks). A navigation ends the watch with its document; the
             // next one starts in the new document. The watch's own names
             // start with `__nv`, so a `--js` expression still sees the page's.
-            let chunk = wait.saturating_sub(started.elapsed()).min(WATCH).as_millis();
+            // An engine that keeps its first layout (Moli) is laid out
+            // again before each watch, which is then a poll's length: a box
+            // or text a script adds shows only to a read after that.
+            let tab = self.active_tab();
+            let watch = if tab.layout_kept() { WATCH_KEPT_LAYOUT } else { WATCH };
+            tab.fresh_layout(timeout);
+            let chunk = wait.saturating_sub(started.elapsed()).min(watch).as_millis();
             let watched = format!(
                 "(async () => {{ const __nvDeep = {}, __nvEnd = Date.now() + {chunk}; \
                  for (;;) {{ if (await ({js_predicate}\n)) return true; const __nvLeft = __nvEnd - Date.now(); \
@@ -4318,8 +4327,11 @@ impl BrowserSession {
             // Up to WATCH in the frame at a time, woken by its changes (as
             // `wait_until_or_in_frames` is in the page), then looked at again
             // from here: a navigation, a frame that went or came, the budget.
-            let chunk = wait.saturating_sub(started.elapsed()).min(WATCH);
-            match self.active_tab().watch_in_frame(chain, js_predicate, chunk, timeout) {
+            let tab = self.active_tab();
+            let watch = if tab.layout_kept() { WATCH_KEPT_LAYOUT } else { WATCH };
+            tab.fresh_layout(timeout);
+            let chunk = wait.saturating_sub(started.elapsed()).min(watch);
+            match tab.watch_in_frame(chain, js_predicate, chunk, timeout) {
                 Ok(true) => return Ok((started.elapsed().as_secs_f64() * 1000.0).round()),
                 Err(e) if format!("{e:#}").contains("not a frame") => return Err(e),
                 // The document went mid-watch: not a tight loop of retries.

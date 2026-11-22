@@ -274,3 +274,55 @@ fn first_pass_on_obscura() {
 fn first_pass_on_moli() {
     first_pass("moli");
 }
+
+/// Content a page's script adds after the first look: a button that shows
+/// up later is waited for, clicked with the mouse, and what it adds is
+/// waited for and read. Moli 1.1.27 keeps the layout it first built until
+/// a screenshot, so without navigera laying the page out again none of
+/// this has a box or text there.
+fn late_content(engine: &'static str) {
+    let Some(bin) = binary(engine) else {
+        eprintln!("skipping: no {engine} binary");
+        return;
+    };
+    let Some(site) = acme() else {
+        eprintln!("skipping: python3 not available for the fixture site");
+        return;
+    };
+    let agent = Agent::new(engine, bin);
+    agent.ok(&["goto", &format!("{}/login", site.base)]);
+    // The first look lays the page out.
+    agent.ax();
+    agent.ok(&[
+        "eval",
+        "setTimeout(() => { const b = document.createElement('button'); b.id = 'late'; \
+         b.textContent = 'Late action'; b.onclick = () => { const p = document.createElement('p'); \
+         p.textContent = 'Late result shown'; document.body.prepend(p); }; document.body.prepend(b); }, 300); 0",
+    ]);
+    agent.ok(&["wait", "--text", "Late action"]);
+    let clicked = agent.ok(&["click", "--selector", "#late"]);
+    assert!(clicked.get("synthetic_click").is_none(), "{engine}: the late button has a box to click: {clicked}");
+    agent.ok(&["wait", "--text", "Late result shown"]);
+    let text = agent.ok(&["text"]);
+    assert!(text.as_str().is_some_and(|t| t.contains("Late result shown")), "{engine}: text reads it: {text}");
+    // Added with no wait in between: the click finds its box at once.
+    agent.ok(&[
+        "eval",
+        "const n = document.createElement('button'); n.id = 'now'; n.textContent = 'Now'; \
+         n.onclick = () => { document.title = 'now clicked'; }; document.body.prepend(n); 0",
+    ]);
+    let clicked = agent.ok(&["click", "--selector", "#now"]);
+    assert!(clicked.get("synthetic_click").is_none(), "{engine}: {clicked}");
+    assert_eq!(agent.ok(&["eval", "document.title"]), "now clicked", "{engine}");
+    agent.ok(&["quit"]);
+}
+
+#[test]
+fn late_content_on_obscura() {
+    late_content("obscura");
+}
+
+#[test]
+fn late_content_on_moli() {
+    late_content("moli");
+}

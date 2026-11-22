@@ -744,12 +744,13 @@ take Chrome's paths; each session gets a browser of its own.
   `$MOLI_BIN` or `PATH`, or from `--chromium`. Tabs, popups (as tabs),
   dialogs and screenshots work as on Chrome. Differences:
   - layout: Moli builds it at the first geometry read and keeps it until a
-    screenshot. An element a script adds afterwards has no box and no
-    `innerText` (a click can't reach it, `wait --text` doesn't see it,
-    `text` reads it empty), and boxes don't move with a scroll, so an
-    element below the first screen can't be clicked. Pages the server
-    renders, acted on near their top, work; content a page's scripts render
-    later does not yet.
+    screenshot, so an element a script adds afterwards has no box and no
+    `innerText` there. navigera takes a 1x1 screenshot before it reads
+    boxes or text (an element op, `text`, `ax`, each 100 ms of a `wait`)
+    when the document, its DOM, its scroll or its viewport changed since
+    the last one: a whole layout, 1.7 ms on a small page, 157 ms on 4,500
+    nodes. Changes inside a shadow root aren't counted, and an `eval` of
+    your own reads the layout as it is.
   - refs are Moli's node ids, large numbers (`[ref=2000000017]`).
   - a `<select>`'s value in `ax` is the selected option's value, not its
     label.
