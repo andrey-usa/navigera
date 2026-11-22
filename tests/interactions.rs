@@ -2481,21 +2481,23 @@ fn a_short_quiet_window_reads_a_chained_list_early() {
     std::fs::write(
         &steps,
         format!(
-            "goto {}/two-fetch\nax\neval \"JSON.stringify({{...window.__t, read: performance.now()}})\"\n",
+            "goto {}/two-fetch\neval \"performance.now()\"\nax\neval \"JSON.stringify({{...window.__t, read: performance.now()}})\"\n",
             site.url
         ),
     )
     .unwrap();
     let steps = steps.display().to_string();
     // The tree, and for a failure the batch's whole answer with the call's
-    // time: its `eval` step gives the page's clock when Alpha was drawn,
-    // when Beta's fetch started and when it was drawn, and when the read
-    // ended. A read that ends past Beta's fetch with a 250 ms window came
-    // late (the page's gap is 400 ms): the times say how late.
+    // time: its `eval` steps give the page's clock as `goto` answered, and
+    // when Alpha was drawn, when Beta's fetch started and when it was
+    // drawn, and when the read ended. A `goto` that answers past Beta's
+    // fetch leaves no window to read early in (a loaded runner); a read
+    // that starts before it and still shows Beta waited too long.
     let read = || {
         let t = std::time::Instant::now();
         let r = s.ok(&["batch", &steps]);
-        let tree = r["results"][0]["result"].as_str();
+        let steps = r["results"].as_array().cloned().unwrap_or_default();
+        let tree = steps.iter().find(|v| v["do"] == "ax").and_then(|v| v["result"].as_str());
         let said = format!("{} ms: {r}", t.elapsed().as_millis());
         (tree.unwrap_or_default().to_string(), said)
     };
