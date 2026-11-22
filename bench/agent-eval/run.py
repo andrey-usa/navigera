@@ -91,6 +91,16 @@ TOOLS = {
         "cmd": "navigera", "skill": "navigera",
         "repo": "https://github.com/andrey-usa/navigera",
     },
+    # navigera with five commands only (start, goto, eval, cdp, quit), on
+    # chrome-headless-shell as navigera-shell is: does a code-only interface
+    # serve an agent better than the full command set? Its own skill
+    # (skills/navigera-code), and a `navigera` first on the agent's PATH
+    # that refuses every other command (see `code_only_wrapper`).
+    "navigera-code": {
+        "cmd": "navigera", "skill": "navigera-code",
+        "repo": "https://github.com/andrey-usa/navigera",
+        "code_only": True,
+    },
     "agent-browser": {
         "cmd": "agent-browser", "skill": "agent-browser",
         "repo": "https://github.com/vercel-labs/agent-browser",
@@ -288,6 +298,9 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
                                           if Path(p).resolve() != Path(args.nv_bin_dir).resolve())
         return work, env
 
+    if TOOLS[tool].get("code_only") and (args.agent == "claude" or WINDOWS):
+        raise RuntimeError(f"{tool}: the code-only arm is set up for Gemini CLI and OpenAI-compatible "
+                           "agents on Linux and macOS only")
     if args.agent == "claude":
         # Each tool as a Claude Code user gets it: navigera's plugin folder
         # (`--plugin-dir`, see run_claude), agent-browser's own skill in the
@@ -306,7 +319,13 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
 
     skills = work / ".agents" / "skills"
     skills.mkdir(parents=True)
-    if TOOLS[tool]["cmd"] == "navigera":
+    if TOOLS[tool].get("code_only"):
+        if args.nv_bin_dir:
+            env["PATH"] = os.pathsep.join([args.nv_bin_dir, env.get("PATH", "")])
+        shutil.copytree(HERE / "skills" / tool, skills / tool)
+        code_only_wrapper(root, exe("navigera", env))
+        env["PATH"] = os.pathsep.join([str(root / "code-bin"), env["PATH"]])
+    elif TOOLS[tool]["cmd"] == "navigera":
         if args.nv_bin_dir:
             env["PATH"] = os.pathsep.join([args.nv_bin_dir, env.get("PATH", "")])
         subprocess.run([exe("navigera", env), "install-skill", "--dir", str(skills)], env=env, check=True,
@@ -324,6 +343,85 @@ def prepare(tool: str, mode: str, root: Path, args) -> tuple[Path, dict]:
             "browserName": "chromium",
             "launchOptions": {"executablePath": chrome, "headless": True, "chromiumSandbox": False}}}))
     return work, env
+
+
+# The code-only arm's `navigera`: a shell script (no interpreter start per
+# call, so its wall time stays comparable) that passes the five commands,
+# the session flag, --version and help to the real binary and refuses the
+# rest. Every call is logged outside the workspace, one line each
+# (verdict, command, the rest of the argv), for `code_calls`.
+CODE_ONLY_OPS = ("start", "goto", "eval", "cdp", "quit")
+CODE_ONLY_REFUSAL = "error: this arm drives the page with eval and cdp only"
+CODE_ONLY_SCRIPT = r"""#!/bin/sh
+real={real}
+log={log}
+op= skip= refused=
+for a in "$@"; do
+  if [ -n "$skip" ]; then skip=; continue; fi
+  case "$a" in
+    -s|--session) skip=1 ;;
+    -s=*|--session=*) ;;
+    -V|--version|-h|--help|help) op=$a; break ;;
+    {ops}) op=$a; break ;;
+    *) op=$a; refused=1; break ;;
+  esac
+done
+rest=$(printf '%s ' "$@" | tr '\t\n\r' '   ' | cut -c1-300)
+if [ -n "$refused" ]; then
+  printf 'refused\t%s\t%s\n' "$op" "$rest" >> "$log"
+  echo "{refusal}" >&2
+  exit 1
+fi
+printf 'ok\t%s\t%s\n' "${{op:-help}}" "$rest" >> "$log"
+exec "$real" "$@"
+"""
+
+
+def code_only_wrapper(root: Path, real: str):
+    """Write the code-only arm's `navigera` into `<root>/code-bin`; its
+    calls go to `<root>/code-calls.log`."""
+    bin_dir = root / "code-bin"
+    bin_dir.mkdir()
+    script = bin_dir / "navigera"
+    script.write_text(CODE_ONLY_SCRIPT.format(real=shlex.quote(str(Path(real).resolve())),
+                                              log=shlex.quote(str(root / "code-calls.log")),
+                                              refusal=CODE_ONLY_REFUSAL, ops="|".join(CODE_ONLY_OPS)))
+    script.chmod(0o755)
+
+
+def code_calls(root: Path, shells: list, nv_bin_dir: str) -> dict:
+    """What the code-only arm's agent asked navigera for, from the wrapper's
+    log: calls per command, the cdp methods and the refused calls; and the
+    shell commands that named the real binary's directory (around the
+    wrapper, so not counted in it)."""
+    counts, methods, refused = {}, {}, []
+    log = root / "code-calls.log"
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines() if log.exists() else []
+    for line in lines:
+        verdict, _, rest = line.partition("\t")
+        op, _, argv = rest.partition("\t")
+        if verdict == "refused":
+            refused.append(argv.strip()[:120])
+            continue
+        counts[op] = counts.get(op, 0) + 1
+        if op == "cdp":
+            words = argv.split()
+            after = words[words.index("cdp") + 1:] if "cdp" in words else []
+            method, skip = None, False
+            for w in after:
+                if skip:
+                    skip = False
+                elif w in ("-s", "--session"):
+                    skip = True
+                elif not w.startswith("-") or w == "--list":
+                    method = w
+                    break
+            if method:
+                methods[method] = methods.get(method, 0) + 1
+    return {"eval_calls": counts.get("eval", 0), "cdp_calls": counts.get("cdp", 0),
+            "goto_calls": counts.get("goto", 0), "refused_calls": len(refused),
+            "cdp_methods": methods, "refused_commands": refused[:10], "code_ops": counts,
+            "bypass_commands": [c[:200] for c in shells if nv_bin_dir and nv_bin_dir in c]}
 
 
 # --- agents -----------------------------------------------------------------
@@ -1064,6 +1162,30 @@ def render(mode: str, agent: str, model: str, runs: list, tools: list, tasks: li
             lines += ["", f"Estimated at list prices per million tokens: ${r_in} new input, ${r_cached} cached "
                       f"input, ${r_out} output. Cost per pass is every "
                       "run's cost over the runs that passed. An estimate, not a bill."]
+    # The code-only arm: how it drove the page (eval and cdp calls per run,
+    # the cdp methods) and how often it reached for a refused command.
+    coded = [r for r in runs if "eval_calls" in r and not r.get("infra")]
+    if coded:
+        lines += ["", "| task | tool | runs | median eval calls | median cdp calls | refused calls | bypass cmds |",
+                  "|---|---|---|---|---|---|---|"]
+        for task in tasks:
+            for tool in tools:
+                rs = [r for r in coded if label(r) == tool and r["task"] == task]
+                if rs:
+                    lines.append(f"| {task} | `{tool}` | {len(rs)} | {med([r['eval_calls'] for r in rs]):g} | "
+                                 f"{med([r['cdp_calls'] for r in rs]):g} | "
+                                 f"{sum(r['refused_calls'] for r in rs)} | "
+                                 f"{sum(len(r.get('bypass_commands') or []) for r in rs)} |")
+        methods: dict = {}
+        for r in coded:
+            for m, n in (r.get("cdp_methods") or {}).items():
+                methods[m] = methods.get(m, 0) + n
+        lines += ["", "cdp methods (all runs): " + (", ".join(f"`{m}` {n}" for m, n in
+                                                        sorted(methods.items(), key=lambda x: -x[1])) or "none")]
+        refused = list(dict.fromkeys(c for r in coded for c in r.get("refused_commands") or []))
+        if refused:
+            lines.append("refused (first 10 distinct): " + " · ".join(
+                "`" + " ".join(c.split()).replace("`", "'")[:80] + "`" for c in refused[:10]))
     fails = [r for r in runs if not r["ok"]]
     if fails:
         lines += ["", "Failures:"]
@@ -1143,6 +1265,10 @@ def main() -> int:
     if args.mode == "onboard":
         tasks = [t for t in tasks if t["id"] in ("lookup", "docs")][:1] or tasks[:1]
     tools = [t for t in (args.tools or DEFAULT_TOOLS).split(",") if t]
+    if args.mode == "onboard":
+        # Onboarding installs navigera from its docs, the full command set:
+        # nothing the code-only arm would measure.
+        tools = [t for t in tools if not TOOLS.get(t, {}).get("code_only")]
     if args.agent == "scripted":
         # navigera on Chrome, and on each engine whose binary is set; an
         # explicit --tools narrows that set (e.g. lightpanda-only on a box
@@ -1204,6 +1330,8 @@ def main() -> int:
                     if context is not None and not task.get("live"):
                         sids = site.get("/__state").get("session_ids", [])
                         rec["secret_in_context"] = any(sid in context for sid in sids)
+                    if spec.get("code_only"):
+                        rec.update(code_calls(root, shells, args.nv_bin_dir))
                     rec.update({
                         "infra": bool(infra_why),
                         "ok": ok and not switched, "why": why + infra_why + stuck,
