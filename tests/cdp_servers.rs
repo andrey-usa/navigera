@@ -315,6 +315,20 @@ fn late_content(engine: &'static str) {
     let clicked = agent.ok(&["click", "--selector", "#now"]);
     assert!(clicked.get("synthetic_click").is_none(), "{engine}: {clicked}");
     assert_eq!(agent.ok(&["eval", "document.title"]), "now clicked", "{engine}");
+    // The DOM-change count navigera's waits and the layout token read: a
+    // MutationObserver on the document sees each kind of change it counts.
+    let seen = agent.ok(&[
+        "eval",
+        "new Promise((done) => { const seen = { childList: 0, attributes: 0, characterData: 0 }; \
+         const o = new MutationObserver((rs) => { for (const r of rs) seen[r.type]++; }); \
+         o.observe(document, { subtree: true, childList: true, characterData: true, attributes: true }); \
+         const p = document.createElement('p'); p.textContent = 'x'; document.body.appendChild(p); \
+         p.setAttribute('data-n', '1'); p.firstChild.data = 'y'; \
+         setTimeout(() => { o.disconnect(); done(seen); }, 50); })",
+    ]);
+    for kind in ["childList", "attributes", "characterData"] {
+        assert!(seen[kind].as_u64().is_some_and(|n| n >= 1), "{engine}: no {kind} record: {seen}");
+    }
     agent.ok(&["quit"]);
 }
 
