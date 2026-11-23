@@ -2468,51 +2468,56 @@ fn a_snapshot_after_a_click_that_fetches_waits_for_the_fetch_not_the_window() {
 }
 
 /// The default quiet window reads a list that arrives in two fetches with
-/// a 400 ms gap between them; a 250 ms window ends in the gap and reads
-/// only the first half. That is why the default stays 500 ms and 250 ms
-/// is opt-in per session. `goto` and `ax` go in one call: a command line
+/// a 400 ms gap between them; a 250 ms window ends in a longer gap and
+/// reads only the first half. That is why the default stays 500 ms and
+/// 250 ms is opt-in per session. `goto` and `ax` go in one call: a command line
 /// started between them (seen on a loaded macOS runner) could take past
 /// the gap, and the read then had both halves whatever the window.
 #[test]
 fn a_short_quiet_window_reads_a_chained_list_early() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("quiet-window", &[]);
-    let steps = std::env::temp_dir().join(format!("nv-quiet-window-{}.txt", std::process::id()));
-    std::fs::write(
-        &steps,
-        format!(
-            "goto {}/two-fetch\neval \"performance.now()\"\nax\neval \"JSON.stringify({{...window.__t, read: performance.now()}})\"\n",
-            site.url
-        ),
-    )
-    .unwrap();
-    let steps = steps.display().to_string();
+    let steps = |gap: u32| {
+        let path = std::env::temp_dir().join(format!("nv-quiet-window-{}-{gap}.txt", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                "goto {}/two-fetch?gap={gap}\neval \"performance.now()\"\nax\neval \"JSON.stringify({{...window.__t, read: performance.now()}})\"\n",
+                site.url
+            ),
+        )
+        .unwrap();
+        path.display().to_string()
+    };
+    let (gap400, gap1000) = (steps(400), steps(1000));
     // The tree, and for a failure the batch's whole answer with the call's
     // time: its `eval` steps give the page's clock as `goto` answered, and
     // when Alpha was drawn, when Beta's fetch started and when it was
-    // drawn, and when the read ended. A `goto` that answers past Beta's
-    // fetch leaves no window to read early in (a loaded runner); a read
-    // that starts before it and still shows Beta waited too long.
-    let read = || {
+    // drawn, and when the read ended.
+    let read = |steps: &str| {
         let t = std::time::Instant::now();
-        let r = s.ok(&["batch", &steps]);
+        let r = s.ok(&["batch", steps]);
         let steps = r["results"].as_array().cloned().unwrap_or_default();
         let tree = steps.iter().find(|v| v["do"] == "ax").and_then(|v| v["result"].as_str());
         let said = format!("{} ms: {r}", t.elapsed().as_millis());
         (tree.unwrap_or_default().to_string(), said)
     };
 
-    let (tree, said) = read();
+    let (tree, said) = read(&gap400);
     assert!(tree.contains("Alpha") && tree.contains("Beta"), "{said}");
 
+    // A 250 ms window ends well inside a 1000 ms gap. On a loaded macOS
+    // runner a 250 ms read has come ~430 ms after the window's end (goto
+    // answered at 16 ms, Alpha drawn at 242, read at 1235 with a 400 ms
+    // gap): late, never early, so the margin is on that side.
     s.ok(&["set", "network-quiet", "250"]);
-    let (tree, said) = read();
+    let (tree, said) = read(&gap1000);
     assert!(tree.contains("Alpha") && !tree.contains("Beta"), "{said}");
 
     s.ok(&["set", "network-quiet", "500"]);
-    let (tree, said) = read();
+    let (tree, said) = read(&gap400);
     assert!(tree.contains("Alpha") && tree.contains("Beta"), "{said}");
-    let _ = std::fs::remove_file(&steps);
+    let _ = (std::fs::remove_file(&gap400), std::fs::remove_file(&gap1000));
 }
 
 /// `check` on a controlled checkbox (the click's default is cancelled and the

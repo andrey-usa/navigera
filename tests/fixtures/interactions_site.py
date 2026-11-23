@@ -37,7 +37,7 @@ getting wrong, one page each, built the way those sites behave:
                 by Redraw; Add row adds a fourth, Route pushes a new URL
 /legal          a 1,500-clause agreement (~130 KB of text), every 10th
                 clause long enough to be cut in a snapshot
-/two-fetch      a list in two halves: one fetch, a 400 ms gap, a second fetch
+/two-fetch      a list in two halves: one fetch, a gap (?gap=ms, 1000), a second fetch
 /big-table      a 2,000-row table, a button and a link in each row
 /clicks         a 2,000-row page with a button per kind of change a click makes
                 (a cell, a row added or removed, a menu a sibling rule shows, a
@@ -305,7 +305,7 @@ q.oninput = () => setTimeout(() => {
 PAGES["/two-fetch"] = ("two fetch", "", """
 <ul id=list><li>Loading...</li></ul>
 <script>
-// Half a list, then a 400 ms gap with no request, then the other half:
+// Half a list, then a gap with no request (?gap=ms, 1000), then the other half:
 // a quiet window shorter than the gap reads only the first half.
 // window.__t: when each step happened on the page's clock, for a test
 // that fails to say whether its read came late.
@@ -313,7 +313,7 @@ const t = window.__t = {};
 fetch('/slow-echo?ms=100').then(() => {
   document.getElementById('list').innerHTML = '<li>Alpha</li>';
   t.alpha = performance.now();
-  return new Promise(r => setTimeout(r, 400));
+  return new Promise(r => setTimeout(r, +(new URLSearchParams(location.search).get('gap') || 1000)));
 }).then(() => { t.second = performance.now(); return fetch('/slow-echo?ms=100'); }).then(() => {
   document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
   t.beta = performance.now();
