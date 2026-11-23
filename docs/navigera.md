@@ -869,6 +869,11 @@ machine without a GPU still reports a software renderer).
 - `NAVIGERA_VERBOSE=1` turns on launch logs.
 - `NAVIGERA_CHROME_LOG=<file>` appends the browser's own stderr there.
 - `NAVIGERA_RSS_REPORT=1` prints navigera's peak memory when a `serve` ends.
+- `NAVIGERA_SCREENSHOT_RESEND_MS=<ms>`: how long a viewport screenshot waits
+  for Chrome's answer before asking again (default 400; Chrome can lose one
+  asked while the page replaces its document). Never for an element, a full
+  page or under `set viewport`/`set device`: two such captures at once leave
+  the tab emulated.
 - Off switches, for telling a navigera behaviour from the page's:
   `NAVIGERA_NO_NETWORK=1` (no Network domain: `network` stays empty and ops
   don't wait for data), `NAVIGERA_NO_CLICK_CHECK=1` (clicks don't watch what

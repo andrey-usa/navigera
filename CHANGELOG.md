@@ -103,6 +103,19 @@ All notable changes to this project are documented here. The format follows
   whole tree then, and a root node with no title and no URL gets the
   page's own in the header and for the links the tree prints.
 
+- A screenshot of an element or of a full page that Chrome answered after
+  400 ms was asked for a second time while the first was out. Chrome keeps
+  the emulation it finds to put back after a capture, so the second put the
+  first one's back: the tab stayed emulated, and later screenshots of the
+  next pages showed them 1,500 px down, blank white (`screenshot --annotate`
+  came back without its labels). Seen on macOS with a just-launched Chrome,
+  where an element shot can take that long: blank in 44 of 89 runs with an
+  element shot before a navigation, each with that shot over 400 ms, and in
+  0 of 121 without ([run 45213089403](https://github.com/andrey-usa/navigera/actions/runs/45213089403)).
+  Only a viewport capture with no device override is asked for again now
+  (after `$NAVIGERA_SCREENSHOT_RESEND_MS`, default 400), for a capture
+  Chrome loses while the page replaces its document.
+
 ### Behaviour changes
 
 - `--engine` (and `$NAVIGERA_ENGINE`) takes chrome, lightpanda, obscura,

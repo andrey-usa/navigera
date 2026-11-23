@@ -3683,6 +3683,10 @@ pub struct Page {
     /// The navigation generation whose document holds the settle arm, plus
     /// one (0: none known); see [`SETTLE_REARM`].
     armed_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Whether this tab has a device metrics override (`set viewport`, `set
+    /// device`, or one sent with `cdp`): Chrome then emulates for every
+    /// capture, so none is asked twice at once (see [`Page::screenshot_clip`]).
+    metrics: Arc<std::sync::atomic::AtomicBool>,
     /// The top document's global object, to call navigera's own functions
     /// on (see [`Page::call_fn`]): the navigation generation it was asked
     /// for in, and its object id.
@@ -3863,6 +3867,7 @@ impl Page {
             primed: Default::default(),
             pre_journal: Default::default(),
             armed_generation: Default::default(),
+            metrics: Default::default(),
             layout_token: Default::default(),
         }
     }
@@ -4474,11 +4479,24 @@ impl Page {
         let timeout = if self.stalled.load(Ordering::SeqCst) { timeout.min(STALLED_WAIT) } else { timeout };
         let res = self.send_once(method, params, timeout);
         match &res {
-            Ok(_) => self.stalled.store(false, Ordering::SeqCst),
+            Ok(_) => {
+                self.stalled.store(false, Ordering::SeqCst);
+                self.note_metrics(method);
+            }
             Err(e) if format!("{e:#}").contains(super::client::NO_ANSWER) => self.stalled.store(true, Ordering::SeqCst),
             Err(_) => {}
         }
         res
+    }
+
+    /// Keeps [`Page::metrics`] after a call this tab answered.
+    fn note_metrics(&self, method: &str) {
+        let on = match method {
+            "Emulation.setDeviceMetricsOverride" => true,
+            "Emulation.clearDeviceMetricsOverride" => false,
+            _ => return,
+        };
+        self.metrics.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn send_once(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
@@ -4534,7 +4552,13 @@ impl Page {
         let mut rx = (!listen.is_empty()).then(|| self.client.subscribe());
         let session = (!browser).then_some(self.session_id.as_str());
         let result = match method {
-            Some(m) => Some(self.block_on(self.client.send(m, params, session, timeout))?),
+            Some(m) => {
+                let r = self.block_on(self.client.send(m, params, session, timeout))?;
+                if !browser {
+                    self.note_metrics(m);
+                }
+                Some(r)
+            }
             None => None,
         };
         let (mut events, mut dropped, mut lagged) = (Vec::new(), 0usize, 0u64);
@@ -7368,6 +7392,7 @@ impl Page {
             Some(q) => json!({ "format": "jpeg", "quality": q }),
             None => json!({ "format": "png" }),
         };
+        let emulated = full_page || clip.is_some() || self.metrics.load(std::sync::atomic::Ordering::Relaxed);
         if full_page || clip.is_some() {
             params["captureBeyondViewport"] = Value::Bool(true);
         }
@@ -7377,17 +7402,35 @@ impl Page {
         }
         // A capture asked for while the page is replacing its document (a click
         // that confirm()s, posts and reloads) can be lost: Chrome never answers it,
-        // and the next capture works at once. So with no answer after 400 ms it is
-        // asked for again, and whichever answers first is taken: a slow capture
-        // that is only slow (a long full page) still answers in its own time.
+        // and the next capture works at once. So with no answer after 400 ms
+        // ($NAVIGERA_SCREENSHOT_RESEND_MS) it is asked for again, and whichever
+        // answers first is taken: a slow capture that is only slow still answers
+        // in its own time.
+        //
+        // Not a capture Chrome emulates for: a clip, a full page, or any capture
+        // under a device metrics override. Chrome sets the emulation for it and
+        // keeps what was set before, to put back after; a second capture asked
+        // while the first is out keeps the FIRST capture's emulation as "before"
+        // and puts that back, so the tab stays emulated, across navigations too.
+        // Seen on macOS with a just-launched Chrome, where an element shot can
+        // take over 400 ms: the next page's viewport captures came out blank
+        // white, the page shown 1,500 px down (44 of 89 runs with an element
+        // shot before a navigation, each with that shot over 400 ms; 0 of 121
+        // runs without). Forcing the second capture does the same on Linux.
+        let resend = Duration::from_millis(
+            std::env::var("NAVIGERA_SCREENSHOT_RESEND_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(400),
+        );
         let started = std::time::Instant::now();
         let session = Some(self.session_id.as_str());
         let res = self.block_on(async {
             let first = self.client.send("Page.captureScreenshot", params.clone(), session, timeout);
+            if emulated {
+                return first.await;
+            }
             tokio::pin!(first);
             tokio::select! {
                 r = &mut first => return r,
-                _ = tokio::time::sleep(timeout.min(Duration::from_millis(400))) => {}
+                _ = tokio::time::sleep(timeout.min(resend)) => {}
             }
             let left = timeout.saturating_sub(started.elapsed());
             if left.is_zero() {

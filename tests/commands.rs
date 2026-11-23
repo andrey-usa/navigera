@@ -90,13 +90,30 @@ impl Agent {
         agent
     }
 
-    fn run(&self, args: &[&str]) -> Value {
+    /// [`Agent::new`] with environment variables for its session server.
+    fn with_env(name: &str, engine: &'static str, bin: Option<PathBuf>, env: &[(&str, &str)]) -> Self {
+        let session = std::env::temp_dir()
+            .join(format!("nv-cmd-{name}-{engine}-{}.sock", std::process::id()))
+            .display()
+            .to_string();
+        let agent = Agent { session, engine, bin };
+        let out =
+            agent.command().envs(env.iter().copied()).args(["start", "--idle-timeout-s", "300"]).output().unwrap();
+        assert!(out.status.success(), "[{engine}] start: {}", String::from_utf8_lossy(&out.stderr));
+        agent
+    }
+
+    fn command(&self) -> Command {
         let mut cmd = Command::new(tool_exe());
         cmd.args(["--session", &self.session, "--engine", self.engine]);
         if let Some(bin) = &self.bin {
             cmd.arg("--chromium").arg(bin);
         }
-        let out = cmd.args(args).stdin(Stdio::null()).output().expect("run navigera");
+        cmd
+    }
+
+    fn run(&self, args: &[&str]) -> Value {
+        let out = self.command().args(args).stdin(Stdio::null()).output().expect("run navigera");
         let text = String::from_utf8_lossy(&out.stdout);
         serde_json::from_str(text.trim())
             .unwrap_or_else(|_| panic!("[{}] stdout must be one JSON object for {args:?}: {text}", self.engine))
@@ -337,12 +354,63 @@ fn screenshot_of_one_element() {
         let before = a.text(&["ax"]);
         a.ok(&["screenshot", file]);
         let plain = std::fs::read(file).unwrap();
+        assert!(!blank(&plain), "[{engine}] the page's controls are in the image");
         let r = a.ok(&["screenshot", file, "--annotate"]);
         assert_eq!(r["refs"], 3, "[{engine}] {r}");
         assert_ne!(std::fs::read(file).unwrap(), plain, "[{engine}] the labels are in the image");
         assert_eq!(a.ok(&["eval", "!!document.getElementById('__nv_marks')"]), false, "[{engine}] and gone after");
         assert_eq!(a.text(&["ax"]), before, "[{engine}] the page reads as before");
         assert!(a.err(&["screenshot", file, "--annotate", "--selector", "button"]).contains("not one element"));
+    }
+    let _ = std::fs::remove_file(file);
+}
+
+/// A PNG with no pixel that is not white.
+fn blank(png: &[u8]) -> bool {
+    navigera::annotate::content_census(png).ends_with(" 0 pixels not white in None")
+}
+
+/// A capture Chrome emulates for (a clip, a full page, any capture under a
+/// viewport override) is never asked for twice at once, even when its
+/// answer comes after the resend wait: Chrome would put the first one's
+/// emulation back after the second, and the tab's next pages would show
+/// 1,500 px down, blank. Here every capture waits 0 ms before a resend.
+#[test]
+fn a_slow_element_shot_leaves_no_emulation_behind() {
+    let card = "data:text/html,<style>body{margin:0}%23card{margin:1500px 0 0 40px;width:200px;height:120px;background:red}</style><div id=card><button>Buy</button></div>";
+    let page = "data:text/html,<button>One</button> <a href=%23x>Two</a> <input aria-label=Three>";
+    let file = std::env::temp_dir().join(format!("nv-resend-{}.png", std::process::id()));
+    let file = file.to_str().unwrap();
+    let size = |png: &[u8]| {
+        (u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap()))
+    };
+    for (engine, bin) in engines() {
+        if engine != "chrome" {
+            continue;
+        }
+        let a = Agent::with_env("resend", engine, bin, &[("NAVIGERA_SCREENSHOT_RESEND_MS", "0")]);
+        let mut sizes = Vec::new();
+        for shot in [&["--selector", "#card"][..], &["--full-page"]] {
+            a.ok(&["goto", card]);
+            a.ok(&[&["screenshot", file][..], shot].concat());
+            a.ok(&["goto", page]);
+            a.ok(&["screenshot", file]);
+            let plain = std::fs::read(file).unwrap();
+            assert!(!blank(&plain), "[{engine}] after {shot:?}: the next page's controls are in the image");
+            sizes.push(size(&plain));
+        }
+        let (w, h) = sizes[0];
+        assert_eq!(sizes[1], (w, h), "[{engine}]");
+        a.ok(&["set", "viewport", "600", "400", "--scale", "2"]);
+        a.ok(&["screenshot", file]);
+        assert_eq!(size(&std::fs::read(file).unwrap()), (1200, 800), "[{engine}] under the override");
+        a.ok(&["screenshot", file, "--selector", "button"]);
+        a.ok(&["set", "viewport", "off"]);
+        a.ok(&["screenshot", file]);
+        let after = std::fs::read(file).unwrap();
+        assert_eq!(size(&after), (w, h), "[{engine}] the override is gone");
+        assert!(!blank(&after), "[{engine}]");
+        a.ok(&["quit"]);
     }
     let _ = std::fs::remove_file(file);
 }

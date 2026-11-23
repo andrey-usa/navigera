@@ -4463,18 +4463,18 @@ impl BrowserSession {
             (_, ms) if ms > 250 => eprintln!("[screenshot] --annotate: the labels' frame took {ms} ms"),
             _ => {}
         }
-        // The other way: the browser hands back an image without them. On
-        // macOS, a Chrome just launched can copy a blank surface: all
-        // white, the page's own content missing too, the same image after
-        // more frames and 3 s later. So the image is asked for proof: one
-        // pixel of the last outline, in the outline's colour. Without it
-        // the viewport is taken again through a clip with
-        // `captureBeyondViewport`, for which Chrome resizes the view and
-        // copies a new surface: on macos-15 with a browser launched per
-        // run, retakes as before recovered 0 of 55 blank captures and this
-        // one 8 of 8 (50/50 runs). Chrome hides scrollbars for such a
-        // capture: where they take room, the retake's content can sit a
-        // scrollbar's width off its marks.
+        // The other way: the browser hands back an image without them. A
+        // tab left emulated (an element shot asked twice at once, which
+        // `screenshot_clip` no longer does) showed the page 1,500 px down:
+        // all white, the page's own content missing too, through more
+        // frames and 3 s later. So the image is asked for proof: one pixel
+        // of the last outline, in the outline's colour. Without it the
+        // viewport is taken again through a clip with
+        // `captureBeyondViewport`, which sets the view's offset and size
+        // for that capture: on macos-15, retakes as before recovered 0 of
+        // 55 such captures and this one 8 of 8 (50/50 runs). Chrome hides
+        // scrollbars for such a capture: where they take room, the
+        // retake's content can sit a scrollbar's width off its marks.
         let n = |i: usize| drawn[i].as_f64().unwrap_or(0.0);
         let (dpr, sx, sy) = (if n(2) > 0.0 { n(2) } else { 1.0 }, n(3), n(4));
         let proof = match quality {
