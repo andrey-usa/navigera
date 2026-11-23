@@ -266,8 +266,10 @@ PAGES["/click-fetch"] = ("click fetch", "", """
 <button id=go>Go</button><ul id=list><li>Loading...</li></ul>
 <script>
 document.getElementById('go').onclick = () => {
+  window.__t = { clicked: performance.now() };
   fetch('/slow-echo?ms=200').then(() => {
     document.getElementById('list').innerHTML = '<li>Alpha</li><li>Beta</li>';
+    window.__t.drawn = performance.now();
   });
 };
 </script>""")

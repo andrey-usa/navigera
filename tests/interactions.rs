@@ -2437,23 +2437,54 @@ fn the_first_read_after_a_paused_goto_was_read_ahead() {
 }
 
 /// After a click whose fetch has started, the snapshot waits for that fetch
-/// and a short settle, not the whole quiet window: the list is there, well
-/// before the 200 ms fetch plus 500 ms of quiet it used to take. A window
-/// the session set holds after actions too.
+/// and a short settle, not the whole quiet window: the read ends about
+/// 110 ms after the list is drawn, where waiting out the 500 ms window ends
+/// it 560 ms or more after. Timed on the page's clock, with `click`, `ax`
+/// and the clock read in one batch: the wall time of a separate `ax` call
+/// also counts the fetch itself and starting a command line, and a loaded
+/// macOS runner took 646-757 ms there. A window the session set holds
+/// after actions too.
 #[test]
 fn a_snapshot_after_a_click_that_fetches_waits_for_the_fetch_not_the_window() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("after-click", &[]);
-    let mut times = Vec::new();
+    let steps = std::env::temp_dir().join(format!("nv-after-click-{}.txt", std::process::id()));
+    std::fs::write(
+        &steps,
+        format!(
+            "goto {}/click-fetch\nclick --role button --name Go\nax\neval \"JSON.stringify({{...window.__t, read: performance.now()}})\"\n",
+            site.url
+        ),
+    )
+    .unwrap();
+    let steps = steps.display().to_string();
+    // From the list drawn to the read's end, per try, and for a failure the
+    // batches' whole answers (the page's clock as the click ran, the list
+    // was drawn and the read ended).
+    let mut after_drawn = Vec::new();
+    let mut said = Vec::new();
     for _ in 0..3 {
-        s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
-        s.ok(&["click", "--role", "button", "--name", "Go"]);
-        let (ms, r) = timed(&s, &["ax"]);
-        let tree = r.as_str().unwrap_or("");
-        assert!(tree.contains("Alpha") && !tree.contains("Loading"), "{tree}");
-        times.push(ms);
+        let r = s.ok(&["batch", &steps]);
+        let results = r["results"].as_array().cloned().unwrap_or_default();
+        let tree = results.iter().find(|v| v["do"] == "ax").and_then(|v| v["result"].as_str()).unwrap_or_default();
+        assert!(tree.contains("Alpha") && !tree.contains("Loading"), "{r}");
+        let clock: Value = results
+            .iter()
+            .find(|v| v["do"].as_str().is_some_and(|d| d.starts_with("eval")))
+            .and_then(|v| v["result"].as_str())
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or_default();
+        let (drawn, read) = (clock["drawn"].as_f64(), clock["read"].as_f64());
+        let (Some(drawn), Some(read)) = (drawn, read) else { panic!("no page clock: {r}") };
+        after_drawn.push(read - drawn);
+        said.push(r);
     }
-    assert!(median(times.clone()) < 650.0, "ax after a click that fetches took {times:?} ms");
+    assert!(
+        median(after_drawn.clone()) < 400.0,
+        "the read ended {after_drawn:?} ms after the list was drawn: {}",
+        Value::Array(said)
+    );
+    let _ = std::fs::remove_file(&steps);
 
     s.ok(&["set", "network-quiet", "800"]);
     s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
