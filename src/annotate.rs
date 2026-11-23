@@ -142,6 +142,24 @@ pub fn mark_census(png: &[u8]) -> String {
     }
 }
 
+/// For a capture without its marks: how many pixels are not white and
+/// the box they fill (None: a blank image, the page's content missing
+/// too), and a hash of the bytes, to tell one capture from the next.
+pub fn content_census(png: &[u8]) -> String {
+    let (mut count, mut bbox) = (0u64, None::<(u32, u32, u32, u32)>);
+    rows(png, None, |r, row, bpp| {
+        for (i, p) in row.chunks_exact(bpp).enumerate() {
+            if p[..3] != [255, 255, 255] {
+                count += 1;
+                let i = i as u32;
+                bbox = Some(bbox.map_or((i, r, i, r), |(a, b, c, d)| (a.min(i), b.min(r), c.max(i), d.max(r))));
+            }
+        }
+    });
+    let hash = png.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    format!("{} bytes, hash {hash:016x}, {count} pixels not white in {bbox:?}", png.len())
+}
+
 /// Decode an 8-bit RGB or RGBA, non-interlaced PNG's rows down to `last`
 /// (all of them when None), handing each to `visit` with its index and
 /// bytes per pixel. Returns (width, height); None when the image cannot
@@ -316,6 +334,16 @@ mod tests {
             assert_eq!(marked, [(4, 3), (6, 5)]);
             assert_eq!(mark_census(&png), "7x6, 2 marked pixels, the first at (4, 3)", "{bpp}");
             assert_eq!(mark_census(&png[..png.len() / 2]), "unreadable");
+            // Not white: against a plain count and box of the same pixels.
+            let lit: Vec<_> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| colour_rgb(x, y) != [255; 3])
+                .collect();
+            let (x0, y0) = (lit.iter().map(|p| p.0).min().unwrap(), lit.iter().map(|p| p.1).min().unwrap());
+            let (x1, y1) = (lit.iter().map(|p| p.0).max().unwrap(), lit.iter().map(|p| p.1).max().unwrap());
+            let census = content_census(&png);
+            let want = format!("{} pixels not white in Some(({x0}, {y0}, {x1}, {y1}))", lit.len());
+            assert!(census.starts_with(&format!("{} bytes, hash ", png.len())) && census.ends_with(&want), "{census}");
         }
         assert_eq!(pixel(b"\xff\xd8 a jpeg", 0, 0), None);
         assert!(is_mark([0xe6, 0x00, 0x7e]) && is_mark([0xea, 0x33, 0x80]));

@@ -4463,12 +4463,18 @@ impl BrowserSession {
             (_, ms) if ms > 250 => eprintln!("[screenshot] --annotate: the labels' frame took {ms} ms"),
             _ => {}
         }
-        // The other way: the browser hands back the frame before. Chrome
-        // on macOS cannot tell when a frame has reached the screen and
-        // captures on a timer, so about 1 capture in 100 there showed the
-        // page without the marks, two frames after they were drawn. So
-        // the image is asked for proof: one pixel of the last outline, in
-        // the outline's colour. Without it the capture is taken again.
+        // The other way: the browser hands back an image without them. On
+        // macOS, a Chrome just launched can copy a blank surface: all
+        // white, the page's own content missing too, the same image after
+        // more frames and 3 s later. So the image is asked for proof: one
+        // pixel of the last outline, in the outline's colour. Without it
+        // the viewport is taken again through a clip with
+        // `captureBeyondViewport`, for which Chrome resizes the view and
+        // copies a new surface: on macos-15 with a browser launched per
+        // run, retakes as before recovered 0 of 55 blank captures and this
+        // one 8 of 8 (50/50 runs). Chrome hides scrollbars for such a
+        // capture: where they take room, the retake's content can sit a
+        // scrollbar's width off its marks.
         let n = |i: usize| drawn[i].as_f64().unwrap_or(0.0);
         let (dpr, sx, sy) = (if n(2) > 0.0 { n(2) } else { 1.0 }, n(3), n(4));
         let proof = match quality {
@@ -4488,9 +4494,17 @@ impl BrowserSession {
                     Some(Some(false)) => {}
                     _ => break,
                 }
-                eprintln!("[screenshot] --annotate: the capture came without the labels; taking it again ({again})");
+                eprintln!(
+                    "[screenshot] --annotate: the capture came without the labels ({}); taking it again ({again})",
+                    shot.as_deref().map_or_else(|_| String::new(), crate::annotate::content_census)
+                );
                 let _ = tab.evaluate(crate::annotate::NEXT_FRAME, timeout);
-                shot = tab.screenshot_as(timeout, full_page, quality);
+                shot = if full_page {
+                    tab.screenshot_as(timeout, true, quality)
+                } else {
+                    let viewport = serde_json::json!({ "x": sx, "y": sy, "width": vw, "height": vh });
+                    tab.screenshot_clip(timeout, false, quality, Some(viewport))
+                };
             }
         }
         // Still without them: say in the session log what was read and
@@ -4510,9 +4524,10 @@ impl BrowserSession {
                 .map_or_else(|e| format!("({e:#})"), |v| v.to_string());
             let census = crate::annotate::mark_census(image);
             eprintln!(
-                "[screenshot] --annotate: no labels at the proof point ({x}, {y}): pixel {:?}; image {census}; \
+                "[screenshot] --annotate: no labels at the proof point ({x}, {y}): pixel {:?}; image {census}, {}; \
                  drawn with dpr {dpr}, viewport {vw}x{vh}, scroll ({sx}, {sy}), {} boxes; page now {page}",
                 crate::annotate::pixel_at(image, x, y),
+                crate::annotate::content_census(image),
                 shown.len()
             );
         }
