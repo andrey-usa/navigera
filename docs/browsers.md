@@ -77,12 +77,14 @@ The differences that remain are listed in
 experimental, are newer headless engines that are their own CDP server,
 like Lightpanda; navigera starts each as `<engine> serve`. Unlike
 Lightpanda they open tabs and lay pages out, so they take Chrome's paths.
-CI downloads each one's newest stable release on every push (0.2.7 and
-1.1.27 at this writing) and runs
-[`tests/cdp_servers.rs`](../tests/cdp_servers.rs) on it: navigation, the
-accessibility tree and acting on its refs, fill, a form submitted with the
-keyboard (the server checks the sign-in), a checkbox click, a select, tabs,
-a screenshot, and the engine's server gone after `quit`. Run with either
+[`tests/cdp_servers.rs`](../tests/cdp_servers.rs) checks each one:
+navigation, the accessibility tree and acting on its refs, fill, a form
+submitted with the keyboard (the server checks the sign-in), a checkbox
+click, a select, tabs, a screenshot, and the engine's server gone after
+`quit`. CI runs it on Moli's newest stable release on every push (1.1.27
+at this writing); on Obscura it last ran on 0.2.7
+([run 45312041662](https://github.com/andrey-usa/navigera/actions/runs/45312041662)).
+Run with either
 one as the default engine (`NAVIGERA_ENGINE`), the rest of the suite shows
 how far each is from Chrome; the differences agents meet are listed in
 [docs/navigera.md](navigera.md#obscura-and-moli). Moli's

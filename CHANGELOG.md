@@ -16,11 +16,11 @@ All notable changes to this project are documented here. The format follows
   out, so they take Chrome's paths (popups, downloads, the click checks);
   each session gets a browser of its own, as Lightpanda's does. `status`
   names the engine. Tested on Obscura 0.2.7 and Moli 1.1.27
-  ([run 44971507816](https://github.com/andrey-usa/navigera/actions/runs/44971507816)):
-  CI's new `engine` jobs download each one's newest stable release on every push
-  and run `tests/cdp_servers.rs` (navigation, the tree and its refs, fill,
+  ([run 44971507816](https://github.com/andrey-usa/navigera/actions/runs/44971507816))
+  with `tests/cdp_servers.rs` (navigation, the tree and its refs, fill,
   a keyboard-submitted sign-in the server records, a checkbox, a select,
-  tabs, a screenshot, the server gone after `quit`). What differs from
+  tabs, a screenshot, the server gone after `quit`); CI's new `engine moli`
+  job runs it on Moli's newest stable release on every push. What differs from
   Chrome is in docs/navigera.md: on Obscura, a press stops at a shadow
   host (navigera clicks inside one from the page, below); Moli 1.1.27 lays a page out again only for a screenshot
   (navigera takes a 1x1 one when the page changed, below).
@@ -85,8 +85,8 @@ All notable changes to this project are documented here. The format follows
   without refs, as on Lightpanda (`--text` reaches them). Chrome takes no
   extra step. The walk takes 0.1 ms on the support page and 0.7 ms on
   4,506 elements in Chrome 153's V8 (behind a proxy that answers the tree
-  as Obscura does); CI's `engine` jobs check both on Obscura 0.2.7 and
-  Moli 1.1.27.
+  as Obscura does); both checked on Obscura 0.2.7 and Moli 1.1.27
+  ([run 45312041662](https://github.com/andrey-usa/navigera/actions/runs/45312041662)).
 - On Lightpanda, a click on an element that was disabled for the moment
   (a "Load more" reading "Loading…") went to it at once, did nothing, and
   counted: the wait for it to be enabled ended with the wait for it to stop

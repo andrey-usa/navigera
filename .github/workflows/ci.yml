@@ -500,8 +500,9 @@ jobs:
 
   # The headless engines that are their own CDP server, each on its newest
   # stable release, on every push: Lightpanda through its own tests and its
-  # leg of tests/commands.rs, Obscura and Moli through tests/cdp_servers.rs
-  # (navigation, the tree and its refs, input, tabs, a screenshot, cleanup).
+  # leg of tests/commands.rs, Moli through tests/cdp_servers.rs (navigation,
+  # the tree and its refs, input, tabs, a screenshot, cleanup). Obscura's
+  # leg of tests/cdp_servers.rs runs where $OBSCURA_BIN is set.
   engines:
     name: engine ${{ matrix.engine }}
     runs-on: ubuntu-24.04
@@ -512,8 +513,6 @@ jobs:
         include:
           - engine: lightpanda
             tests: --test lightpanda --test commands
-          - engine: obscura
-            tests: --test cdp_servers
           - engine: moli
             tests: --test cdp_servers
     steps:
@@ -527,9 +526,6 @@ jobs:
       - name: Lightpanda binary
         if: matrix.engine == 'lightpanda'
         uses: ./.github/actions/lightpanda
-      - name: Obscura binary
-        if: matrix.engine == 'obscura'
-        uses: ./.github/actions/obscura
       - name: Moli binary
         if: matrix.engine == 'moli'
         uses: ./.github/actions/moli
