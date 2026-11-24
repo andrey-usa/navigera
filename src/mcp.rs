@@ -51,9 +51,15 @@ fn snapshot_prop() -> Value {
     json!({"type": "boolean", "description": "Snapshot after the action"})
 }
 
+/// An empty `required` is left out: it says nothing JSON Schema's default
+/// doesn't, and the model reads every byte of the list.
 fn object(mut props: Map<String, Value>, required: &[&str]) -> Value {
     props.retain(|_, v| !v.is_null());
-    json!({"type": "object", "properties": props, "required": required})
+    let mut schema = json!({"type": "object", "properties": props});
+    if !required.is_empty() {
+        schema["required"] = json!(required);
+    }
+    schema
 }
 
 fn props(base: &[Value]) -> Map<String, Value> {
@@ -66,13 +72,50 @@ fn props(base: &[Value]) -> Map<String, Value> {
     out
 }
 
+/// A tool that `browser_more` returns. Its definition reaches the model as
+/// the text of that call, every byte of it, so only a read says
+/// `readOnlyHint`.
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value {
     let mut tool = json!({ "name": name, "description": description, "inputSchema": schema });
-    // `readOnlyHint` is false unless said: only a read says it, and the
-    // list stays small for the model's context.
     if read_only {
         tool["annotations"] = json!({"readOnlyHint": true});
     }
+    tool
+}
+
+/// What a listed tool does to the browser, as the four MCP annotations.
+/// Clients read them (permission prompts, which calls may run in parallel)
+/// and so do registries that score tool definitions. The tool formats of
+/// the model APIs (Anthropic's, OpenAI's, Gemini's) have name, description
+/// and input schema only, so a client sends the model none of them; the
+/// mock model of bench/ide-eval reports whether an agent does anyway. Left
+/// unsaid, a client must assume the worst of a tool that isn't read-only:
+/// destructive and open-world.
+#[derive(Clone, Copy)]
+struct Hints {
+    read_only: bool,
+    destructive: bool,
+    idempotent: bool,
+    open_world: bool,
+}
+
+/// Reads the page or the server and changes neither.
+const READS: Hints = Hints { read_only: true, destructive: false, idempotent: true, open_world: false };
+
+/// Acts on the page, and the page may do anything with it: a click, a key or
+/// a script can submit, delete, pay or send, and the page's own requests go
+/// wherever it likes.
+const ACTS: Hints = Hints { read_only: false, destructive: true, idempotent: false, open_world: true };
+
+/// A tool of `tools/list`, with all four annotations.
+fn listed(name: &str, description: &str, schema: Value, hints: Hints) -> Value {
+    let mut tool = json!({ "name": name, "description": description, "inputSchema": schema });
+    tool["annotations"] = json!({
+        "readOnlyHint": hints.read_only,
+        "destructiveHint": hints.destructive,
+        "idempotentHint": hints.idempotent,
+        "openWorldHint": hints.open_world,
+    });
     tool
 }
 
@@ -85,9 +128,10 @@ pub fn tools() -> Vec<Value> {
     let action =
         |extra: Value| props(&[target_props(), extra, json!({"snapshot": snapshot_prop(), "state": state_prop()})]);
     vec![
-        tool(
+        listed(
             "browser_navigate",
-            "Open a URL and wait for it to load; a bare host gets https://.",
+            "Open a URL in the active tab and wait for it to load; a bare host gets https://. Back, forward, reload: \
+             browser_history.",
             object(
                 props(&[json!({
                     "url": {"type": "string", "description": "The address to open"},
@@ -96,9 +140,9 @@ pub fn tools() -> Vec<Value> {
                 })]),
                 &["url"],
             ),
-            false,
+            Hints { read_only: false, destructive: false, idempotent: true, open_world: true },
         ),
-        tool(
+        listed(
             "browser_snapshot",
             "The page as an indented accessibility tree; actionable elements carry [ref=N]. Cheaper and more exact \
              than a screenshot. Scope big pages with ref or selector.",
@@ -111,9 +155,9 @@ pub fn tools() -> Vec<Value> {
                 ]),
                 &[],
             ),
-            true,
+            READS,
         ),
-        tool(
+        listed(
             "browser_click",
             "Click an element with a real mouse event; waits for it and any navigation it starts. Fails, naming what covers it.",
             object(
@@ -123,17 +167,19 @@ pub fn tools() -> Vec<Value> {
                 })),
                 &[],
             ),
-            false,
+            ACTS,
         ),
-        tool(
+        listed(
             "browser_fill",
-            "Set the value of an input or textarea (replaces its text).",
+            "Replace an input's or textarea's value in one step; for key-by-key typing (autocomplete, key handlers), \
+             browser_type.",
             object(action(json!({"value": {"type": "string", "description": "The new value"}})), &["value"]),
-            false,
+            Hints { idempotent: true, ..ACTS },
         ),
-        tool(
+        listed(
             "browser_type",
-            "Type text key by key into the element (or the focused one), as real key events.",
+            "Type text key by key into the element (or the focused one) as real key events; existing text stays \
+             (to replace it, browser_fill).",
             object(
                 action(json!({
                     "value": {"type": "string", "description": "Text to type"},
@@ -141,36 +187,38 @@ pub fn tools() -> Vec<Value> {
                 })),
                 &["value"],
             ),
-            false,
+            ACTS,
         ),
-        tool(
+        listed(
             "browser_press_key",
             "Press a key or chord (Enter, Tab, Control+a); to a target, else the focused element. For text, browser_type.",
             object(action(json!({"key": {"type": "string", "description": "Key name or chord (Enter, Control+a)"}})), &["key"]),
-            false,
+            ACTS,
         ),
-        tool(
+        listed(
             "browser_select_option",
-            "Choose options of a <select> by label or value.",
+            "Select options by label or value (replacing the selection) in a <select> or a custom dropdown \
+             (ARIA combobox).",
             object(
                 action(json!({"values": {"type": "array", "items": {"type": "string"}, "description": "Labels or values to select"}})),
                 &["values"],
             ),
-            false,
+            Hints { idempotent: true, ..ACTS },
         ),
-        tool(
+        listed(
             "browser_scroll",
-            "Scroll by pixels or to top/bottom, or bring an element into view.",
+            "Scroll by pixels or to top/bottom, or bring an element into view (with by/to: scroll inside it); \
+             clicks need no scrolling first.",
             object(
                 action(json!({
                     "by": {"type": "number", "description": "Pixels down (negative: up)"},
-                    "to": {"type": "string", "enum": ["top", "bottom"], "description": "top or bottom"},
+                    "to": {"type": "string", "enum": ["top", "bottom"], "description": "bottom waits for more to load"},
                 })),
                 &[],
             ),
-            false,
+            Hints { read_only: false, destructive: false, idempotent: false, open_world: true },
         ),
-        tool(
+        listed(
             "browser_wait_for",
             "Wait until every given condition holds (default 5 s). Navigating actions already wait.",
             object(
@@ -186,25 +234,25 @@ pub fn tools() -> Vec<Value> {
                 })]),
                 &[],
             ),
-            true,
+            READS,
         ),
-        tool(
+        listed(
             "browser_evaluate",
             "Run JavaScript in the page and return its JSON result; an arrow function is called, a promise awaited. \
-             In an Electron app (navigera mcp --electron), main: true runs it in the app's main process.",
+             For what the tree doesn't show; act with browser_click/browser_fill (real input events).",
             object(
                 props(&[
                     json!({"expression": {"type": "string", "description": "JavaScript or arrow function"}}),
-                    json!({"main": {"type": "boolean", "description": "Electron: run in the main process"}}),
+                    json!({"main": {"type": "boolean", "description": "Electron (navigera mcp --electron): its main process"}}),
                 ]),
                 &["expression"],
             ),
-            false,
+            ACTS,
         ),
 
 
 
-        tool(
+        listed(
             "browser_run",
             "Run steps in order and stop at the first failure, naming it (earlier steps stay applied); end with a snapshot. Each step is \
              {\"op\": \"click\"|\"fill\"|\"type\"|\"press\"|\"select\"|\"hover\"|\"scroll\"|\"wait\"|\"goto\"|\"eval\", \
@@ -219,20 +267,21 @@ pub fn tools() -> Vec<Value> {
                 })]),
                 &["steps"],
             ),
-            false,
+            ACTS,
         ),
-        tool(
+        listed(
             "browser_more",
-            "The less common tools with their schemas, all callable by name: browser_mouse, browser_handoff, \
-             browser_history, browser_console_messages, browser_network_requests, browser_resize, browser_screenshot, browser_tabs, browser_file_upload, browser_hover.",
+            "Lists the less common tools and schemas; call it when a task needs one, then call that tool by name: \
+             browser_mouse, browser_handoff, browser_history, browser_console_messages, browser_network_requests, \
+             browser_resize, browser_screenshot, browser_tabs, browser_file_upload, browser_hover, browser_handle_dialog.",
             object(Map::new(), &[]),
-            true,
+            READS,
         ),
-        tool(
+        listed(
             "browser_close",
             "Close the browser. The next tool call starts a fresh one.",
             object(Map::new(), &[]),
-            false,
+            Hints { read_only: false, destructive: true, idempotent: true, open_world: false },
         ),
     ]
 }
@@ -394,6 +443,11 @@ fn deferred_tools() -> Vec<Value> {
             false,
         ),
     ]
+}
+
+/// What `browser_more` answers: the deferred tools with their schemas.
+fn more_text() -> String {
+    serde_json::to_string_pretty(&deferred_tools()).unwrap()
 }
 
 /// A tool call translated to serve-protocol ops: the commands to run in order,
@@ -725,8 +779,7 @@ impl<'a> Server<'a> {
     /// One `tools/call` of a browser tool: its MCP result.
     pub fn call(&mut self, name: &str, arguments: &Value) -> Value {
         if name == "browser_more" {
-            let text = serde_json::to_string_pretty(&deferred_tools()).unwrap();
-            return json!({"content": [{"type": "text", "text": text}]});
+            return json!({"content": [{"type": "text", "text": more_text()}]});
         }
         let plan = match plan(name, arguments) {
             Ok(plan) => plan,
@@ -1041,6 +1094,47 @@ mod tests {
         for tool in tools().into_iter().chain(deferred_tools()) {
             for (name, spec) in tool["inputSchema"]["properties"].as_object().unwrap() {
                 assert!(spec["description"].as_str().is_some_and(|d| !d.is_empty()), "{} {name}", tool["name"]);
+            }
+        }
+    }
+
+    /// The bytes of `tools/list` a model reads: each listed tool's name,
+    /// description and input schema; the annotations go to the client, not
+    /// to the model. They are in front of it on every turn of every session,
+    /// so they stay under the 8,000 bytes tests/mcp.rs holds the list to.
+    const LISTED_BYTES_LIMIT: usize = 8_000;
+    /// `browser_more`'s answer, read when the model calls it: no bigger than
+    /// 0.16.0's.
+    const MORE_BYTES_LIMIT: usize = 10_435;
+
+    fn model_visible_bytes(tools: &[Value]) -> usize {
+        tools
+            .iter()
+            .map(|t| {
+                let seen = json!({"name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"]});
+                serde_json::to_string(&seen).unwrap().len()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn what_the_model_reads_of_the_tools_stays_small() {
+        let listed = model_visible_bytes(&tools());
+        assert!(listed < LISTED_BYTES_LIMIT, "tools/list is {listed} bytes for the model, limit {LISTED_BYTES_LIMIT}");
+        let more = more_text().len();
+        assert!(more <= MORE_BYTES_LIMIT, "browser_more answers {more} bytes, limit {MORE_BYTES_LIMIT}");
+    }
+
+    #[test]
+    fn every_listed_tool_says_what_it_does_to_the_browser() {
+        for t in tools() {
+            let name = t["name"].as_str().unwrap();
+            let hints = &t["annotations"];
+            for hint in ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] {
+                assert!(hints[hint].is_boolean(), "{name} {hint}");
+            }
+            if hints["readOnlyHint"] == true {
+                assert_eq!(hints["destructiveHint"], false, "{name}: a read destroys nothing");
             }
         }
     }

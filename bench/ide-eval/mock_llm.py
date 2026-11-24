@@ -22,6 +22,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+ANNOTATION_HINTS = (b"readOnlyHint", b"destructiveHint", b"idempotentHint", b"openWorldHint")
+
+
 class Server(ThreadingHTTPServer):
     # The local address is enough; reverse DNS can stall macOS runners.
     def server_bind(self):
@@ -139,14 +142,18 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404, {"error": {"message": "not found"}})
 
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0) or b"{}")
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0) or b"{}"
+        body = json.loads(raw)
         if not self.path.rstrip("/").endswith("/chat/completions"):
             return self.reply(404, {"error": {"message": f"unsupported path {self.path}"}})
         step = next_step(body)
         if self.log_path:
+            # `hints`: an MCP tool annotation reached the model, in the tool
+            # list or as text in a prompt.
+            hints = any(h in raw for h in ANNOTATION_HINTS)
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"tools": sorted(tool_names(body.get("tools"))), "messages": len(body.get("messages", [])),
-                                    "step": step}) + "\n")
+                                    "step": step, "hints": hints}) + "\n")
         created, model = int(time.time()), body.get("model", "mock")
         usage = {"prompt_tokens": len(json.dumps(body)) // 4, "completion_tokens": 20,
                  "total_tokens": len(json.dumps(body)) // 4 + 20}

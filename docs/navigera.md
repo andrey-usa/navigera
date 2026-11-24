@@ -497,6 +497,13 @@ page state, and `snapshot: true` for the updated tree in the same call.
 `browser_hover`, `browser_mouse` and `browser_scroll` still return the
 full state (their page change is not tracked).
 
+Each tool on `tools/list` declares the four MCP annotations, for a client
+deciding what to ask about before a call: `browser_snapshot`,
+`browser_wait_for` and `browser_more` only read; `browser_navigate` and
+`browser_scroll` change the page and destroy nothing; the other actions are
+marked destructive, as a page may submit, delete or send on any of them.
+The tool formats of the model APIs have no field for annotations.
+
 An MCP client may have no shell of its own, so the browser is not its way to
 the disk: `file:` pages and the browser's own pages (`chrome://`,
 `devtools://`) are refused, and every file a tool or a `browser_run` step
