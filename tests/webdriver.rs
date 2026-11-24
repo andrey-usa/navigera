@@ -355,6 +355,16 @@ fn nav_clicks(args: &[&str], engine: &str) {
         let id = i as u64 * 2;
         assert_eq!(ok(&a, id + 1)["title"], "Nav", "{engine}");
         assert_eq!(ok(&a, id + 2)["title"], *title, "{engine}: the click on {selector}: {}", ok(&a, id + 2));
+        // Only the submit the form's checks held back says so, naming the
+        // field.
+        let note = ok(&a, id + 2)["not_submitted"].as_str().map(str::to_string);
+        if *selector == "#invalid" {
+            let note = note.unwrap_or_default();
+            assert!(note.starts_with("the browser did not submit the form: input[name=\"q\"]: "), "{engine}: {note}");
+            assert!(note.ends_with(". Fill in that field, then submit again"), "{engine}: {note}");
+        } else {
+            assert_eq!(note, None, "{engine}: the click on {selector}");
+        }
     }
     // A click that opens a tab says so.
     let script: Vec<Value> = vec![

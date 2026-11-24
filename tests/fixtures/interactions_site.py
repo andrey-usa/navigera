@@ -274,6 +274,21 @@ document.getElementById('go').onclick = () => {
 };
 </script>""")
 
+# A sign-up form with five fields the browser checks: a labelled required
+# one, a malformed one named only by its placeholder, a bad email, two more
+# required; and a form that passes.
+PAGES["/form-checks"] = ("form checks", "", """
+<form id=signup action=/posted>
+<label for=fn>First Name</label> <input id=fn required>
+<input placeholder=Mobile name=mobile pattern="[0-9]{10}" value=123>
+<input type=email name=email value=nope>
+<input name=city required>
+<textarea name=bio required></textarea>
+<button>Submit</button>
+</form>
+<form action=/posted><input name=v value=1 required><button>Send</button></form>
+""")
+
 PAGES["/nav-intent"] = ("nav intent", "", """
 <div id=out>idle</div>
 <button id=plain>Plain</button>

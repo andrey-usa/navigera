@@ -53,6 +53,9 @@ only there.
   Don't assume the click worked. A click that came before a page that just
   loaded wired the element up is sent again by navigera once it does
   (`"clicked_again"`): don't click it again yourself.
+- **A submit the form's checks held back** carries `"not_submitted"`: the
+  fields that failed (label, placeholder or selector) and the browser's
+  message for each. Fill them in and submit again.
 - **Iframes and shadow DOM:** refs work in any iframe. `--selector`, `--text`
   and the locators also search iframes (cross-origin ones included) and open
   shadow roots when the page itself has no match. `--selector "#app >>> x-card

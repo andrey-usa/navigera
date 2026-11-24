@@ -5767,6 +5767,11 @@ impl Driver {
                          Check what the click should do before clicking again"
                     ));
                 }
+                if let Some(bad) = point.get("invalid") {
+                    // A submit the browser held back: the click reported
+                    // "ok", and the agent went on as if the form was sent.
+                    state["not_submitted"] = json!(not_submitted(bad));
+                }
                 if let Some(fx) = point.get("no_effect") {
                     // Clicked, but the page did nothing: often a control
                     // the page hasn't wired up yet.
@@ -7408,6 +7413,23 @@ fn elapsed_ms(started: Instant) -> f64 {
 
 /// `click ref 12: …`, naming the op once: the finder's own `click: ` at the
 /// start of its error goes.
+/// What a submit the browser held back says (a click, or Enter on the
+/// WebDriver engines): the fields that failed their checks, each with the
+/// browser's own message, and what to do.
+pub(crate) fn not_submitted(bad: &Value) -> String {
+    let fields: Vec<&str> = bad
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let more = match bad.get("more").and_then(Value::as_u64).unwrap_or(0) {
+        0 => String::new(),
+        n => format!("; and {n} more"),
+    };
+    let them = if fields.len() > 1 || !more.is_empty() { "those fields" } else { "that field" };
+    format!("the browser did not submit the form: {}{more}. Fill in {them}, then submit again", fields.join("; "))
+}
+
 fn on_target(op: &str, t: &Target, e: anyhow::Error) -> anyhow::Error {
     let msg = format!("{e:#}");
     let word = op.split(' ').next().unwrap_or(op);

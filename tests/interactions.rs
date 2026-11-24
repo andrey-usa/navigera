@@ -1845,6 +1845,33 @@ fn a_click_waits_for_a_navigation_only_when_the_page_plans_one() {
     );
 }
 
+/// A submit click the browser holds back, because fields fail their checks,
+/// says so: the first three fields by the name a person reads (label, else
+/// placeholder, else a selector) with the browser's own message, and how
+/// many more. A plain "ok" there reads as sent. A form that passes says
+/// nothing of it and loads its page.
+#[test]
+fn a_submit_the_form_s_checks_hold_back_names_the_fields() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("form-checks", &[]);
+    s.ok(&["goto", &format!("{}/form-checks", site.url)]);
+    let r = s.ok(&["click", "--text", "Submit"]);
+    let note = r["not_submitted"].as_str().unwrap_or_default();
+    assert!(note.starts_with("the browser did not submit the form: \"First Name\": "), "{r}");
+    assert!(note.contains("; \"Mobile\": "), "{r}");
+    assert!(note.contains("; input[name=\"email\"]: "), "{r}");
+    assert!(note.ends_with("; and 2 more. Fill in those fields, then submit again"), "{r}");
+    assert_eq!(s.ok(&["eval", "location.pathname"]), "/form-checks");
+    let r = s.ok(&["click", "--text", "Send"]);
+    assert!(r.get("not_submitted").is_none(), "{r}");
+    assert!(r["url"].as_str().unwrap_or_default().contains("/posted"), "{r}");
+    s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+    let r = s.ok(&["click", "--text", "Invalid submit"]);
+    let note = r["not_submitted"].as_str().unwrap_or_default();
+    assert!(note.starts_with("the browser did not submit the form: input[name=\"z\"]: "), "{r}");
+    assert!(note.ends_with(". Fill in that field, then submit again"), "{r}");
+}
+
 fn assert_chain_reports_its_end(page: &str) {
     let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };

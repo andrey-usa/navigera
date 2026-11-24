@@ -94,11 +94,47 @@ struct Arrival {
     off: Option<String>,
     /// Read in the same round trip, once the press had arrived on the
     /// element: whether the page let the click's navigation go ahead (see
-    /// [`Page::nav_planned`]; the outer None: not asked, or not yet).
-    nav: Option<Option<bool>>,
+    /// [`Page::nav_planned`]; None: not asked, or not yet).
+    nav: Option<NavVerdict>,
     /// And the first look at what the click changed (see
     /// [`Page::click_effect`]).
     effect: Option<Value>,
+}
+
+/// What a click's navigation watch said (`armNav` in CLICK_PREP).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct NavVerdict {
+    /// Whether the page let the click's navigation go ahead; None when it
+    /// can't be told.
+    go: Option<bool>,
+    /// When it didn't and fields failed their checks (the browser keeps
+    /// such a form from being sent): the first three, as `field: message`.
+    invalid: Vec<String>,
+    /// How many more fields failed.
+    more: u64,
+}
+
+/// The page expression that reads [`NavVerdict`] once and stops the watch:
+/// true, false or null, or `{ invalid, more }` for a form whose fields
+/// failed their checks.
+const NAV_READ: &str = "(() => { const n = window.__nvNav; if (!n) return null; delete window.__nvNav; \
+    const v = n.verdict(); return v === false && n.bad.length ? { invalid: n.bad, more: n.badN - n.bad.length } : v; })()";
+
+impl NavVerdict {
+    fn from_page(v: Option<&Value>) -> Self {
+        match v {
+            Some(Value::Bool(b)) => Self { go: Some(*b), ..Self::default() },
+            Some(o @ Value::Object(_)) => Self {
+                go: Some(false),
+                invalid: o["invalid"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default(),
+                more: o["more"].as_u64().unwrap_or(0),
+            },
+            _ => Self::default(),
+        }
+    }
 }
 
 /// What an element op acts on.
@@ -438,11 +474,24 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     // one was planned. Unknown (null) when a listener ahead of these hid
     // the events: then the click waits, as before.
     const armNav = (w, form) => {
-        const n = { click: null, submit: null, invalid: false, planned: false, offs: [] };
+        const n = { click: null, submit: null, invalid: false, planned: false, offs: [], bad: [], badN: 0 };
         const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
         on(w, 'click', ours((e) => { if (!n.click) n.click = e; }));
         on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
-        on(w, 'invalid', () => { n.invalid = true; });
+        // Which fields failed, named as a person reads them (label, else a
+        // selector), with the browser's own message: what to fix.
+        on(w, 'invalid', (e) => {
+            n.invalid = true;
+            if (n.badN++ >= 3) return;
+            try {
+                const t = e.target, lab = t.labels && t.labels[0], id = t.getAttribute('name');
+                const name = ((lab && lab.innerText) || t.getAttribute('aria-label') || t.getAttribute('placeholder') || '')
+                    .replace(/\s+/g, ' ').trim().slice(0, 40);
+                const who = name ? JSON.stringify(name)
+                    : t.localName + (t.id ? '#' + t.id : id ? '[name=' + JSON.stringify(id) + ']' : '');
+                n.bad.push(who + ': ' + String(t.validationMessage || 'invalid').replace(/\.\s*$/, ''));
+            } catch (_) {}
+        });
         // A handler that navigates by script (`location`, `form.submit()`).
         const api = w.navigation;
         if (api && api.addEventListener) {
@@ -6031,11 +6080,17 @@ impl Page {
             // The page has already reacted to this press: not pressed again.
             point["click_off"] = json!(on);
         }
-        if nav && nav_read.unwrap_or_else(|| self.nav_planned(timeout)) == Some(false) {
-            // The page cancelled what the click would have loaded (a
-            // router's link, a submit a script handles) or the form failed
-            // validation: no navigation to wait for.
-            point["nav"] = json!(false);
+        if nav {
+            let verdict = nav_read.unwrap_or_else(|| self.nav_planned(timeout));
+            if verdict.go == Some(false) {
+                // The page cancelled what the click would have loaded (a
+                // router's link, a submit a script handles) or the form
+                // failed validation: no navigation to wait for.
+                point["nav"] = json!(false);
+            }
+            if !verdict.invalid.is_empty() {
+                point["invalid"] = json!({ "fields": verdict.invalid, "more": verdict.more });
+            }
         }
         if armed {
             let effect = self.click_effect(&before, first_effect, timeout);
@@ -6222,18 +6277,10 @@ impl Page {
     }
 
     /// Did the click on a link or a submit button plan a navigation (see
-    /// `armNav` in CLICK_PREP)? Stops watching. None when it can't be told.
-    fn nav_planned(&self, timeout: Duration) -> Option<bool> {
-        self.send(
-            "Runtime.evaluate",
-            json!({
-                "expression": "(() => { const n = window.__nvNav; if (!n) return null; delete window.__nvNav; return n.verdict(); })()",
-                "returnByValue": true,
-            }),
-            timeout,
-        )
-        .ok()
-        .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
+    /// `armNav` in CLICK_PREP)? Stops watching.
+    fn nav_planned(&self, timeout: Duration) -> NavVerdict {
+        let read = self.send("Runtime.evaluate", json!({ "expression": NAV_READ, "returnByValue": true }), timeout);
+        NavVerdict::from_page(read.ok().as_ref().and_then(|r| r.pointer("/result/value")))
     }
 
     /// Stop watching a click's effects (see [`Page::click_effect`]).
@@ -6286,11 +6333,7 @@ impl Page {
             let also = if more {
                 format!(
                     ", (window.__nvSeen !== 0 && !window.__nvMissed) ? [{}, {}] : null",
-                    if nav {
-                        "(() => { const n = window.__nvNav; if (!n) return null; delete window.__nvNav; return n.verdict(); })()"
-                    } else {
-                        "0"
-                    },
+                    if nav { NAV_READ } else { "0" },
                     if effect { "(window.__nvFx ? window.__nvFx.check(false) : null)" } else { "0" },
                 )
             } else {
@@ -6314,7 +6357,7 @@ impl Page {
                     }
                     if let Some(read) = v.and_then(|v| v.get(4)).and_then(Value::as_array).filter(|_| more) {
                         if nav {
-                            nav_read = Some(read.first().and_then(Value::as_bool));
+                            nav_read = Some(NavVerdict::from_page(read.first()));
                         }
                         if effect {
                             first_effect = read.get(1).cloned();

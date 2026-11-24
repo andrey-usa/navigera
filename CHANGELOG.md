@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A submit click the browser holds back because fields fail their checks
+  (`required`, `pattern`, `type=email`, ...) says so in `not_submitted`:
+  the first three fields by the name a person reads (label, else
+  placeholder, else a selector), each with the browser's own message, and
+  how many more. The click used to answer a plain ok, which an agent read
+  as sent. On Chrome's engines and the WebDriver ones (there Enter in a
+  form's field too).
+
 - `--engine obscura` and `--engine moli` (experimental): two more
   headless engines that are their own CDP server, started as
   `obscura serve --allow-private-network` and `moli serve --layout` on a
