@@ -4206,7 +4206,14 @@ impl BrowserSession {
         Ok(serde_json::Value::Array(chosen))
     }
 
-    pub fn press(&self, target: Option<&Target>, key: &str, timeout_ms: Option<f64>) -> Result<()> {
+    /// Press a key or chord (see [`cdp::Page::press`]); Enter in a form
+    /// whose fields failed their checks answers which (`{ fields, more }`).
+    pub fn press(
+        &self,
+        target: Option<&Target>,
+        key: &str,
+        timeout_ms: Option<f64>,
+    ) -> Result<Option<serde_json::Value>> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let before = self.active_tab().activity();
         // Modifiers held with `keydown` apply, as on a real keyboard.
@@ -4218,14 +4225,14 @@ impl BrowserSession {
             .chain(std::iter::once(key))
             .collect::<Vec<_>>()
             .join("+");
-        let may_navigate = self.active_tab().press(target, &chord, wait, timeout)?;
-        if may_navigate {
+        let pressed = self.active_tab().press(target, &chord, wait, timeout)?;
+        if pressed.may_navigate {
             // Enter in a form submits it (implicit submission); on a link
             // it follows it.
             self.active_tab().navigation_started_since(before, NAV_GRACE);
         }
         self.settle_for(timeout_ms);
-        Ok(())
+        Ok(pressed.invalid)
     }
 
     pub fn type_text(&self, target: Option<&Target>, text: &str, timeout_ms: Option<f64>) -> Result<()> {

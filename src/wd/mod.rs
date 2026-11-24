@@ -172,7 +172,8 @@ const POINT_EL: &str = r#"function (el, force) {
 /// document unless the page cancels it (a router's link, a form a script
 /// sends itself, a form that fails validation); anything else navigates
 /// only by script, which the Navigation API reports as it happens.
-const ARM_NAV: &str = r#"function (el, key) {
+const ARM_NAV: &str = concat!(
+    r#"function (el, key) {
     const K = Symbol.for('navigera.nav');
     if (window[K]) window[K].off();
     if (key) {
@@ -219,21 +220,9 @@ const ARM_NAV: &str = r#"function (el, key) {
     const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
     on(w, 'click', (e) => { if (!n.click && e.isTrusted) n.click = e; });
     on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
-    // Which fields failed, named as a person reads them (label, else a
-    // selector), with the browser's own message: what to fix (as Chrome's
-    // engine, `armNav`).
-    on(w, 'invalid', (e) => {
-        n.invalid = true;
-        if (n.badN++ >= 3) return;
-        try {
-            const t = e.target, lab = t.labels && t.labels[0], id = t.getAttribute('name');
-            const name = ((lab && lab.innerText) || t.getAttribute('aria-label') || t.getAttribute('placeholder') || '')
-                .replace(/\s+/g, ' ').trim().slice(0, 40);
-            const who = name ? JSON.stringify(name)
-                : t.localName + (t.id ? '#' + t.id : id ? '[name=' + JSON.stringify(id) + ']' : '');
-            n.bad.push(who + ': ' + String(t.validationMessage || 'invalid').replace(/\.\s*$/, ''));
-        } catch (_) {}
-    });
+"#,
+    crate::cdp::page::invalid_listener_js!(),
+    r#"
     // A link to a fragment of this document, or a handler that sets
     // `location.hash`: the URL changes with the action, and the page learns
     // of it from `hashchange`, a task of its own after it, where a
@@ -316,7 +305,8 @@ const ARM_NAV: &str = r#"function (el, key) {
     Object.defineProperty(window, K, { value: n, configurable: true, enumerable: false, writable: true });
     // For Enter: whether it can load a document from here at all.
     return !!(el.form || el.closest('a[href], button, [role=button], [role=link]'));
-}"#;
+}"#
+);
 
 /// After the click: the verdict of [`ARM_NAV`], and the page's URL and
 /// title (the page's state when no navigation follows), read once the

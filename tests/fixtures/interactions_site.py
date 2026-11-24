@@ -276,7 +276,7 @@ document.getElementById('go').onclick = () => {
 
 # A sign-up form with five fields the browser checks: a labelled required
 # one, a malformed one named only by its placeholder, a bad email, two more
-# required; and a form that passes.
+# required; a form that passes; a note written in a textarea.
 PAGES["/form-checks"] = ("form checks", "", """
 <form id=signup action=/posted>
 <label for=fn>First Name</label> <input id=fn required>
@@ -287,6 +287,7 @@ PAGES["/form-checks"] = ("form checks", "", """
 <button>Submit</button>
 </form>
 <form action=/posted><input name=v value=1 required><button>Send</button></form>
+<form action=/posted><textarea name=note></textarea><button>Post</button></form>
 """)
 
 PAGES["/nav-intent"] = ("nav intent", "", """

@@ -1872,6 +1872,56 @@ fn a_submit_the_form_s_checks_hold_back_names_the_fields() {
     assert!(note.ends_with(". Fill in that field, then submit again"), "{r}");
 }
 
+/// Enter in a form's field is watched as a submit click is: in a form
+/// whose fields fail their checks it names them, as the click does; where
+/// the page handles the submit, or in a textarea (a new line), there is no
+/// navigation to wait for, so it costs what a plain key costs, not the
+/// navigation grace on top. A form the page lets go still loads its page.
+/// Nothing navigera watched is left behind.
+#[test]
+fn enter_in_a_form_says_what_the_page_did_with_the_submit() {
+    let _alone = timed_alone();
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("enter-form", &[]);
+    let checks = format!("{}/form-checks", site.url);
+    s.ok(&["goto", &checks]);
+    let r = s.ok(&["press", "Enter", "--selector", "#fn"]);
+    let note = r["not_submitted"].as_str().unwrap_or_default();
+    assert!(note.starts_with("the browser did not submit the form: \"First Name\": "), "{r}");
+    assert!(note.ends_with("; and 2 more. Fill in those fields, then submit again"), "{r}");
+    let clean = "window.__nvNav === undefined && HTMLFormElement.prototype.submit.toString().includes('[native code]')";
+    assert_eq!(s.ok(&["eval", clean]), true, "watchers left behind");
+    s.ok(&["fill", "--selector", "textarea", "one"]);
+    let r = s.ok(&["press", "Enter", "--selector", "textarea"]);
+    assert!(r.get("not_submitted").is_none(), "{r}");
+    assert_eq!(s.ok(&["eval", "document.querySelector('textarea').value"]), "one\n");
+    assert_eq!(s.ok(&["eval", "location.pathname"]), "/form-checks");
+    let page = format!("{}/nav-intent", site.url);
+    s.ok(&["goto", &page]);
+    let r = s.ok(&["press", "Enter", "--selector", "input[name=y]"]);
+    assert!(r["url"].as_str().unwrap_or_default().contains("/posted?y=2"), "{r}");
+    let best = |selector: &str, key: &str| {
+        (0..3)
+            .map(|_| {
+                s.ok(&["goto", &page]);
+                timed(&s, &["press", key, "--selector", selector]).0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let plain = best("input[name=x]", "a");
+    for (what, selector) in [("handled", "input[name=x]"), ("invalid", "input[name=z]")] {
+        let enter = best(selector, "Enter");
+        assert!(
+            enter < plain + 100.0,
+            "Enter in the {what} form waited for a navigation: {enter:.0} ms against {plain:.0} ms for a plain key"
+        );
+        let shown = s.ok(&["text", "--selector", "#out"]);
+        let shown = shown.as_str().unwrap_or_default();
+        assert!(shown.starts_with(if what == "handled" { "handled" } else { "idle" }), "{what}: {shown}");
+    }
+    assert_eq!(s.ok(&["eval", clean]), true, "watchers left behind");
+}
+
 fn assert_chain_reports_its_end(page: &str) {
     let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };

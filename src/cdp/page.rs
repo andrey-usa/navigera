@@ -137,6 +137,17 @@ impl NavVerdict {
     }
 }
 
+/// What a key press did ([`Page::press`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pressed {
+    /// It may load a new document: Enter on a link, a button, or in a form
+    /// whose submit the page let go or that can't be told.
+    pub may_navigate: bool,
+    /// Enter in a form whose fields failed their checks: `{ fields, more }`
+    /// (see `protocol::not_submitted`).
+    pub invalid: Option<Value>,
+}
+
 /// What an element op acts on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -345,6 +356,32 @@ pub const DEEP: &str = r#"(() => {
     };
 })()"#;
 
+/// The `invalid` listener of a navigation watch (`n`, its `on` and window
+/// `w` in scope): which fields failed their checks, the first three named
+/// as a person reads them (label, else aria-label or placeholder, else a
+/// selector) with the browser's own message, what to fix: `"First Name":
+/// Please fill out this field`. One copy for CLICK_PREP's `armNav`, Enter's
+/// watch ([`ENTER_MAY_NAVIGATE`]) and the WebDriver engines' `ARM_NAV`.
+macro_rules! invalid_listener_js {
+    () => {
+        r#"
+    on(w, 'invalid', (e) => {
+        n.invalid = true;
+        if (n.badN++ >= 3) return;
+        try {
+            const t = e.target, lab = t.labels && t.labels[0], id = t.getAttribute('name');
+            const name = ((lab && lab.innerText) || t.getAttribute('aria-label') || t.getAttribute('placeholder') || '')
+                .replace(/\s+/g, ' ').trim().slice(0, 40);
+            const who = name ? JSON.stringify(name)
+                : t.localName + (t.id ? '#' + t.id : id ? '[name=' + JSON.stringify(id) + ']' : '');
+            n.bad.push(who + ': ' + String(t.validationMessage || 'invalid').replace(/\.\s*$/, ''));
+        } catch (_) {}
+    });
+"#
+    };
+}
+pub(crate) use invalid_listener_js;
+
 /// Scroll the element into view and, if it is visible and actually receives
 /// a pointer event at its centre, return that point for a *trusted* CDP
 /// mouse event (`isTrusted: true`, default actions, focus, user activation
@@ -368,7 +405,8 @@ pub const DEEP: &str = r#"(() => {
 /// element and its ancestors (`__nvPath`), to tell whether anything
 /// listened for the click (see [`Page::wired_later`]); with `gel` (see
 /// [`GEL`]), counted as the press comes.
-const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects, youngMs, gel, enabledMs) {
+const CLICK_PREP: &str = concat!(
+    r#"async function (el, force, settleMs, strict, button, effects, youngMs, gel, enabledMs) {
     const deadline = Date.now() + (force ? 0 : settleMs);
     // navigera's own listeners, told from the page's by PATH_LISTENERS.
     const ours = (f) => { f.__nv = true; return f; };
@@ -478,20 +516,9 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
         on(w, 'click', ours((e) => { if (!n.click) n.click = e; }));
         on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
-        // Which fields failed, named as a person reads them (label, else a
-        // selector), with the browser's own message: what to fix.
-        on(w, 'invalid', (e) => {
-            n.invalid = true;
-            if (n.badN++ >= 3) return;
-            try {
-                const t = e.target, lab = t.labels && t.labels[0], id = t.getAttribute('name');
-                const name = ((lab && lab.innerText) || t.getAttribute('aria-label') || t.getAttribute('placeholder') || '')
-                    .replace(/\s+/g, ' ').trim().slice(0, 40);
-                const who = name ? JSON.stringify(name)
-                    : t.localName + (t.id ? '#' + t.id : id ? '[name=' + JSON.stringify(id) + ']' : '');
-                n.bad.push(who + ': ' + String(t.validationMessage || 'invalid').replace(/\.\s*$/, ''));
-            } catch (_) {}
-        });
+        "#,
+    invalid_listener_js!(),
+    r#"
         // A handler that navigates by script (`location`, `form.submit()`).
         const api = w.navigation;
         if (api && api.addEventListener) {
@@ -1023,7 +1050,8 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, button: b, view }));
     }
     return { synthetic: true, covered: !!hit && !force, covered_by: hit && hit !== el ? describe(hit) : null, nav: mayNavigate(el) };
-}"#;
+}"#
+);
 
 /// Armed by [`Page::mark_action`] before an action runs: the DOM-change
 /// count's baseline for the settle proof (see [`Page::action_settle_wait`]),
@@ -3269,6 +3297,10 @@ fn shifted_char(c: char) -> char {
 
 /// Does Enter on the focused element (through open shadow roots and
 /// same-origin frames) possibly navigate? Form controls, links, buttons.
+/// In a form (implicit submission, or its button) "form": the submit is
+/// watched as a click's is (CLICK_PREP's `armNav`, read with [`NAV_READ`]),
+/// so [`Page::press`] knows when the page handled it or the form's checks
+/// held it back, and has no navigation to wait for.
 /// What open shadow roots hold, for an engine whose accessibility tree leaves
 /// them out (Lightpanda: neither its AX tree nor `DOM.getDocument` with
 /// `pierce` reaches inside one, and `DOM.describeNode` refuses a node there,
@@ -3359,7 +3391,8 @@ const SHADOW_AX: &str = r#"(scope, withFrames) => {
   return out;
 }"#;
 
-const ENTER_MAY_NAVIGATE: &str = r#"(() => {
+const ENTER_MAY_NAVIGATE: &str = concat!(
+    r#"(() => {
     let e = document.activeElement;
     for (;;) {
         if (e && e.shadowRoot && e.shadowRoot.activeElement) { e = e.shadowRoot.activeElement; continue; }
@@ -3372,6 +3405,44 @@ const ENTER_MAY_NAVIGATE: &str = r#"(() => {
     }
     if (!e || e === document.body) return false;
     const nav = !!(e.form || e.closest('a[href], button, [role=button], [role=link]'));
+    // A form that loads its answer in this tab (another tab, or a frame's
+    // own document, is waited for as before). Only what the page is seen
+    // to do decides: a submit it lets go, one it cancels, a form whose
+    // checks failed; Enter in a textarea writes a line, so there only a
+    // script submits. Anything else: can't be told, waited for as before.
+    const f = e.form, fw = e.ownerDocument.defaultView;
+    const ft = f && ((e.getAttribute('formtarget') || f.getAttribute('target') || '').toLowerCase());
+    if (f && fw && fw === fw.top && (!ft || ft === '_self' || ft === '_top' || ft === '_parent')) {
+        const w = fw;
+        if (w.__nvNav && w.__nvNav.off) w.__nvNav.off();
+        const n = { submit: null, invalid: false, planned: false, offs: [], bad: [], badN: 0 };
+        const on = (v, t, fn) => { v.addEventListener(t, fn, true); n.offs.push(() => v.removeEventListener(t, fn, true)); };
+        on(w, 'submit', (ev) => { if (!n.submit) n.submit = ev; });
+"#,
+    invalid_listener_js!(),
+    r#"
+        const api = w.navigation;
+        if (api && api.addEventListener) {
+            on(api, 'navigate', (ev) => { if (!(ev.destination && ev.destination.sameDocument)) n.planned = true; });
+        }
+        const F = w.HTMLFormElement && w.HTMLFormElement.prototype, submit = F && F.submit;
+        if (typeof submit === 'function') {
+            const mine = function () { n.planned = true; return submit.apply(this, arguments); };
+            F.submit = mine;
+            n.offs.push(() => { if (F.submit === mine) F.submit = submit; });
+        }
+        const line = e.localName === 'textarea';
+        n.off = () => { for (const off of n.offs.splice(0)) off(); };
+        setTimeout(n.off, 10000);
+        n.verdict = () => {
+            n.off();
+            if (n.planned) return true;
+            if (n.submit) return !n.submit.defaultPrevented;
+            return n.invalid || line ? false : null;
+        };
+        Object.defineProperty(w, '__nvNav', { value: n, configurable: true, enumerable: false, writable: true });
+        return 'form';
+    }
     // Enter on a link to a fragment of its own document: armed as a
     // click's is (CLICK_PREP's `__nvHash`), and "hash" says so, for
     // `Page::press` to wait until the page's `hashchange` listeners ran.
@@ -3400,7 +3471,8 @@ const ENTER_MAY_NAVIGATE: &str = r#"(() => {
     Object.defineProperty(top, '__nvHash', { value: hash, configurable: true, enumerable: false, writable: true });
     setTimeout(hash.off, 10000);
     return 'hash';
-})()"#;
+})()"#
+);
 
 fn modifier_bit(name: &str) -> Option<u32> {
     match name.to_ascii_lowercase().as_str() {
@@ -7176,25 +7248,15 @@ impl Page {
 
     /// Focus `target` (if any), then press a key or chord like `Enter`,
     /// `Control+a`, `Shift+Tab`.
-    /// Press a key or chord. Returns true when the key may start a
-    /// navigation (Enter on a form field, link or button), so the caller
-    /// knows to wait for one; other keys cost no navigation grace.
-    pub fn press(&self, target: Option<&Target>, chord: &str, wait: Duration, timeout: Duration) -> Result<bool> {
+    /// Says whether the key may start a navigation (Enter on a form field,
+    /// link or button, unless the page handled the form's submit or its
+    /// checks held it back), so the caller knows to wait for one; other
+    /// keys cost no navigation grace. And the fields that failed.
+    pub fn press(&self, target: Option<&Target>, chord: &str, wait: Duration, timeout: Duration) -> Result<Pressed> {
         if let Some(target) = target {
             self.on_element(target, "press", FOCUS_EL, &[], wait, timeout)?;
         }
         let enter = matches!(chord.to_ascii_lowercase().as_str(), "enter" | "return");
-        // Enter navigates only from a form control, a link or a button.
-        // (Cross-origin frames hide their focus: assume it might.)
-        let (may_navigate, hash) = if enter {
-            match self.evaluate_raw(ENTER_MAY_NAVIGATE, timeout).ok() {
-                Some(Value::Bool(b)) => (b, false),
-                Some(Value::String(s)) if s == "hash" => (true, true),
-                _ => (true, false),
-            }
-        } else {
-            (false, false)
-        };
         let parts: Vec<&str> = chord.split('+').filter(|p| !p.is_empty()).collect();
         let parts = if chord.ends_with("++") || chord == "+" {
             let mut p = parts;
@@ -7225,6 +7287,19 @@ impl Page {
         };
         // With Control/Alt/Meta held the key produces no text (a shortcut).
         let text = if modifiers & (1 | 2 | 4) != 0 { None } else { text };
+        // Enter navigates only from a form control, a link or a button.
+        // (Cross-origin frames hide their focus: assume it might.) Asked
+        // once the key is known to be sent: a form's watch is read after.
+        let (may_navigate, hash, form) = if enter {
+            match self.evaluate_raw(ENTER_MAY_NAVIGATE, timeout).ok() {
+                Some(Value::Bool(b)) => (b, false, false),
+                Some(Value::String(s)) if s == "hash" => (true, true, false),
+                Some(Value::String(s)) if s == "form" => (true, false, true),
+                _ => (true, false, false),
+            }
+        } else {
+            (false, false, false)
+        };
         let mut down = json!({
             "type": if text.is_some() { "keyDown" } else { "rawKeyDown" },
             "key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers,
@@ -7233,19 +7308,30 @@ impl Page {
             down["text"] = json!(t);
             down["unmodifiedText"] = json!(t);
         }
-        self.send("Input.dispatchKeyEvent", down, timeout)?;
-        self.send(
-            "Input.dispatchKeyEvent",
-            json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers }),
-            timeout,
-        )?;
+        let sent = self.send("Input.dispatchKeyEvent", down, timeout).and_then(|_| {
+            self.send(
+                "Input.dispatchKeyEvent",
+                json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers }),
+                timeout,
+            )
+        });
+        // The form's watch: what the page did with the submit (and stop
+        // watching, the key sent or not).
+        let verdict = form.then(|| self.nav_planned(timeout));
+        sent?;
         // A hash-routed page renders the view the link names in its
         // `hashchange` listener, a task after the URL changed: a read right
         // after the press saw the old view (25 reads in 39 here).
         if hash {
             self.hash_settled(timeout);
         }
-        Ok(may_navigate)
+        let Some(verdict) = verdict else {
+            return Ok(Pressed { may_navigate, invalid: None });
+        };
+        Ok(Pressed {
+            may_navigate: verdict.go != Some(false),
+            invalid: (!verdict.invalid.is_empty()).then(|| json!({ "fields": verdict.invalid, "more": verdict.more })),
+        })
     }
 
     /// Type text key by key into `target` (or the focused element): real

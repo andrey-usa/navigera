@@ -13,8 +13,8 @@ All notable changes to this project are documented here. The format follows
   the first three fields by the name a person reads (label, else
   placeholder, else a selector), each with the browser's own message, and
   how many more. The click used to answer a plain ok, which an agent read
-  as sent. On Chrome's engines and the WebDriver ones (there Enter in a
-  form's field too).
+  as sent. Enter in a form's field says the same, on Chrome's engines
+  and the WebDriver ones.
 
 - `--engine obscura` and `--engine moli` (experimental): two more
   headless engines that are their own CDP server, started as
@@ -40,6 +40,13 @@ All notable changes to this project are documented here. The format follows
   and 1.0.4 the drag test expects that bug's answer, and only there.
 
 ### Changed
+
+- Enter in a form's field no longer waits the 150 ms navigation grace
+  when no navigation can follow: the page handled the submit (a
+  single-page app's form), the form's checks held it back, or the field is
+  a textarea (a new line). It is watched as a submit click is; a submit
+  the page lets go, or one it can't tell, is waited for as before. On
+  Chrome's engines (the WebDriver ones already did).
 
 - MCP: every tool on `tools/list` declares the four annotations
   (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`),

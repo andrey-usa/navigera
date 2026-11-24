@@ -5869,8 +5869,12 @@ impl Driver {
             }
             Command::Press { key, target, timeout_ms } => {
                 let t = target.optional("press")?;
-                s.press(t.as_ref(), key, *timeout_ms).map_err(|e| e.context(format!("press {key}")))?;
-                Ok(self.state_json())
+                let invalid = s.press(t.as_ref(), key, *timeout_ms).map_err(|e| e.context(format!("press {key}")))?;
+                let mut state = self.state_json();
+                if let Some(bad) = invalid {
+                    state["not_submitted"] = json!(not_submitted(&bad));
+                }
+                Ok(state)
             }
             Command::Type { value, target, timeout_ms } => {
                 let t = target.optional("type")?;
