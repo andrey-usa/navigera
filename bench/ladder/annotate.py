@@ -7,7 +7,10 @@ storage; annotations come back through the plain checks API
 script can read the ladder table without downloading anything.
 
 GitHub keeps 10 notices per step, so a file that would need more is an
-error, never a silently cut tail. A `.json` file is re-serialised compact
+error, never a silently cut tail. `--step S/T` spreads one file over T
+steps: this step prints the S-th slice of 10, titles still numbered over
+the whole file (`<title> i/N`), and each of the T steps fails when the
+file needs more than T * 10. A `.json` file is re-serialised compact
 (no indent, no spaces) first; joining its notices in order and parsing the
 result gives the same document back.
 """
@@ -20,8 +23,16 @@ CHUNK = 3500
 
 # Tables carry ✓/✗/⚠: write UTF-8 even where the console code page isn't.
 sys.stdout.reconfigure(encoding="utf-8")
-path = Path(sys.argv[1] if len(sys.argv) > 1 else "bench/ladder/out/table.md")
-title = sys.argv[2] if len(sys.argv) > 2 else "ladder table"
+args = sys.argv[1:]
+step, steps = 1, 1
+if "--step" in args:
+    i = args.index("--step")
+    step, steps = (int(x) for x in args[i + 1].split("/"))
+    del args[i:i + 2]
+    if not 1 <= step <= steps:
+        sys.exit(f"--step {step}/{steps}: S must be 1..T")
+path = Path(args[0] if args else "bench/ladder/out/table.md")
+title = args[1] if len(args) > 1 else "ladder table"
 if not path.exists():
     print(f"::warning title={title}::{path} not found")
     sys.exit(0)
@@ -60,10 +71,12 @@ else:
         cur += line + "\n"
     if cur:
         chunks.append(cur)
-if len(chunks) > MAX_NOTICES:
+if len(chunks) > MAX_NOTICES * steps:
     print(f"::error title={title}::{path} needs {len(chunks)} notices, GitHub keeps "
-          f"{MAX_NOTICES} per step: shorten the file or split the step")
+          f"{MAX_NOTICES} per step and this file has {steps} step(s): shorten the file "
+          f"or add a step (--step S/T)")
     sys.exit(1)
-for i, chunk in enumerate(chunks, 1):
+first = (step - 1) * MAX_NOTICES
+for i, chunk in enumerate(chunks[first:first + MAX_NOTICES], first + 1):
     enc = chunk.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
     print(f"::notice title={title} {i}/{len(chunks)}::{enc}")
