@@ -271,9 +271,9 @@ pub fn tools() -> Vec<Value> {
         ),
         listed(
             "browser_more",
-            "Lists the less common tools and schemas; call it when a task needs one, then call that tool by name: \
-             browser_mouse, browser_handoff, browser_history, browser_console_messages, browser_network_requests, \
-             browser_resize, browser_screenshot, browser_tabs, browser_file_upload, browser_hover, browser_handle_dialog.",
+            "Lists the less common tools and schemas; call it when a task needs one, then call that tool by name, \
+             browser_ and one of: mouse, handoff, history, console_messages, network_requests, resize, screenshot, \
+             tabs, file_upload, hover, handle_dialog, webmcp_list, webmcp_call.",
             object(Map::new(), &[]),
             READS,
         ),
@@ -1115,6 +1115,19 @@ mod tests {
                 serde_json::to_string(&seen).unwrap().len()
             })
             .sum()
+    }
+
+    #[test]
+    fn browser_more_names_every_tool_it_lists() {
+        let tools = tools();
+        let more = tools.iter().find(|t| t["name"] == "browser_more").unwrap();
+        let description = more["description"].as_str().unwrap();
+        let words: Vec<&str> = description.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).collect();
+        for t in deferred_tools() {
+            let name = t["name"].as_str().unwrap();
+            let rest = name.strip_prefix("browser_").unwrap();
+            assert!(words.contains(&rest), "browser_more's description leaves out {name}");
+        }
     }
 
     #[test]

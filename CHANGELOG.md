@@ -47,10 +47,12 @@ All notable changes to this project are documented here. The format follows
   for custom dropdowns (ARIA comboboxes) as well as `<select>`,
   `browser_scroll` (clicks need no scrolling first), `browser_navigate`
   (back, forward and reload are `browser_history`), `browser_evaluate`,
-  and `browser_more`, which now also names `browser_handle_dialog`. An
-  empty `required` is left out of a schema. What the model reads of
-  `tools/list` is 7,978 bytes (7,677 in 0.16.0), under the 8,000 the
-  tests hold it to; `browser_more` answers 10,325 bytes (10,435).
+  and `browser_more`, which now names all 13 tools it lists
+  (`browser_handle_dialog`, `browser_webmcp_list` and `browser_webmcp_call`
+  were missing; a test holds it to the list). An empty `required` is left
+  out of a schema. What the model reads of `tools/list` is 7,937 bytes
+  (7,677 in 0.16.0), under the 8,000 the tests hold it to; `browser_more`
+  answers 10,325 bytes (10,435).
 
 ### Fixed
 
