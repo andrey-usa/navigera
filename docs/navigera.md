@@ -727,9 +727,13 @@ take Chrome's paths; each session gets a browser of its own.
     or click sent meanwhile answers only once the new document has loaded
     (Obscura #921): 1.5 s for a document that takes 1.5 s, where Chrome
     answers in under 3 ms.
-  - shadow roots: its hit test stops at the shadow host, so a click on an
-    element inside an open shadow root reaches the host and the element's
-    own handler doesn't run (the response says so in `click_missed`).
+  - shadow roots: its mouse events go to `document.elementFromPoint`, the
+    shadow host, so a press never reaches an element inside a shadow root.
+    navigera asks each engine it starts as a CDP server once, with a button
+    in a shadow root on its first tab; where the press stops at the host, a
+    `click` on an element inside one gets its pointer and mouse events from
+    the page (composed, so the host's listeners hear them too) once the
+    usual checks passed. A page that checks `isTrusted` sees them as false.
   - its accessibility tree's root has no name and no URL, and
     `Accessibility.getRootAXNode` answers nothing: `ax` reads the whole tree
     and takes the title and URL from the page.

@@ -376,6 +376,13 @@ fn frames_and_shadow_roots(engine: &'static str) {
     // Each element once: listed from the page only where the tree has none.
     assert_eq!(support.matches("textbox \"Message\"").count(), 1, "{engine}:\n{support}");
     assert_eq!(cart.matches("button \"Apply coupon\"").count(), 1, "{engine}:\n{cart}");
+    // A click on the button inside the coupon's shadow root runs its own
+    // handler: the coupon is posted and the page reloads with the discount.
+    agent.ok(&["goto", &format!("{}/cart", site.base)]);
+    agent.ok(&["fill", "--text", "Coupon code", "SAVE10"]);
+    let r = agent.ok(&["click", "--text", "Apply coupon"]);
+    assert!(r.get("click_missed").is_none() && r.get("synthetic_click").is_none(), "{engine}: {r}");
+    agent.ok(&["wait", "--text", "Discount (SAVE10)"]);
     agent.ok(&["quit"]);
 }
 

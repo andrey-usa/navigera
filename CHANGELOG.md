@@ -21,8 +21,8 @@ All notable changes to this project are documented here. The format follows
   and run `tests/cdp_servers.rs` (navigation, the tree and its refs, fill,
   a keyboard-submitted sign-in the server records, a checkbox, a select,
   tabs, a screenshot, the server gone after `quit`). What differs from
-  Chrome is in docs/navigera.md: on Obscura, a click can't reach into a
-  shadow root; Moli 1.1.27 lays a page out again only for a screenshot
+  Chrome is in docs/navigera.md: on Obscura, a press stops at a shadow
+  host (navigera clicks inside one from the page, below); Moli 1.1.27 lays a page out again only for a screenshot
   (navigera takes a 1x1 one when the page changed, below).
 
 - Lightpanda is back in CI (out since 1.0.3 broke the drag test):
@@ -115,6 +115,14 @@ All notable changes to this project are documented here. The format follows
   Only a viewport capture with no device override is asked for again now
   (after `$NAVIGERA_SCREENSHOT_RESEND_MS`, default 400), for a capture
   Chrome loses while the page replaces its document.
+
+- On Obscura, a click on an element inside a shadow root reached the host:
+  Obscura 0.2.7 sends every mouse event to `document.elementFromPoint`,
+  which is the shadow host, so the element's own handler never ran (the
+  eval site's coupon: no discount, the agent eval's purchase task 0/3).
+  navigera asks each engine it starts as a CDP server once, with a button
+  in a shadow root on its first tab; where the press stops at the host, the
+  click's events for an element inside one come from the page.
 
 ### Behaviour changes
 

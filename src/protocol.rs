@@ -5719,7 +5719,12 @@ impl Driver {
                 }
                 // Lightpanda lays nothing out, so a DOM-event click there is
                 // the normal case, not a sign of an overlay.
-                if point.get("synthetic").and_then(Value::as_bool) == Some(true) && !s.is_lightpanda() {
+                // Nor on an engine whose press stops at a shadow host, for
+                // an element inside one (see `events::PRESS_SHADOW_PAGE`).
+                if point.get("synthetic").and_then(Value::as_bool) == Some(true)
+                    && !s.is_lightpanda()
+                    && point.get("shadow_page").and_then(Value::as_bool) != Some(true)
+                {
                     // The agent should know the click was not a real one.
                     state["synthetic_click"] = json!(if point.get("dropped").and_then(Value::as_bool) == Some(true) {
                         "the browser did not deliver the mouse events (twice); the click went to the element without the mouse"

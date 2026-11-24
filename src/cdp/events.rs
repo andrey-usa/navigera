@@ -298,7 +298,23 @@ pub struct Shared {
     /// did not start as a CDP server), [`AX_SHADOW_ASK`] (not known yet) or
     /// [`AX_SHADOW_PAGE`] (it leaves shadow roots out: see [`ask_ax_shadow`]).
     pub ax_shadow_mode: std::sync::atomic::AtomicU8,
+    /// Whether the engine's mouse events reach an element inside a shadow
+    /// root: [`PRESS_SHADOW_ENGINE`] (Chrome, and every browser navigera
+    /// did not start as a CDP server), [`PRESS_SHADOW_ASK`] (not known yet)
+    /// or [`PRESS_SHADOW_PAGE`] (its press stops at the host: see
+    /// [`ask_press_shadow`]).
+    pub press_shadow_mode: std::sync::atomic::AtomicU8,
 }
+
+/// [`Shared::press_shadow_mode`]: the engine's press reaches into shadow roots.
+pub const PRESS_SHADOW_ENGINE: u8 = 0;
+/// [`Shared::press_shadow_mode`]: a CDP server engine, not asked yet.
+pub const PRESS_SHADOW_ASK: u8 = 1;
+/// [`Shared::press_shadow_mode`]: the engine's mouse events go to
+/// `document.elementFromPoint`, the shadow host, never the element inside
+/// (Obscura 0.2.7, `Input.dispatchMouseEvent`). A click on an element in
+/// a shadow root gets its events from the page, once its checks passed.
+pub const PRESS_SHADOW_PAGE: u8 = 2;
 
 /// [`Shared::ax_shadow_mode`]: the engine's tree has shadow roots in it.
 pub const AX_SHADOW_TREE: u8 = 0;
@@ -1132,6 +1148,7 @@ pub async fn arm_dialog(client: &CdpClient, shared: &Shared, session: &str) {
     if !shared.is_single_target() {
         ask_layout(client, shared, session).await;
         ask_ax_shadow(client, shared, session).await;
+        ask_press_shadow(client, shared, session).await;
         if page_dialogs(client, shared, session).await {
             install_page_dialogs(client, shared, session).await;
         }
@@ -1273,6 +1290,65 @@ async fn ask_ax_shadow(client: &CdpClient, shared: &Shared, session: &str) {
     crate::timing::log(&format!(
         "[ax] shadow roots {}",
         if mode == AX_SHADOW_PAGE { "listed from the page" } else { "in the engine's tree" }
+    ));
+}
+
+/// Whether `session`'s engine delivers a press to an element inside an
+/// open shadow root, asked once per browser (only of a CDP server engine:
+/// [`PRESS_SHADOW_ASK`]), with its first tab, before any page of the
+/// user's is in it: a 40 px button in a shadow root fixed at the top left,
+/// a press and release at its centre, and whether the button heard the
+/// press. Any failure leaves the engine's press as it is
+/// ([`PRESS_SHADOW_ENGINE`]), and nothing is asked again.
+async fn ask_press_shadow(client: &CdpClient, shared: &Shared, session: &str) {
+    if shared.press_shadow_mode.load(Ordering::Relaxed) != PRESS_SHADOW_ASK {
+        return;
+    }
+    const WAIT: Duration = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let eval = |expression: &str| {
+        client.send("Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(session), WAIT)
+    };
+    let added = eval(
+        "(() => { const made = !document.documentElement; \
+         if (made) document.appendChild(document.createElement('html')); \
+         const r = document.body || document.documentElement; \
+         if (!r.attachShadow) return false; const h = document.createElement('div'); \
+         h.style.cssText = 'position:fixed;left:0;top:0;width:40px;height:40px;margin:0;padding:0;z-index:2147483647'; \
+         const b = document.createElement('button'); \
+         b.style.cssText = 'display:block;width:40px;height:40px;margin:0;padding:0;border:0'; \
+         const heard = []; b.addEventListener('mousedown', () => heard.push(1)); \
+         h.attachShadow({ mode: 'open' }).appendChild(b); r.appendChild(h); \
+         Object.defineProperty(window, '__nvPressProbe', { value: [h, made, heard], configurable: true, enumerable: false }); \
+         return true; })()",
+    )
+    .await;
+    let mut mode = PRESS_SHADOW_ENGINE;
+    if added.is_ok_and(|r| r.pointer("/result/value") == Some(&json!(true))) {
+        // An engine that keeps its first layout hit-tests with it.
+        if shared.layout_mode.load(Ordering::Relaxed) == LAYOUT_SHOT {
+            let _ = client.send("Page.captureScreenshot", layout_shot_params(), Some(session), WAIT).await;
+        }
+        let mut pressed = true;
+        for kind in ["mousePressed", "mouseReleased"] {
+            let params = json!({ "type": kind, "x": 20, "y": 20, "button": "left", "buttons": 1, "clickCount": 1 });
+            pressed &= client.send("Input.dispatchMouseEvent", params, Some(session), WAIT).await.is_ok();
+        }
+        let heard = eval("(() => { const p = window.__nvPressProbe; return p ? p[2].length > 0 : null; })()").await;
+        if pressed && heard.is_ok_and(|r| r.pointer("/result/value") == Some(&json!(false))) {
+            mode = PRESS_SHADOW_PAGE;
+        }
+    }
+    let _ = eval(
+        "(() => { const p = window.__nvPressProbe; if (!p) return; delete window.__nvPressProbe; \
+         const r = p[0].parentNode; p[0].remove(); if (p[1] && r) r.remove(); })()",
+    )
+    .await;
+    shared.press_shadow_mode.store(mode, Ordering::Relaxed);
+    crate::timing::record("press_shadow_probe", started);
+    crate::timing::log(&format!(
+        "[click] in shadow roots: {}",
+        if mode == PRESS_SHADOW_PAGE { "events from the page" } else { "the engine's press" }
     ));
 }
 

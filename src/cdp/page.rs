@@ -919,7 +919,8 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 }
                 const nav = mayNavigate(el);
                 if (nav) armNav(w, !el.closest('a[href]'));
-                return Object.assign(p, { nav, check: true, effects: !!effects, young });
+                const shadow = !!el.getRootNode && el.getRootNode() !== el.ownerDocument;
+                return Object.assign(p, { nav, check: true, effects: !!effects, young, shadow });
             }
             // Inside a cross-origin frame: our coordinates are frame-local;
             // the caller asks CDP for the box instead.
@@ -5930,6 +5931,22 @@ impl Page {
         let armed = point.get("effects").and_then(Value::as_bool) == Some(true);
         let young = point.get("young").and_then(Value::as_bool) == Some(true);
         let nav = point.get("nav").and_then(Value::as_bool) == Some(true);
+        if point.get("shadow").and_then(Value::as_bool) == Some(true)
+            && self.shared.press_shadow_mode.load(std::sync::atomic::Ordering::Relaxed)
+                == super::events::PRESS_SHADOW_PAGE
+        {
+            // This engine's press stops at the shadow host: the element's
+            // own events come from the page, its checks above passed.
+            if armed {
+                self.drop_effects(timeout);
+            }
+            if nav {
+                self.nav_planned(timeout);
+            }
+            let mut res = dom(self)?;
+            res["shadow_page"] = json!(true);
+            return Ok(res);
+        }
         let before = (self.shared.activity(&self.session_id), self.shared.logs.lock().unwrap().requests_started());
         let pressed_at = Instant::now();
         match self.mouse_click(&point, &opts.button, timeout) {
