@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-25
+
 ### Added
 
 - A submit click the browser holds back because fields fail their checks
