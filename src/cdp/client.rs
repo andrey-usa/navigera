@@ -568,6 +568,10 @@ impl CdpClient {
             }
             Ok(Ok(response)) => response,
         };
+        if std::env::var_os("NAVIGERA_CDP_TRACE").is_some() {
+            let expr = params.get("expression").or(params.get("functionDeclaration")).and_then(Value::as_str).map(|e| e.chars().take(70).collect::<String>()).unwrap_or_default();
+            trace(&format!("DONE {method}"), &Value::String(expr));
+        }
         match response {
             Ok(value) => {
                 self.unproven(counted);
@@ -666,7 +670,10 @@ fn trace(method: &str, params: &Value) {
     let Some(file) = file else { return };
     // One write() per line: several navigera processes append to the
     // same file in parallel, and O_APPEND keeps single writes whole.
-    let mut line = serde_json::json!({ "method": method, "params": shape(params, 0) }).to_string();
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let t = T0.get_or_init(std::time::Instant::now).elapsed().as_micros() as u64;
+    let p = if method.starts_with("DONE ") { params.clone() } else { shape(params, 0) };
+    let mut line = serde_json::json!({ "method": method, "params": p, "t": t }).to_string();
     line.push('\n');
     if let Ok(mut f) = file.lock() {
         let _ = f.write_all(line.as_bytes());

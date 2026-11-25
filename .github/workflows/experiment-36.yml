@@ -1,0 +1,71 @@
+name: experiment-36
+
+# Where a ladder click's time goes on GitHub's runner: navigera (static musl
+# as released, and glibc) against agent-browser, with each one's CDP
+# commands timestamped (bench/probe/click_probe.py). Numbers as notices.
+
+on:
+  push:
+    branches: [experiment-36]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+
+      - name: Chrome and agent-browser
+        run: |
+          CHROME_BIN=$(which google-chrome)
+          echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
+          "$CHROME_BIN" --version
+          npm install -g agent-browser@latest
+          echo "::notice::$(agent-browser --version) · $("$CHROME_BIN" --version) · $(nproc) cpus · $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+
+      - name: Build navigera (static musl, as released; and glibc)
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked --bin navigera --target x86_64-unknown-linux-musl
+          cargo build --release --locked --bin navigera
+
+      - name: Fixtures
+        run: |
+          python3 bench/ladder/gen_fixtures.py
+          (cd bench/ladder/fixtures && nohup python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 1
+
+      - name: Probe, musl build
+        env:
+          NAVIGERA: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/navigera
+        run: python3 bench/probe/click_probe.py http://127.0.0.1:8765 "$RUNNER_TEMP/out-musl"
+
+      - name: Probe, glibc build
+        env:
+          NAVIGERA: ${{ github.workspace }}/target/release/navigera
+        run: |
+          "$NAVIGERA" sessions --clean --all >/dev/null 2>&1 || true
+          agent-browser close --all >/dev/null 2>&1 || true
+          python3 bench/probe/click_probe.py http://127.0.0.1:8765 "$RUNNER_TEMP/out-glibc"
+
+      - name: Upload traces
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: probe
+          path: ${{ runner.temp }}/out-*
