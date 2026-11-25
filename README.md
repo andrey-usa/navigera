@@ -6,6 +6,7 @@
 [![npm](https://img.shields.io/npm/v/navigera.svg)](https://www.npmjs.com/package/navigera)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Documentation](https://img.shields.io/badge/documentation-site-blue.svg)](https://andrey-usa.github.io/navigera/)
+[![andrey-usa/navigera MCP server](https://glama.ai/mcp/servers/andrey-usa/navigera/badges/score.svg)](https://glama.ai/mcp/servers/andrey-usa/navigera)
 
 **`navigera`** is extremely fast browser automation for AI agents, driven
 from the shell, one command per step. It is a single native binary (Rust,
