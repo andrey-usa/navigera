@@ -38,6 +38,9 @@ jobs:
           npm install -g agent-browser@latest
           echo "::notice::$(agent-browser --version) · $("$CHROME_BIN" --version) · $(nproc) cpus · $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
 
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: musl-tools
       - name: Build navigera (static musl, as released; and glibc)
         run: |
           rustup target add x86_64-unknown-linux-musl
