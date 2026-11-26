@@ -5,6 +5,8 @@
     libc_probe.py profile ARM BASE_URL OUT_DIR
     libc_probe.py cli ARM BASE_URL OUT_DIR
     libc_probe.py split BASE_URL OUT_DIR
+    libc_probe.py rest BASE_URL OUT_DIR
+    libc_probe.py sched ARM BASE_URL OUT_DIR
 
 Builds, from $NAVIGERA_BUILDS (`name=path,name=path,...`): the release's
 musl + mimalloc, musl with musl's own allocator, glibc with glibc's, glibc
@@ -24,6 +26,20 @@ and instructions where the runner counts them), `strace -c`, and
 `perf record`, each over 45 clicks with their setup, and over 45 setups
 alone (the difference is the clicks'). Notices per click; full output to
 OUT_DIR.
+
+`rest`: the click after its setup with the ladder's 0.3 s rest and with
+0.02 s, every arm and both rests interleaved: a cost that grows with the
+idle time before the click (a purge, a cold cache, a deep CPU sleep
+state) shows as a gap at 0.3 s that closes at 0.02 s.
+
+`sched ARM`: the off-CPU view of one arm's clicks. (a) `perf sched record`
+of the whole machine over the clicks: per click, from the scheduler's own
+switch and wakeup events, the session server's threads' run time,
+scheduling delay (woken but not yet on a CPU) and wakeups, its Chrome's
+processes' (renderer, GPU, browser, utility), and how idle the CPUs were;
+only the timed click's window counts, not its setup. (b) `perf record`
+of the server's switch-outs with DWARF stacks: where its threads block
+or are preempted during the clicks, folded and counted.
 """
 import json
 import os
@@ -370,6 +386,254 @@ def split_mode(base, out_dir):
     clean()
 
 
+def mono_us():
+    return time.clock_gettime(time.CLOCK_MONOTONIC) * 1e6
+
+
+def clicks_in_windows(arm, n, rest=0.3):
+    """n (setup, rest, click) of a started arm; the clicks' monotonic windows."""
+    setup, call, env = op_argv(arm, "click")
+    wins, ms = [], []
+    for _ in range(n):
+        run(setup, env)
+        time.sleep(rest)
+        t0 = mono_us()
+        ms.append(run(call, env)[0])
+        wins.append((t0, mono_us()))
+    return wins, ms
+
+
+def family(pid):
+    """Every process descended from pid (the server's Chrome), by kind."""
+    kids = {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            stat = open(f"/proc/{d}/stat").read()
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            args = open(f"/proc/{d}/cmdline", "rb").read().split(b"\0")
+        except (OSError, IndexError, ValueError):
+            continue
+        kids.setdefault(ppid, []).append((int(d), args))
+    out, todo = {}, [pid]
+    while todo:
+        p = todo.pop()
+        for c, args in kids.get(p, []):
+            kind = next((a.split(b"=", 1)[1].decode() for a in args if a.startswith(b"--type=")), "browser")
+            out[c] = kind
+            todo.append(c)
+    return out
+
+
+def all_tids(pids):
+    got = {}
+    for p, kind in pids.items():
+        try:
+            for t in os.listdir(f"/proc/{p}/task"):
+                got[int(t)] = kind
+        except OSError:
+            pass
+    return got
+
+
+SW = re.compile(r"prev_pid=(\d+) .*?prev_state=(\S+) ==> .*?next_pid=(\d+)")
+WK = re.compile(r"\bpid=(\d+)")
+
+
+def sched_part(arm, pid, n, out_dir):
+    who = {t: "server" for t in tids(pid)}
+    who.update({t: f"chrome-{k}" for t, k in all_tids(family(pid)).items()})
+    data = os.path.join(out_dir, f"{arm}-sched.data")
+    p = subprocess.Popen(["sudo", "perf", "sched", "record", "-k", "CLOCK_MONOTONIC", "-a", "-o", data],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    time.sleep(1.5)
+    wins, ms = clicks_in_windows(arm, n)
+    time.sleep(0.2)
+    subprocess.run(["sudo", "kill", "-INT", str(p.pid)])
+    p.communicate(timeout=120)
+    # perf sched record runs `perf record` as its child under sudo: the
+    # data file is written once that child has gone.
+    subprocess.run(["sudo", "chmod", "a+r", data])
+    txt = subprocess.run(["sudo", "perf", "script", "-i", data, "-F", "cpu,time,event,trace", "--ns"],
+                         capture_output=True, text=True).stdout
+    open(os.path.join(out_dir, f"{arm}-sched.txt"), "w").write(txt)
+    ncpu = os.cpu_count() or 1
+    per = sched_replay(txt, who, wins, ncpu)
+    report_sched(arm, per, wins, ncpu, out_dir)
+
+
+def sched_replay(txt, who, wins, ncpu):
+    """Per click window: run time, scheduling delay (wakeup to on-CPU),
+    wakeups and preemptions per group of tids, and the CPUs' idle share,
+    from `perf script -F cpu,time,event,trace` of sched_switch/wakeup."""
+    # Replay the scheduler: per tid, when it was woken and switched in.
+    woke, on, idle_since = {}, {}, {}
+    ev = []  # (t_us, kind, group, value)
+    for line in txt.splitlines():
+        m = re.match(r"\s*\[(\d+)\]\s+([\d.]+):\s+(\S+):\s+(.*)", line)
+        if not m:
+            continue
+        cpu, t, name, trace = int(m.group(1)), float(m.group(2)) * 1e6, m.group(3), m.group(4)
+        if name.startswith("sched:sched_wakeup"):
+            w = WK.search(trace)
+            if w:
+                woke[int(w.group(1))] = t
+        elif name == "sched:sched_switch":
+            s_ = SW.search(trace)
+            if not s_:
+                continue
+            prev, state, nxt = int(s_.group(1)), s_.group(2), int(s_.group(3))
+            if prev in on:
+                g = who.get(prev)
+                if g:
+                    ev.append((on.pop(prev), t, g, "run"))
+                    if state.startswith("R"):
+                        ev.append((t, t, g, "preempt"))
+            if prev == 0 and cpu in idle_since:
+                ev.append((idle_since.pop(cpu), t, "cpu", "idle"))
+            if nxt == 0:
+                idle_since[cpu] = t
+            else:
+                on[nxt] = t
+                g = who.get(nxt)
+                if g:
+                    w = woke.pop(nxt, None)
+                    if w is not None and w <= t:
+                        ev.append((w, t, g, "delay"))
+                        ev.append((t, t, g, "wake"))
+    # Close what is still running or idle when the trace ends.
+    end = max((e[1] for e in ev), default=0.0)
+    for tid, t in on.items():
+        if who.get(tid):
+            ev.append((t, end, who[tid], "run"))
+    for cpu, t in idle_since.items():
+        ev.append((t, end, "cpu", "idle"))
+    per = []
+    for t0, t1 in wins:
+        acc = {}
+        for a, b, g, k in ev:
+            if b < t0 or a > t1:
+                continue
+            key = (g, k)
+            if k in ("wake", "preempt"):
+                acc[key] = acc.get(key, 0) + 1
+            else:
+                acc[key] = acc.get(key, 0) + (min(b, t1) - max(a, t0)) / 1000
+                if k == "delay":
+                    acc[(g, "maxdelay")] = max(acc.get((g, "maxdelay"), 0), (b - a) / 1000)
+        acc[("cpu", "idlepct")] = 100 * acc.get(("cpu", "idle"), 0) / (ncpu * (t1 - t0) / 1000)
+        acc[("click", "ms")] = (t1 - t0) / 1000
+        per.append(acc)
+    return per
+
+
+def report_sched(arm, per, wins, ncpu, out_dir):
+    keys = sorted({k for a in per for k in a})
+    med = {k: statistics.median(a.get(k, 0) for a in per) for k in keys}
+    p90 = {k: statistics.quantiles([a.get(k, 0) for a in per], n=10)[-1] for k in keys}
+    json.dump({"windows": wins, "per_click": [{f"{g}.{k}": v for (g, k), v in a.items()} for a in per]},
+              open(os.path.join(out_dir, f"{arm}-sched.json"), "w"))
+    groups = [g for g in ("server", "chrome-renderer", "chrome-browser", "chrome-gpu-process", "chrome-utility")
+              if any(k[0] == g for k in keys)]
+    parts = [f"click {med[('click', 'ms')]:.2f} (p90 {p90[('click', 'ms')]:.2f})",
+             f"cpus idle {med[('cpu', 'idlepct')]:.0f}%"]
+    for g in groups:
+        parts.append(f"{g}: run {med.get((g, 'run'), 0):.2f} · delay {med.get((g, 'delay'), 0):.3f}"
+                     f" (p90 {p90.get((g, 'delay'), 0):.3f}, max/click {med.get((g, 'maxdelay'), 0):.3f})"
+                     f" · wakes {med.get((g, 'wake'), 0):.0f} · preempt {med.get((g, 'preempt'), 0):.0f}")
+    print(f"::notice title={arm} sched per click, median ms ({len(per)} clicks, {ncpu} cpus)::" + " | ".join(parts))
+
+
+def stacks_part(arm, pid, n, out_dir):
+    data = os.path.join(out_dir, f"{arm}-switch.data")
+    p = subprocess.Popen(["sudo", "perf", "record", "-e", "sched:sched_switch", "--call-graph", "dwarf,16384",
+                          "-k", "CLOCK_MONOTONIC", "-p", str(pid), "-o", data],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    time.sleep(1.5)
+    wins, _ = clicks_in_windows(arm, n)
+    time.sleep(0.2)
+    subprocess.run(["sudo", "kill", "-INT", str(p.pid)])
+    p.communicate(timeout=120)
+    subprocess.run(["sudo", "chmod", "a+r", data])
+    txt = subprocess.run(["sudo", "perf", "script", "-i", data, "-F", "time,trace,ip,sym", "--ns"],
+                         capture_output=True, text=True).stdout
+    open(os.path.join(out_dir, f"{arm}-switch.txt"), "w").write(txt)
+    counts, cur = {}, None
+
+    def flush():
+        if cur and any(a <= cur[0] <= b for a, b in wins):
+            # The scheduler's own frames say nothing; the syscall's do,
+            # then the user stack from the innermost frame out.
+            kern = [x for x in cur[2] if not re.match(r"(__)?schedule|preempt_schedule", x)]
+            key = f"{cur[1]} " + ";".join(kern[:3] + ["|"] + cur[3][:8])
+            counts[key] = counts.get(key, 0) + 1
+
+    for line in txt.splitlines():
+        m = re.match(r"\s*([\d.]+):\s+(.*prev_state=(\S+).*)", line)
+        if m:
+            flush()
+            cur = (float(m.group(1)) * 1e6, m.group(3), [], [])
+        elif cur and line.strip():
+            f = line.split(None, 1)
+            if len(f) == 2:
+                sym = re.sub(r"\s*\(.*\)$", "", f[1].strip())
+                sym = re.sub(r"\+0x[0-9a-f]+$", "", sym)
+                sym = re.sub(r"::h[0-9a-f]{16}$", "", sym)[:70]
+                frames = cur[2] if f[0].startswith("ffff") else cur[3]
+                if not frames or frames[-1] != sym:
+                    frames.append(sym)
+    flush()
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:8]
+    open(os.path.join(out_dir, f"{arm}-switch-folded.txt"), "w").write(
+        "".join(f"{c} {k}\n" for k, c in sorted(counts.items(), key=lambda kv: -kv[1])))
+    print(f"::notice title={arm} server switch-outs in {n} clicks ({sum(counts.values())} in all), top stacks::"
+          + " ‖ ".join(f"{c}x {k[:300]}" for k, c in top))
+
+
+def sched_mode(arm, base, out_dir):
+    pid = start(arm, base)
+    if not pid:
+        raise SystemExit(f"{arm}: no session server pid in start's answer")
+    setup, call, env = op_argv(arm, "click")
+    for _ in range(5):
+        run(setup, env)
+        run(call, env)
+    print(f"::notice title={arm} threads::server {len(tids(pid))} · chrome processes "
+          + ", ".join(f"{k} {v}" for k, v in sorted(_count(family(pid).values()).items())))
+    n = int(os.environ.get("SCHED_N", "30"))
+    for part in (sched_part, stacks_part):
+        try:
+            part(arm, pid, n, out_dir)
+        except Exception as e:  # noqa: BLE001 - report and go on
+            print(f"::warning title={arm} {part.__name__}::{type(e).__name__}: {str(e)[:300]}")
+    clean()
+
+
+def _count(xs):
+    out = {}
+    for x in xs:
+        out[x] = out.get(x, 0) + 1
+    return out
+
+
+def rest_mode(base, out_dir):
+    names = list(ARMS)
+    for a in names:
+        start(a, base)
+    got = {(a, r): [] for a in names for r in (0.3, 0.02)}
+    reps = int(os.environ.get("REST_REPS", "5"))
+    for rnd in range(ROUNDS):
+        order = names[rnd % len(names):] + names[:rnd % len(names)]
+        for a in order:
+            for r in ((0.3, 0.02) if rnd % 2 == 0 else (0.02, 0.3)):
+                got[(a, r)] += clicks_in_windows(a, reps, r)[1]
+    print(f"::notice title=click by rest before it, median [IQR] ms, {ROUNDS}x{reps} each::"
+          + " · ".join(f"{a} rest {r:g}s {summary(got[(a, r)])}" for a in names for r in (0.3, 0.02)))
+    json.dump({f"{a}@{r}": v for (a, r), v in got.items()}, open(os.path.join(out_dir, "rest.json"), "w"))
+    clean()
+
+
 if MODE == "split":
     split_mode(sys.argv[2], sys.argv[3])
 elif MODE == "cli":
@@ -378,5 +642,9 @@ elif MODE == "time":
     time_mode(sys.argv[2], sys.argv[3])
 elif MODE == "profile":
     profile_mode(sys.argv[2], sys.argv[3], sys.argv[4])
+elif MODE == "rest":
+    rest_mode(sys.argv[2], sys.argv[3])
+elif MODE == "sched":
+    sched_mode(sys.argv[2], sys.argv[3], sys.argv[4])
 else:
     raise SystemExit(__doc__)

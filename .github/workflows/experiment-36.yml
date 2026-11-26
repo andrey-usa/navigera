@@ -1,11 +1,13 @@
 name: experiment-36
 
 # What the static musl build (as released) costs a call on GitHub's runner,
-# and where: four builds ({musl, glibc} x {mimalloc, the libc's allocator}),
-# the release's build with mimalloc's purge off, agent-browser as the
-# control; then each build's session server under perf stat, strace -c and
-# perf record over the same clicks (bench/probe/libc_probe.py). Numbers as
-# notices, raw output as the artifact.
+# and where (bench/probe/libc_probe.py). Run 4: the off-CPU view of
+# mimalloc's click tail. Three builds (musl + mimalloc as released, musl +
+# musl's malloc, glibc + glibc's), all with frame pointers; the click with
+# a 0.3 s and a 0.02 s rest before it; then per build the scheduler's view
+# of the clicks (perf sched record of the machine) and the session
+# server's switch-out stacks. Numbers as notices, raw output as the
+# artifact.
 
 on:
   push:
@@ -54,6 +56,9 @@ jobs:
           perf --version
 
       - name: Build the three navigera builds
+        env:
+          RUSTFLAGS: "-C force-frame-pointers=yes"
+          CFLAGS: "-fno-omit-frame-pointer"
         run: |
           rustup target add x86_64-unknown-linux-musl
           b="$RUNNER_TEMP/builds"
@@ -83,19 +88,25 @@ jobs:
           sleep 1
           mkdir -p "$RUNNER_TEMP/out"
 
-      - name: Where a click's time goes, per build (traced, interleaved)
+      - name: The click by the rest before it (0.3 s, 0.02 s), interleaved
         env:
           ROUNDS: "6"
-          SPLIT_REPS: "10"
-        run: python3 bench/probe/libc_probe.py split http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+          REST_REPS: "5"
+        run: python3 bench/probe/libc_probe.py rest http://127.0.0.1:8765 "$RUNNER_TEMP/out"
 
-      - name: The same, again (order and runner drift)
-        env:
-          ROUNDS: "6"
-          SPLIT_REPS: "10"
+      - name: Off-CPU view, musl + mimalloc
+        run: python3 bench/probe/libc_probe.py sched musl-mi http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+
+      - name: Off-CPU view, musl + malloc
+        run: python3 bench/probe/libc_probe.py sched musl-sys http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+
+      - name: Off-CPU view, glibc
+        run: python3 bench/probe/libc_probe.py sched glibc-sys http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+
+      - name: Off-CPU view, musl + mimalloc again (order and drift)
         run: |
           mkdir -p "$RUNNER_TEMP/out/again"
-          python3 bench/probe/libc_probe.py split http://127.0.0.1:8765 "$RUNNER_TEMP/out/again"
+          python3 bench/probe/libc_probe.py sched musl-mi http://127.0.0.1:8765 "$RUNNER_TEMP/out/again"
 
       - name: Upload
         if: always()
