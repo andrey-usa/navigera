@@ -1,14 +1,14 @@
 name: experiment-40
 
-# How often three tests fail on the runner they failed on, with what each
-# failing run leaves behind (bench/probe/repeat.py): the Electron webview
-# test on macos-15 (alone, and inside its whole test binary as ci runs it),
-# natural mode's automation signs on macos-15 (alone and inside its binary),
-# and the network-service test's Edge launches on ubuntu-24.04 with the
-# runner's Edge and Chrome beta as the first browser (as in the compat
-# job). CDP trace with times on every run; macOS crash reports and Linux
-# process tables and stacks of a launch still running at 45 s are kept.
-# Counts as notices, everything else as the artifact.
+# How often the Electron suite fails on macos-15, with what each failing
+# run leaves behind (bench/probe/repeat.py). Run 4: run 3 tied the crash
+# (SIGBUS in Chromium's blockfile cache thread) to the suite's seven
+# tests sharing one Electron profile (disk-cache errors in 184/200 cold
+# suite runs). Arm A: tests/electron_shared.rs (the suite as on next);
+# arm B: tests/electron.rs, each test's app on a profile of its own
+# (`--fixture-user-data`). 20 fresh machines, each running both arms 10
+# times from empty app data, half A first, half B first. Counts as
+# notices, everything else as the artifact.
 
 on:
   push:
@@ -26,10 +26,10 @@ env:
   REPEATS: "30"
 
 jobs:
-  # Run 3: ci's crash rate is per job (4 of ~180 electron (macos-15) jobs
-  # since 2026-11-13), and each job is a fresh machine: 20 machines, each
-  # running the whole binary 10 times from empty app data, the first of
-  # them that machine's first Electron launch.
+  # ci's crash rate is per job (4 of ~180 electron (macos-15) jobs since
+  # 2026-11-13), and each job is a fresh machine: 20 machines, each running
+  # each arm's binary 10 times from empty app data, the first repeat that
+  # machine's first Electron launch.
   electron:
     strategy:
       fail-fast: false
@@ -38,7 +38,7 @@ jobs:
     runs-on: macos-15
     env:
       REPEATS: "10"
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
@@ -57,19 +57,41 @@ jobs:
           node node_modules/electron/install.js
           echo "::notice title=machine::electron $(node -p "require('electron/package.json').version") · $(sw_vers -productVersion) $(sw_vers -buildVersion) · $(uname -m) · $(sysctl -n hw.ncpu) cpus · $(( $(sysctl -n hw.memsize) / 1073741824 )) GB · $(sysctl -n machdep.cpu.brand_string)"
       - name: Build tests
-        run: cargo test --locked --test electron --no-run
-      # Run 2: a fresh runner's state. ci's electron job starts all seven
-      # tests at once into an app data directory nothing has written yet
-      # (Electron's default, ~/Library/Application Support/<app name>,
-      # shared by every launch); run 1's repeats all found it filled.
-      - name: whole electron binary, app data removed before each repeat
+        run: cargo test --locked --test electron --test electron_shared --no-run
+      # Every repeat from empty app data, as on a fresh machine. Odd shards
+      # run arm A first, even shards arm B first; one step per arm, so each
+      # has its own 10 notices.
+      - name: first arm, app data removed before each repeat
         env:
           NAVIGERA_REQUIRE_ELECTRON: "1"
+          SHARD: ${{ matrix.shard }}
         run: |
-          python3 bench/probe/repeat.py --arm "electron-suite-cold-${{ matrix.shard }}" --n "$REPEATS" --out "$RUNNER_TEMP/out" \
+          if [ $((SHARD % 2)) -eq 1 ]; then name=shared-profile; target=electron_shared; else name=own-profile; target=electron; fi
+          python3 bench/probe/repeat.py --arm "$name-$SHARD" --n "$REPEATS" --out "$RUNNER_TEMP/out" \
             --before 'rm -rf "$HOME/Library/Application Support/navigera-electron-fixture"' -- \
-            cargo test --locked --test electron -- --nocapture
-          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/electron-suite-cold-${{ matrix.shard }}.md" "electron suite cold ${{ matrix.shard }}"
+            cargo test --locked --test "$target" -- --nocapture
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/$name-$SHARD.md" "$name $SHARD"
+      - name: second arm, app data removed before each repeat
+        if: always()
+        env:
+          NAVIGERA_REQUIRE_ELECTRON: "1"
+          SHARD: ${{ matrix.shard }}
+        run: |
+          shared="$HOME/Library/Application Support/navigera-electron-fixture"
+          if [ $((SHARD % 2)) -eq 0 ]; then
+            # The last repeat was arm B's, after the shared profile was removed.
+            echo "::notice title=shared profile after arm B $SHARD::$([ -e "$shared" ] && echo present || echo absent)"
+            name=shared-profile; target=electron_shared
+          else
+            name=own-profile; target=electron
+          fi
+          # A crash report can come 20 s after its repeat (run 3): wait, so
+          # a late one is not filed under the other arm.
+          sleep 30
+          python3 bench/probe/repeat.py --arm "$name-$SHARD" --n "$REPEATS" --out "$RUNNER_TEMP/out" \
+            --before 'rm -rf "$HOME/Library/Application Support/navigera-electron-fixture"' -- \
+            cargo test --locked --test "$target" -- --nocapture
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/$name-$SHARD.md" "$name $SHARD"
       - name: app data and leftovers
         if: always()
         run: |
@@ -91,86 +113,3 @@ jobs:
           path: ${{ runner.temp }}/out
           retention-days: 14
 
-  natural:
-    runs-on: macos-15
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
-        with:
-          toolchain: stable
-          cache-on-failure: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
-        with:
-          python-version: "3.12"
-      - name: Machine
-        run: |
-          chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-          echo "::notice title=machine::$("$chrome" --version) · $(sw_vers -productVersion) $(sw_vers -buildVersion) · $(uname -m) · $(sysctl -n hw.ncpu) cpus · $(system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Resolution|Display Type' | tr -s ' ' | tr '\n' ' ')"
-      - name: Build tests
-        run: cargo test --locked --features http --test handoff --no-run
-      # Run 3: ci's rate is about 1 in 80 macos jobs, so 300 repeats.
-      - name: natural mode alone
-        env:
-          NAVIGERA_REQUIRE_BROWSER: "1"
-        run: |
-          python3 bench/probe/repeat.py --arm natural-alone-300 --n 300 --out "$RUNNER_TEMP/out" -- \
-            cargo test --locked --features http --test handoff -- --exact natural_mode_shows_no_sign_of_automation --nocapture
-          python3 bench/probe/signals.py "$RUNNER_TEMP/out/natural-alone-300" > "$RUNNER_TEMP/out/signals.txt"
-          head -3 "$RUNNER_TEMP/out/signals.txt" >> "$RUNNER_TEMP/out/natural-alone-300.md"
-          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/natural-alone-300.md" "natural alone 300"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: always()
-        with:
-          name: natural-macos
-          path: ${{ runner.temp }}/out
-          retention-days: 14
-
-  edge:
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
-        with:
-          toolchain: stable
-          cache-on-failure: false
-      - uses: ./.github/actions/apt-install
-        with:
-          packages: gdb
-      - name: Chrome beta (the first browser, as in the compat job)
-        run: |
-          url=$(python3 tools/cft_matrix.py | python3 -c 'import json,sys
-          line = next(l for l in sys.stdin if l.startswith("matrix="))
-          print(next(b["url"] for b in json.loads(line[7:]) if b["channel"] == "beta"))')
-          curl -sSfL --retry 3 -o /tmp/browser.zip "$url"
-          unzip -q /tmp/browser.zip -d /tmp/browser
-          echo "CHROME_BIN=/tmp/browser/chrome-linux64/chrome" >> "$GITHUB_ENV"
-          echo "::notice title=machine::$(/tmp/browser/chrome-linux64/chrome --version) · $(/usr/bin/microsoft-edge --version) · $(nproc) cpus · $(free -g | awk '/Mem/{print $2}') GB · kernel $(uname -r) · $(. /etc/os-release; echo $PRETTY_NAME) · image $ImageVersion"
-      - name: Build tests
-        run: cargo test --locked --features http --test network_service --no-run
-      # Run 3: 2 machines x 200 quiet repeats.
-      - name: network service test
-        env:
-          NAVIGERA_REQUIRE_BROWSER: "1"
-        run: |
-          python3 bench/probe/repeat.py --arm "network-service-${{ matrix.shard }}" --n 200 --out "$RUNNER_TEMP/out" --hang-after 45 -- \
-            cargo test --locked --features http --test network_service -- --nocapture
-          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/network-service-${{ matrix.shard }}.md" "network service ${{ matrix.shard }}"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: always()
-        with:
-          name: edge-linux-${{ matrix.shard }}
-          path: ${{ runner.temp }}/out
-          retention-days: 14

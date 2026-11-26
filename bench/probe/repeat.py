@@ -28,6 +28,10 @@ from pathlib import Path
 CRASH_DIRS = [Path.home() / "Library/Logs/DiagnosticReports", Path("/Library/Logs/DiagnosticReports")]
 
 
+CACHE_ERR = re.compile(r"Unable to create cache|Critical error found|Failed to open [^\n]*Cache|"
+                       r"Failed retry to open blob cache entry|disk_cache", re.M)
+
+
 def crash_files():
     out = {}
     for d in CRASH_DIRS:
@@ -158,13 +162,20 @@ def main():
             except Exception as e:  # a report we can't parse is still kept
                 crashes.append({"file": Path(path).name, "exception": f"(unparsed: {e})", "frames": []})
         text = (rep / "test.log").read_text(errors="replace")
+        # Chromium's disk-cache errors, wherever the run wrote them (the
+        # test's output, the browser's stderr, session logs): the lines
+        # that close every ci Electron crash's stderr.
+        cache_lines = 0
+        for f in rep.rglob("*"):
+            if f.is_file() and f.name != "cdp-trace.jsonl" and f.parent.name != "crash":
+                cache_lines += sum(1 for line in f.read_text(errors="replace").splitlines() if CACHE_ERR.search(line))
         failed = re.findall(r"^test (\S+) \.\.\. FAILED", text, re.M)
         passed = re.findall(r"^test (\S+) \.\.\. ok", text, re.M)
         m = re.search(r"panicked at ([^\n]+)\n([^\n]*)", text)
         first = f"{m.group(1)} {m.group(2)}"[:600] if m else ""
         row = {"arm": a.arm, "rep": i, "rc": rc, "secs": round(secs, 1), "start_offset_s": round(t0 - step_start, 1),
                "hung_past": a.hang_after if hung else None, "timed_out": timed_out, "failed": failed,
-               "passed": len(passed), "first": first, "crashes": crashes}
+               "passed": len(passed), "first": first, "crashes": crashes, "cache_errors": cache_lines}
         rows.append(row)
         print(json.dumps(row)[:400], flush=True)
     with open(out / f"{a.arm}.jsonl", "w") as f:
@@ -183,6 +194,8 @@ def write_summary(path, arm, rows, cmd):
     lines = [f"{arm}: {len(bad)}/{len(rows)} repeats failed; first failing repeat "
              f"{bad[0]['rep'] if bad else '-'}; crash reports in {len(with_crash)} repeats "
              f"({sum(1 for r in with_crash if r['rc'] == 0)} of them passed); "
+             f"disk-cache errors in {sum(1 for r in rows if r.get('cache_errors'))} repeats "
+             f"({sum(r.get('cache_errors', 0) for r in rows)} lines); "
              f"median {sorted(r['secs'] for r in rows)[len(rows) // 2]} s; `{' '.join(cmd)}`"]
     if tests:
         lines.append("failed tests: " + ", ".join(f"{t} x{n}" for t, n in sorted(tests.items())))
