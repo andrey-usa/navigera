@@ -660,7 +660,7 @@ impl CdpClient {
 /// trace against the running browser's own `/json/protocol`
 /// (`tools/cdp_check.py`), so a renamed method or parameter in a new Chrome
 /// fails a test run instead of an agent's session.
-fn trace(method: &str, params: &Value) {
+pub(crate) fn trace(method: &str, params: &Value) {
     use std::io::Write as _;
     static FILE: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
     let file = FILE.get_or_init(|| {
@@ -670,8 +670,8 @@ fn trace(method: &str, params: &Value) {
     let Some(file) = file else { return };
     // One write() per line: several navigera processes append to the
     // same file in parallel, and O_APPEND keeps single writes whole.
-    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    let t = T0.get_or_init(std::time::Instant::now).elapsed().as_micros() as u64;
+    // Wall clock in microseconds: lines up with the probe's own times.
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros() as u64).unwrap_or(0);
     let p = if method.starts_with("DONE ") { params.clone() } else { shape(params, 0) };
     let mut line = serde_json::json!({ "method": method, "params": p, "t": t }).to_string();
     line.push('\n');

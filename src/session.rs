@@ -433,6 +433,9 @@ fn serve_connection(
     let mut waited = waited;
     for line in reader.lines() {
         let Ok(raw) = line else { return (false, ran) };
+        if std::env::var_os("NAVIGERA_CDP_TRACE").is_some() {
+            crate::cdp::client::trace("REQ", &Value::Null);
+        }
         // `sessions` asks for status without making the session busy.
         let (is_status, probe, caller) = match serde_json::from_str::<Value>(&raw) {
             Ok(v) => (
@@ -487,6 +490,9 @@ fn serve_connection(
         // thread can lose the CPU between the two), and be told it waited.
         let done = Instant::now();
         let written = responses.iter().try_for_each(|response| protocol::write_response(&mut writer, response, false));
+        if std::env::var_os("NAVIGERA_CDP_TRACE").is_some() {
+            crate::cdp::client::trace("ANS", &Value::Null);
+        }
         // A `sessions` probe is no one's command.
         if !probe {
             last.store(now_s(), Ordering::Relaxed);

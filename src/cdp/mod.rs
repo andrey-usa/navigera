@@ -17,7 +17,7 @@
 pub mod attach;
 pub mod ax;
 mod browser;
-mod client;
+pub(crate) mod client;
 pub(crate) mod domax;
 pub mod downloads;
 mod events;

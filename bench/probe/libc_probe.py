@@ -4,6 +4,7 @@
     libc_probe.py time BASE_URL OUT_DIR
     libc_probe.py profile ARM BASE_URL OUT_DIR
     libc_probe.py cli ARM BASE_URL OUT_DIR
+    libc_probe.py split BASE_URL OUT_DIR
 
 Builds, from $NAVIGERA_BUILDS (`name=path,name=path,...`): the release's
 musl + mimalloc, musl with musl's own allocator, glibc with glibc's, glibc
@@ -316,7 +317,62 @@ def cli_mode(arm, base, out_dir):
     clean()
 
 
-if MODE == "cli":
+def split_mode(base, out_dir):
+    """Where a click's wall time goes, per build: every session server
+    traced (NAVIGERA_CDP_TRACE: wall-clock microseconds per CDP command
+    sent and answered, the request read, the answer written), clicks of
+    all arms interleaved. Phases: CLI start to the request read; to the
+    first mouse event sent (prep); the three mouse events' answers; to
+    the answer written; to the CLI's exit."""
+    names = [a for a in ARMS]
+    traces = {}
+    for a in names:
+        traces[a] = os.path.join(out_dir, f"{a}-split.jsonl")
+        ARMS[a] = (ARMS[a][0], dict(ARMS[a][1], NAVIGERA_CDP_TRACE=traces[a]))
+        start(a, base)
+    got = {a: [] for a in names}
+    reps = int(os.environ.get("SPLIT_REPS", "10"))
+    for r in range(ROUNDS):
+        order = names[r % len(names):] + names[:r % len(names)]
+        for a in order:
+            setup, call, env = op_argv(a, "click")
+            for _ in range(reps):
+                run(setup, env)
+                time.sleep(0.3)
+                t0 = time.time() * 1e6
+                run(call, env)
+                t1 = time.time() * 1e6
+                got[a].append((t0, t1))
+    rows_by = {}
+    for a in names:
+        rows = [json.loads(x) for x in open(traces[a])]
+        rows_by[a] = rows
+        ph = {k: [] for k in ("start", "prep", "m1", "m2", "m3", "after", "exit", "total")}
+        for t0, t1 in got[a]:
+            rs = [x for x in rows if t0 <= x["t"] <= t1]
+            req = next((x["t"] for x in rs if x["method"] == "REQ"), None)
+            ans = next((x["t"] for x in rs if x["method"] == "ANS"), None)
+            sends = [x["t"] for x in rs if x["method"] == "Input.dispatchMouseEvent"]
+            dones = [x["t"] for x in rs if x["method"] == "DONE Input.dispatchMouseEvent"]
+            if None in (req, ans) or len(sends) < 3 or len(dones) < 3:
+                continue
+            ph["start"].append((req - t0) / 1000)
+            ph["prep"].append((sends[0] - req) / 1000)
+            for i in range(3):
+                ph[f"m{i + 1}"].append((dones[i] - sends[0]) / 1000)
+            ph["after"].append((ans - dones[2]) / 1000)
+            ph["exit"].append((t1 - ans) / 1000)
+            ph["total"].append((t1 - t0) / 1000)
+        n = len(ph["total"])
+        print(f"::notice title={a} click split, median ms ({n} of {len(got[a])} clicks)::"
+              + " · ".join(f"{k} {statistics.median(v):.2f}" for k, v in ph.items() if v))
+    json.dump({"got": got}, open(os.path.join(out_dir, "split.json"), "w"))
+    clean()
+
+
+if MODE == "split":
+    split_mode(sys.argv[2], sys.argv[3])
+elif MODE == "cli":
     cli_mode(sys.argv[2], sys.argv[3], sys.argv[4])
 elif MODE == "time":
     time_mode(sys.argv[2], sys.argv[3])
