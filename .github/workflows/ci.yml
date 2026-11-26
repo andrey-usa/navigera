@@ -220,6 +220,13 @@ jobs:
           bin=target/${{ matrix.target }}/release/navigera
           file "$bin" | tee /dev/stderr | grep -q 'static'
           "$bin" --version
+          # mimalloc's arena reserve is set to 32 MiB at startup (src/bin/navigera.rs):
+          # a process of this binary maps nothing of 512 MiB or more.
+          sleep 3 | "$bin" serve >/dev/null & pid=$!
+          sleep 1
+          big=$(python3 -c 'import sys; print(" ".join(r for r in (l.split()[0] for l in open(f"/proc/{sys.argv[1]}/maps")) if int(r.split("-")[1], 16) - int(r.split("-")[0], 16) >= 1 << 29))' "$pid")
+          wait $pid || true
+          if [ -n "$big" ]; then echo "::error::mappings of 512 MiB or more (mimalloc's arena reserve not set?): $big"; exit 1; fi
           if [ "${{ matrix.target }}" = x86_64-unknown-linux-musl ]; then
             printf '%s\n' '{"id":1,"op":"goto","url":"data:text/html,<h1>Static</h1><button>Go</button>"}' \
               '{"id":2,"op":"ax","format":"text"}' '{"id":3,"op":"quit"}' | "$bin" serve | tee out.jsonl
