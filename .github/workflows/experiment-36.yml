@@ -9,7 +9,9 @@ name: experiment-36
 # `--version` and the 2,000-row `ax` per arm, with provjobd's CPU per call
 # in the same windows. Builds as released (no frame pointers), plus musl +
 # mimalloc with a 32 MiB reserve set in code before the first allocation.
-# Numbers as notices, raw output as the artifact.
+# Run 7 = run 6 again (its first step failed on Python 3.12's mmap
+# constants), plus Page.captureScreenshot of a 1280x720 view with and
+# without optimizeForSpeed. Numbers as notices, raw output as the artifact.
 
 on:
   push:
@@ -104,7 +106,8 @@ jobs:
             t=0; for p in $pids; do set -- $(sudo cat /proc/$p/stat 2>/dev/null | sed 's/.*) //'); t=$((t + ${12:-0} + ${13:-0})); done; echo $t; }
           one() { # label, command...: provjobd ticks over 200 runs of the command
             l=$1; shift; a=$(cpu); s=$(date +%s%N)
-            for i in $(seq 200); do "$@" >/dev/null 2>&1; done
+            rc=0; for i in $(seq 200); do "$@" >/dev/null 2>&1 || rc=$?; done
+            [ "$rc" = 0 ] || echo "::warning title=provjobd probe::$l exited $rc"
             e=$(date +%s%N); b=$(cpu)
             echo "::notice title=provjobd ticks per 200 calls (CLK_TCK $(getconf CLK_TCK))::$l: $((b - a)) ticks, calls $(( (e - s) / 200000 )) us each"
           }
@@ -113,13 +116,18 @@ jobs:
           mi="${kv[0]#*=}"
           for r in 0 32MiB 128MiB 256MiB 512MiB; do one "musl-mi --version, MIMALLOC_ARENA_RESERVE=$r" env MIMALLOC_ARENA_RESERVE=$r "$mi" --version; done
           # Another program: does a plain mapping of that size do it?
-          # (size, prot: 0 = PROT_NONE, 3 = PROT_READ | PROT_WRITE)
-          map='import mmap, sys; mmap.mmap(-1, int(sys.argv[1]), flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS | mmap.MAP_NORESERVE, prot=int(sys.argv[2]))'
+          # (size, prot: 0 = PROT_NONE, 3 = PROT_READ | PROT_WRITE; 0x4000 = MAP_NORESERVE, unnamed in Python 3.12)
+          map='import mmap, sys; mmap.mmap(-1, int(sys.argv[1]), flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS | 0x4000, prot=int(sys.argv[2]))'
           one "python3 -c pass" python3 -c pass
           one "python3, 1 GiB PROT_NONE NORESERVE" python3 -c "$map" $((1 << 30)) 0
           one "python3, 1 GiB PROT_READ|WRITE NORESERVE (untouched)" python3 -c "$map" $((1 << 30)) 3
           one "python3, 32 MiB PROT_NONE NORESERVE" python3 -c "$map" $((32 << 20)) 0
           one "/bin/true" /bin/true
+
+      - name: The capture of a 1280x720 view, three ways and with optimizeForSpeed (screenshot-720's gap)
+        run: |
+          node bench/probe/shot_probe.mjs "$CHROME_BIN" http://127.0.0.1:8765/page_a.html 10 6
+          node bench/probe/shot_probe.mjs "$CHROME_BIN" http://127.0.0.1:8765/big.html 10 6
 
       - name: Click, eval, --version and the 2,000-row ax per arm, with provjobd's CPU per call
         env:
