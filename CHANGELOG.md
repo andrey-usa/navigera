@@ -6,6 +6,175 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-25
+
+### Added
+
+- A submit click the browser holds back because fields fail their checks
+  (`required`, `pattern`, `type=email`, ...) says so in `not_submitted`:
+  the first three fields by the name a person reads (label, else
+  placeholder, else a selector), each with the browser's own message, and
+  how many more. The click used to answer a plain ok, which an agent read
+  as sent. Enter in a form's field says the same, on Chrome's engines
+  and the WebDriver ones.
+
+- `--engine obscura` and `--engine moli` (experimental): two more
+  headless engines that are their own CDP server, started as
+  `obscura serve --allow-private-network` and `moli serve --layout` on a
+  free port, the binary from `$OBSCURA_BIN` / `$MOLI_BIN`, `PATH` or
+  `--chromium`. Unlike Lightpanda both open tabs and contexts and lay pages
+  out, so they take Chrome's paths (popups, downloads, the click checks);
+  each session gets a browser of its own, as Lightpanda's does. `status`
+  names the engine. Tested on Obscura 0.2.7 and Moli 1.1.27
+  ([run 44971507816](https://github.com/andrey-usa/navigera/actions/runs/44971507816))
+  with `tests/cdp_servers.rs` (navigation, the tree and its refs, fill,
+  a keyboard-submitted sign-in the server records, a checkbox, a select,
+  tabs, a screenshot, the server gone after `quit`); CI's new `engine moli`
+  job runs it on Moli's newest stable release on every push. What differs from
+  Chrome is in docs/navigera.md: on Obscura, a press stops at a shadow
+  host (navigera clicks inside one from the page, below); Moli 1.1.27 lays a page out again only for a screenshot
+  (navigera takes a 1x1 one when the page changed, below).
+
+- Lightpanda is back in CI (out since 1.0.3 broke the drag test):
+  the `engine lightpanda` job runs tests/lightpanda.rs and Lightpanda's leg
+  of tests/commands.rs on its newest stable release. 1.0.5 fixed the
+  layout bug behind it (the drag fixture's track at left 0); on 1.0.3
+  and 1.0.4 the drag test expects that bug's answer, and only there.
+
+### Changed
+
+- Enter in a form's field no longer waits the 150 ms navigation grace
+  when no navigation can follow: the page handled the submit (a
+  single-page app's form), the form's checks held it back, or the field is
+  a textarea (a new line). It is watched as a submit click is; a submit
+  the page lets go, or one it can't tell, is waited for as before. On
+  Chrome's engines (the WebDriver ones already did).
+
+- MCP: every tool on `tools/list` declares the four annotations
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`),
+  so a client can tell a read (`browser_snapshot`, `browser_wait_for`,
+  `browser_more`) from an action a page may turn into a submit, a delete
+  or a message (`browser_click`, `browser_fill`, `browser_type`,
+  `browser_press_key`, `browser_select_option`, `browser_evaluate`,
+  `browser_run`), and ask before it. Only the reads said anything before.
+  The tool formats of the model APIs have no field for them; the mock
+  model of `bench/ide-eval` now reports whether an agent passed them on.
+- MCP: seven tool descriptions say when to use the tool and what to use
+  instead: `browser_fill` against `browser_type`, `browser_select_option`
+  for custom dropdowns (ARIA comboboxes) as well as `<select>`,
+  `browser_scroll` (clicks need no scrolling first), `browser_navigate`
+  (back, forward and reload are `browser_history`), `browser_evaluate`,
+  and `browser_more`, which now names all 13 tools it lists
+  (`browser_handle_dialog`, `browser_webmcp_list` and `browser_webmcp_call`
+  were missing; a test holds it to the list). An empty `required` is left
+  out of a schema. What the model reads of `tools/list` is 7,937 bytes
+  (7,677 in 0.16.0), under the 8,000 the tests hold it to; `browser_more`
+  answers 10,325 bytes (10,435).
+
+### Fixed
+
+- On Obscura, an `eval` with an effect could have it twice. navigera tries
+  an `eval` as a read first, under V8's side-effect check
+  (`throwOnSideEffect`), and Obscura 0.2.7 reads no such check and runs the
+  script: a `fetch` POST, which returns a promise, went out twice (the
+  check, then the awaited read: two webhooks from one `eval` in the agent
+  eval's `api` task, 3 of 3 runs,
+  [run 45018633839](https://github.com/andrey-usa/navigera/actions/runs/45018633839)),
+  and an effect with no promise was answered as a read, with nothing
+  settled after it. navigera now asks each browser once whether it refuses
+  a side effect there (a write to the global `undefined`, which is not
+  writable, so it changes nothing where it runs) and where it does not,
+  every `eval` runs as an action, as on Lightpanda. Chrome and Moli refuse
+  it, and their reads stay reads.
+- `status` in a `fork` of an Obscura or Moli session said engine `chrome`.
+- On Obscura, `dialog` changed nothing and no dialog was reported: Obscura
+  0.2.7's `confirm()` answers false and `prompt()` null at once, with no
+  dialog event, so an accepted "Place order?" was dismissed without a word.
+  navigera puts its own `alert`, `confirm` and `prompt` in each tab's
+  documents there, which answer as `dialog` says and report each dialog as
+  on Chrome. Which engines need them is asked once per browser, and only of
+  an engine that is its own CDP server: one whose `confirm` is the
+  browser's own (not a constructor) opens no dialog for it (1.3-2.5 ms for
+  Chrome 153's behind a proxy that hides its dialog events, as Obscura
+  does), any other is called once and watched for the dialog event. CI's
+  `engine` jobs check the answers and the reports on Obscura 0.2.7 and
+  Moli 1.1.27 ([run 45052209468](https://github.com/andrey-usa/navigera/actions/runs/45052209468)).
+- On Moli, content a page's script added after the first look could not
+  be clicked, waited for or read: Moli 1.1.27 keeps the layout it builds at
+  the first geometry read until a screenshot, so a late button had no box
+  (`no box on screen`), `wait --text` and `wait --selector` never saw it,
+  and `text` read it empty. Nothing else it answers over CDP lays the page
+  out again (`Emulation.setScrollbarsHidden`, `Page.getLayoutMetrics` and
+  evals don't). navigera asks each browser it starts as a CDP server once
+  whether a box added after a read gets a width, and where only a
+  screenshot gives it one, takes a 1x1 screenshot before it reads boxes or
+  text (an element op, `text`, `ax`, `eval`, each 100 ms of a `wait`),
+  only when a document (the page's or a same-origin frame's), its DOM, its
+  scroll or its viewport changed since the last one: it costs a layout of the whole page, 1.7 ms on 19 nodes and 157 ms
+  on 4,505 on Moli 1.1.27, where a whole-page shot takes 56 / 236 ms
+  ([run 45055641714](https://github.com/andrey-usa/navigera/actions/runs/45055641714)).
+  Chrome takes no extra step. The scripted agent eval on Moli went from
+  9/21 to 21/21 ([run 45057911369](https://github.com/andrey-usa/navigera/actions/runs/45057911369)).
+- On Obscura, `ax` showed nothing of what a shadow root or an iframe
+  holds: Obscura 0.2.7's accessibility tree is the top document's light
+  DOM only, and it answers the top document's tree for any frame, so the
+  cart's coupon field and the support page's form were missing. navigera
+  asks each browser it starts as a CDP server once whether a button in an
+  open shadow root is in its tree, and where it is not, lists what open
+  shadow roots and same-origin frames hold after the tree, from the page and
+  without refs, as on Lightpanda (`--text` reaches them). Chrome takes no
+  extra step. The walk takes 0.1 ms on the support page and 0.7 ms on
+  4,506 elements in Chrome 153's V8 (behind a proxy that answers the tree
+  as Obscura does); both checked on Obscura 0.2.7 and Moli 1.1.27
+  ([run 45312041662](https://github.com/andrey-usa/navigera/actions/runs/45312041662)).
+- On Lightpanda, a click on an element that was disabled for the moment
+  (a "Load more" reading "Loading…") went to it at once, did nothing, and
+  counted: the wait for it to be enabled ended with the wait for it to stop
+  moving, which is none on an engine with no layout. It is the element
+  wait now, as on Chrome; `click --until-gone --max 2` loaded one page
+  there instead of two.
+- `click --until-gone` on Lightpanda went on to its limit (50 clicks) on a
+  button that had stopped changing anything: navigera does not watch what
+  Lightpanda's clicks change. It compares the page (its text, form values
+  and URL, hashed in the page) before a click and once what the click
+  fetched has landed, and stops at the click that changed nothing.
+- `ax` on an engine whose `Accessibility.getRootAXNode` answers without a
+  node (Obscura 0.2.7 answers `{}`) printed an empty page: it reads the
+  whole tree then, and a root node with no title and no URL gets the
+  page's own in the header and for the links the tree prints.
+
+- A screenshot of an element or of a full page that Chrome answered after
+  400 ms was asked for a second time while the first was out. Chrome keeps
+  the emulation it finds to put back after a capture, so the second put the
+  first one's back: the tab stayed emulated, and later screenshots of the
+  next pages showed them 1,500 px down, blank white (`screenshot --annotate`
+  came back without its labels). Seen on macOS with a just-launched Chrome,
+  where an element shot can take that long: blank in 44 of 89 runs with an
+  element shot before a navigation, each with that shot over 400 ms, and in
+  0 of 121 without ([run 45213089403](https://github.com/andrey-usa/navigera/actions/runs/45213089403)).
+  Only a viewport capture with no device override is asked for again now
+  (after `$NAVIGERA_SCREENSHOT_RESEND_MS`, default 400), for a capture
+  Chrome loses while the page replaces its document.
+
+- On Obscura, a click on an element inside a shadow root reached the host:
+  Obscura 0.2.7 sends every mouse event to `document.elementFromPoint`,
+  which is the shadow host, so the element's own handler never ran (the
+  eval site's coupon: no discount, the agent eval's purchase task 0/3).
+  navigera asks each engine it starts as a CDP server once, with a button
+  in a shadow root on its first tab; where the press stops at the host, the
+  click's events for an element inside one come from the page.
+
+### Behaviour changes
+
+- `--engine` (and `$NAVIGERA_ENGINE`) takes chrome, lightpanda, obscura,
+  moli, firefox, safari or safari-preview, in any letter case. A misspelled
+  or unknown name used to start Chrome without a word; it is refused now,
+  and `--engine Firefox` is Firefox where it was Chrome.
+
+- A client that asks before a destructive MCP tool may stop asking before
+  `browser_navigate` and `browser_scroll`: they now say they destroy
+  nothing. Left unsaid, a client had to assume they might.
+
 ## [0.17.0] - 2026-11-21
 
 ### Added
@@ -34,9 +203,14 @@ All notable changes to this project are documented here. The format follows
   a page makes, and every goto waited for it, the log read or not (a page
   of 300 images, median of 30 loads in fresh sessions: Firefox 581.5 ms
   with the events from launch, 190.5 without, 0.16.0 182.8; chromedriver
-  over BiDi 367.8, 273.4 and 270.1; run 44921449861, which also found the
-  bodies kept, the reading of the events and the log costing no time
-  measurable there). Run `network` once before the load you want to see.
+  over BiDi 367.8, 273.4 and 270.1;
+  [run 44921449861](https://github.com/andrey-usa/navigera/actions/runs/44921449861),
+  which also found the bodies kept, the reading of the events and the log
+  costing no time measurable there). Against 0.16.0 that goto is now 0.97x
+  on Firefox and 0.99x over chromedriver's BiDi, and 539.5 / 396.7 ms with
+  the log on (medians of 20,
+  [run 44923122326](https://github.com/andrey-usa/navigera/actions/runs/44923122326)).
+  Run `network` once before the load you want to see.
   Classic WebDriver still has no request list and says so.
 - `screencast start <dir>` / `screencast stop` on Firefox and the other
   WebDriver BiDi engines (a WebDriver server with `--bidi`, chromedriver):

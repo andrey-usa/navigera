@@ -172,7 +172,8 @@ const POINT_EL: &str = r#"function (el, force) {
 /// document unless the page cancels it (a router's link, a form a script
 /// sends itself, a form that fails validation); anything else navigates
 /// only by script, which the Navigation API reports as it happens.
-const ARM_NAV: &str = r#"function (el, key) {
+const ARM_NAV: &str = concat!(
+    r#"function (el, key) {
     const K = Symbol.for('navigera.nav');
     if (window[K]) window[K].off();
     if (key) {
@@ -215,11 +216,13 @@ const ARM_NAV: &str = r#"function (el, key) {
         may = here(c.getAttribute('formtarget') || form.getAttribute('target'));
         opens = !may;
     }
-    const n = { click: null, submit: null, invalid: false, planned: false, opened: false, offs: [] };
+    const n = { click: null, submit: null, invalid: false, planned: false, opened: false, offs: [], bad: [], badN: 0 };
     const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
     on(w, 'click', (e) => { if (!n.click && e.isTrusted) n.click = e; });
     on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
-    on(w, 'invalid', () => { n.invalid = true; });
+"#,
+    crate::cdp::page::invalid_listener_js!(),
+    r#"
     // A link to a fragment of this document, or a handler that sets
     // `location.hash`: the URL changes with the action, and the page learns
     // of it from `hashchange`, a task of its own after it, where a
@@ -302,15 +305,18 @@ const ARM_NAV: &str = r#"function (el, key) {
     Object.defineProperty(window, K, { value: n, configurable: true, enumerable: false, writable: true });
     // For Enter: whether it can load a document from here at all.
     return !!(el.form || el.closest('a[href], button, [role=button], [role=link]'));
-}"#;
+}"#
+);
 
 /// After the click: the verdict of [`ARM_NAV`], and the page's URL and
 /// title (the page's state when no navigation follows), read once the
 /// `hashchange` of a fragment navigation has run, up to 250 ms (Chrome's
-/// `HASH_WAIT`).
+/// `HASH_WAIT`); then, when no navigation follows and fields failed their
+/// checks, `{ fields, more }`.
 const NAV_VERDICT: &str = "async () => { const K = Symbol.for('navigera.nav'); const n = window[K]; delete window[K]; \
-    if (n && n.hashed) await n.hashed(250); \
-    return [n ? n.verdict() : null, location.href, document.title]; }";
+    if (n && n.hashed) await n.hashed(250); const v = n ? n.verdict() : null; \
+    return [v, location.href, document.title, \
+        v === false && n.bad.length ? { fields: n.bad, more: n.badN - n.bad.length } : null]; }";
 
 /// The page expression for the element an op kept for the protocol's own
 /// element command (`upload`).
@@ -940,7 +946,11 @@ impl Driver {
         match (read.get(0).and_then(Value::as_bool), text(1), text(2)) {
             (Some(false), Some(url), Some(title)) => {
                 self.wire.settle(self.timeout, Watch::No);
-                Ok(self.state_of(url, title, tabs))
+                let mut state = self.state_of(url, title, tabs);
+                if let Some(bad) = read.get(3).filter(|v| v.is_object()) {
+                    state["not_submitted"] = json!(crate::protocol::not_submitted(bad));
+                }
+                Ok(state)
             }
             (planned, ..) => {
                 let watch = if gone || planned == Some(true) { Watch::Planned } else { unknown };

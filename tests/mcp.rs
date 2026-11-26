@@ -108,8 +108,21 @@ fn mcp_handshake_without_a_browser() {
     {
         assert!(names.contains(&want), "{want} missing from {names:?}");
     }
-    let schemas = serde_json::to_string(&list["result"]["tools"]).unwrap();
-    assert!(schemas.len() < 8_000, "tool list stays small for the model's context: {} bytes", schemas.len());
+    // What the model reads of the list is each tool's name, description and
+    // input schema. The four annotations go to the client: the tool formats of
+    // the model APIs have no field for them. So they are held to a bound of
+    // their own, on the whole answer.
+    let tools = list["result"]["tools"].as_array().unwrap();
+    let seen: usize = tools
+        .iter()
+        .map(|t| {
+            let read = json!({"name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"]});
+            serde_json::to_string(&read).unwrap().len()
+        })
+        .sum();
+    assert!(seen < 8_000, "tool list stays small for the model's context: {seen} bytes");
+    let whole = serde_json::to_string(&list["result"]["tools"]).unwrap();
+    assert!(whole.len() < 9_600, "with the annotations, the answer stays small: {} bytes", whole.len());
 
     assert!(c.request("ping", json!({}))["result"].is_object());
     assert_eq!(c.request("resources/list", json!({}))["error"]["code"], -32601);

@@ -261,9 +261,15 @@ jobs:
         if: always()
         run: python3 bench/ladder/annotate.py bench/ladder/out/table.md
 
-      - name: Results JSON as annotations (publish.json)
+      # Two steps: GitHub keeps 10 notices per step and publish.json needs
+      # more than 10 (fetch_publish.py joins `ladder json i/N` across them).
+      - name: Results JSON as annotations (publish.json, 1 of 2)
         if: success()
-        run: python3 bench/ladder/annotate.py bench/ladder/out/publish.json "ladder json"
+        run: python3 bench/ladder/annotate.py bench/ladder/out/publish.json "ladder json" --step 1/2
+
+      - name: Results JSON as annotations (publish.json, 2 of 2)
+        if: success()
+        run: python3 bench/ladder/annotate.py bench/ladder/out/publish.json "ladder json" --step 2/2
 
       - name: Failure log tail as annotations
         if: failure()

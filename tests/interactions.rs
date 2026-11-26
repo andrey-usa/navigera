@@ -1845,6 +1845,83 @@ fn a_click_waits_for_a_navigation_only_when_the_page_plans_one() {
     );
 }
 
+/// A submit click the browser holds back, because fields fail their checks,
+/// says so: the first three fields by the name a person reads (label, else
+/// placeholder, else a selector) with the browser's own message, and how
+/// many more. A plain "ok" there reads as sent. A form that passes says
+/// nothing of it and loads its page.
+#[test]
+fn a_submit_the_form_s_checks_hold_back_names_the_fields() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("form-checks", &[]);
+    s.ok(&["goto", &format!("{}/form-checks", site.url)]);
+    let r = s.ok(&["click", "--text", "Submit"]);
+    let note = r["not_submitted"].as_str().unwrap_or_default();
+    assert!(note.starts_with("the browser did not submit the form: \"First Name\": "), "{r}");
+    assert!(note.contains("; \"Mobile\": "), "{r}");
+    assert!(note.contains("; input[name=\"email\"]: "), "{r}");
+    assert!(note.ends_with("; and 2 more. Fill in those fields, then submit again"), "{r}");
+    assert_eq!(s.ok(&["eval", "location.pathname"]), "/form-checks");
+    let r = s.ok(&["click", "--text", "Send"]);
+    assert!(r.get("not_submitted").is_none(), "{r}");
+    assert!(r["url"].as_str().unwrap_or_default().contains("/posted"), "{r}");
+    s.ok(&["goto", &format!("{}/nav-intent", site.url)]);
+    let r = s.ok(&["click", "--text", "Invalid submit"]);
+    let note = r["not_submitted"].as_str().unwrap_or_default();
+    assert!(note.starts_with("the browser did not submit the form: input[name=\"z\"]: "), "{r}");
+    assert!(note.ends_with(". Fill in that field, then submit again"), "{r}");
+}
+
+/// Enter in a form's field is watched as a submit click is: in a form
+/// whose fields fail their checks it names them, as the click does; where
+/// the page handles the submit, or in a textarea (a new line), there is no
+/// navigation to wait for, so it costs what a plain key costs, not the
+/// navigation grace on top. A form the page lets go still loads its page.
+/// Nothing navigera watched is left behind.
+#[test]
+fn enter_in_a_form_says_what_the_page_did_with_the_submit() {
+    let _alone = timed_alone();
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("enter-form", &[]);
+    let checks = format!("{}/form-checks", site.url);
+    s.ok(&["goto", &checks]);
+    let r = s.ok(&["press", "Enter", "--selector", "#fn"]);
+    let note = r["not_submitted"].as_str().unwrap_or_default();
+    assert!(note.starts_with("the browser did not submit the form: \"First Name\": "), "{r}");
+    assert!(note.ends_with("; and 2 more. Fill in those fields, then submit again"), "{r}");
+    let clean = "window.__nvNav === undefined && HTMLFormElement.prototype.submit.toString().includes('[native code]')";
+    assert_eq!(s.ok(&["eval", clean]), true, "watchers left behind");
+    s.ok(&["fill", "--selector", "textarea", "one"]);
+    let r = s.ok(&["press", "Enter", "--selector", "textarea"]);
+    assert!(r.get("not_submitted").is_none(), "{r}");
+    assert_eq!(s.ok(&["eval", "document.querySelector('textarea').value"]), "one\n");
+    assert_eq!(s.ok(&["eval", "location.pathname"]), "/form-checks");
+    let page = format!("{}/nav-intent", site.url);
+    s.ok(&["goto", &page]);
+    let r = s.ok(&["press", "Enter", "--selector", "input[name=y]"]);
+    assert!(r["url"].as_str().unwrap_or_default().contains("/posted?y=2"), "{r}");
+    let best = |selector: &str, key: &str| {
+        (0..3)
+            .map(|_| {
+                s.ok(&["goto", &page]);
+                timed(&s, &["press", key, "--selector", selector]).0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let plain = best("input[name=x]", "a");
+    for (what, selector) in [("handled", "input[name=x]"), ("invalid", "input[name=z]")] {
+        let enter = best(selector, "Enter");
+        assert!(
+            enter < plain + 100.0,
+            "Enter in the {what} form waited for a navigation: {enter:.0} ms against {plain:.0} ms for a plain key"
+        );
+        let shown = s.ok(&["text", "--selector", "#out"]);
+        let shown = shown.as_str().unwrap_or_default();
+        assert!(shown.starts_with(if what == "handled" { "handled" } else { "idle" }), "{what}: {shown}");
+    }
+    assert_eq!(s.ok(&["eval", clean]), true, "watchers left behind");
+}
+
 fn assert_chain_reports_its_end(page: &str) {
     let _alone = timed_alone();
     let (true, Some(site)) = (chrome(), site()) else { return };
@@ -2437,23 +2514,54 @@ fn the_first_read_after_a_paused_goto_was_read_ahead() {
 }
 
 /// After a click whose fetch has started, the snapshot waits for that fetch
-/// and a short settle, not the whole quiet window: the list is there, well
-/// before the 200 ms fetch plus 500 ms of quiet it used to take. A window
-/// the session set holds after actions too.
+/// and a short settle, not the whole quiet window: the read ends about
+/// 110 ms after the list is drawn, where waiting out the 500 ms window ends
+/// it 560 ms or more after. Timed on the page's clock, with `click`, `ax`
+/// and the clock read in one batch: the wall time of a separate `ax` call
+/// also counts the fetch itself and starting a command line, and a loaded
+/// macOS runner took 646-757 ms there. A window the session set holds
+/// after actions too.
 #[test]
 fn a_snapshot_after_a_click_that_fetches_waits_for_the_fetch_not_the_window() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("after-click", &[]);
-    let mut times = Vec::new();
+    let steps = std::env::temp_dir().join(format!("nv-after-click-{}.txt", std::process::id()));
+    std::fs::write(
+        &steps,
+        format!(
+            "goto {}/click-fetch\nclick --role button --name Go\nax\neval \"JSON.stringify({{...window.__t, read: performance.now()}})\"\n",
+            site.url
+        ),
+    )
+    .unwrap();
+    let steps = steps.display().to_string();
+    // From the list drawn to the read's end, per try, and for a failure the
+    // batches' whole answers (the page's clock as the click ran, the list
+    // was drawn and the read ended).
+    let mut after_drawn = Vec::new();
+    let mut said = Vec::new();
     for _ in 0..3 {
-        s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
-        s.ok(&["click", "--role", "button", "--name", "Go"]);
-        let (ms, r) = timed(&s, &["ax"]);
-        let tree = r.as_str().unwrap_or("");
-        assert!(tree.contains("Alpha") && !tree.contains("Loading"), "{tree}");
-        times.push(ms);
+        let r = s.ok(&["batch", &steps]);
+        let results = r["results"].as_array().cloned().unwrap_or_default();
+        let tree = results.iter().find(|v| v["do"] == "ax").and_then(|v| v["result"].as_str()).unwrap_or_default();
+        assert!(tree.contains("Alpha") && !tree.contains("Loading"), "{r}");
+        let clock: Value = results
+            .iter()
+            .find(|v| v["do"].as_str().is_some_and(|d| d.starts_with("eval")))
+            .and_then(|v| v["result"].as_str())
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or_default();
+        let (drawn, read) = (clock["drawn"].as_f64(), clock["read"].as_f64());
+        let (Some(drawn), Some(read)) = (drawn, read) else { panic!("no page clock: {r}") };
+        after_drawn.push(read - drawn);
+        said.push(r);
     }
-    assert!(median(times.clone()) < 650.0, "ax after a click that fetches took {times:?} ms");
+    assert!(
+        median(after_drawn.clone()) < 400.0,
+        "the read ended {after_drawn:?} ms after the list was drawn: {}",
+        Value::Array(said)
+    );
+    let _ = std::fs::remove_file(&steps);
 
     s.ok(&["set", "network-quiet", "800"]);
     s.ok(&["goto", &format!("{}/click-fetch", site.url)]);
@@ -2468,31 +2576,56 @@ fn a_snapshot_after_a_click_that_fetches_waits_for_the_fetch_not_the_window() {
 }
 
 /// The default quiet window reads a list that arrives in two fetches with
-/// a 400 ms gap between them; a 250 ms window ends in the gap and reads
-/// only the first half. That is why the default stays 500 ms and 250 ms
-/// is opt-in per session. `goto` and `ax` go in one call: a command line
+/// a 400 ms gap between them; a 250 ms window ends in a longer gap and
+/// reads only the first half. That is why the default stays 500 ms and
+/// 250 ms is opt-in per session. `goto` and `ax` go in one call: a command line
 /// started between them (seen on a loaded macOS runner) could take past
 /// the gap, and the read then had both halves whatever the window.
 #[test]
 fn a_short_quiet_window_reads_a_chained_list_early() {
     let (true, Some(site)) = (chrome(), site()) else { return };
     let s = Session::start("quiet-window", &[]);
-    let steps = std::env::temp_dir().join(format!("nv-quiet-window-{}.txt", std::process::id()));
-    std::fs::write(&steps, format!("goto {}/two-fetch\nax\n", site.url)).unwrap();
-    let steps = steps.display().to_string();
-    let read = || s.ok(&["batch", &steps])["results"][0]["result"].as_str().unwrap_or_default().to_string();
+    let steps = |gap: u32| {
+        let path = std::env::temp_dir().join(format!("nv-quiet-window-{}-{gap}.txt", std::process::id()));
+        std::fs::write(
+            &path,
+            format!(
+                "goto {}/two-fetch?gap={gap}\neval \"performance.now()\"\nax\neval \"JSON.stringify({{...window.__t, read: performance.now()}})\"\n",
+                site.url
+            ),
+        )
+        .unwrap();
+        path.display().to_string()
+    };
+    let (gap400, gap1000) = (steps(400), steps(1000));
+    // The tree, and for a failure the batch's whole answer with the call's
+    // time: its `eval` steps give the page's clock as `goto` answered, and
+    // when Alpha was drawn, when Beta's fetch started and when it was
+    // drawn, and when the read ended.
+    let read = |steps: &str| {
+        let t = std::time::Instant::now();
+        let r = s.ok(&["batch", steps]);
+        let steps = r["results"].as_array().cloned().unwrap_or_default();
+        let tree = steps.iter().find(|v| v["do"] == "ax").and_then(|v| v["result"].as_str());
+        let said = format!("{} ms: {r}", t.elapsed().as_millis());
+        (tree.unwrap_or_default().to_string(), said)
+    };
 
-    let tree = read();
-    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
+    let (tree, said) = read(&gap400);
+    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{said}");
 
+    // A 250 ms window ends well inside a 1000 ms gap. On a loaded macOS
+    // runner a 250 ms read has come ~430 ms after the window's end (goto
+    // answered at 16 ms, Alpha drawn at 242, read at 1235 with a 400 ms
+    // gap): late, never early, so the margin is on that side.
     s.ok(&["set", "network-quiet", "250"]);
-    let tree = read();
-    assert!(tree.contains("Alpha") && !tree.contains("Beta"), "{tree}");
+    let (tree, said) = read(&gap1000);
+    assert!(tree.contains("Alpha") && !tree.contains("Beta"), "{said}");
 
     s.ok(&["set", "network-quiet", "500"]);
-    let tree = read();
-    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{tree}");
-    let _ = std::fs::remove_file(&steps);
+    let (tree, said) = read(&gap400);
+    assert!(tree.contains("Alpha") && tree.contains("Beta"), "{said}");
+    let _ = (std::fs::remove_file(&gap400), std::fs::remove_file(&gap1000));
 }
 
 /// `check` on a controlled checkbox (the click's default is cancelled and the

@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
 
-use crate::cdp::{self, AxOptions, Browser, DialogPolicy, LaunchOptions, Page, Target, DEFAULT_ELEMENT_WAIT};
+use crate::cdp::{
+    self, AxOptions, Browser, DialogPolicy, LaunchOptions, Page, Target, DEFAULT_ELEMENT_WAIT, SIDE_EFFECTS_CHECKED,
+    SIDE_EFFECTS_RUN,
+};
 
 /// Tokio runtime for the CDP engine: 2 workers is plenty for a sequential
 /// CLI, and keeps RSS/CPU far below a default multi-thread runtime.
@@ -335,6 +338,9 @@ const NO_SANDBOX: &str = "--no-sandbox";
 /// How long a `wait` watches in the page before it looks again from here
 /// (a navigation, cross-origin frames, the budget).
 const WATCH: Duration = Duration::from_millis(300);
+/// [`WATCH`] on an engine that keeps its first layout until a screenshot:
+/// one poll, laid out again before each (see `Page::fresh_layout`).
+const WATCH_KEPT_LAYOUT: Duration = Duration::from_millis(100);
 
 /// `--natural`: the browser looks like the browser it is, not like an
 /// automated one. Set once per process, before the browser starts.
@@ -770,53 +776,107 @@ fn read_protocol(host: &str, port: u16) -> Result<serde_json::Value> {
     Ok(protocol)
 }
 
-/// True when `--engine` selects the Lightpanda CDP server instead of Chromium.
-pub fn is_lightpanda(engine: &str) -> bool {
-    matches!(engine.trim().to_ascii_lowercase().as_str(), "lightpanda" | "panda")
+/// A browser that is its own CDP server, started as `<binary> serve` rather
+/// than with Chromium's flags: `--engine lightpanda`, `obscura` or `moli`.
+/// navigera starts it on a free port, reads `/json/version` and drives it
+/// over CDP like Chrome; what each engine lacks is told apart below, not
+/// assumed from Lightpanda.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CdpServer {
+    Lightpanda,
+    Obscura,
+    Moli,
 }
 
-/// Resolve the `lightpanda` binary for direct `lightpanda serve` launch.
+impl CdpServer {
+    /// The server `--engine` names, if it names one.
+    pub fn from_engine(engine: &str) -> Option<Self> {
+        match engine.trim().to_ascii_lowercase().as_str() {
+            "lightpanda" | "panda" => Some(Self::Lightpanda),
+            "obscura" => Some(Self::Obscura),
+            "moli" => Some(Self::Moli),
+            _ => None,
+        }
+    }
+
+    /// The engine's name, as `status` and a session's engine check say it,
+    /// and its binary's name on `PATH`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Lightpanda => "lightpanda",
+            Self::Obscura => "obscura",
+            Self::Moli => "moli",
+        }
+    }
+
+    /// The variable that names the binary.
+    pub fn bin_var(self) -> &'static str {
+        match self {
+            Self::Lightpanda => "LIGHTPANDA_BIN",
+            Self::Obscura => "OBSCURA_BIN",
+            Self::Moli => "MOLI_BIN",
+        }
+    }
+
+    /// One context and one tab per process, no layout and no DOM snapshot:
+    /// Lightpanda. Obscura and Moli open tabs and contexts, lay pages out
+    /// and answer `DOMSnapshot`, so they take Chrome's paths.
+    pub fn single_target(self) -> bool {
+        matches!(self, Self::Lightpanda)
+    }
+}
+
+/// True when `--engine` selects the Lightpanda CDP server instead of Chromium.
+pub fn is_lightpanda(engine: &str) -> bool {
+    CdpServer::from_engine(engine) == Some(CdpServer::Lightpanda)
+}
+
+/// True when `--engine` selects a browser that is its own CDP server
+/// (Lightpanda, Obscura, Moli) rather than Chrome.
+pub fn is_cdp_server(engine: &str) -> bool {
+    CdpServer::from_engine(engine).is_some()
+}
+
+/// Resolve the binary of a CDP server engine for its `serve` launch.
 ///
 /// Order: explicit `--chromium <path>` (kept as the generic binary override),
-/// `$LIGHTPANDA_BIN`, then `lightpanda` on `PATH`.
-fn resolve_lightpanda_bin(cli_override: Option<&str>) -> Result<String> {
+/// the engine's variable (`$LIGHTPANDA_BIN`, `$OBSCURA_BIN`, `$MOLI_BIN`),
+/// then the engine's name on `PATH`.
+fn resolve_server_bin(server: CdpServer, cli_override: Option<&str>) -> Result<String> {
+    let (name, var) = (server.name(), server.bin_var());
     if let Some(path) = cli_override {
         if !path.trim().is_empty() {
-            // `--chromium` doubles as the lightpanda override, so a Chromium
+            // `--chromium` doubles as the engine's override, so a Chromium
             // path that leaked in from $CHROME_BIN-style defaults would be
             // launched as `chrome serve --port …` and then time out waiting
             // for a /json/version that never comes. Fail fast instead.
             let file =
                 Path::new(path).file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
             if ["chrome", "chromium", "msedge", "edge", "brave"].iter().any(|b| file.contains(b)) {
-                bail!(
-                    "--engine lightpanda was given a Chromium binary ({path}); pass the lightpanda binary via --chromium or $LIGHTPANDA_BIN"
-                );
+                bail!("--engine {name} was given a Chromium binary ({path}); pass the {name} binary via --chromium or ${var}");
             }
             return Ok(path.to_string());
         }
     }
-    if let Ok(path) = std::env::var("LIGHTPANDA_BIN") {
+    if let Ok(path) = std::env::var(var) {
         if !path.trim().is_empty() {
             return Ok(path);
         }
     }
-    if let Ok(path) = which_lightpanda() {
+    if let Some(path) = on_path(name) {
         return Ok(path);
     }
-    bail!("lightpanda binary not found — install it or set --chromium <path> / $LIGHTPANDA_BIN")
+    bail!("{name} binary not found — install it or set --chromium <path> / ${var}")
 }
 
-/// `lightpanda` on `PATH` (no external `which` dependency).
-fn which_lightpanda() -> Result<String> {
+/// `name` on `PATH` (no external `which` dependency).
+fn on_path(name: &str) -> Option<String> {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(if cfg!(windows) { "lightpanda.exe" } else { "lightpanda" });
-        if candidate.is_file() {
-            return Ok(candidate.to_string_lossy().into_owned());
-        }
-    }
-    anyhow::bail!("lightpanda not on PATH")
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(&file))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
 }
 
 /// A browser navigera connects to instead of launching its own.
@@ -951,6 +1011,9 @@ pub struct BrowserSession {
     /// True when the underlying engine is Lightpanda (one tab; popups are
     /// followed in place).
     lightpanda: bool,
+    /// The engine's name as `status` says it: `chrome`, or the CDP server
+    /// (`lightpanda`, `obscura`, `moli`).
+    engine: &'static str,
     timeout_ms: f64,
     /// (tab target, navigation generation) whose load we stopped waiting
     /// for after a full navigation timeout (a page that streams forever,
@@ -1069,17 +1132,18 @@ impl BrowserSession {
             bail!("--transport pipe needs Linux/macOS; Windows uses ws (the default there)");
         }
         let launch_started = std::time::Instant::now();
-        let lightpanda = is_lightpanda(engine);
+        let server = CdpServer::from_engine(engine);
+        let lightpanda = server == Some(CdpServer::Lightpanda);
         let runtime = engine_runtime()?;
         let handle = runtime.handle().clone();
 
-        let (browser, exe) = if lightpanda {
-            // Lightpanda is a CDP server, not a Chromium executable: start
-            // `lightpanda serve` directly and connect to its CDP endpoint.
-            // No Chromium flags, no shim, no X server involved.
-            let bin = resolve_lightpanda_bin(executable)?;
-            let browser = Browser::launch_lightpanda(&handle, &bin)?;
-            crate::timing::log(&format!("[browser] engine=lightpanda launched {} via {bin}", browser.ws_url()));
+        let (browser, exe) = if let Some(server) = server {
+            // A CDP server, not a Chromium executable: start `<bin> serve`
+            // directly and connect to its CDP endpoint. No Chromium flags,
+            // no shim, no X server involved.
+            let bin = resolve_server_bin(server, executable)?;
+            let browser = Browser::launch_server(&handle, server, &bin)?;
+            crate::timing::log(&format!("[browser] engine={} launched {} via {bin}", server.name(), browser.ws_url()));
             (browser, bin)
         } else {
             launch_chrome(&handle, headless, executable, &transport)?
@@ -1110,6 +1174,7 @@ impl BrowserSession {
             active: 0,
             exe,
             lightpanda,
+            engine: server.map_or("chrome", CdpServer::name),
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -1196,6 +1261,7 @@ impl BrowserSession {
             active: 0,
             exe,
             lightpanda: false,
+            engine: "chrome",
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -1385,6 +1451,7 @@ impl BrowserSession {
             active,
             exe: what,
             lightpanda: false,
+            engine: "chrome",
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -1509,6 +1576,7 @@ impl BrowserSession {
             active,
             exe,
             lightpanda: false,
+            engine: "chrome",
             timeout_ms: nav_timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -1850,6 +1918,7 @@ impl BrowserSession {
             active: 0,
             exe: self.exe.clone(),
             lightpanda: false,
+            engine: self.engine,
             timeout_ms: self.timeout_ms,
             abandoned: std::sync::Mutex::new(None),
             network_quiet_ms: std::sync::Mutex::new(DEFAULT_NETWORK_QUIET_MS),
@@ -3881,13 +3950,40 @@ impl BrowserSession {
     /// `eval` as a read (see [`cdp::Page::evaluate_read`]): its answer when
     /// V8 shows the source, taken as one expression, changes nothing; else
     /// None, and the caller runs it with [`Self::evaluate_user`]. Not on
-    /// Lightpanda, whose side-effect checks are not V8's.
+    /// Lightpanda, whose side-effect checks are not V8's, nor on an engine
+    /// that runs what it is asked to check (Obscura 0.2.7): there an eval
+    /// with an effect had it during the check and was answered as a read,
+    /// with nothing settled after it, and one that returned a promise ran
+    /// twice (a `fetch` POST went out twice).
     pub fn evaluate_read(&self, source: &str, timeout_ms: Option<f64>) -> Result<Option<serde_json::Value>> {
-        if self.is_lightpanda() {
+        if self.is_lightpanda() || !self.checks_side_effects(self.timeout(timeout_ms))? {
             return Ok(None);
         }
         let marked = format!("{source}\n//# sourceURL={}\n", crate::clock::USER_EVAL_URL);
+        // A read of boxes or text on an engine that keeps its first layout
+        // (Moli) sees what the page shows now.
+        self.active_tab().fresh_layout(self.timeout(timeout_ms));
         self.active_tab().evaluate_read(&marked, self.timeout(timeout_ms))
+    }
+
+    /// [`cdp::Page::checks_side_effects`], asked once per browser (its
+    /// answer is the engine's, kept in `Shared::side_effects` for every
+    /// session on it). An error is the browser's, as a read's is: the
+    /// caller reports it as the op's (a request that never reached a
+    /// crashed shared browser is what relaunches it), and the next eval
+    /// asks again.
+    fn checks_side_effects(&self, timeout: Duration) -> Result<bool> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let known = &self.browser.shared().side_effects;
+        Ok(match known.load(Relaxed) {
+            SIDE_EFFECTS_CHECKED => true,
+            SIDE_EFFECTS_RUN => false,
+            _ => {
+                let checks = self.active_tab().checks_side_effects(timeout)?;
+                known.store(if checks { SIDE_EFFECTS_CHECKED } else { SIDE_EFFECTS_RUN }, Relaxed);
+                checks
+            }
+        })
     }
 
     /// Click the element `target` names (trusted mouse click when hittable).
@@ -4110,7 +4206,14 @@ impl BrowserSession {
         Ok(serde_json::Value::Array(chosen))
     }
 
-    pub fn press(&self, target: Option<&Target>, key: &str, timeout_ms: Option<f64>) -> Result<()> {
+    /// Press a key or chord (see [`cdp::Page::press`]); Enter in a form
+    /// whose fields failed their checks answers which (`{ fields, more }`).
+    pub fn press(
+        &self,
+        target: Option<&Target>,
+        key: &str,
+        timeout_ms: Option<f64>,
+    ) -> Result<Option<serde_json::Value>> {
         let (wait, timeout) = self.element_budget(timeout_ms);
         let before = self.active_tab().activity();
         // Modifiers held with `keydown` apply, as on a real keyboard.
@@ -4122,14 +4225,14 @@ impl BrowserSession {
             .chain(std::iter::once(key))
             .collect::<Vec<_>>()
             .join("+");
-        let may_navigate = self.active_tab().press(target, &chord, wait, timeout)?;
-        if may_navigate {
+        let pressed = self.active_tab().press(target, &chord, wait, timeout)?;
+        if pressed.may_navigate {
             // Enter in a form submits it (implicit submission); on a link
             // it follows it.
             self.active_tab().navigation_started_since(before, NAV_GRACE);
         }
         self.settle_for(timeout_ms);
-        Ok(())
+        Ok(pressed.invalid)
     }
 
     pub fn type_text(&self, target: Option<&Target>, text: &str, timeout_ms: Option<f64>) -> Result<()> {
@@ -4187,7 +4290,13 @@ impl BrowserSession {
             // checks). A navigation ends the watch with its document; the
             // next one starts in the new document. The watch's own names
             // start with `__nv`, so a `--js` expression still sees the page's.
-            let chunk = wait.saturating_sub(started.elapsed()).min(WATCH).as_millis();
+            // An engine that keeps its first layout (Moli) is laid out
+            // again before each watch, which is then a poll's length: a box
+            // or text a script adds shows only to a read after that.
+            let tab = self.active_tab();
+            let watch = if tab.layout_kept() { WATCH_KEPT_LAYOUT } else { WATCH };
+            tab.fresh_layout(timeout);
+            let chunk = wait.saturating_sub(started.elapsed()).min(watch).as_millis();
             let watched = format!(
                 "(async () => {{ const __nvDeep = {}, __nvEnd = Date.now() + {chunk}; \
                  for (;;) {{ if (await ({js_predicate}\n)) return true; const __nvLeft = __nvEnd - Date.now(); \
@@ -4228,8 +4337,11 @@ impl BrowserSession {
             // Up to WATCH in the frame at a time, woken by its changes (as
             // `wait_until_or_in_frames` is in the page), then looked at again
             // from here: a navigation, a frame that went or came, the budget.
-            let chunk = wait.saturating_sub(started.elapsed()).min(WATCH);
-            match self.active_tab().watch_in_frame(chain, js_predicate, chunk, timeout) {
+            let tab = self.active_tab();
+            let watch = if tab.layout_kept() { WATCH_KEPT_LAYOUT } else { WATCH };
+            tab.fresh_layout(timeout);
+            let chunk = wait.saturating_sub(started.elapsed()).min(watch);
+            match tab.watch_in_frame(chain, js_predicate, chunk, timeout) {
                 Ok(true) => return Ok((started.elapsed().as_secs_f64() * 1000.0).round()),
                 Err(e) if format!("{e:#}").contains("not a frame") => return Err(e),
                 // The document went mid-watch: not a tight loop of retries.
@@ -4358,12 +4470,18 @@ impl BrowserSession {
             (_, ms) if ms > 250 => eprintln!("[screenshot] --annotate: the labels' frame took {ms} ms"),
             _ => {}
         }
-        // The other way: the browser hands back the frame before. Chrome
-        // on macOS cannot tell when a frame has reached the screen and
-        // captures on a timer, so about 1 capture in 100 there showed the
-        // page without the marks, two frames after they were drawn. So
-        // the image is asked for proof: one pixel of the last outline, in
-        // the outline's colour. Without it the capture is taken again.
+        // The other way: the browser hands back an image without them. A
+        // tab left emulated (an element shot asked twice at once, which
+        // `screenshot_clip` no longer does) showed the page 1,500 px down:
+        // all white, the page's own content missing too, through more
+        // frames and 3 s later. So the image is asked for proof: one pixel
+        // of the last outline, in the outline's colour. Without it the
+        // viewport is taken again through a clip with
+        // `captureBeyondViewport`, which sets the view's offset and size
+        // for that capture: on macos-15, retakes as before recovered 0 of
+        // 55 such captures and this one 8 of 8 (50/50 runs). Chrome hides
+        // scrollbars for such a capture: where they take room, the
+        // retake's content can sit a scrollbar's width off its marks.
         let n = |i: usize| drawn[i].as_f64().unwrap_or(0.0);
         let (dpr, sx, sy) = (if n(2) > 0.0 { n(2) } else { 1.0 }, n(3), n(4));
         let proof = match quality {
@@ -4383,16 +4501,48 @@ impl BrowserSession {
                     Some(Some(false)) => {}
                     _ => break,
                 }
-                eprintln!("[screenshot] --annotate: the capture came without the labels; taking it again ({again})");
+                eprintln!(
+                    "[screenshot] --annotate: the capture came without the labels ({}); taking it again ({again})",
+                    shot.as_deref().map_or_else(|_| String::new(), crate::annotate::content_census)
+                );
                 let _ = tab.evaluate(crate::annotate::NEXT_FRAME, timeout);
-                shot = tab.screenshot_as(timeout, full_page, quality);
+                shot = if full_page {
+                    tab.screenshot_as(timeout, true, quality)
+                } else {
+                    let viewport = serde_json::json!({ "x": sx, "y": sy, "width": vw, "height": vh });
+                    tab.screenshot_clip(timeout, false, quality, Some(viewport))
+                };
             }
+        }
+        // Still without them: say in the session log what was read and
+        // where, and what the page holds now (before the marks go), so a
+        // rare failure can tell marks drawn elsewhere from marks missing.
+        let failed = match (&shot, proof) {
+            (Ok(image), Some((x, y))) => crate::annotate::shows_mark(image, x, y) == Some(false),
+            _ => false,
+        };
+        if let (true, Ok(image), Some((x, y))) = (failed, &shot, proof) {
+            let page = tab
+                .evaluate(
+                    "[!!document.getElementById('__nv_marks'), innerWidth, innerHeight, devicePixelRatio, scrollX, \
+                     scrollY, document.visibilityState, document.hasFocus()]",
+                    timeout,
+                )
+                .map_or_else(|e| format!("({e:#})"), |v| v.to_string());
+            let census = crate::annotate::mark_census(image);
+            eprintln!(
+                "[screenshot] --annotate: no labels at the proof point ({x}, {y}): pixel {:?}; image {census}, {}; \
+                 drawn with dpr {dpr}, viewport {vw}x{vh}, scroll ({sx}, {sy}), {} boxes; page now {page}",
+                crate::annotate::pixel_at(image, x, y),
+                crate::annotate::content_census(image),
+                shown.len()
+            );
         }
         let _ = tab.evaluate(crate::annotate::REMOVE, timeout);
         let shot = shot?;
-        // Still without them: an image that claims labels it does not
-        // show would have an agent act on the wrong thing.
-        if proof.and_then(|(x, y)| crate::annotate::shows_mark(&shot, x, y)) == Some(false) {
+        // An image that claims labels it does not show would have an
+        // agent act on the wrong thing.
+        if failed {
             bail!(
                 "the browser's capture does not show the labels (4 captures). A dialog or popover shown on top of \
                  the page hides them: close it first. Otherwise take it again, or act on the refs `ax` prints"
@@ -4418,6 +4568,12 @@ impl BrowserSession {
     /// True when this session drives Lightpanda rather than Chromium.
     pub fn is_lightpanda(&self) -> bool {
         self.lightpanda
+    }
+
+    /// The engine's name as `status` says it (`chrome`, `lightpanda`,
+    /// `obscura`, `moli`).
+    pub fn engine_name(&self) -> &'static str {
+        self.engine
     }
 
     /// An Electron app (`start --electron`): its windows are the app's own.

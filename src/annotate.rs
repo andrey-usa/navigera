@@ -100,7 +100,71 @@ pub fn shows_mark(image: &[u8], x: u32, y: u32) -> Option<bool> {
     pixel(image, x, y).map(is_mark)
 }
 
+/// The RGB at device pixel (`x`, `y`) of the PNG `image`, as
+/// [`shows_mark`] reads it (for a failure's report).
+pub fn pixel_at(image: &[u8], x: u32, y: u32) -> Option<[u8; 3]> {
+    pixel(image, x, y)
+}
+
 fn pixel(png: &[u8], x: u32, y: u32) -> Option<[u8; 3]> {
+    let mut found = None;
+    let (width, _) = rows(png, Some(y), |r, row, bpp| {
+        if r == y {
+            let at = x as usize * bpp;
+            found = row.get(at..at + 3).map(|p| [p[0], p[1], p[2]]);
+        }
+    })?;
+    if x >= width {
+        return None;
+    }
+    found
+}
+
+/// For a capture that failed its proof: the image's size, how many of its
+/// pixels have the outline's colour, and the first of them (row by row).
+/// Marks drawn but not at the proof point show a count with a place;
+/// marks missing show none. Reads the whole image: for the failure's
+/// report only, which this is the text of.
+pub fn mark_census(png: &[u8]) -> String {
+    let (mut count, mut first) = (0u64, None);
+    let dims = rows(png, None, |r, row, bpp| {
+        for (i, p) in row.chunks_exact(bpp).enumerate() {
+            if is_mark([p[0], p[1], p[2]]) {
+                count += 1;
+                first.get_or_insert((i as u32, r));
+            }
+        }
+    });
+    match (dims, first) {
+        (None, _) => "unreadable".into(),
+        (Some((w, h)), None) => format!("{w}x{h}, no marked pixel"),
+        (Some((w, h)), Some((x, y))) => format!("{w}x{h}, {count} marked pixels, the first at ({x}, {y})"),
+    }
+}
+
+/// For a capture without its marks: how many pixels are not white and
+/// the box they fill (None: a blank image, the page's content missing
+/// too), and a hash of the bytes, to tell one capture from the next.
+pub fn content_census(png: &[u8]) -> String {
+    let (mut count, mut bbox) = (0u64, None::<(u32, u32, u32, u32)>);
+    rows(png, None, |r, row, bpp| {
+        for (i, p) in row.chunks_exact(bpp).enumerate() {
+            if p[..3] != [255, 255, 255] {
+                count += 1;
+                let i = i as u32;
+                bbox = Some(bbox.map_or((i, r, i, r), |(a, b, c, d)| (a.min(i), b.min(r), c.max(i), d.max(r))));
+            }
+        }
+    });
+    let hash = png.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+    format!("{} bytes, hash {hash:016x}, {count} pixels not white in {bbox:?}", png.len())
+}
+
+/// Decode an 8-bit RGB or RGBA, non-interlaced PNG's rows down to `last`
+/// (all of them when None), handing each to `visit` with its index and
+/// bytes per pixel. Returns (width, height); None when the image cannot
+/// be read so far. Only the rows asked for are inflated.
+fn rows(png: &[u8], last: Option<u32>, mut visit: impl FnMut(u32, &[u8], usize)) -> Option<(u32, u32)> {
     let body = png.strip_prefix(b"\x89PNG\r\n\x1a\n")?;
     let (mut at, mut idat, mut head) = (0usize, Vec::new(), None);
     while let Some(len) = body.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize) {
@@ -116,13 +180,14 @@ fn pixel(png: &[u8], x: u32, y: u32) -> Option<[u8; 3]> {
     }
     let head = head.filter(|h| h.len() >= 13)?;
     let width = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
-    let rows = u32::from_be_bytes([head[4], head[5], head[6], head[7]]);
+    let height = u32::from_be_bytes([head[4], head[5], head[6], head[7]]);
     let bpp = match (head[8], head[9], head[12]) {
         (8, 2, 0) => 3usize,
         (8, 6, 0) => 4,
         _ => return None,
     };
-    if x >= width || y >= rows || width > 1 << 16 {
+    let y = last.unwrap_or(height.checked_sub(1)?);
+    if y >= height || width > 1 << 16 {
         return None;
     }
     let line = 1 + width as usize * bpp;
@@ -168,10 +233,10 @@ fn pixel(png: &[u8], x: u32, y: u32) -> Option<[u8; 3]> {
             };
             row[i] = data[i].wrapping_add(add);
         }
+        visit(r as u32, &row, bpp);
         std::mem::swap(&mut above, &mut row);
     }
-    let at = x as usize * bpp;
-    Some([above[at], above[at + 1], above[at + 2]])
+    Some((width, height))
 }
 
 /// Answers after the page's next frame (100 ms at most).
@@ -204,7 +269,11 @@ mod tests {
         }
         for bpp in [3usize, 4] {
             let (w, h) = (7usize, 6usize);
-            let colour = |x: usize, y: usize| [(x * 40 + y) as u8, (y * 37 + 3) as u8, (x * y * 9) as u8, 255];
+            // Two pixels in the outline's colour, for the census.
+            let colour = |x: usize, y: usize| match (x, y) {
+                (4, 3) | (6, 5) => [0xe6, 0x00, 0x7e, 255],
+                _ => [(x * 40 + y) as u8, (y * 37 + 3) as u8, (x * y * 9) as u8, 255],
+            };
             let mut raw = Vec::new();
             let mut above = vec![0u8; w * bpp];
             for y in 0..h {
@@ -258,6 +327,23 @@ mod tests {
             assert_eq!(pixel(&png, 7, 0), None);
             assert_eq!(pixel(&png, 0, 6), None);
             assert_eq!(pixel(&png[..png.len() / 2], 6, 5), None, "a cut image proves nothing");
+            // The census against a plain count of the same pixels.
+            let colour_rgb = |x: usize, y: usize| -> [u8; 3] { colour(x, y)[..3].try_into().unwrap() };
+            let marked: Vec<_> =
+                (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| is_mark(colour_rgb(x, y))).collect();
+            assert_eq!(marked, [(4, 3), (6, 5)]);
+            assert_eq!(mark_census(&png), "7x6, 2 marked pixels, the first at (4, 3)", "{bpp}");
+            assert_eq!(mark_census(&png[..png.len() / 2]), "unreadable");
+            // Not white: against a plain count and box of the same pixels.
+            let lit: Vec<_> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| colour_rgb(x, y) != [255; 3])
+                .collect();
+            let (x0, y0) = (lit.iter().map(|p| p.0).min().unwrap(), lit.iter().map(|p| p.1).min().unwrap());
+            let (x1, y1) = (lit.iter().map(|p| p.0).max().unwrap(), lit.iter().map(|p| p.1).max().unwrap());
+            let census = content_census(&png);
+            let want = format!("{} pixels not white in Some(({x0}, {y0}, {x1}, {y1}))", lit.len());
+            assert!(census.starts_with(&format!("{} bytes, hash ", png.len())) && census.ends_with(&want), "{census}");
         }
         assert_eq!(pixel(b"\xff\xd8 a jpeg", 0, 0), None);
         assert!(is_mark([0xe6, 0x00, 0x7e]) && is_mark([0xea, 0x33, 0x80]));

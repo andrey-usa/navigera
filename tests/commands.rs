@@ -45,6 +45,12 @@ fn engines() -> Vec<(&'static str, Option<PathBuf>)> {
     out
 }
 
+/// `lightpanda version` of the binary a Lightpanda agent runs (`1.0.5`).
+fn lightpanda_release(bin: &Option<PathBuf>) -> Option<String> {
+    let out = Command::new(bin.as_ref()?).arg("version").stdin(Stdio::null()).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().trim_start_matches('v').to_string())
+}
+
 struct Site {
     child: Child,
     base: String,
@@ -84,13 +90,30 @@ impl Agent {
         agent
     }
 
-    fn run(&self, args: &[&str]) -> Value {
+    /// [`Agent::new`] with environment variables for its session server.
+    fn with_env(name: &str, engine: &'static str, bin: Option<PathBuf>, env: &[(&str, &str)]) -> Self {
+        let session = std::env::temp_dir()
+            .join(format!("nv-cmd-{name}-{engine}-{}.sock", std::process::id()))
+            .display()
+            .to_string();
+        let agent = Agent { session, engine, bin };
+        let out =
+            agent.command().envs(env.iter().copied()).args(["start", "--idle-timeout-s", "300"]).output().unwrap();
+        assert!(out.status.success(), "[{engine}] start: {}", String::from_utf8_lossy(&out.stderr));
+        agent
+    }
+
+    fn command(&self) -> Command {
         let mut cmd = Command::new(tool_exe());
         cmd.args(["--session", &self.session, "--engine", self.engine]);
         if let Some(bin) = &self.bin {
             cmd.arg("--chromium").arg(bin);
         }
-        let out = cmd.args(args).stdin(Stdio::null()).output().expect("run navigera");
+        cmd
+    }
+
+    fn run(&self, args: &[&str]) -> Value {
+        let out = self.command().args(args).stdin(Stdio::null()).output().expect("run navigera");
         let text = String::from_utf8_lossy(&out.stdout);
         serde_json::from_str(text.trim())
             .unwrap_or_else(|_| panic!("[{}] stdout must be one JSON object for {args:?}: {text}", self.engine))
@@ -98,8 +121,17 @@ impl Agent {
 
     fn response(&self, args: &[&str]) -> Value {
         let r = self.run(args);
-        assert_eq!(r["ok"], true, "[{}] {args:?} failed: {r}", self.engine);
+        assert_eq!(r["ok"], true, "[{}] {args:?} failed: {r}\n{}", self.engine, self.log_tail());
         r
+    }
+
+    /// The last lines of the session's own log (beside its socket), where
+    /// navigera says what it saw on a failure CI cannot reproduce.
+    fn log_tail(&self) -> String {
+        let log = std::path::Path::new(&self.session).with_extension("log");
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        format!("session log, last lines:\n{}", lines[lines.len().saturating_sub(15)..].join("\n"))
     }
 
     fn ok(&self, args: &[&str]) -> Value {
@@ -276,8 +308,19 @@ fn drag_drops_a_card_and_moves_a_slider() {
         assert_eq!(r["drag"]["dropped"], true, "[{engine}] {r}");
         let r = a.ok(&["drag", "#card", "#out"]);
         assert_eq!(r["drag"]["dropped"], false, "[{engine}] {r}");
-        a.ok(&["drag", "#knob", "#track"]);
-        assert_eq!(a.ok(&["eval", "out.textContent"]), "knob 140px", "[{engine}]");
+        // Lightpanda 1.0.3 and 1.0.4 put the block-level track and its knob at
+        // left 0 (240 before and from 1.0.5 on), where the hit test finds
+        // another element, so neither has an on-screen point: that
+        // known bug, on those releases only, is the answer expected there.
+        let known_bug =
+            engine == "lightpanda" && matches!(lightpanda_release(&a.bin).as_deref(), Some("1.0.3" | "1.0.4"));
+        if known_bug {
+            let r = a.run(&["drag", "#knob", "#track"]);
+            assert!(r["error"].as_str().is_some_and(|e| e.contains("no on-screen point")), "[{engine}] {r}");
+        } else {
+            a.ok(&["drag", "#knob", "#track"]);
+            assert_eq!(a.ok(&["eval", "out.textContent"]), "knob 140px", "[{engine}]");
+        }
         assert!(a.err(&["drag", "#card", "#nowhere", "--timeout-ms", "300"]).contains("drag"), "[{engine}]");
     }
 }
@@ -311,12 +354,63 @@ fn screenshot_of_one_element() {
         let before = a.text(&["ax"]);
         a.ok(&["screenshot", file]);
         let plain = std::fs::read(file).unwrap();
+        assert!(!blank(&plain), "[{engine}] the page's controls are in the image");
         let r = a.ok(&["screenshot", file, "--annotate"]);
         assert_eq!(r["refs"], 3, "[{engine}] {r}");
         assert_ne!(std::fs::read(file).unwrap(), plain, "[{engine}] the labels are in the image");
         assert_eq!(a.ok(&["eval", "!!document.getElementById('__nv_marks')"]), false, "[{engine}] and gone after");
         assert_eq!(a.text(&["ax"]), before, "[{engine}] the page reads as before");
         assert!(a.err(&["screenshot", file, "--annotate", "--selector", "button"]).contains("not one element"));
+    }
+    let _ = std::fs::remove_file(file);
+}
+
+/// A PNG with no pixel that is not white.
+fn blank(png: &[u8]) -> bool {
+    navigera::annotate::content_census(png).ends_with(" 0 pixels not white in None")
+}
+
+/// A capture Chrome emulates for (a clip, a full page, any capture under a
+/// viewport override) is never asked for twice at once, even when its
+/// answer comes after the resend wait: Chrome would put the first one's
+/// emulation back after the second, and the tab's next pages would show
+/// 1,500 px down, blank. Here every capture waits 0 ms before a resend.
+#[test]
+fn a_slow_element_shot_leaves_no_emulation_behind() {
+    let card = "data:text/html,<style>body{margin:0}%23card{margin:1500px 0 0 40px;width:200px;height:120px;background:red}</style><div id=card><button>Buy</button></div>";
+    let page = "data:text/html,<button>One</button> <a href=%23x>Two</a> <input aria-label=Three>";
+    let file = std::env::temp_dir().join(format!("nv-resend-{}.png", std::process::id()));
+    let file = file.to_str().unwrap();
+    let size = |png: &[u8]| {
+        (u32::from_be_bytes(png[16..20].try_into().unwrap()), u32::from_be_bytes(png[20..24].try_into().unwrap()))
+    };
+    for (engine, bin) in engines() {
+        if engine != "chrome" {
+            continue;
+        }
+        let a = Agent::with_env("resend", engine, bin, &[("NAVIGERA_SCREENSHOT_RESEND_MS", "0")]);
+        let mut sizes = Vec::new();
+        for shot in [&["--selector", "#card"][..], &["--full-page"]] {
+            a.ok(&["goto", card]);
+            a.ok(&[&["screenshot", file][..], shot].concat());
+            a.ok(&["goto", page]);
+            a.ok(&["screenshot", file]);
+            let plain = std::fs::read(file).unwrap();
+            assert!(!blank(&plain), "[{engine}] after {shot:?}: the next page's controls are in the image");
+            sizes.push(size(&plain));
+        }
+        let (w, h) = sizes[0];
+        assert_eq!(sizes[1], (w, h), "[{engine}]");
+        a.ok(&["set", "viewport", "600", "400", "--scale", "2"]);
+        a.ok(&["screenshot", file]);
+        assert_eq!(size(&std::fs::read(file).unwrap()), (1200, 800), "[{engine}] under the override");
+        a.ok(&["screenshot", file, "--selector", "button"]);
+        a.ok(&["set", "viewport", "off"]);
+        a.ok(&["screenshot", file]);
+        let after = std::fs::read(file).unwrap();
+        assert_eq!(size(&after), (w, h), "[{engine}] the override is gone");
+        assert!(!blank(&after), "[{engine}]");
+        a.ok(&["quit"]);
     }
     let _ = std::fs::remove_file(file);
 }

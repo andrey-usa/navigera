@@ -274,7 +274,94 @@ pub struct Shared {
     /// Several sessions share this browser (`BrowserSession::fork`): each
     /// takes only the tabs its own tabs opened or closed.
     pub forked: std::sync::atomic::AtomicBool,
+    /// Whether the engine refuses side effects under `throwOnSideEffect`:
+    /// 0 not asked yet, else [`SIDE_EFFECTS_CHECKED`] or [`SIDE_EFFECTS_RUN`]
+    /// (see `BrowserSession::evaluate_read`).
+    pub side_effects: std::sync::atomic::AtomicU8,
+    /// How the engine's dialogs are answered: [`DIALOGS_NATIVE`] (it
+    /// announces each and waits for the answer: Chrome, and every browser
+    /// navigera did not start as a CDP server), [`DIALOGS_ASK`] (not known
+    /// yet) or [`DIALOGS_PAGE`] (its own answer at once and tell no one:
+    /// navigera's page-side functions answer instead, see [`arm_dialog`]).
+    pub dialogs_mode: std::sync::atomic::AtomicU8,
+    /// The engine announced the dialog [`arm_dialog`] opened to ask.
+    pub dialog_probe_seen: AtomicBool,
+    /// Page-side dialogs: page session id -> its new-document script.
+    pub dialog_scripts: Mutex<HashMap<String, String>>,
+    /// Whether the engine's layout follows the page: [`LAYOUT_LIVE`]
+    /// (Chrome, and every browser navigera did not start as a CDP server),
+    /// [`LAYOUT_ASK`] (not known yet) or [`LAYOUT_SHOT`] (it keeps the
+    /// layout it first built until a screenshot: see [`ask_layout`]).
+    pub layout_mode: std::sync::atomic::AtomicU8,
+    /// Whether the engine's accessibility tree holds what an open shadow
+    /// root shows: [`AX_SHADOW_TREE`] (Chrome, and every browser navigera
+    /// did not start as a CDP server), [`AX_SHADOW_ASK`] (not known yet) or
+    /// [`AX_SHADOW_PAGE`] (it leaves shadow roots out: see [`ask_ax_shadow`]).
+    pub ax_shadow_mode: std::sync::atomic::AtomicU8,
+    /// Whether the engine's mouse events reach an element inside a shadow
+    /// root: [`PRESS_SHADOW_ENGINE`] (Chrome, and every browser navigera
+    /// did not start as a CDP server), [`PRESS_SHADOW_ASK`] (not known yet)
+    /// or [`PRESS_SHADOW_PAGE`] (its press stops at the host: see
+    /// [`ask_press_shadow`]).
+    pub press_shadow_mode: std::sync::atomic::AtomicU8,
 }
+
+/// [`Shared::press_shadow_mode`]: the engine's press reaches into shadow roots.
+pub const PRESS_SHADOW_ENGINE: u8 = 0;
+/// [`Shared::press_shadow_mode`]: a CDP server engine, not asked yet.
+pub const PRESS_SHADOW_ASK: u8 = 1;
+/// [`Shared::press_shadow_mode`]: the engine's mouse events go to
+/// `document.elementFromPoint`, the shadow host, never the element inside
+/// (Obscura 0.2.7, `Input.dispatchMouseEvent`). A click on an element in
+/// a shadow root gets its events from the page, once its checks passed.
+pub const PRESS_SHADOW_PAGE: u8 = 2;
+
+/// [`Shared::ax_shadow_mode`]: the engine's tree has shadow roots in it.
+pub const AX_SHADOW_TREE: u8 = 0;
+/// [`Shared::ax_shadow_mode`]: a CDP server engine, not asked yet.
+pub const AX_SHADOW_ASK: u8 = 1;
+/// [`Shared::ax_shadow_mode`]: the engine's tree is the top document's
+/// light DOM only (Obscura 0.2.7: `Accessibility.getFullAXTree` walks
+/// the document's children, never a shadow root, and answers the top
+/// document's tree whatever `frameId` it is given). `ax` lists what open
+/// shadow roots and same-origin frames hold from the page, as on Lightpanda.
+pub const AX_SHADOW_PAGE: u8 = 2;
+
+/// [`Shared::layout_mode`]: the layout follows the page (the default).
+pub const LAYOUT_LIVE: u8 = 0;
+/// [`Shared::layout_mode`]: a CDP server engine, not asked yet.
+pub const LAYOUT_ASK: u8 = 1;
+/// [`Shared::layout_mode`]: the engine keeps the layout it built at the
+/// first geometry read until a screenshot (Moli 1.1.27): an element a
+/// script adds afterwards has no box, no `innerText` and no hit. A 1x1
+/// screenshot lays the page out again (Moli 1.1.27 on ubuntu-24.04:
+/// 1.7 ms on 19 nodes, 157 ms on 4,505; a whole-page shot 56 / 236 ms).
+pub const LAYOUT_SHOT: u8 = 2;
+
+/// [`Shared::dialogs_mode`]: the engine announces dialogs (the default).
+pub const DIALOGS_NATIVE: u8 = 0;
+/// [`Shared::dialogs_mode`]: a CDP server engine, not asked yet.
+pub const DIALOGS_ASK: u8 = 1;
+/// [`Shared::dialogs_mode`]: the engine's own dialogs answer at once and
+/// raise no event (Obscura 0.2.7: `confirm()` false, `prompt()` null).
+pub const DIALOGS_PAGE: u8 = 2;
+
+/// The message of the dialog that asks an engine whether it announces
+/// dialogs; answered unseen, never reported.
+const DIALOG_PROBE: &str = "navigera: is this dialog announced?";
+/// The binding navigera's page-side dialog functions report through.
+const DIALOG_BINDING: &str = "__navigeraDialog";
+/// Page-side dialogs kept until a response reports them: a page that calls
+/// the binding in a loop costs this many, not memory without bound.
+const PAGE_DIALOGS_MAX: usize = 256;
+/// A page-side dialog's message, at most (a char boundary at or below).
+const PAGE_DIALOG_MESSAGE_MAX: usize = 16 * 1024;
+
+/// [`Shared::side_effects`]: the engine refuses them (V8: Chrome, Moli).
+pub const SIDE_EFFECTS_CHECKED: u8 = 1;
+/// [`Shared::side_effects`]: the engine runs what it is asked to check
+/// (Obscura 0.2.7).
+pub const SIDE_EFFECTS_RUN: u8 = 2;
 
 /// What the `WebMCP` domain reported.
 #[derive(Default)]
@@ -850,6 +937,7 @@ impl Shared {
         self.scopes.lock().unwrap().remove(session_id);
         self.nav.lock().unwrap().remove(session_id);
         self.net.lock().unwrap().remove(session_id);
+        self.dialog_scripts.lock().unwrap().remove(session_id);
     }
 
     /// (fetch/XHR requests in flight, when the last one started or ended).
@@ -1050,11 +1138,21 @@ impl Shared {
     }
 }
 
-/// Arm the session's dialog policy on Lightpanda, where a dialog takes the
-/// response armed before it opens. One armed response covers one dialog.
+/// Arm the session's dialog policy where it has to be in place before a
+/// dialog opens: on Lightpanda, where a dialog takes the response armed
+/// beforehand (one armed response covers one dialog), and on an engine
+/// whose own dialogs answer at once and tell no one (Obscura 0.2.7), where
+/// navigera's page-side functions answer per the policy and report each.
+/// Chrome waits for the answer: the watcher sends it then.
 pub async fn arm_dialog(client: &CdpClient, shared: &Shared, session: &str) {
     if !shared.is_single_target() {
-        return; // Chrome waits for the answer: the watcher sends it then.
+        ask_layout(client, shared, session).await;
+        ask_ax_shadow(client, shared, session).await;
+        ask_press_shadow(client, shared, session).await;
+        if page_dialogs(client, shared, session).await {
+            install_page_dialogs(client, shared, session).await;
+        }
+        return;
     }
     let policy = shared.policy_for(&shared.scope_of(session));
     let mut params = json!({ "accept": policy.accept });
@@ -1068,6 +1166,294 @@ pub async fn arm_dialog(client: &CdpClient, shared: &Shared, session: &str) {
         // An engine without the LP domain dismisses every dialog.
         Err(_) => map.remove(session),
     };
+}
+
+/// Whether `session`'s engine needs page-side dialogs, asked once per
+/// browser (only of a CDP server engine: [`DIALOGS_ASK`]). A `confirm` that
+/// is a browser's own operation (no `prototype`: not a constructor) is
+/// taken as is, with no dialog opened. Any other is called: a dialog the
+/// engine announces is answered by the watcher, unseen; one it answers by
+/// itself with no event is a stub (Obscura 0.2.7's `function () { return
+/// false; }`). Any failure keeps the engine's dialogs as they are, and
+/// nothing is asked again.
+async fn page_dialogs(client: &CdpClient, shared: &Shared, session: &str) -> bool {
+    match shared.dialogs_mode.load(Ordering::Relaxed) {
+        DIALOGS_ASK => {}
+        mode => return mode == DIALOGS_PAGE,
+    }
+    shared.dialog_probe_seen.store(false, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let asked = client
+        .send(
+            "Runtime.evaluate",
+            json!({ "expression": dialog_probe_expression(), "returnByValue": true }),
+            Some(session),
+            Duration::from_secs(5),
+        )
+        .await;
+    crate::timing::record("dialog_probe", started);
+    // An announced dialog comes before the answer of the eval that opened
+    // it; the watcher, a task of its own, may still be on its way to it.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    while shared.behind(client) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    crate::timing::record("dialog_probe_wait", started);
+    // null: the browser's own `confirm`, not called.
+    let called =
+        asked.is_ok_and(|r| r.get("exceptionDetails").is_none() && r.pointer("/result/value") == Some(&json!(false)));
+    let page = called && !shared.dialog_probe_seen.load(Ordering::SeqCst);
+    shared.dialogs_mode.store(if page { DIALOGS_PAGE } else { DIALOGS_NATIVE }, Ordering::Relaxed);
+    crate::timing::log(&format!("[dialogs] {}", if page { "page-side" } else { "the engine's" }));
+    page
+}
+
+/// Whether `session`'s engine keeps its first layout until a screenshot,
+/// asked once per browser (only of a CDP server engine: [`LAYOUT_ASK`]),
+/// with its first tab: a 10 px box added after a geometry read has no
+/// width there, and has it after a 1x1 screenshot. Where it has no width
+/// either way, nothing navigera sends would help: the layout is taken as
+/// it is. Any failure does the same, and nothing is asked again.
+async fn ask_layout(client: &CdpClient, shared: &Shared, session: &str) {
+    if shared.layout_mode.load(Ordering::Relaxed) != LAYOUT_ASK {
+        return;
+    }
+    const WAIT: Duration = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let width = |r: anyhow::Result<Value>| r.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_f64));
+    let eval = |expression: &str| {
+        client.send("Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(session), WAIT)
+    };
+    let mut mode = LAYOUT_LIVE;
+    if let Some(w) = width(eval(LAYOUT_PROBE_ADD).await) {
+        if w < 1.0 {
+            let shot = client.send("Page.captureScreenshot", layout_shot_params(), Some(session), WAIT).await;
+            if shot.is_ok() && width(eval(LAYOUT_PROBE_TAKE).await).is_some_and(|w| w >= 1.0) {
+                mode = LAYOUT_SHOT;
+            }
+        }
+    }
+    // Taken out whatever was answered (no-op once taken).
+    let _ = eval(LAYOUT_PROBE_TAKE).await;
+    shared.layout_mode.store(mode, Ordering::Relaxed);
+    crate::timing::record("layout_probe", started);
+    crate::timing::log(&format!("[layout] {}", if mode == LAYOUT_SHOT { "kept until a screenshot" } else { "live" }));
+}
+
+/// Whether `session`'s engine puts what an open shadow root shows in its
+/// accessibility tree, asked once per browser (only of a CDP server engine:
+/// [`AX_SHADOW_ASK`]), with its first tab: a button named
+/// [`AX_SHADOW_PROBE`] in an open shadow root, then the engine's tree,
+/// searched for that name. Any failure leaves the tree as it is
+/// ([`AX_SHADOW_TREE`]), and nothing is asked again.
+async fn ask_ax_shadow(client: &CdpClient, shared: &Shared, session: &str) {
+    if shared.ax_shadow_mode.load(Ordering::Relaxed) != AX_SHADOW_ASK {
+        return;
+    }
+    const WAIT: Duration = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let eval = |expression: String| {
+        client.send("Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(session), WAIT)
+    };
+    let name = json!(AX_SHADOW_PROBE);
+    let added = eval(format!(
+        "(() => {{ const made = !document.documentElement; \
+         if (made) document.appendChild(document.createElement('html')); \
+         const r = document.body || document.documentElement; \
+         if (!r.attachShadow) return false; const h = document.createElement('div'); \
+         const b = document.createElement('button'); b.textContent = {name}; \
+         h.attachShadow({{ mode: 'open' }}).appendChild(b); r.appendChild(h); \
+         Object.defineProperty(window, '__nvAxProbe', {{ value: [h, made], configurable: true, enumerable: false }}); \
+         return true; }})()"
+    ))
+    .await;
+    let mut mode = AX_SHADOW_TREE;
+    if added.is_ok_and(|r| r.pointer("/result/value") == Some(&json!(true))) {
+        // An engine that keeps its first layout builds the tree from it.
+        if shared.layout_mode.load(Ordering::Relaxed) == LAYOUT_SHOT {
+            let _ = client.send("Page.captureScreenshot", layout_shot_params(), Some(session), WAIT).await;
+        }
+        if let Ok(tree) = client.send("Accessibility.getFullAXTree", json!({}), Some(session), WAIT).await {
+            if !tree.to_string().contains(AX_SHADOW_PROBE) {
+                mode = AX_SHADOW_PAGE;
+            }
+        }
+    }
+    let _ = eval(
+        "(() => { const p = window.__nvAxProbe; if (!p) return; delete window.__nvAxProbe; \
+         const r = p[0].parentNode; p[0].remove(); if (p[1] && r) r.remove(); })()"
+            .to_string(),
+    )
+    .await;
+    shared.ax_shadow_mode.store(mode, Ordering::Relaxed);
+    crate::timing::record("ax_shadow_probe", started);
+    crate::timing::log(&format!(
+        "[ax] shadow roots {}",
+        if mode == AX_SHADOW_PAGE { "listed from the page" } else { "in the engine's tree" }
+    ));
+}
+
+/// Whether `session`'s engine delivers a press to an element inside an
+/// open shadow root, asked once per browser (only of a CDP server engine:
+/// [`PRESS_SHADOW_ASK`]), with its first tab, before any page of the
+/// user's is in it: a 40 px button in a shadow root fixed at the top left,
+/// a press and release at its centre, and whether the button heard the
+/// press. Any failure leaves the engine's press as it is
+/// ([`PRESS_SHADOW_ENGINE`]), and nothing is asked again.
+async fn ask_press_shadow(client: &CdpClient, shared: &Shared, session: &str) {
+    if shared.press_shadow_mode.load(Ordering::Relaxed) != PRESS_SHADOW_ASK {
+        return;
+    }
+    const WAIT: Duration = Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let eval = |expression: &str| {
+        client.send("Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(session), WAIT)
+    };
+    let added = eval(
+        "(() => { const made = !document.documentElement; \
+         if (made) document.appendChild(document.createElement('html')); \
+         const r = document.body || document.documentElement; \
+         if (!r.attachShadow) return false; const h = document.createElement('div'); \
+         h.style.cssText = 'position:fixed;left:0;top:0;width:40px;height:40px;margin:0;padding:0;z-index:2147483647'; \
+         const b = document.createElement('button'); \
+         b.style.cssText = 'display:block;width:40px;height:40px;margin:0;padding:0;border:0'; \
+         const heard = []; b.addEventListener('mousedown', () => heard.push(1)); \
+         h.attachShadow({ mode: 'open' }).appendChild(b); r.appendChild(h); \
+         Object.defineProperty(window, '__nvPressProbe', { value: [h, made, heard], configurable: true, enumerable: false }); \
+         return true; })()",
+    )
+    .await;
+    let mut mode = PRESS_SHADOW_ENGINE;
+    if added.is_ok_and(|r| r.pointer("/result/value") == Some(&json!(true))) {
+        // An engine that keeps its first layout hit-tests with it.
+        if shared.layout_mode.load(Ordering::Relaxed) == LAYOUT_SHOT {
+            let _ = client.send("Page.captureScreenshot", layout_shot_params(), Some(session), WAIT).await;
+        }
+        let mut pressed = true;
+        for kind in ["mousePressed", "mouseReleased"] {
+            let params = json!({ "type": kind, "x": 20, "y": 20, "button": "left", "buttons": 1, "clickCount": 1 });
+            pressed &= client.send("Input.dispatchMouseEvent", params, Some(session), WAIT).await.is_ok();
+        }
+        let heard = eval("(() => { const p = window.__nvPressProbe; return p ? p[2].length > 0 : null; })()").await;
+        if pressed && heard.is_ok_and(|r| r.pointer("/result/value") == Some(&json!(false))) {
+            mode = PRESS_SHADOW_PAGE;
+        }
+    }
+    let _ = eval(
+        "(() => { const p = window.__nvPressProbe; if (!p) return; delete window.__nvPressProbe; \
+         const r = p[0].parentNode; p[0].remove(); if (p[1] && r) r.remove(); })()",
+    )
+    .await;
+    shared.press_shadow_mode.store(mode, Ordering::Relaxed);
+    crate::timing::record("press_shadow_probe", started);
+    crate::timing::log(&format!(
+        "[click] in shadow roots: {}",
+        if mode == PRESS_SHADOW_PAGE { "events from the page" } else { "the engine's press" }
+    ));
+}
+
+/// See [`ask_ax_shadow`]: the probe button's name.
+const AX_SHADOW_PROBE: &str = "navigera-ax-shadow-probe";
+
+/// See [`ask_layout`]: a geometry read, then a 10 px box added to the
+/// document element, and its width.
+const LAYOUT_PROBE_ADD: &str = "(() => { const r = document.documentElement; if (!r) return null; \
+     r.getBoundingClientRect(); const d = document.createElement('div'); \
+     d.style.cssText = 'display:block;width:10px;height:10px'; r.appendChild(d); \
+     Object.defineProperty(window, '__nvLayProbe', { value: d, configurable: true, enumerable: false }); \
+     return d.getBoundingClientRect().width; })()";
+
+/// See [`ask_layout`]: the probe box's width now, and the box taken out.
+const LAYOUT_PROBE_TAKE: &str = "(() => { const d = window.__nvLayProbe; if (!d) return null; \
+     delete window.__nvLayProbe; const w = d.getBoundingClientRect().width; d.remove(); return w; })()";
+
+/// The screenshot that lays a [`LAYOUT_SHOT`] engine's page out again: one
+/// pixel, the least to paint and encode.
+pub fn layout_shot_params() -> Value {
+    json!({ "clip": { "x": 0, "y": 0, "width": 1, "height": 1, "scale": 1 } })
+}
+
+/// See [`page_dialogs`]: null where `confirm` is a browser's own operation,
+/// else what calling it with [`DIALOG_PROBE`] answers.
+fn dialog_probe_expression() -> String {
+    format!("typeof confirm !== 'function' || !('prototype' in confirm) ? null : confirm({})", json!(DIALOG_PROBE))
+}
+
+/// Put navigera's `alert`/`confirm`/`prompt` in `session`'s documents, the
+/// one it shows and every one after, answering per its scope's policy and
+/// reporting each through [`DIALOG_BINDING`]. Again after a policy change:
+/// the shown document takes the new answer, the next ones the new script.
+async fn install_page_dialogs(client: &CdpClient, shared: &Shared, session: &str) {
+    const WAIT: Duration = Duration::from_secs(10);
+    let started = std::time::Instant::now();
+    let policy = shared.policy_for(&shared.scope_of(session));
+    let old = shared.dialog_scripts.lock().unwrap().remove(session);
+    let first = old.is_none();
+    let bind = async {
+        if first {
+            let _ = client.send("Runtime.addBinding", json!({ "name": DIALOG_BINDING }), Some(session), WAIT).await;
+        }
+    };
+    let remove = async {
+        if let Some(id) = old {
+            let params = json!({ "identifier": id });
+            let _ = client.send("Page.removeScriptToEvaluateOnNewDocument", params, Some(session), WAIT).await;
+        }
+    };
+    let params = json!({ "source": page_dialog_script(&policy), "runImmediately": true });
+    let add = client.send("Page.addScriptToEvaluateOnNewDocument", params, Some(session), WAIT);
+    let (_, _, added) = tokio::join!(bind, remove, add);
+    crate::timing::record("dialog_install", started);
+    if let Some(id) = added.ok().and_then(|r| r.get("identifier").and_then(Value::as_str).map(str::to_string)) {
+        shared.dialog_scripts.lock().unwrap().insert(session.to_string(), id);
+    }
+}
+
+/// The page-side dialog functions with `policy`'s answer. Run again in a
+/// document that has them, it only changes the answer.
+fn page_dialog_script(policy: &DialogPolicy) -> String {
+    format!(
+        r#"(() => {{
+  const policy = {{ accept: {accept}, text: {text} }};
+  const key = Symbol.for('navigera.dialogs');
+  if (typeof globalThis[key] === 'function') {{ globalThis[key](policy); return; }}
+  let p = policy;
+  Object.defineProperty(globalThis, key, {{ value: (next) => {{ p = next; }} }});
+  const str = (v) => (v === undefined ? '' : String(v));
+  const report = (type, message) => {{
+    try {{ globalThis.{binding}(JSON.stringify({{ type, message, accepted: p.accept }})); }} catch (e) {{}}
+  }};
+  const put = (name, fn) =>
+    Object.defineProperty(globalThis, name, {{ value: fn, writable: true, configurable: true, enumerable: true }});
+  put('alert', function alert(message) {{ report('alert', str(message)); }});
+  put('confirm', function confirm(message) {{ report('confirm', str(message)); return p.accept; }});
+  put('prompt', function prompt(message, value) {{
+    report('prompt', str(message));
+    return p.accept ? (p.text ?? str(value)) : null;
+  }});
+}})()"#,
+        accept = policy.accept,
+        text = policy.prompt_text.as_ref().map_or_else(|| "null".to_string(), |t| json!(t).to_string()),
+        binding = DIALOG_BINDING,
+    )
+}
+
+/// A dialog navigera's page-side functions reported: `{type, message,
+/// accepted}` from the binding's payload, which the page can also call,
+/// so it is read as data with bounds (a known type, the message clipped).
+fn page_dialog(payload: &Value) -> Option<Value> {
+    let v: Value = serde_json::from_str(payload.as_str()?).ok()?;
+    let kind = v.get("type").and_then(Value::as_str).filter(|t| matches!(*t, "alert" | "confirm" | "prompt"))?;
+    let mut message = v.get("message").and_then(Value::as_str).unwrap_or("");
+    if message.len() > PAGE_DIALOG_MESSAGE_MAX {
+        let mut end = PAGE_DIALOG_MESSAGE_MAX;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message = &message[..end];
+    }
+    let accepted = v.get("accepted").and_then(Value::as_bool).unwrap_or(false);
+    Some(json!({ "type": kind, "message": message, "accepted": accepted }))
 }
 
 /// Lightpanda opens `target=_blank` / `window.open` pages as top-level
@@ -1246,6 +1632,29 @@ fn on_event(client: &CdpClient, shared: &Arc<Shared>, event: &Value) {
         shared.downloads.lock().unwrap().on_event(method, &params, &scope);
     }
     match method {
+        "Page.javascriptDialogOpening"
+            if shared.dialogs_mode.load(Ordering::Relaxed) == DIALOGS_ASK
+                && params.get("message").and_then(Value::as_str) == Some(DIALOG_PROBE) =>
+        {
+            // The engine announces dialogs (see `page_dialogs`): answered
+            // unseen, it is no dialog of the page's.
+            shared.dialog_probe_seen.store(true, Ordering::SeqCst);
+            let client = client.clone();
+            let session = session.to_string();
+            tokio::spawn(async move {
+                let s = Some(session.as_str()).filter(|s| !s.is_empty());
+                let answer = json!({ "accept": false });
+                let _ = client.send("Page.handleJavaScriptDialog", answer, s, Duration::from_secs(10)).await;
+            });
+        }
+        "Runtime.bindingCalled" if params.get("name").and_then(Value::as_str) == Some(DIALOG_BINDING) => {
+            if let Some(dialog) = params.get("payload").and_then(page_dialog) {
+                let mut dialogs = shared.dialogs.lock().unwrap();
+                if dialogs.len() < PAGE_DIALOGS_MAX {
+                    dialogs.push((shared.scope_of(session), dialog));
+                }
+            }
+        }
         "Page.javascriptDialogOpening" if shared.is_single_target() => {
             // Already answered by the page's engine: report what it got (the
             // armed response, else a dismissal) and arm the next one.
@@ -1958,5 +2367,33 @@ mod tests {
         assert!(shared.routes.lock().unwrap().contains_key("ctx-a2"));
         shared.move_scope("ctx-b", "ctx-b2", false);
         assert!(shared.policy_for("ctx-b2").accept);
+    }
+
+    #[test]
+    fn a_page_side_dialog_report_is_read_as_data_with_bounds() {
+        let payload = |v: Value| json!(v.to_string());
+        let d = page_dialog(&payload(json!({"type": "confirm", "message": "Delete?", "accepted": true}))).unwrap();
+        assert_eq!(d, json!({"type": "confirm", "message": "Delete?", "accepted": true}));
+        // The page can call the binding too: only the three kinds, and a
+        // message clipped on a character boundary.
+        assert!(page_dialog(&payload(json!({"type": "beforeunload", "message": ""}))).is_none());
+        assert!(page_dialog(&json!("not json")).is_none());
+        assert!(page_dialog(&json!(7)).is_none());
+        let long = "é".repeat(PAGE_DIALOG_MESSAGE_MAX);
+        let d = page_dialog(&payload(json!({"type": "alert", "message": long}))).unwrap();
+        let m = d["message"].as_str().unwrap();
+        assert!(m.len() <= PAGE_DIALOG_MESSAGE_MAX && m.len() >= PAGE_DIALOG_MESSAGE_MAX - 1, "{}", m.len());
+        assert_eq!(d["accepted"], false, "no accepted field reads as dismissed");
+    }
+
+    #[test]
+    fn the_page_side_script_carries_the_policy_as_literals() {
+        let s = page_dialog_script(&DialogPolicy { accept: false, prompt_text: None });
+        assert!(s.contains("accept: false, text: null"), "{s}");
+        let s = page_dialog_script(&DialogPolicy { accept: true, prompt_text: Some("a'b\"c</script>".into()) });
+        assert!(s.contains(r#"accept: true, text: "a'b\"c</script>""#), "{s}");
+        assert!(s.contains(DIALOG_BINDING));
+        // Asked only where `confirm` is not the browser's own operation.
+        assert!(dialog_probe_expression().starts_with("typeof confirm !== 'function' || !('prototype' in confirm)"));
     }
 }

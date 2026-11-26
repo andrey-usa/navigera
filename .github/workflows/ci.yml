@@ -497,3 +497,50 @@ jobs:
             --markdown "$RUNNER_TEMP/cdp-check.md" || rc=$?
           python3 bench/ladder/annotate.py "$RUNNER_TEMP/cdp-check.md" "cdp check ${{ matrix.browser.label }}"
           exit $rc
+
+  # The headless engines that are their own CDP server, each on its newest
+  # stable release, on every push: Lightpanda through its own tests and its
+  # leg of tests/commands.rs, Moli through tests/cdp_servers.rs (navigation,
+  # the tree and its refs, input, tabs, a screenshot, cleanup). Obscura's
+  # leg of tests/cdp_servers.rs runs where $OBSCURA_BIN is set.
+  engines:
+    name: engine ${{ matrix.engine }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: lightpanda
+            tests: --test lightpanda --test commands
+          - engine: moli
+            tests: --test cdp_servers
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          cache-on-failure: false
+      - name: Lightpanda binary
+        if: matrix.engine == 'lightpanda'
+        uses: ./.github/actions/lightpanda
+      - name: Moli binary
+        if: matrix.engine == 'moli'
+        uses: ./.github/actions/moli
+      - name: e2e tests on ${{ matrix.engine }}
+        timeout-minutes: 10
+        env:
+          ENGINE: ${{ matrix.engine }}
+          TESTS: ${{ matrix.tests }}
+        run: |
+          set -o pipefail
+          # A missing binary fails the job instead of skipping the tests.
+          export "NAVIGERA_REQUIRE_${ENGINE^^}=1"
+          # shellcheck disable=SC2086 # TESTS is a list of --test flags
+          if ! cargo test --locked --features http $TESTS --no-fail-fast 2>&1 | tee /tmp/test.log; then
+            sed -n '/^---- /,/^test result/p' /tmp/test.log | grep -v -E '^ +[0-9]+: |^ +at ' | tail -c 30000 > /tmp/test-tail.log || true
+            python3 bench/ladder/annotate.py /tmp/test-tail.log "cargo test failure ($ENGINE)"
+            exit 1
+          fi

@@ -297,6 +297,8 @@ def run_one(agent: str, browser: str, task: dict, model_spec: str, args, rep: in
             reqs = [r for r in mock.requests() if r["tools"]]
             parsed["iterations"] = len(reqs)
         browser_calls = [c for c in parsed["calls"] if is_browser_call(c[0], c[1])]
+        if mock is not None:
+            rec["model_saw_hints"] = any(r.get("hints") for r in mock.requests())
         rec.update({
             "ok": ok and not timed_out, "why": why + (["timed out"] if timed_out else []),
             "exit": proc.returncode, "timed_out": timed_out, "wall_s": round(wall, 1),
@@ -397,6 +399,13 @@ def main() -> int:
     (out / "table.md").write_text(table)
     (out / "runs.json").write_text(json.dumps(runs, indent=1))
     print(table)
+    if args.model == "mock":
+        # MCP servers declare tool annotations for the client; whether an
+        # agent passes them on to the model decides what they cost its context.
+        mcp_runs = [r for r in runs if r["browser"] != "navigera"]
+        saw = [f"{r['agent']}/{r['browser']}" for r in mcp_runs if r.get("model_saw_hints")]
+        print(f"MCP tool annotations in what the model was sent: {', '.join(saw) or 'none'} "
+              f"(of {len(mcp_runs)} MCP runs)")
     if args.require_pass and any(not r.get("ok") for r in runs):
         return 1
     return 0

@@ -44,7 +44,11 @@ console and dialogs, and upload, drag, mouse, keydown, keyup, storage and
 of the session from its first `network` on, as a browser listened to
 slows every load: run `network` once before the load you want to see;
 the list, a response body, `--har` with the bodies the browser kept, up
-to 10 MiB each), `screencast` (screenshots of the
+to 10 MiB each; chromedriver 157 sends a request body that is not UTF-8
+as its base64 labelled as text, which no client can tell from a text body
+that reads the same, so navigera shows that text; Firefox labels it
+base64),
+`screencast` (screenshots of the
 viewport on the session's connection while commands run and between them,
 a frame for each change, at most every 100 ms and one a second on a still
 page),
@@ -61,9 +65,28 @@ headless mode, runs one session per machine and blocks user input while it
 runs (Apple's limits). The `webdriver` workflow runs one scenario on Firefox
 (Linux, macOS, Windows), Safari (macOS) and chromedriver over both protocols.
 
-**Lightpanda** 1.0 (`--engine lightpanda`) runs the same end-to-end suite in
-CI, on 1.0.1 and the nightly. It is a different engine (one tab, no layout),
+**Lightpanda** 1.0 (`--engine lightpanda`) runs its own end-to-end tests and
+its leg of the commands suite in CI on every push, on its newest stable
+release (never the nightly). It is a different engine (one tab, no layout),
 so navigera fills in what its CDP leaves out: shadow roots and password
 fields in `ax`, `confirm()`/`prompt()` answers, navigations a click starts.
 The differences that remain are listed in
 [docs/navigera.md](navigera.md#lightpanda-and-your-own-browser).
+
+**Obscura** (`--engine obscura`) and **Moli** (`--engine moli`), both
+experimental, are newer headless engines that are their own CDP server,
+like Lightpanda; navigera starts each as `<engine> serve`. Unlike
+Lightpanda they open tabs and lay pages out, so they take Chrome's paths.
+[`tests/cdp_servers.rs`](../tests/cdp_servers.rs) checks each one:
+navigation, the accessibility tree and acting on its refs, fill, a form
+submitted with the keyboard (the server checks the sign-in), a checkbox
+click, a select, tabs, a screenshot, and the engine's server gone after
+`quit`. CI runs it on Moli's newest stable release on every push (1.1.27
+at this writing); on Obscura it last ran on 0.2.7
+([run 45312041662](https://github.com/andrey-usa/navigera/actions/runs/45312041662)).
+Run with either
+one as the default engine (`NAVIGERA_ENGINE`), the rest of the suite shows
+how far each is from Chrome; the differences agents meet are listed in
+[docs/navigera.md](navigera.md#obscura-and-moli). Moli's
+biggest one, for now: it keeps the layout it built at the first geometry
+read, so content a page's scripts render later has no box to click.

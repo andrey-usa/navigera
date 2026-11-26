@@ -27,7 +27,7 @@ navigera [GLOBAL FLAGS] <command> [ARGS] [GLOBAL FLAGS]
 | `--wait-ms <ms>` | element ops' wait when they name no timeout, and on one `wait` for a condition, its timeout (default 5000; `$NAVIGERA_WAIT_MS`). On `start`/`serve`/`mcp` it holds for the whole session |
 | `--download-dir <dir>` | where downloaded files go (`$NAVIGERA_DOWNLOAD_DIR`; default a directory of the session's own in `navigera-<uid>` under the system temp directory, which only you can enter) |
 | `--chromium <path>` | browser binary (also `$NAVIGERA_CHROMIUM`, `$CHROME_BIN`) |
-| `--engine chrome\|lightpanda` (`$NAVIGERA_ENGINE`), `--headed` | engine; visible window |
+| `--engine chrome\|lightpanda\|obscura\|moli` (`$NAVIGERA_ENGINE`), `--headed` | engine (an unknown name is refused); visible window |
 | `--idle-timeout-s <s>` | a session server shuts down after this idle time (default 600, 0 = never; also `start --idle <s>`). `status` and `sessions` don't count as use |
 | `--own-browser` | with `start` (or `mcp`): a browser of the session's own instead of a context on the shared browser (`$NAVIGERA_SHARED_BROWSER=0`) |
 | `--parent <pid>` | with `start`: the session quits when that process exits (checked twice a second; `$NAVIGERA_PARENT_PID`) |
@@ -213,10 +213,10 @@ page "Cart — Acme Supply" http://127.0.0.1:8765/cart (tab 0 of 2)
 
 | command | args | result |
 |---|---|---|
-| `click` | target; `--button right\|middle`; `--force`; `--until-gone [--max <n>]` (JSON `until_gone`: `true` or the most clicks) | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box); `no_effect` note if the page did nothing in response. `--until-gone` clicks again (a "Load more" button) while the element is there, shown and enabled and each click changes the page, at most 50 clicks: it follows the element first clicked, lets what each click fetched land, waits for a disabled one while the page is loading, and stops when the element is gone, hidden or stays disabled, a click changes nothing, a click opens another page, or at the limit; `clicks` and `stopped` say how many and why. A later click that fails ends the clicks and is named in `stopped`, not an error |
+| `click` | target; `--button right\|middle`; `--force`; `--until-gone [--max <n>]` (JSON `until_gone`: `true` or the most clicks) | state; fails naming the element that covers the target; `synthetic_click` note if a DOM click was used (`--force`, an element with no box); `no_effect` note if the page did nothing in response; `not_submitted` note if the browser held a submit back because fields failed their checks (up to three, each with the browser's message, and how many more). `--until-gone` clicks again (a "Load more" button) while the element is there, shown and enabled and each click changes the page, at most 50 clicks: it follows the element first clicked, lets what each click fetched land, waits for a disabled one while the page is loading, and stops when the element is gone, hidden or stays disabled, a click changes nothing, a click opens another page, or at the limit; `clicks` and `stopped` say how many and why. A later click that fails ends the clicks and is named in `stopped`, not an error |
 | `fill` | target, `<value>` or `--value`; `--keys` selects what the field holds and types the value key by key (apps that keep only typed input, observable-model forms); waits (up to the command timeout) for the field to be visible, enabled and editable, and the timeout error names the check that failed; `--force` skips the checks | state |
 | `type` | `<text>` or `--value`; optional `--selector/--ref/--text` to focus first | state |
-| `press` | `<key>` or `--key`; optional target to focus first | state; Enter on a link to a fragment of the page returns once the page has handled `hashchange`, as a click does |
+| `press` | `<key>` or `--key`; optional target to focus first | state; Enter on a link to a fragment of the page returns once the page has handled `hashchange`, as a click does; Enter in a form is watched as a submit click is: no navigation wait when the page handles the submit, the form's checks hold it back (`not_submitted` note, as `click`) or the field is a textarea |
 | `select` | target, option label(s)/value(s) (positional or repeated `--value`; labels match with whitespace collapsed); `--add` keeps what a multiple select already has. On a custom dropdown (an ARIA combobox: react-select and the like) it does what a user does: focuses it, opens it (ArrowDown, else a click), finds the option by its text in the listbox that opened (a portal at the end of `<body>` included), types to filter when it isn't listed, and clicks it | state + `selected` |
 | `hover` | target | state; `synthetic_hover` note if the element could not be hovered |
 | `mouse` | `move <x> <y> [--steps n]`, `down`, `up`, `click <x> <y> [--count n]`, `wheel <dx> <dy>`; `--button left\|right\|middle`; an optional target makes x/y relative to its top-left corner, scrolling it into view when that point is out of it (`down`, `up` and `wheel` with a target go to its center; a target in a cross-origin frame is refused). A `click` at viewport coordinates outside the viewport is refused; a `move` may leave it (a drag out of the window) | state, plus `mouse: {x, y, held}` (viewport CSS pixels, the buttons still held) |
@@ -497,6 +497,13 @@ page state, and `snapshot: true` for the updated tree in the same call.
 `browser_hover`, `browser_mouse` and `browser_scroll` still return the
 full state (their page change is not tracked).
 
+Each tool on `tools/list` declares the four MCP annotations, for a client
+deciding what to ask about before a call: `browser_snapshot`,
+`browser_wait_for` and `browser_more` only read; `browser_navigate` and
+`browser_scroll` change the page and destroy nothing; the other actions are
+marked destructive, as a page may submit, delete or send on any of them.
+The tool formats of the model APIs have no field for annotations.
+
 An MCP client may have no shell of its own, so the browser is not its way to
 the disk: `file:` pages and the browser's own pages (`chrome://`,
 `devtools://`) are refused, and every file a tool or a `browser_run` step
@@ -628,7 +635,7 @@ MCP Registry, as `io.github.andrey-usa/navigera`.
   POST reopens with GET). A command running at the crash fails and is not
   retried; a second crash within 10 s of a recovery ends the session. A browser of its
   own instead: `start --own-browser` (or `NAVIGERA_SHARED_BROWSER=0`);
-  `--attach`, `--profile`, `--electron`, Lightpanda and `--transport ws` on Linux/macOS
+  `--attach`, `--profile`, `--electron`, Lightpanda, Obscura, Moli and `--transport ws` on Linux/macOS
   always get one.
 
 ## Lightpanda and your own browser
@@ -702,6 +709,73 @@ connection for all commands): a one-shot command with `--attach` is
 refused. Chrome 136–143 can't serve its default profile at all (the
 `--remote-debugging-port` switch is ignored for it, and the inspect toggle
 arrives in 144): use `--profile` there, which works on any version.
+
+## Obscura and Moli
+
+Two more experimental headless engines that are their own CDP server, like
+Lightpanda: navigera starts each as `<engine> serve` on a free port.
+Unlike Lightpanda they open tabs and contexts and lay pages out, so they
+take Chrome's paths; each session gets a browser of its own.
+
+- **`--engine obscura`** (experimental; tested on Obscura 0.2.7, its newest
+  stable release) starts `obscura serve --allow-private-network`: Obscura
+  refuses loopback and private addresses otherwise, and a local dev server
+  is what agents test. The binary comes from `$OBSCURA_BIN` or `PATH`, or
+  from `--chromium`. Tabs, contexts, layout and screenshots work as on
+  Chrome. Differences:
+  - popups: a page opened with `target=_blank` loads in the current tab
+    (Obscura opens no target for it); `tab-new` works.
+  - dialogs: Obscura's own `alert`, `confirm` and `prompt` answer at once
+    and raise no event (`confirm()` false, `prompt()` null). navigera puts
+    its own in each tab's documents: they answer as `dialog` says and each
+    dialog is reported as on Chrome. A page's script sees them as plain
+    functions; they are checked in the top document only, not in frames.
+  - input during a navigation the page started (a script or a form): a key
+    or click sent meanwhile answers only once the new document has loaded
+    (Obscura #921): 1.5 s for a document that takes 1.5 s, where Chrome
+    answers in under 3 ms.
+  - shadow roots: its mouse events go to `document.elementFromPoint`, the
+    shadow host, so a press never reaches an element inside a shadow root.
+    navigera asks each engine it starts as a CDP server once, with a button
+    in a shadow root on its first tab; where the press stops at the host, a
+    `click` on an element inside one gets its pointer and mouse events from
+    the page (composed, so the host's listeners hear them too) once the
+    usual checks passed. A page that checks `isTrusted` sees them as false.
+  - its accessibility tree's root has no name and no URL, and
+    `Accessibility.getRootAXNode` answers nothing: `ax` reads the whole tree
+    and takes the title and URL from the page.
+  - its accessibility tree is the top document's light DOM only: no
+    shadow root's content and no frame's document. navigera asks each
+    engine it starts as a CDP server once whether an open shadow root's
+    button is in its tree; where it is not, `ax` lists what open shadow
+    roots and same-origin frames hold after the tree, under
+    `- shadow root of <tag>` and `- document of <iframe> "<title>"`,
+    without refs (target those elements with `--text`).
+  - a multiple `<select>` takes one option (`select --add` is refused), and
+    there is no `Clipboard` API.
+  - `eval`: Obscura runs a script it is asked to check for side effects, so
+    navigera can't tell a read from a change there and runs every `eval` as
+    an action (the page's change watch armed first), never as a read.
+- **`--engine moli`** (experimental; tested on Moli 1.1.27) starts
+  `moli serve --layout`: without `--layout` Moli answers geometry from a
+  fixed compatibility layout and paints nothing. The binary comes from
+  `$MOLI_BIN` or `PATH`, or from `--chromium`. Tabs, popups (as tabs),
+  dialogs and screenshots work as on Chrome. Differences:
+  - layout: Moli builds it at the first geometry read and keeps it until a
+    screenshot, so an element a script adds afterwards has no box and no
+    `innerText` there. navigera takes a 1x1 screenshot before it reads
+    boxes or text (an element op, `text`, `ax`, `eval`, each 100 ms of a
+    `wait`) when a document (the page's or a same-origin frame's), its DOM,
+    its scroll or its viewport changed since the last one: a whole layout,
+    1.7 ms on a small page, 157 ms on 4,500 nodes. Changes inside a shadow
+    root aren't counted, and an `eval` that changes the page and then reads
+    a box reads the layout from before its change.
+  - refs are Moli's node ids, large numbers (`[ref=2000000017]`).
+  - a `<select>`'s value in `ax` is the selected option's value, not its
+    label.
+  - roles in `ax`: a file input is `file` where Chrome says `button`, and a
+    `<details>` summary's toggle is `button` where Chrome says
+    `DisclosureTriangle`.
 
 ## Electron and natural mode
 
@@ -806,6 +880,11 @@ machine without a GPU still reports a software renderer).
 - `NAVIGERA_VERBOSE=1` turns on launch logs.
 - `NAVIGERA_CHROME_LOG=<file>` appends the browser's own stderr there.
 - `NAVIGERA_RSS_REPORT=1` prints navigera's peak memory when a `serve` ends.
+- `NAVIGERA_SCREENSHOT_RESEND_MS=<ms>`: how long a viewport screenshot waits
+  for Chrome's answer before asking again (default 400; Chrome can lose one
+  asked while the page replaces its document). Never for an element, a full
+  page or under `set viewport`/`set device`: two such captures at once leave
+  the tab emulated.
 - Off switches, for telling a navigera behaviour from the page's:
   `NAVIGERA_NO_NETWORK=1` (no Network domain: `network` stays empty and ops
   don't wait for data), `NAVIGERA_NO_CLICK_CHECK=1` (clicks don't watch what

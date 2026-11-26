@@ -94,11 +94,58 @@ struct Arrival {
     off: Option<String>,
     /// Read in the same round trip, once the press had arrived on the
     /// element: whether the page let the click's navigation go ahead (see
-    /// [`Page::nav_planned`]; the outer None: not asked, or not yet).
-    nav: Option<Option<bool>>,
+    /// [`Page::nav_planned`]; None: not asked, or not yet).
+    nav: Option<NavVerdict>,
     /// And the first look at what the click changed (see
     /// [`Page::click_effect`]).
     effect: Option<Value>,
+}
+
+/// What a click's navigation watch said (`armNav` in CLICK_PREP).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct NavVerdict {
+    /// Whether the page let the click's navigation go ahead; None when it
+    /// can't be told.
+    go: Option<bool>,
+    /// When it didn't and fields failed their checks (the browser keeps
+    /// such a form from being sent): the first three, as `field: message`.
+    invalid: Vec<String>,
+    /// How many more fields failed.
+    more: u64,
+}
+
+/// The page expression that reads [`NavVerdict`] once and stops the watch:
+/// true, false or null, or `{ invalid, more }` for a form whose fields
+/// failed their checks.
+const NAV_READ: &str = "(() => { const n = window.__nvNav; if (!n) return null; delete window.__nvNav; \
+    const v = n.verdict(); return v === false && n.bad.length ? { invalid: n.bad, more: n.badN - n.bad.length } : v; })()";
+
+impl NavVerdict {
+    fn from_page(v: Option<&Value>) -> Self {
+        match v {
+            Some(Value::Bool(b)) => Self { go: Some(*b), ..Self::default() },
+            Some(o @ Value::Object(_)) => Self {
+                go: Some(false),
+                invalid: o["invalid"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default(),
+                more: o["more"].as_u64().unwrap_or(0),
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+/// What a key press did ([`Page::press`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pressed {
+    /// It may load a new document: Enter on a link, a button, or in a form
+    /// whose submit the page let go or that can't be told.
+    pub may_navigate: bool,
+    /// Enter in a form whose fields failed their checks: `{ fields, more }`
+    /// (see `protocol::not_submitted`).
+    pub invalid: Option<Value>,
 }
 
 /// What an element op acts on.
@@ -309,6 +356,32 @@ pub const DEEP: &str = r#"(() => {
     };
 })()"#;
 
+/// The `invalid` listener of a navigation watch (`n`, its `on` and window
+/// `w` in scope): which fields failed their checks, the first three named
+/// as a person reads them (label, else aria-label or placeholder, else a
+/// selector) with the browser's own message, what to fix: `"First Name":
+/// Please fill out this field`. One copy for CLICK_PREP's `armNav`, Enter's
+/// watch ([`ENTER_MAY_NAVIGATE`]) and the WebDriver engines' `ARM_NAV`.
+macro_rules! invalid_listener_js {
+    () => {
+        r#"
+    on(w, 'invalid', (e) => {
+        n.invalid = true;
+        if (n.badN++ >= 3) return;
+        try {
+            const t = e.target, lab = t.labels && t.labels[0], id = t.getAttribute('name');
+            const name = ((lab && lab.innerText) || t.getAttribute('aria-label') || t.getAttribute('placeholder') || '')
+                .replace(/\s+/g, ' ').trim().slice(0, 40);
+            const who = name ? JSON.stringify(name)
+                : t.localName + (t.id ? '#' + t.id : id ? '[name=' + JSON.stringify(id) + ']' : '');
+            n.bad.push(who + ': ' + String(t.validationMessage || 'invalid').replace(/\.\s*$/, ''));
+        } catch (_) {}
+    });
+"#
+    };
+}
+pub(crate) use invalid_listener_js;
+
 /// Scroll the element into view and, if it is visible and actually receives
 /// a pointer event at its centre, return that point for a *trusted* CDP
 /// mouse event (`isTrusted: true`, default actions, focus, user activation
@@ -332,7 +405,8 @@ pub const DEEP: &str = r#"(() => {
 /// element and its ancestors (`__nvPath`), to tell whether anything
 /// listened for the click (see [`Page::wired_later`]); with `gel` (see
 /// [`GEL`]), counted as the press comes.
-const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button, effects, youngMs, gel) {
+const CLICK_PREP: &str = concat!(
+    r#"async function (el, force, settleMs, strict, button, effects, youngMs, gel, enabledMs) {
     const deadline = Date.now() + (force ? 0 : settleMs);
     // navigera's own listeners, told from the page's by PATH_LISTENERS.
     const ours = (f) => { f.__nv = true; return f; };
@@ -438,11 +512,13 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
     // one was planned. Unknown (null) when a listener ahead of these hid
     // the events: then the click waits, as before.
     const armNav = (w, form) => {
-        const n = { click: null, submit: null, invalid: false, planned: false, offs: [] };
+        const n = { click: null, submit: null, invalid: false, planned: false, offs: [], bad: [], badN: 0 };
         const on = (v, t, f) => { v.addEventListener(t, f, true); n.offs.push(() => v.removeEventListener(t, f, true)); };
         on(w, 'click', ours((e) => { if (!n.click) n.click = e; }));
         on(w, 'submit', (e) => { if (!n.submit) n.submit = e; });
-        on(w, 'invalid', () => { n.invalid = true; });
+        "#,
+    invalid_listener_js!(),
+    r#"
         // A handler that navigates by script (`location`, `form.submit()`).
         const api = w.navigation;
         if (api && api.addEventListener) {
@@ -646,7 +722,11 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         Object.defineProperty(top, '__nvFx', { value: fx, configurable: true, enumerable: false, writable: true });
     };
     const disabled = () => !!(el.disabled || el.closest('fieldset[disabled]'));
-    while (!force && disabled() && Date.now() < deadline) await new Promise((res) => setTimeout(res, 50));
+    // A disabled element is waited for the element wait, also where nothing
+    // moves (no layout: settleMs is 0): a "Load more" that reads "Loading…"
+    // got the click while disabled there, which did nothing and counted.
+    const enabledBy = Date.now() + (force ? 0 : (enabledMs ?? settleMs));
+    while (!force && disabled() && Date.now() < enabledBy) await new Promise((res) => setTimeout(res, 50));
     if (!force && strict && disabled()) return { disabled: true };
     const describe = (n) => {
         if (!n) return null;
@@ -915,7 +995,8 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
                 }
                 const nav = mayNavigate(el);
                 if (nav) armNav(w, !el.closest('a[href]'));
-                return Object.assign(p, { nav, check: true, effects: !!effects, young });
+                const shadow = !!el.getRootNode && el.getRootNode() !== el.ownerDocument;
+                return Object.assign(p, { nav, check: true, effects: !!effects, young, shadow });
             }
             // Inside a cross-origin frame: our coordinates are frame-local;
             // the caller asks CDP for the box instead.
@@ -969,7 +1050,8 @@ const CLICK_PREP: &str = r#"async function (el, force, settleMs, strict, button,
         el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, button: b, view }));
     }
     return { synthetic: true, covered: !!hit && !force, covered_by: hit && hit !== el ? describe(hit) : null, nav: mayNavigate(el) };
-}"#;
+}"#
+);
 
 /// Armed by [`Page::mark_action`] before an action runs: the DOM-change
 /// count's baseline for the settle proof (see [`Page::action_settle_wait`]),
@@ -1026,6 +1108,19 @@ const SETTLE_ARM: &str = r#"(() => {
     };
     return c.arm();
 })()"#;
+
+/// What decides whether [`Page::fresh_layout`] lays the page out again:
+/// the document (a random id kept in it), its DOM changes so far (a
+/// `MutationObserver` count; without one, a new value each time), its
+/// scroll and its viewport, and the same of each same-origin frame in it.
+/// Changes inside shadow roots aren't counted.
+const LAYOUT_TOKEN: &str = "(() => { const tok = (w) => { try { let c = w.__nvLay; if (!c) { c = { n: 0, id: Math.random() }; \
+     try { new w.MutationObserver((r) => { c.n += r.length; }).observe(w.document, \
+     { subtree: true, childList: true, characterData: true, attributes: true }); } catch (e) { c.n = NaN; } \
+     Object.defineProperty(w, '__nvLay', { value: c, configurable: true, enumerable: false }); } \
+     let s = [c.id, Number.isNaN(c.n) ? Math.random() : c.n, w.scrollX, w.scrollY, w.innerWidth, w.innerHeight].join(' '); \
+     for (let i = 0; i < w.frames.length; i++) s += '|' + tok(w.frames[i]); return s; } catch (e) { return 'x'; } }; \
+     return tok(window); })()";
 
 /// [`SETTLE_ARM`] again in a document that has it: the kept function, or
 /// -1 when the document has none (a new one, or the counter stopped).
@@ -3202,6 +3297,10 @@ fn shifted_char(c: char) -> char {
 
 /// Does Enter on the focused element (through open shadow roots and
 /// same-origin frames) possibly navigate? Form controls, links, buttons.
+/// In a form (implicit submission, or its button) "form": the submit is
+/// watched as a click's is (CLICK_PREP's `armNav`, read with [`NAV_READ`]),
+/// so [`Page::press`] knows when the page handled it or the form's checks
+/// held it back, and has no navigation to wait for.
 /// What open shadow roots hold, for an engine whose accessibility tree leaves
 /// them out (Lightpanda: neither its AX tree nor `DOM.getDocument` with
 /// `pierce` reaches inside one, and `DOM.describeNode` refuses a node there,
@@ -3209,7 +3308,7 @@ fn shifted_char(c: char) -> char {
 /// live region: `{host, tag, role, name, value?, checked?, level?}`, `host`
 /// numbering the shadow roots in document order. `scope` limits it to roots
 /// under the element a selector names.
-const SHADOW_AX: &str = r#"(scope) => {
+const SHADOW_AX: &str = r#"(scope, withFrames) => {
   const top = scope ? document.querySelector(scope) : document;
   if (!top) return [];
   const out = [];
@@ -3261,9 +3360,17 @@ const SHADOW_AX: &str = r#"(scope) => {
     try { return getComputedStyle(el).display === 'none'; } catch (e) { return false; }
   };
   let hosts = 0;
-  const visit = (root, host, tag) => {
+  const visit = (root, host, tag, frame) => {
     for (const el of root.querySelectorAll('*')) {
-      if (el.shadowRoot) visit(el.shadowRoot, ++hosts, el.localName);
+      if (el.shadowRoot) visit(el.shadowRoot, ++hosts, el.localName, null);
+      if (withFrames && (el.localName === 'iframe' || el.localName === 'frame') && !hidden(el)) {
+        let doc = null;
+        try { doc = el.contentDocument; } catch (e) {}
+        if (doc && doc.documentElement) {
+          const label = squash(el.getAttribute('title') || el.getAttribute('name') || el.getAttribute('src') || '');
+          visit(doc, ++hosts, el.localName, label);
+        }
+      }
       if (host === 0 || out.length >= 200) continue;
       try {
         const role = roleOf(el);
@@ -3272,6 +3379,7 @@ const SHADOW_AX: &str = r#"(scope) => {
         const live = /^(status|alert|log)$/.test(role);
         if (live && !name) continue;
         const entry = { host, tag, role, name };
+        if (frame !== null) entry.frame = frame;
         if (/^(textbox|searchbox|spinbutton|combobox|slider)$/.test(role) && el.value) entry.value = String(el.value);
         if (role === 'checkbox' || role === 'radio') entry.checked = !!el.checked;
         if (role === 'heading') entry.level = +el.tagName.slice(1) || 2;
@@ -3279,11 +3387,12 @@ const SHADOW_AX: &str = r#"(scope) => {
       } catch (e) {}
     }
   };
-  visit(top, 0, '');
+  visit(top, 0, '', null);
   return out;
 }"#;
 
-const ENTER_MAY_NAVIGATE: &str = r#"(() => {
+const ENTER_MAY_NAVIGATE: &str = concat!(
+    r#"(() => {
     let e = document.activeElement;
     for (;;) {
         if (e && e.shadowRoot && e.shadowRoot.activeElement) { e = e.shadowRoot.activeElement; continue; }
@@ -3296,6 +3405,44 @@ const ENTER_MAY_NAVIGATE: &str = r#"(() => {
     }
     if (!e || e === document.body) return false;
     const nav = !!(e.form || e.closest('a[href], button, [role=button], [role=link]'));
+    // A form that loads its answer in this tab (another tab, or a frame's
+    // own document, is waited for as before). Only what the page is seen
+    // to do decides: a submit it lets go, one it cancels, a form whose
+    // checks failed; Enter in a textarea writes a line, so there only a
+    // script submits. Anything else: can't be told, waited for as before.
+    const f = e.form, fw = e.ownerDocument.defaultView;
+    const ft = f && ((e.getAttribute('formtarget') || f.getAttribute('target') || '').toLowerCase());
+    if (f && fw && fw === fw.top && (!ft || ft === '_self' || ft === '_top' || ft === '_parent')) {
+        const w = fw;
+        if (w.__nvNav && w.__nvNav.off) w.__nvNav.off();
+        const n = { submit: null, invalid: false, planned: false, offs: [], bad: [], badN: 0 };
+        const on = (v, t, fn) => { v.addEventListener(t, fn, true); n.offs.push(() => v.removeEventListener(t, fn, true)); };
+        on(w, 'submit', (ev) => { if (!n.submit) n.submit = ev; });
+"#,
+    invalid_listener_js!(),
+    r#"
+        const api = w.navigation;
+        if (api && api.addEventListener) {
+            on(api, 'navigate', (ev) => { if (!(ev.destination && ev.destination.sameDocument)) n.planned = true; });
+        }
+        const F = w.HTMLFormElement && w.HTMLFormElement.prototype, submit = F && F.submit;
+        if (typeof submit === 'function') {
+            const mine = function () { n.planned = true; return submit.apply(this, arguments); };
+            F.submit = mine;
+            n.offs.push(() => { if (F.submit === mine) F.submit = submit; });
+        }
+        const line = e.localName === 'textarea';
+        n.off = () => { for (const off of n.offs.splice(0)) off(); };
+        setTimeout(n.off, 10000);
+        n.verdict = () => {
+            n.off();
+            if (n.planned) return true;
+            if (n.submit) return !n.submit.defaultPrevented;
+            return n.invalid || line ? false : null;
+        };
+        Object.defineProperty(w, '__nvNav', { value: n, configurable: true, enumerable: false, writable: true });
+        return 'form';
+    }
     // Enter on a link to a fragment of its own document: armed as a
     // click's is (CLICK_PREP's `__nvHash`), and "hash" says so, for
     // `Page::press` to wait until the page's `hashchange` listeners ran.
@@ -3324,7 +3471,8 @@ const ENTER_MAY_NAVIGATE: &str = r#"(() => {
     Object.defineProperty(top, '__nvHash', { value: hash, configurable: true, enumerable: false, writable: true });
     setTimeout(hash.off, 10000);
     return 'hash';
-})()"#;
+})()"#
+);
 
 fn modifier_bit(name: &str) -> Option<u32> {
     match name.to_ascii_lowercase().as_str() {
@@ -3651,9 +3799,16 @@ pub struct Page {
     primed: Arc<std::sync::Mutex<Option<u64>>>,
     /// The journal of the last [`Page::pre_read`] (0: none yet).
     pre_journal: Arc<std::sync::atomic::AtomicU64>,
+    /// What [`LAYOUT_TOKEN`] read when [`Page::fresh_layout`] last had the
+    /// page laid out again.
+    layout_token: Arc<std::sync::Mutex<Option<String>>>,
     /// The navigation generation whose document holds the settle arm, plus
     /// one (0: none known); see [`SETTLE_REARM`].
     armed_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Whether this tab has a device metrics override (`set viewport`, `set
+    /// device`, or one sent with `cdp`): Chrome then emulates for every
+    /// capture, so none is asked twice at once (see [`Page::screenshot_clip`]).
+    metrics: Arc<std::sync::atomic::AtomicBool>,
     /// The top document's global object, to call navigera's own functions
     /// on (see [`Page::call_fn`]): the navigation generation it was asked
     /// for in, and its object id.
@@ -3834,7 +3989,39 @@ impl Page {
             primed: Default::default(),
             pre_journal: Default::default(),
             armed_generation: Default::default(),
+            metrics: Default::default(),
+            layout_token: Default::default(),
         }
+    }
+
+    /// The engine keeps its first layout until a screenshot (Moli 1.1.27,
+    /// see [`super::events::LAYOUT_SHOT`]).
+    pub fn layout_kept(&self) -> bool {
+        self.shared.layout_mode.load(std::sync::atomic::Ordering::Relaxed) == super::events::LAYOUT_SHOT
+    }
+
+    /// Before a read of the page's boxes or text on an engine that keeps
+    /// its first layout until a screenshot: lay the page out again with a
+    /// 1x1 screenshot, only when the document, its DOM (a change count),
+    /// its scroll or its viewport changed since the last time (it costs a
+    /// layout of the whole page: 157 ms on 4,505 nodes on Moli 1.1.27).
+    /// Nothing elsewhere. True when it did.
+    pub fn fresh_layout(&self, timeout: Duration) -> bool {
+        if !self.layout_kept() {
+            return false;
+        }
+        let started = std::time::Instant::now();
+        let Ok(token) = self.evaluate_raw(LAYOUT_TOKEN, timeout) else { return false };
+        let token = token.to_string();
+        if self.layout_token.lock().unwrap().as_deref() == Some(token.as_str()) {
+            return false;
+        }
+        if self.send("Page.captureScreenshot", super::events::layout_shot_params(), timeout).is_err() {
+            return false;
+        }
+        crate::timing::record("layout_refresh", started);
+        *self.layout_token.lock().unwrap() = Some(token);
+        true
     }
 
     /// Remember what a snapshot's refs were (see [`Page::refind`]).
@@ -4414,11 +4601,24 @@ impl Page {
         let timeout = if self.stalled.load(Ordering::SeqCst) { timeout.min(STALLED_WAIT) } else { timeout };
         let res = self.send_once(method, params, timeout);
         match &res {
-            Ok(_) => self.stalled.store(false, Ordering::SeqCst),
+            Ok(_) => {
+                self.stalled.store(false, Ordering::SeqCst);
+                self.note_metrics(method);
+            }
             Err(e) if format!("{e:#}").contains(super::client::NO_ANSWER) => self.stalled.store(true, Ordering::SeqCst),
             Err(_) => {}
         }
         res
+    }
+
+    /// Keeps [`Page::metrics`] after a call this tab answered.
+    fn note_metrics(&self, method: &str) {
+        let on = match method {
+            "Emulation.setDeviceMetricsOverride" => true,
+            "Emulation.clearDeviceMetricsOverride" => false,
+            _ => return,
+        };
+        self.metrics.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn send_once(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
@@ -4474,7 +4674,13 @@ impl Page {
         let mut rx = (!listen.is_empty()).then(|| self.client.subscribe());
         let session = (!browser).then_some(self.session_id.as_str());
         let result = match method {
-            Some(m) => Some(self.block_on(self.client.send(m, params, session, timeout))?),
+            Some(m) => {
+                let r = self.block_on(self.client.send(m, params, session, timeout))?;
+                if !browser {
+                    self.note_metrics(m);
+                }
+                Some(r)
+            }
             None => None,
         };
         let (mut events, mut dropped, mut lagged) = (Vec::new(), 0usize, 0u64);
@@ -4520,6 +4726,22 @@ impl Page {
     /// evaluate to their value.
     pub fn evaluate(&self, expression: &str, timeout: Duration) -> Result<Value> {
         self.evaluate_raw(&call_if_function(expression), timeout)
+    }
+
+    /// Whether this engine refuses, under `throwOnSideEffect`, what would
+    /// change the page, as V8 does with an `EvalError`. Obscura 0.2.7 reads
+    /// no such parameter and runs the script. Asked with a write to the
+    /// global `undefined`, which is not writable: a checking engine refuses
+    /// it, and where the script runs it changes nothing, so the page sees
+    /// nothing either way. Any other answer (another exception, a value)
+    /// counts as not checking.
+    pub fn checks_side_effects(&self, timeout: Duration) -> Result<bool> {
+        let res = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": "globalThis.undefined = undefined", "returnByValue": true, "throwOnSideEffect": true }),
+            timeout,
+        )?;
+        Ok(res.pointer("/exceptionDetails/exception/className").and_then(Value::as_str) == Some("EvalError"))
     }
 
     /// [`Self::evaluate`] for a read: run only if V8 can show the expression
@@ -5312,6 +5534,7 @@ impl Page {
         wait: Duration,
         timeout: Duration,
     ) -> Result<Value> {
+        self.fresh_layout(timeout);
         let arg_list: Vec<String> = args.iter().map(|v| plain_arg(v).to_string()).collect();
         let extra = if arg_list.is_empty() { String::new() } else { format!(", {}", arg_list.join(", ")) };
         let wait_ms = wait_budget_ms(wait, timeout);
@@ -5703,6 +5926,11 @@ impl Page {
             _ => None,
         };
         let gel = gel.as_deref().map_or(Value::Null, object_arg);
+        // How long a disabled element is waited for: the element wait. On
+        // Chrome that is the settle wait CLICK_PREP falls back to (also when
+        // a cover is looked at again with what is left of it); with no
+        // layout there is no settle wait, so it is given on its own.
+        let enabled = if self.shared.is_single_target() { json!(wait.as_millis() as u64) } else { Value::Null };
         let prep = |settle: &Value| {
             self.on_element(
                 target,
@@ -5716,12 +5944,19 @@ impl Page {
                     json!(effects),
                     json!(young_ms),
                     gel.clone(),
+                    enabled.clone(),
                 ],
                 wait,
                 timeout,
             )
         };
         let mut point = prep(&settle)?;
+        // An engine that keeps its first layout (Moli) shows no box for an
+        // element a script added while the click waited for it: once more
+        // after laying the page out again, with no second wait.
+        if point.get("hidden").and_then(Value::as_bool) == Some(true) && self.fresh_layout(timeout) {
+            point = prep(&json!(0))?;
+        }
         // A cover with controls that stayed put is reported early, unless
         // the page is still fetching: then it may be a loading overlay
         // about to go, and the rest of the element wait is spent on it.
@@ -5817,6 +6052,22 @@ impl Page {
         let armed = point.get("effects").and_then(Value::as_bool) == Some(true);
         let young = point.get("young").and_then(Value::as_bool) == Some(true);
         let nav = point.get("nav").and_then(Value::as_bool) == Some(true);
+        if point.get("shadow").and_then(Value::as_bool) == Some(true)
+            && self.shared.press_shadow_mode.load(std::sync::atomic::Ordering::Relaxed)
+                == super::events::PRESS_SHADOW_PAGE
+        {
+            // This engine's press stops at the shadow host: the element's
+            // own events come from the page, its checks above passed.
+            if armed {
+                self.drop_effects(timeout);
+            }
+            if nav {
+                self.nav_planned(timeout);
+            }
+            let mut res = dom(self)?;
+            res["shadow_page"] = json!(true);
+            return Ok(res);
+        }
         let before = (self.shared.activity(&self.session_id), self.shared.logs.lock().unwrap().requests_started());
         let pressed_at = Instant::now();
         match self.mouse_click(&point, &opts.button, timeout) {
@@ -5901,11 +6152,17 @@ impl Page {
             // The page has already reacted to this press: not pressed again.
             point["click_off"] = json!(on);
         }
-        if nav && nav_read.unwrap_or_else(|| self.nav_planned(timeout)) == Some(false) {
-            // The page cancelled what the click would have loaded (a
-            // router's link, a submit a script handles) or the form failed
-            // validation: no navigation to wait for.
-            point["nav"] = json!(false);
+        if nav {
+            let verdict = nav_read.unwrap_or_else(|| self.nav_planned(timeout));
+            if verdict.go == Some(false) {
+                // The page cancelled what the click would have loaded (a
+                // router's link, a submit a script handles) or the form
+                // failed validation: no navigation to wait for.
+                point["nav"] = json!(false);
+            }
+            if !verdict.invalid.is_empty() {
+                point["invalid"] = json!({ "fields": verdict.invalid, "more": verdict.more });
+            }
         }
         if armed {
             let effect = self.click_effect(&before, first_effect, timeout);
@@ -6092,18 +6349,10 @@ impl Page {
     }
 
     /// Did the click on a link or a submit button plan a navigation (see
-    /// `armNav` in CLICK_PREP)? Stops watching. None when it can't be told.
-    fn nav_planned(&self, timeout: Duration) -> Option<bool> {
-        self.send(
-            "Runtime.evaluate",
-            json!({
-                "expression": "(() => { const n = window.__nvNav; if (!n) return null; delete window.__nvNav; return n.verdict(); })()",
-                "returnByValue": true,
-            }),
-            timeout,
-        )
-        .ok()
-        .and_then(|r| r.pointer("/result/value").and_then(Value::as_bool))
+    /// `armNav` in CLICK_PREP)? Stops watching.
+    fn nav_planned(&self, timeout: Duration) -> NavVerdict {
+        let read = self.send("Runtime.evaluate", json!({ "expression": NAV_READ, "returnByValue": true }), timeout);
+        NavVerdict::from_page(read.ok().as_ref().and_then(|r| r.pointer("/result/value")))
     }
 
     /// Stop watching a click's effects (see [`Page::click_effect`]).
@@ -6156,11 +6405,7 @@ impl Page {
             let also = if more {
                 format!(
                     ", (window.__nvSeen !== 0 && !window.__nvMissed) ? [{}, {}] : null",
-                    if nav {
-                        "(() => { const n = window.__nvNav; if (!n) return null; delete window.__nvNav; return n.verdict(); })()"
-                    } else {
-                        "0"
-                    },
+                    if nav { NAV_READ } else { "0" },
                     if effect { "(window.__nvFx ? window.__nvFx.check(false) : null)" } else { "0" },
                 )
             } else {
@@ -6184,7 +6429,7 @@ impl Page {
                     }
                     if let Some(read) = v.and_then(|v| v.get(4)).and_then(Value::as_array).filter(|_| more) {
                         if nav {
-                            nav_read = Some(read.first().and_then(Value::as_bool));
+                            nav_read = Some(NavVerdict::from_page(read.first()));
                         }
                         if effect {
                             first_effect = read.get(1).cloned();
@@ -7003,25 +7248,15 @@ impl Page {
 
     /// Focus `target` (if any), then press a key or chord like `Enter`,
     /// `Control+a`, `Shift+Tab`.
-    /// Press a key or chord. Returns true when the key may start a
-    /// navigation (Enter on a form field, link or button), so the caller
-    /// knows to wait for one; other keys cost no navigation grace.
-    pub fn press(&self, target: Option<&Target>, chord: &str, wait: Duration, timeout: Duration) -> Result<bool> {
+    /// Says whether the key may start a navigation (Enter on a form field,
+    /// link or button, unless the page handled the form's submit or its
+    /// checks held it back), so the caller knows to wait for one; other
+    /// keys cost no navigation grace. And the fields that failed.
+    pub fn press(&self, target: Option<&Target>, chord: &str, wait: Duration, timeout: Duration) -> Result<Pressed> {
         if let Some(target) = target {
             self.on_element(target, "press", FOCUS_EL, &[], wait, timeout)?;
         }
         let enter = matches!(chord.to_ascii_lowercase().as_str(), "enter" | "return");
-        // Enter navigates only from a form control, a link or a button.
-        // (Cross-origin frames hide their focus: assume it might.)
-        let (may_navigate, hash) = if enter {
-            match self.evaluate_raw(ENTER_MAY_NAVIGATE, timeout).ok() {
-                Some(Value::Bool(b)) => (b, false),
-                Some(Value::String(s)) if s == "hash" => (true, true),
-                _ => (true, false),
-            }
-        } else {
-            (false, false)
-        };
         let parts: Vec<&str> = chord.split('+').filter(|p| !p.is_empty()).collect();
         let parts = if chord.ends_with("++") || chord == "+" {
             let mut p = parts;
@@ -7052,6 +7287,19 @@ impl Page {
         };
         // With Control/Alt/Meta held the key produces no text (a shortcut).
         let text = if modifiers & (1 | 2 | 4) != 0 { None } else { text };
+        // Enter navigates only from a form control, a link or a button.
+        // (Cross-origin frames hide their focus: assume it might.) Asked
+        // once the key is known to be sent: a form's watch is read after.
+        let (may_navigate, hash, form) = if enter {
+            match self.evaluate_raw(ENTER_MAY_NAVIGATE, timeout).ok() {
+                Some(Value::Bool(b)) => (b, false, false),
+                Some(Value::String(s)) if s == "hash" => (true, true, false),
+                Some(Value::String(s)) if s == "form" => (true, false, true),
+                _ => (true, false, false),
+            }
+        } else {
+            (false, false, false)
+        };
         let mut down = json!({
             "type": if text.is_some() { "keyDown" } else { "rawKeyDown" },
             "key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers,
@@ -7060,19 +7308,30 @@ impl Page {
             down["text"] = json!(t);
             down["unmodifiedText"] = json!(t);
         }
-        self.send("Input.dispatchKeyEvent", down, timeout)?;
-        self.send(
-            "Input.dispatchKeyEvent",
-            json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers }),
-            timeout,
-        )?;
+        let sent = self.send("Input.dispatchKeyEvent", down, timeout).and_then(|_| {
+            self.send(
+                "Input.dispatchKeyEvent",
+                json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers }),
+                timeout,
+            )
+        });
+        // The form's watch: what the page did with the submit (and stop
+        // watching, the key sent or not).
+        let verdict = form.then(|| self.nav_planned(timeout));
+        sent?;
         // A hash-routed page renders the view the link names in its
         // `hashchange` listener, a task after the URL changed: a read right
         // after the press saw the old view (25 reads in 39 here).
         if hash {
             self.hash_settled(timeout);
         }
-        Ok(may_navigate)
+        let Some(verdict) = verdict else {
+            return Ok(Pressed { may_navigate, invalid: None });
+        };
+        Ok(Pressed {
+            may_navigate: verdict.go != Some(false),
+            invalid: (!verdict.invalid.is_empty()).then(|| json!({ "fields": verdict.invalid, "more": verdict.more })),
+        })
     }
 
     /// Type text key by key into `target` (or the focused element): real
@@ -7179,6 +7438,7 @@ impl Page {
 
     /// The page's whole text as it reads (`innerText` of the body).
     pub fn page_text(&self, timeout: Duration) -> Result<String> {
+        self.fresh_layout(timeout);
         let value = self
             .evaluate_raw(&ascii_safe("(document.body || document.documentElement || {}).innerText ?? ''"), timeout)?;
         Ok(from_ascii_safe(value)?.as_str().unwrap_or_default().to_string())
@@ -7189,6 +7449,7 @@ impl Page {
     /// it is not rendered (hidden, a script, or an engine without layout).
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
+        self.fresh_layout(timeout);
         // Code and styles inside the element aren't text a user reads (an
         // element that is itself a script, e.g. a JSON blob, keeps its own).
         let value = self.evaluate_raw(
@@ -7277,6 +7538,7 @@ impl Page {
             Some(q) => json!({ "format": "jpeg", "quality": q }),
             None => json!({ "format": "png" }),
         };
+        let emulated = full_page || clip.is_some() || self.metrics.load(std::sync::atomic::Ordering::Relaxed);
         if full_page || clip.is_some() {
             params["captureBeyondViewport"] = Value::Bool(true);
         }
@@ -7286,17 +7548,35 @@ impl Page {
         }
         // A capture asked for while the page is replacing its document (a click
         // that confirm()s, posts and reloads) can be lost: Chrome never answers it,
-        // and the next capture works at once. So with no answer after 400 ms it is
-        // asked for again, and whichever answers first is taken: a slow capture
-        // that is only slow (a long full page) still answers in its own time.
+        // and the next capture works at once. So with no answer after 400 ms
+        // ($NAVIGERA_SCREENSHOT_RESEND_MS) it is asked for again, and whichever
+        // answers first is taken: a slow capture that is only slow still answers
+        // in its own time.
+        //
+        // Not a capture Chrome emulates for: a clip, a full page, or any capture
+        // under a device metrics override. Chrome sets the emulation for it and
+        // keeps what was set before, to put back after; a second capture asked
+        // while the first is out keeps the FIRST capture's emulation as "before"
+        // and puts that back, so the tab stays emulated, across navigations too.
+        // Seen on macOS with a just-launched Chrome, where an element shot can
+        // take over 400 ms: the next page's viewport captures came out blank
+        // white, the page shown 1,500 px down (44 of 89 runs with an element
+        // shot before a navigation, each with that shot over 400 ms; 0 of 121
+        // runs without). Forcing the second capture does the same on Linux.
+        let resend = Duration::from_millis(
+            std::env::var("NAVIGERA_SCREENSHOT_RESEND_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(400),
+        );
         let started = std::time::Instant::now();
         let session = Some(self.session_id.as_str());
         let res = self.block_on(async {
             let first = self.client.send("Page.captureScreenshot", params.clone(), session, timeout);
+            if emulated {
+                return first.await;
+            }
             tokio::pin!(first);
             tokio::select! {
                 r = &mut first => return r,
-                _ = tokio::time::sleep(timeout.min(Duration::from_millis(400))) => {}
+                _ = tokio::time::sleep(timeout.min(resend)) => {}
             }
             let left = timeout.saturating_sub(started.elapsed());
             if left.is_zero() {
@@ -8201,6 +8481,23 @@ impl Page {
     }
 
     fn ax_tree_inner(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        let tree = self.ax_tree_read(timeout, opts)?;
+        // An engine whose tree leaves shadow roots out (Obscura 0.2.7, see
+        // `events::AX_SHADOW_PAGE`): what they hold is listed from the page,
+        // and the documents of frames too where no `Iframe` line holds one.
+        let page_side =
+            self.shared.ax_shadow_mode.load(std::sync::atomic::Ordering::Relaxed) == super::events::AX_SHADOW_PAGE;
+        match tree {
+            Value::String(text) if page_side && !opts.json => {
+                let frames = !text.lines().any(|l| l.trim_start().starts_with("- Iframe") && l.ends_with(':'));
+                Ok(Value::String(self.page_side_ax(text, opts, frames, timeout)))
+            }
+            tree => Ok(tree),
+        }
+    }
+
+    fn ax_tree_read(&self, timeout: Duration, opts: &AxOptions) -> Result<Value> {
+        self.fresh_layout(timeout);
         // Only a read that arms a journal leaves one standing for itself,
         // and its snapshot.
         *self.journal.lock().unwrap() = None;
@@ -8778,7 +9075,13 @@ impl Page {
         };
         // The page's root, for the header line (and, unscoped, the seed).
         let main_root = self.send("Accessibility.getRootAXNode", json!({}), timeout)?;
-        let main_root = main_root.get("node").cloned().unwrap_or(Value::Null);
+        let main_root = match main_root.get("node") {
+            Some(node) if node.is_object() => node.clone(),
+            // An engine that answers without a root (Obscura 0.2.7: `{}`,
+            // as it answers getChildAXNodes) would print an empty tree:
+            // read the full tree instead.
+            _ => bail!("Accessibility.getRootAXNode answered no node"),
+        };
         let (seed, scoped_backend) = match root_backend_id {
             Some(backend) => {
                 let res = self.send("Accessibility.getPartialAXTree", json!({ "backendNodeId": backend }), timeout)?;
@@ -8894,13 +9197,21 @@ impl Page {
             }
         };
         let root = nodes.iter().find(|n| n.get("parentId").is_none());
-        let title = root.map(|n| ax_str(n, "name").to_string()).unwrap_or_default();
-        let url = root
+        let mut title = root.map(|n| ax_str(n, "name").to_string()).unwrap_or_default();
+        let mut url = root
             .and_then(|n| n.get("properties").and_then(Value::as_array))
             .and_then(|props| props.iter().find(|p| p.get("name").and_then(Value::as_str) == Some("url")))
             .and_then(|p| p.get("value").and_then(|v| v.get("value")).and_then(Value::as_str))
             .unwrap_or_default()
             .to_string();
+        if title.is_empty() && url.is_empty() {
+            // A root node with neither (Obscura 0.2.7): the page's own, for
+            // the header and for the links the tree prints against its URL.
+            if let Ok(page) = self.evaluate_raw("[document.title, location.href]", timeout) {
+                title = page[0].as_str().unwrap_or_default().to_string();
+                url = page[1].as_str().unwrap_or_default().to_string();
+            }
+        }
         let (origin, page) = ax::origin_and_page(&url);
         let root_backend_id = match &opts.scope {
             Some(target) => Some(self.backend_id(target, DEFAULT_ELEMENT_WAIT, timeout)?),
@@ -8925,25 +9236,35 @@ impl Page {
         crate::timing::record("ax_render", started);
         self.remember_refs(&rendered.refs, &url, root_backend_id);
         let mut text = rendered.text;
-        // Lightpanda's tree stops at a shadow root; what is inside is read
-        // from the page instead, without refs (see SHADOW_AX).
-        let scope = match &opts.scope {
-            None => Some(Value::Null),
-            Some(Target::Selector(sel)) => Some(json!(sel)),
-            Some(_) => None,
-        };
-        if let (true, Some(scope)) = (self.shared.is_single_target(), scope) {
-            if let Ok(Value::Array(found)) = self.evaluate_raw(&format!("({SHADOW_AX})({scope})"), timeout) {
-                let shadow = ax::render_shadow(&found);
-                if !shadow.is_empty() {
-                    if !text.ends_with('\n') {
-                        text.push('\n');
-                    }
-                    text.push_str(shadow.trim_end());
-                }
-            }
+        // Lightpanda's tree stops at a shadow root: what is inside is read
+        // from the page instead (see `page_side_ax`).
+        if self.shared.is_single_target() {
+            text = self.page_side_ax(text, opts, false, timeout);
         }
         Ok(Value::String(text))
+    }
+
+    /// `text` with what open shadow roots (and, with `frames`, same-origin
+    /// frames' documents) hold appended, read from the page without refs
+    /// (see SHADOW_AX): for an engine whose tree has no such nodes.
+    fn page_side_ax(&self, mut text: String, opts: &AxOptions, frames: bool, timeout: Duration) -> String {
+        let scope = match &opts.scope {
+            None => Value::Null,
+            Some(Target::Selector(sel)) => json!(sel),
+            Some(_) => return text,
+        };
+        let started = std::time::Instant::now();
+        if let Ok(Value::Array(found)) = self.evaluate_raw(&format!("({SHADOW_AX})({scope}, {frames})"), timeout) {
+            let shadow = ax::render_shadow(&found);
+            if !shadow.is_empty() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(shadow.trim_end());
+            }
+        }
+        crate::timing::record("ax_page_side", started);
+        text
     }
 
     /// Close this tab the way a user (and Playwright) does: `Page.close` on

@@ -1127,6 +1127,16 @@ const UNTIL_GONE_MAX: u32 = 50;
 /// flight for this long is not waiting for one.
 const DISABLED_QUIET: Duration = Duration::from_millis(500);
 
+/// What a page shows and holds, hashed in the page: its text, its form
+/// controls' values and states, its URL. `click --until-gone` compares it
+/// around a click on an engine whose clicks navigera does not watch
+/// (Lightpanda), to tell a click that changed nothing.
+const PAGE_SIGNATURE: &str = "(() => { const d = document; \
+    const t = (d.body ? d.body.textContent : '') + '\\u0000' + location.href + '\\u0000' + \
+    [...d.querySelectorAll('input, select, textarea')].map((e) => e.type === 'checkbox' || e.type === 'radio' ? e.checked : e.value).join('\\u0001'); \
+    let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } \
+    return t.length + ':' + (h >>> 0); })()";
+
 /// `until_gone` in JSON: `true` for the default limit, or the limit.
 fn until_gone_limit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
     use serde::de::Error;
@@ -1220,6 +1230,11 @@ fn check_profile_flags(config: &SessionConfig) -> Result<(), String> {
 /// `--attach` takes an optional value; the default is the user's running
 /// browser, whichever serves remote debugging (`--auto-connect` too).
 const DEFAULT_ATTACH: &str = crate::cdp::attach::AUTO;
+
+/// What `--engine` takes (`panda` is Lightpanda's short name; `webdriver`
+/// is what `--webdriver` sets, and may be given by hand).
+const KNOWN_ENGINES: &[&str] =
+    &["chrome", "lightpanda", "panda", "obscura", "moli", "firefox", "safari", "safari-preview", "webdriver"];
 
 /// `--tab <current|new>`: where an attached session starts.
 fn parse_start_tab(raw: &str) -> Result<bool, String> {
@@ -1514,7 +1529,11 @@ pub fn usage_full(program: &str) -> String {
             "--wait-ms <ms>",
             "how long an element command waits for its element (default 5000): on `start`, for the session; on one command, for that command".into(),
         ),
-        ("--chromium <path>", "the browser binary ($CHROME_BIN; --executable for any engine); --engine lightpanda ($NAVIGERA_ENGINE); --headed".into()),
+        ("--chromium <path>", "the browser binary ($CHROME_BIN; --executable for any engine); --headed".into()),
+        (
+            "--engine lightpanda|obscura|moli",
+            "experimental headless engines that are their own CDP server, started as `<engine> serve` ($NAVIGERA_ENGINE; the binary from --chromium, $LIGHTPANDA_BIN / $OBSCURA_BIN / $MOLI_BIN, or PATH); Lightpanda has one tab and no layout".into(),
+        ),
         (
             "--engine firefox|safari|safari-preview",
             "experimental WebDriver engines: Firefox over WebDriver BiDi ($NAVIGERA_FIREFOX), Safari through safaridriver on macOS (run `safaridriver --enable` once; safari-preview: Safari Technology Preview). They do the core ops (goto, ax, click, fill, select, check, press, type, text, eval, wait, screenshot, tabs, cookies, console, dialogs); a Chrome-only op says to use --engine chrome".into(),
@@ -1716,8 +1735,11 @@ fn check_electron_flags(config: &SessionConfig) -> Result<(), String> {
     if config.electron.is_some() && (config.attach.is_some() || config.profile.is_some()) {
         return Err("--electron, --attach and --profile are alternatives: pick one".into());
     }
-    if config.electron.is_some() && crate::browser::is_lightpanda(&config.engine) {
-        return Err("--electron runs an Electron app; --engine lightpanda is a browser of its own".into());
+    if config.electron.is_some() && crate::browser::is_cdp_server(&config.engine) {
+        return Err(format!(
+            "--electron runs an Electron app; --engine {} is a browser of its own",
+            config.engine.trim()
+        ));
     }
     Ok(())
 }
@@ -1890,8 +1912,8 @@ fn consume_globals(args: &mut std::collections::VecDeque<String>, config: &mut S
     if config.attach.is_some() && config.profile.is_some() {
         return Err("--attach and --profile are alternatives: pick one".into());
     }
-    if (config.attach.is_some() || config.profile.is_some()) && crate::browser::is_lightpanda(&config.engine) {
-        return Err("--attach/--profile drive Chrome; drop --engine lightpanda".into());
+    if (config.attach.is_some() || config.profile.is_some()) && crate::browser::is_cdp_server(&config.engine) {
+        return Err(format!("--attach/--profile drive Chrome; drop --engine {}", config.engine.trim()));
     }
     Ok(())
 }
@@ -2315,6 +2337,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs,
     }
     if config.capabilities.is_none() {
         config.capabilities = std::env::var("NAVIGERA_CAPABILITIES").ok().filter(|v| !v.trim().is_empty());
+    }
+    config.engine = config.engine.trim().to_ascii_lowercase();
+    if !KNOWN_ENGINES.contains(&config.engine.as_str()) {
+        return invalid(format!(
+            "--engine takes chrome, lightpanda, obscura, moli, firefox, safari or safari-preview, not {:?}",
+            config.engine
+        ));
     }
     if config.webdriver.is_some() && config.engine == "chrome" {
         config.engine = "webdriver".into();
@@ -5551,7 +5580,19 @@ impl Driver {
         let wait =
             timeout_ms.map(|ms| Duration::from_secs_f64(ms / 1000.0)).unwrap_or_else(crate::browser::element_wait);
         let mut clicks = 1;
+        // Lightpanda's clicks are DOM events navigera does not watch, so no
+        // `no_effect` comes back: the page before a click (the second on),
+        // compared once what the click fetched has landed.
+        let unwatched = s.is_lightpanda();
+        let mut before: Option<String> = None;
         loop {
+            if let Some(before) = before.take() {
+                let window = s.network_quiet_window().min(AFTER_ACTION_QUIET);
+                s.action_settle_wait(window, NETWORK_QUIET_MAX);
+                if s.evaluate_with_timeout::<String>(PAGE_SIGNATURE, timeout_ms).ok().as_ref() == Some(&before) {
+                    return (clicks, format!("click {clicks} changed nothing on the page"));
+                }
+            }
             if point.get("no_effect").is_some() {
                 // The first click's note says what to check; a later one
                 // is how a list that stops growing ends.
@@ -5613,6 +5654,9 @@ impl Driver {
             // Each click is an action of its own: what it fetches is its
             // traffic (not a poll of the URL the last one fetched), and its
             // render is what the settle proof waits for.
+            if unwatched {
+                before = s.evaluate_with_timeout::<String>(PAGE_SIGNATURE, timeout_ms).ok();
+            }
             s.mark_action();
             match s.click_target(&next, opts, timeout_ms) {
                 Ok(p) => *point = p,
@@ -5675,7 +5719,12 @@ impl Driver {
                 }
                 // Lightpanda lays nothing out, so a DOM-event click there is
                 // the normal case, not a sign of an overlay.
-                if point.get("synthetic").and_then(Value::as_bool) == Some(true) && !s.is_lightpanda() {
+                // Nor on an engine whose press stops at a shadow host, for
+                // an element inside one (see `events::PRESS_SHADOW_PAGE`).
+                if point.get("synthetic").and_then(Value::as_bool) == Some(true)
+                    && !s.is_lightpanda()
+                    && point.get("shadow_page").and_then(Value::as_bool) != Some(true)
+                {
                     // The agent should know the click was not a real one.
                     state["synthetic_click"] = json!(if point.get("dropped").and_then(Value::as_bool) == Some(true) {
                         "the browser did not deliver the mouse events (twice); the click went to the element without the mouse"
@@ -5717,6 +5766,11 @@ impl Driver {
                         "the press reached the element, but {went}, so the element's own click handler didn't run. \
                          Check what the click should do before clicking again"
                     ));
+                }
+                if let Some(bad) = point.get("invalid") {
+                    // A submit the browser held back: the click reported
+                    // "ok", and the agent went on as if the form was sent.
+                    state["not_submitted"] = json!(not_submitted(bad));
                 }
                 if let Some(fx) = point.get("no_effect") {
                     // Clicked, but the page did nothing: often a control
@@ -5815,8 +5869,12 @@ impl Driver {
             }
             Command::Press { key, target, timeout_ms } => {
                 let t = target.optional("press")?;
-                s.press(t.as_ref(), key, *timeout_ms).map_err(|e| e.context(format!("press {key}")))?;
-                Ok(self.state_json())
+                let invalid = s.press(t.as_ref(), key, *timeout_ms).map_err(|e| e.context(format!("press {key}")))?;
+                let mut state = self.state_json();
+                if let Some(bad) = invalid {
+                    state["not_submitted"] = json!(not_submitted(&bad));
+                }
+                Ok(state)
             }
             Command::Type { value, target, timeout_ms } => {
                 let t = target.optional("type")?;
@@ -6542,7 +6600,7 @@ impl Driver {
             }
             Command::Status {} => {
                 let mut state = self.state_json();
-                state["engine"] = json!(if self.session.is_lightpanda() { "lightpanda" } else { "chrome" });
+                state["engine"] = json!(self.session.engine_name());
                 state["executable"] = json!(self.session.executable());
                 state["endpoint"] = json!(crate::cdp::attach::shown(&self.session.endpoint()));
                 state["attached"] = json!(self.session.is_attached());
@@ -7359,6 +7417,23 @@ fn elapsed_ms(started: Instant) -> f64 {
 
 /// `click ref 12: …`, naming the op once: the finder's own `click: ` at the
 /// start of its error goes.
+/// What a submit the browser held back says (a click, or Enter on the
+/// WebDriver engines): the fields that failed their checks, each with the
+/// browser's own message, and what to do.
+pub(crate) fn not_submitted(bad: &Value) -> String {
+    let fields: Vec<&str> = bad
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let more = match bad.get("more").and_then(Value::as_u64).unwrap_or(0) {
+        0 => String::new(),
+        n => format!("; and {n} more"),
+    };
+    let them = if fields.len() > 1 || !more.is_empty() { "those fields" } else { "that field" };
+    format!("the browser did not submit the form: {}{more}. Fill in {them}, then submit again", fields.join("; "))
+}
+
 fn on_target(op: &str, t: &Target, e: anyhow::Error) -> anyhow::Error {
     let msg = format!("{e:#}");
     let word = op.split(' ').next().unwrap_or(op);
@@ -9539,6 +9614,25 @@ mod tests {
         assert!(parse_args(argv(&["navigera", "-s", "me", "start", "--profile", "a", "--from-profile", "x"])).is_err());
         assert_eq!(parse_args(argv(&["navigera", "profiles"])).unwrap().local, Some(Local::Profiles));
         assert!(parse_args(argv(&["navigera", "--engine", "lightpanda", "-s", "me", "start", "--attach"])).is_err());
+    }
+
+    #[test]
+    fn engine_names_are_checked_and_cdp_servers_take_no_browser_source() {
+        for engine in ["obscura", "moli", "lightpanda", "Moli"] {
+            let p = parse_args(argv(&["navigera", "--engine", engine, "-s", "me", "start"])).unwrap();
+            assert_eq!(p.config.engine, engine.to_ascii_lowercase());
+            for source in [&["--attach"][..], &["--profile", "work"], &["--electron", "/opt/app"]] {
+                let mut args = vec!["navigera", "--engine", engine, "-s", "me", "start"];
+                args.extend_from_slice(source);
+                assert!(parse_args(argv(&args)).is_err(), "{engine} {source:?}");
+            }
+        }
+        // A misspelled engine was Chrome without a word; it is refused.
+        match parse_args(argv(&["navigera", "--engine", "molli", "-s", "me", "start"])) {
+            Err(ArgsError::Invalid(why)) => assert!(why.contains("obscura, moli"), "{why}"),
+            other => panic!("expected an invalid engine, got {:?}", other.map(|p| p.config.engine)),
+        }
+        assert_eq!(parse_args(argv(&["navigera", "-s", "me", "start"])).unwrap().config.engine, "chrome");
     }
 
     #[test]

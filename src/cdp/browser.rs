@@ -13,6 +13,7 @@ use super::client::CdpClient;
 use super::events::{self, DialogPolicy, Shared};
 use super::page::Page;
 use super::transport::{self, LaunchedChrome};
+use crate::browser::CdpServer;
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -99,23 +100,25 @@ pub struct Browser {
 }
 
 impl Browser {
-    /// Launch `lightpanda serve` directly (no Chromium flags, no shim) and
-    /// connect the browser-level CDP session.
+    /// Launch a CDP server engine's `serve` directly (no Chromium flags, no
+    /// shim) and connect the browser-level CDP session.
     ///
-    /// Lightpanda is a CDP server, not a Chromium executable: it must be
-    /// started as `lightpanda serve --host … --port …`, and the browser
-    /// WebSocket URL is discovered via its `/json/version` endpoint.
-    pub fn launch_lightpanda(handle: &tokio::runtime::Handle, bin: &str) -> Result<Self> {
-        let port = free_port().context("pick a free port for lightpanda serve")?;
+    /// Lightpanda, Obscura and Moli are CDP servers, not Chromium
+    /// executables: each is started as `<bin> serve --host … --port …`, and
+    /// the browser WebSocket URL is discovered via its `/json/version`
+    /// endpoint.
+    pub fn launch_server(handle: &tokio::runtime::Handle, server: CdpServer, bin: &str) -> Result<Self> {
+        let name = server.name();
+        let port = free_port().with_context(|| format!("pick a free port for {name} serve"))?;
         let program = bin.to_string();
-        let args = lightpanda_serve_args(port);
+        let args = serve_args(server, port);
         // Write child output to a temp file for diagnostics (not piped to avoid
         // the pipe-buffer deadlock). The file is read only on poll failure.
         // In this user's own temp directory and never through a link: the
         // name is guessable, and the shared temp directory is anyone's.
         let log_path = crate::session::private_temp_dir()
             .unwrap_or_else(|_| std::env::temp_dir())
-            .join(format!("lightpanda-serve-{port}.log"));
+            .join(format!("{name}-serve-{port}.log"));
         let log_file = crate::session::create_log(&log_path).ok();
         let log_file_err = log_file.as_ref().and_then(|f| f.try_clone().ok());
         let mut cmd = std::process::Command::new(&program);
@@ -126,7 +129,7 @@ impl Browser {
         }
         let mut child = cmd
             .args(&args)
-            .envs(LIGHTPANDA_ENV.iter().copied())
+            .envs(serve_env(server).iter().copied())
             .stdin(std::process::Stdio::null())
             .stdout(log_file.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
             .stderr(log_file_err.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
@@ -150,8 +153,22 @@ impl Browser {
                 );
             }
         };
-        crate::timing::log(&format!("[browser] lightpanda serve on 127.0.0.1:{port} -> {ws_url}"));
-        let client = handle.block_on(CdpClient::connect(&ws_url)).context("connect to lightpanda")?;
+        crate::timing::log(&format!("[browser] {name} serve on 127.0.0.1:{port} -> {ws_url}"));
+        let client = handle.block_on(CdpClient::connect(&ws_url)).with_context(|| format!("connect to {name}"))?;
+        if !server.single_target() {
+            // Tabs, contexts and popups as Chrome has them: the same setup,
+            // target discovery included. The server leads its own process
+            // group, so closing it takes its workers along. Whether its
+            // dialogs are announced, whether its layout follows the page,
+            // whether its tree holds shadow roots and whether its press
+            // reaches into them is asked with its first tab.
+            let browser = Self::finish(handle, client, Some(child), None, ws_url);
+            browser.shared.dialogs_mode.store(events::DIALOGS_ASK, std::sync::atomic::Ordering::Relaxed);
+            browser.shared.layout_mode.store(events::LAYOUT_ASK, std::sync::atomic::Ordering::Relaxed);
+            browser.shared.ax_shadow_mode.store(events::AX_SHADOW_ASK, std::sync::atomic::Ordering::Relaxed);
+            browser.shared.press_shadow_mode.store(events::PRESS_SHADOW_ASK, std::sync::atomic::Ordering::Relaxed);
+            return Ok(browser);
+        }
         let shared = Arc::new(Shared::default());
         shared.single_target.store(true, std::sync::atomic::Ordering::Relaxed);
         events::spawn(handle, &client, Arc::clone(&shared));
@@ -536,9 +553,15 @@ impl Browser {
     /// default one) are answered from now on.
     pub fn set_dialog_policy(&self, scope: &str, policy: DialogPolicy) {
         self.shared.policy.lock().unwrap().insert(scope.to_string(), policy);
-        if self.shared.is_single_target() {
+        let page_side = self.shared.dialogs_mode.load(std::sync::atomic::Ordering::Relaxed) == events::DIALOGS_PAGE;
+        if self.shared.is_single_target() || page_side {
             let sessions: Vec<String> = self.shared.sessions.lock().unwrap().keys().cloned().collect();
             for session in sessions {
+                // Page-side functions answer per their own scope's policy:
+                // only this scope's change.
+                if page_side && self.shared.scope_of(&session) != scope {
+                    continue;
+                }
                 self.block_on(events::arm_dialog(&self.client, &self.shared, &session));
             }
         }
@@ -568,6 +591,7 @@ impl Browser {
                 Arc::clone(&self.shared),
             );
             page.enable().await?;
+            events::arm_dialog(&self.client, &self.shared, &session_id).await;
             // The popup's navigation started before we attached: read where
             // it stands so the next op waits for it instead of reading the
             // initial about:blank.
@@ -982,6 +1006,39 @@ impl Browser {
 /// Environment for `lightpanda serve`: no usage telemetry.
 const LIGHTPANDA_ENV: &[(&str, &str)] = &[("LIGHTPANDA_DISABLE_TELEMETRY", "1")];
 
+/// The environment a CDP server engine's `serve` runs with.
+fn serve_env(server: CdpServer) -> &'static [(&'static str, &'static str)] {
+    match server {
+        CdpServer::Lightpanda => LIGHTPANDA_ENV,
+        CdpServer::Obscura | CdpServer::Moli => &[],
+    }
+}
+
+/// A CDP server engine's `serve` arguments, on 127.0.0.1:`port`.
+fn serve_args(server: CdpServer, port: u16) -> Vec<String> {
+    match server {
+        CdpServer::Lightpanda => lightpanda_serve_args(port),
+        CdpServer::Obscura => obscura_serve_args(port),
+        CdpServer::Moli => moli_serve_args(port),
+    }
+}
+
+/// `obscura serve` arguments. Obscura refuses loopback and private
+/// addresses unless told (an SSRF guard for a server others reach): a
+/// local dev server is what agents test, and Chrome loads it.
+fn obscura_serve_args(port: u16) -> Vec<String> {
+    let port = port.to_string();
+    ["serve", "--host", "127.0.0.1", "--port", &port, "--allow-private-network"].iter().map(|s| s.to_string()).collect()
+}
+
+/// `moli serve` arguments. Without `--layout` Moli answers geometry from a
+/// fixed compatibility layout and paints nothing: clicks would land on
+/// made-up boxes and screenshots would fail.
+fn moli_serve_args(port: u16) -> Vec<String> {
+    let port = port.to_string();
+    ["serve", "--host", "127.0.0.1", "--port", &port, "--layout"].iter().map(|s| s.to_string()).collect()
+}
+
 /// `lightpanda serve` arguments. `serve` loads no sub-resources by default:
 /// iframes (card and support widgets) would be empty documents, and without
 /// stylesheets `display:none` content would count as visible.
@@ -1060,5 +1117,17 @@ mod tests {
         assert_eq!(loads, ["iframe", "stylesheet"]);
         assert!(!args.iter().any(|a| a.contains("xvfb")), "serve is headless: {args:?}");
         assert_eq!(LIGHTPANDA_ENV, [("LIGHTPANDA_DISABLE_TELEMETRY", "1")]);
+        assert_eq!(serve_args(CdpServer::Lightpanda, 9333), args);
+    }
+
+    #[test]
+    fn obscura_reaches_local_servers_and_moli_lays_pages_out() {
+        let args = serve_args(CdpServer::Obscura, 9334);
+        assert_eq!(&args[..5], ["serve", "--host", "127.0.0.1", "--port", "9334"]);
+        assert!(args.iter().any(|a| a == "--allow-private-network"), "{args:?}");
+        let args = serve_args(CdpServer::Moli, 9335);
+        assert_eq!(&args[..5], ["serve", "--host", "127.0.0.1", "--port", "9335"]);
+        assert!(args.iter().any(|a| a == "--layout"), "{args:?}");
+        assert!(serve_env(CdpServer::Obscura).is_empty() && serve_env(CdpServer::Moli).is_empty());
     }
 }
