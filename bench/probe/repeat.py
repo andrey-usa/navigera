@@ -11,7 +11,8 @@ during the repeat (macOS: DiagnosticReports) are copied there, with their
 top frames. A repeat still running after --hang-after seconds gets a
 process table and, on Linux, the stacks of navigera and the browser.
 
-Writes DIR/NAME.jsonl (one row per repeat) and DIR/NAME.md (the summary).
+--before runs a shell command ahead of each repeat (a cold start: an app's
+data removed). Writes DIR/NAME.jsonl (one row per repeat) and DIR/NAME.md (the summary).
 """
 import argparse
 import json
@@ -105,6 +106,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--hang-after", type=float, default=0)
     ap.add_argument("--timeout", type=float, default=300)
+    ap.add_argument("--before", default="", help="a shell command run before each repeat (e.g. reset an app's data)")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     a = ap.parse_args()
     cmd = a.cmd[1:] if a.cmd and a.cmd[0] == "--" else a.cmd
@@ -121,6 +123,8 @@ def main():
                    NAVIGERA_CDP_TRACE=str(rep / "cdp-trace.jsonl"),
                    NAVIGERA_CHROME_LOG=str(rep / "browser-stderr.log"),
                    NV_KEEP_DIR=str(rep), NV_SIGNALS_DIR=str(rep))
+        if a.before:
+            subprocess.run(a.before, shell=True)
         t0 = time.time()
         with open(rep / "test.log", "wb") as log:
             p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
@@ -166,7 +170,7 @@ def main():
     with open(out / f"{a.arm}.jsonl", "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
-    write_summary(out / f"{a.arm}.md", a.arm, rows, cmd)
+    write_summary(out / f"{a.arm}.md", a.arm, rows, cmd + ([f"(before each: {a.before})"] if a.before else []))
 
 
 def write_summary(path, arm, rows, cmd):
