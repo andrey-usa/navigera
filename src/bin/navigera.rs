@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 /// The static Linux build's allocator: musl's own is several times slower
 /// on the small allocations of a large page's snapshot.
-#[cfg(target_env = "musl")]
+#[cfg(all(any(target_env = "musl", feature = "exp-mimalloc"), not(feature = "exp-sysalloc")))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

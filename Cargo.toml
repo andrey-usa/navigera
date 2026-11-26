@@ -34,6 +34,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-platform-verifier = "0.7"
 # The `http` feature: requests outside the page (bitti's API tests).
 ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "platform-verifier"], optional = true }
+mimalloc = { version = "0.1", default-features = false, optional = true }
 
 [build-dependencies]
 # Deflates the vendored axe-core into the binary (see build.rs).
@@ -44,6 +45,9 @@ miniz_oxide = "0.9"
 # `navigera::http` (bitti's API tests).
 default = ["http"]
 http = ["dep:ureq"]
+# experiment-36 only: the allocator against the libc.
+exp-sysalloc = []
+exp-mimalloc = ["dep:mimalloc"]
 
 # musl's allocator is slow on the many small allocations a large snapshot makes.
 [target.'cfg(target_env = "musl")'.dependencies]

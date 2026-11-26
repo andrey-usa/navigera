@@ -1,8 +1,11 @@
 name: experiment-36
 
-# Where a ladder click's time goes on GitHub's runner: navigera (static musl
-# as released, and glibc) against agent-browser, with each one's CDP
-# commands timestamped (bench/probe/click_probe.py). Numbers as notices.
+# What the static musl build (as released) costs a call on GitHub's runner,
+# and where: four builds ({musl, glibc} x {mimalloc, the libc's allocator}),
+# the release's build with mimalloc's purge off, agent-browser as the
+# control; then each build's session server under perf stat, strace -c and
+# perf record over the same clicks (bench/probe/libc_probe.py). Numbers as
+# notices, raw output as the artifact.
 
 on:
   push:
@@ -14,7 +17,10 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
+    env:
+      # Symbols for perf; stripping does not change the code.
+      CARGO_PROFILE_RELEASE_STRIP: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -34,41 +40,57 @@ jobs:
         run: |
           CHROME_BIN=$(which google-chrome)
           echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
-          "$CHROME_BIN" --version
           npm install -g agent-browser@latest
-          echo "::notice::$(agent-browser --version) · $("$CHROME_BIN" --version) · $(nproc) cpus · $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+          echo "::notice::$(agent-browser --version) · $("$CHROME_BIN" --version) · $(nproc) cpus · $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) · kernel $(uname -r)"
 
       - uses: ./.github/actions/apt-install
         with:
-          packages: musl-tools
-      - name: Build navigera (static musl, as released; and glibc)
+          packages: musl-tools strace
+
+      - name: perf
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends "linux-tools-$(uname -r)" || sudo apt-get install -y -qq --no-install-recommends linux-tools-azure
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 kernel.yama.ptrace_scope=0
+          perf --version
+
+      - name: Build the four navigera builds
         run: |
           rustup target add x86_64-unknown-linux-musl
-          cargo build --release --locked --bin navigera --target x86_64-unknown-linux-musl
-          cargo build --release --locked --bin navigera
+          b="$RUNNER_TEMP/builds"
+          one() { # name, target dir part, cargo args...
+            name=$1; dir=$2; shift 2
+            cargo build --release --locked --bin navigera "$@"
+            mkdir -p "$b/$name" && cp "target/$dir/release/navigera" "$b/$name/navigera"
+          }
+          one musl-mi x86_64-unknown-linux-musl --target x86_64-unknown-linux-musl
+          one musl-sys x86_64-unknown-linux-musl --target x86_64-unknown-linux-musl --features exp-sysalloc
+          one glibc-sys .
+          one glibc-mi . --features exp-mimalloc
+          ls -l "$b"/*/navigera
+          echo "NAVIGERA_BUILDS=musl-mi=$b/musl-mi/navigera,musl-sys=$b/musl-sys/navigera,glibc-sys=$b/glibc-sys/navigera,glibc-mi=$b/glibc-mi/navigera" >> "$GITHUB_ENV"
 
       - name: Fixtures
         run: |
           python3 bench/ladder/gen_fixtures.py
           (cd bench/ladder/fixtures && nohup python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
           sleep 1
+          mkdir -p "$RUNNER_TEMP/out"
 
-      - name: Probe, musl build
-        env:
-          NAVIGERA: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/navigera
-        run: python3 bench/probe/click_probe.py http://127.0.0.1:8765 "$RUNNER_TEMP/out-musl"
+      - name: Time every arm
+        run: python3 bench/probe/libc_probe.py time http://127.0.0.1:8765 "$RUNNER_TEMP/out"
 
-      - name: Probe, glibc build
-        env:
-          NAVIGERA: ${{ github.workspace }}/target/release/navigera
-        run: |
-          "$NAVIGERA" sessions --clean --all >/dev/null 2>&1 || true
-          agent-browser close --all >/dev/null 2>&1 || true
-          python3 bench/probe/click_probe.py http://127.0.0.1:8765 "$RUNNER_TEMP/out-glibc"
+      - name: Profile musl-mi (as released)
+        run: python3 bench/probe/libc_probe.py profile musl-mi http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+      - name: Profile glibc-sys
+        run: python3 bench/probe/libc_probe.py profile glibc-sys http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+      - name: Profile musl-sys
+        run: python3 bench/probe/libc_probe.py profile musl-sys http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+      - name: Profile glibc-mi
+        run: python3 bench/probe/libc_probe.py profile glibc-mi http://127.0.0.1:8765 "$RUNNER_TEMP/out"
 
-      - name: Upload traces
+      - name: Upload
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: probe
-          path: ${{ runner.temp }}/out-*
+          path: ${{ runner.temp }}/out
