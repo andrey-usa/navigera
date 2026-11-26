@@ -128,7 +128,10 @@ OPTIONAL_SCENARIOS = ("eval", "cold", "realworld", "browse", "agent", "parallel"
 
 # Matched-operation per-call stage: one call per op, warm session.
 OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
-       "screenshot", "form-batch")
+       "screenshot", "screenshot-720", "form-batch")
+# The default-viewport screenshot captures each tool's own viewport (different
+# pixel counts), so the losses compare screenshot-720 (one viewport) instead.
+OPS_NOT_RANKED = ("screenshot",)
 # Two rounds of 5 reps each, second round in reverse tool order: a slow
 # minute shifts every tool alike, and the cell is the median of 10.
 OPS_ROUNDS = 2
@@ -962,6 +965,11 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
                 merged["runs_ms"].extend(cell.get("runs_ms") or [])
                 merged["calls"] = cell.get("calls", 1)
                 merged["errors"].extend(cell.get("errors") or [])
+                # What the screenshot ops captured: PNG size and dpr.
+                for key in ("png", "dpr"):
+                    for v in cell.get(key) or []:
+                        if v not in merged.setdefault(key, []):
+                            merged[key].append(v)
                 if not cell.get("ok"):
                     merged["ok"] = False
             print(f"  [ops] {label} round {rnd + 1}/{OPS_ROUNDS}: done", flush=True)
@@ -1219,6 +1227,9 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
                                 "complete": bool(cell.get("complete")),
                                 **({"not_run": cell["not_run"]} if cell.get("not_run") else {}),
                                 **({"incomplete": True} if cell.get("incomplete") else {}),
+                                # The PNG sizes (WxH) and devicePixelRatios captured.
+                                **({"png": cell["png"], "dpr": cell.get("dpr", [])}
+                                   if cell.get("png") else {}),
                                 # Partial samples stay in the JSON.
                                 "runs_ms": cell.get("runs_ms", []),
                                 "ok": bool(cell.get("ok")),
@@ -1724,7 +1735,10 @@ def main() -> int:
                      "(client-side filter, no navigation); `click-submit` clicks the "
                      "order form's submit, which a script handles (no navigation); "
                      "`read-text` reads the heading; `snapshot` is each tool's default "
-                     "accessibility output; `screenshot` writes a PNG; `form-batch` "
+                     "accessibility output; `screenshot` writes a PNG at the tool's "
+                     "own default viewport (its size in the cell); `screenshot-720` "
+                     "is the same capture after the tool's own resize command set "
+                     "1280x720 (untimed, undone after); `form-batch` "
                      "fills two fields, clicks submit and reads the status — one call "
                      "for tools with a batch command, four calls otherwise. "
                      "Per-call time includes process start (CLI) or JSON-RPC (MCP) "
@@ -1742,6 +1756,7 @@ def main() -> int:
             row = [f"`{op}`"]
             for name in ops_cols:
                 cell = ops_results[name]["cells"][op]
+                size = (", " + "/".join(cell["png"])) if cell.get("png") else ""
                 if cell.get("not_run"):
                     row.append("not run: " + cell["not_run"])
                 elif cell.get("median_ms") is None:
@@ -1750,12 +1765,12 @@ def main() -> int:
                     n = cell.get("reps", 0)
                     n_expected = cell.get("expected_reps", 10)
                     row.append(f"incomplete ({n}/{n_expected}) {cell['median_ms']:.1f} ms "
-                               f"({cell['calls']} call{'s' if cell['calls'] != 1 else ''})")
+                               f"({cell['calls']} call{'s' if cell['calls'] != 1 else ''}{size})")
                 else:
                     n = cell.get("reps", 10)
                     row.append(f"{cell['median_ms']:.1f} ms ({cell['calls']} call"
                                f"{'s' if cell['calls'] != 1 else ''}"
-                               + (f", n={n}" if n != 10 else "") + ")")
+                               + (f", n={n}" if n != 10 else "") + size + ")")
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
         lines.append("Firefox API arms use persistent library sessions, not a CLI per op. "
@@ -1784,6 +1799,8 @@ def main() -> int:
                 continue
             losses = []
             for op in OPS:
+                if op in OPS_NOT_RANKED:
+                    continue
                 own = ops_results[baseline]["cells"][op]
                 if not own.get("complete"):
                     continue
@@ -1794,7 +1811,8 @@ def main() -> int:
                     if cell.get("complete") and cell["median_ms"] < own["median_ms"]:
                         losses.append(f"{op}: {other} {cell['median_ms']:.1f} ms "
                                       f"vs {own['median_ms']:.1f} ms")
-            lines.append(f"Losses for `{baseline}` (complete cells only):")
+            lines.append(f"Losses for `{baseline}` (complete cells only; "
+                         "screenshot at one viewport, `screenshot-720`):")
             lines.extend(f"- {loss}" for loss in losses)
             if not losses:
                 lines.append("- None measured.")

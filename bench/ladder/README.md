@@ -58,7 +58,10 @@ one call per op, warm session, median of 10 — the per-call table the README
 quotes instead of the session's per-step mean. Ops, all on the listing page:
 `goto`, `fill`, `click` (Search, no navigation), `click-submit` (the order
 form's submit, handled by the page script, no navigation), `read-text`,
-`snapshot`, `screenshot`, and `form-batch` (fill two fields, click submit,
+`snapshot`, `screenshot` (at the tool's own default viewport),
+`screenshot-720` (the same capture after the tool's own resize command set
+a 1280x720 viewport, untimed and undone after the rep: the losses rank this
+row, since the default viewports differ), and `form-batch` (fill two fields, click submit,
 read the status — one call for tools with a batch command, four calls
 otherwise). Tools: navigera (plus `navigera (baseline)` with `baseline_ref`),
 agent-browser, playwright-cli, Playwright MCP, Chrome DevTools MCP, and
@@ -78,8 +81,10 @@ left out of rankings, ratios and the losses page. Snapshot checks assert
 the page's known heading and the Search button; screenshot checks fully
 decode the PNG (chunk CRCs, IDAT decompression, exact raster size, every
 scanline filter byte 0-4) and
-assert its dimensions equal the session's live viewport, read untimed
-(the tools run at different viewports, so no single size is asserted).
+assert its dimensions equal the session's live viewport times its
+devicePixelRatio, read untimed (the tools' default viewports differ, so
+`screenshot` asserts no single size; `screenshot-720` asserts 1280x720).
+Each screenshot cell records the PNG's size and the dpr it was taken at.
 
 ## Accounting
 

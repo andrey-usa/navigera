@@ -323,7 +323,7 @@ if ops:
     ops_cols.sort(key=lambda o: ops_order.index(o["name"]))
     ops_cols += [o for o in ops if o["name"] not in ops_order]
     op_names = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
-                "screenshot", "form-batch")
+                "screenshot", "screenshot-720", "form-batch")
     ops_label = {**label,
                  "navigera (baseline)": "`navigera` (baseline build)",
                  "browser-use": f"`browser-use` {ver('browser-use', '')} (exec model)".replace("  ", " ")}
@@ -337,22 +337,29 @@ if ops:
         "the search box; `click` clicks Search (client-side filter, no navigation);",
         "`click-submit` clicks the order form's submit, which a script handles (no",
         "navigation); `read-text` reads the heading; `snapshot` is each tool's default",
-        "accessibility output; `screenshot` writes a PNG; `form-batch` fills two fields,",
+        "accessibility output; `screenshot` writes a PNG at the tool's own default",
+        "viewport (the PNG's size in the cell); `screenshot-720` is the same capture after",
+        "the tool's own resize command set a 1280x720 viewport (untimed, undone after), so",
+        "every tool captures the same pixels; `form-batch` fills two fields,",
         "clicks submit and reads the status — one call for tools with a batch command,",
         "four calls otherwise. Two rounds of 5 reps: rounds are the outer loop and tools",
         "the inner loop, with the second round in reversed tool order. Each tool runs in",
         "its default output mode (MCP tools over JSON-RPC, their only interface); no tool",
         "is switched into a machine mode. A cell is complete only with all 10 reps and no",
         "round error; a partial cell is shown as `incomplete (n/N)` and left out of the",
-        "per-op losses below.",
+        "per-op losses, which rank `screenshot-720`, not the default-viewport row.",
         "",
         "| op | " + " | ".join(ops_label.get(o["name"], o["name"]) for o in ops_cols) + " |",
         "|---|" + "---|" * len(ops_cols),
     ]
     for op in op_names:
+        # A run from before an op existed has no row for it.
+        if not any(op in (o.get("cells") or {}) for o in ops_cols):
+            continue
         row = [f"`{op}`"]
         for o in ops_cols:
             cell = (o.get("cells") or {}).get(op) or {}
+            size = (", " + "/".join(cell["png"])) if cell.get("png") else ""
             if cell.get("not_run"):
                 row.append("not run: " + cell["not_run"])
             elif cell.get("median_ms") is None:
@@ -361,10 +368,10 @@ if ops:
                 n = cell.get("reps", 0)
                 n_expected = cell.get("expected_reps", 10)
                 row.append(f"incomplete ({n}/{n_expected}) {cell['median_ms']:.1f} ms "
-                           f"({cell['calls']} call{'s' if cell['calls'] != 1 else ''})")
+                           f"({cell['calls']} call{'s' if cell['calls'] != 1 else ''}{size})")
             else:
                 row.append(f"{cell['median_ms']:.1f} ms ({cell['calls']} call"
-                           f"{'s' if cell['calls'] != 1 else ''})")
+                           f"{'s' if cell['calls'] != 1 else ''}{size})")
         ops_lines.append("| " + " | ".join(row) + " |")
     ops_lines += [
         "",
@@ -492,9 +499,11 @@ if nav_ops:
     # Per-op losses: only against tools that took the same number of calls
     # (the form-batch cell is 1 call for batch tools, 4 for the rest).
     # Incomplete cells are left out entirely: a partial median
-    # is not a ranking, for navigera or for a rival.
+    # is not a ranking, for navigera or for a rival. The screenshot is
+    # ranked at one viewport (screenshot-720): the default-viewport row
+    # captures each tool's own size, unequal pixel counts.
     for op in ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
-               "screenshot", "form-batch"):
+               "screenshot-720", "form-batch"):
         mine = (nav_ops.get("cells") or {}).get(op) or {}
         mine_ms, mine_calls = mine.get("median_ms"), mine.get("calls")
         if mine_ms is None or mine.get("incomplete"):

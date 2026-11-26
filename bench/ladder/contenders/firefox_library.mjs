@@ -87,6 +87,12 @@ async function perform(req) {
       else if (kind === 'vibium') await writeFile(req.path, await page.screenshot());
       else await page.screenshot({ path: req.path });
       return null;
+    case 'resize':
+      // Each library's own viewport setter (screenshot-720's untimed setup).
+      if (kind === 'playwright') return page.setViewportSize({ width: req.width, height: req.height });
+      if (kind === 'puppeteer') return page.setViewport({ width: req.width, height: req.height });
+      if (kind === 'webdriverio') return browser.setViewport({ width: req.width, height: req.height });
+      return page.setViewport({ width: req.width, height: req.height });
     case 'form-batch':
       await fill('#cust', 'ada');
       await fill('#qty', '2');
