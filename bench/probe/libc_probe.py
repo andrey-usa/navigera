@@ -19,6 +19,8 @@ the session server talks to Chrome itself, so the server is all of
 navigera's side but the CLI), three ops (the ladder's click with its setup
 and 0.3 s rest, `eval 1`, `ax`), rounds in a Latin square so each arm is
 in each position once. One notice per op.
+With it, the CPU a runner daemon (`WATCH_PROC`, default provjob) spent
+while each arm's ops ran, per CLI call.
 
 `profile ARM`: one fresh session of that arm; its session server under
 `perf stat` (task clock, context switches, migrations, page faults, cycles
@@ -150,6 +152,28 @@ def clean():
     subprocess.run([AB, "close", "--all"], capture_output=True, env=ENV_AB)
 
 
+def watched_pids():
+    """The runner's provjobd (runs 4-5: busy beside the mimalloc build only)."""
+    p = subprocess.run(["pgrep", "-f", os.environ.get("WATCH_PROC", "provjob")], capture_output=True, text=True)
+    return [int(x) for x in p.stdout.split()]
+
+
+def cpu_ticks(pids):
+    """utime + stime of each process (all its threads, exited ones too), in clock ticks."""
+    t = 0
+    for pid in pids:
+        try:
+            raw = open(f"/proc/{pid}/stat").read()
+        except PermissionError:
+            raw = subprocess.run(["sudo", "cat", f"/proc/{pid}/stat"], capture_output=True, text=True).stdout
+        except FileNotFoundError:
+            continue
+        f = raw.rsplit(") ", 1)[-1].split()
+        if len(f) > 12:
+            t += int(f[11]) + int(f[12])
+    return t
+
+
 def time_mode(base, out_dir):
     names = list(ARMS) + ["ab"]
     for a in names:
@@ -157,17 +181,27 @@ def time_mode(base, out_dir):
         start(a, base, "big.html", "big")
     ops = ["click", "eval", "version", "axbig"]
     got = {op: {a: [] for a in names} for op in ops}
+    # The watched daemon's CPU while each arm's ops ran, and the processes
+    # each arm started meanwhile (every CLI call is one).
+    watch, ticks, calls = watched_pids(), {a: 0 for a in names}, {a: 0 for a in names}
     for r in range(ROUNDS):
         order = names[r % len(names):] + names[:r % len(names)]
         for a in order:
+            t0 = cpu_ticks(watch)
             for op in ops:
                 try:
                     got[op][a] += timed(a, op, REPS)
+                    calls[a] += REPS * (2 if op == "click" else 1)
                 except RuntimeError as e:
                     print(f"::warning::{a} {op}: {str(e)[:200]}")
+            ticks[a] += cpu_ticks(watch) - t0
     for op in ops:
         parts = [f"{a} {summary(got[op][a])}" for a in names if len(got[op][a]) >= 4]
         print(f"::notice title={op} median [IQR] ms, {ROUNDS}x{REPS} per arm::" + " · ".join(parts))
+    hz = os.sysconf("SC_CLK_TCK")
+    print(f"::notice title=watched daemon CPU per CLI call during each arm's ops, ms ({len(watch)} pids)::"
+          + " · ".join(f"{a} {ticks[a] * 1000 / hz / max(calls[a], 1):.3f} ({ticks[a]} ticks / {calls[a]} calls)" for a in names))
+    got["_watch"] = {"pids": watch, "ticks": ticks, "calls": calls, "hz": hz}
     json.dump(got, open(os.path.join(out_dir, "times.json"), "w"))
     clean()
 

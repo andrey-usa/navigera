@@ -49,6 +49,7 @@ http = ["dep:ureq"]
 exp-sysalloc = []
 exp-mimalloc = ["dep:mimalloc"]
 exp-mimalloc-v2 = ["mimalloc/v2"]
+exp-arena-reserve = []
 
 # musl's allocator is slow on the many small allocations a large snapshot makes.
 [target.'cfg(target_env = "musl")'.dependencies]

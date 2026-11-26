@@ -1,13 +1,15 @@
 name: experiment-36
 
 # What the static musl build (as released) costs a call on GitHub's runner,
-# and where (bench/probe/libc_probe.py). Run 4: the off-CPU view of
-# mimalloc's click tail. Three builds (musl + mimalloc as released, musl +
-# musl's malloc, glibc + glibc's), all with frame pointers; the click with
-# a 0.3 s and a 0.02 s rest before it; then per build the scheduler's view
-# of the clicks (perf sched record of the machine) and the session
-# server's switch-out stacks. Numbers as notices, raw output as the
-# artifact.
+# and where (bench/probe/libc_probe.py). Run 6: runs 4-5 found that a
+# runner daemon (provjobd) spends ~1.1 ms of CPU on every process that
+# reserves mimalloc's 1 GiB arena, and takes Chrome's CPU during a click.
+# Here: what provjobd reacts to (mimalloc's reserve from 0 to 512 MiB;
+# a plain 1 GiB mapping in another program), and the click, `eval`,
+# `--version` and the 2,000-row `ax` per arm, with provjobd's CPU per call
+# in the same windows. Builds as released (no frame pointers), plus musl +
+# mimalloc with a 32 MiB reserve set in code before the first allocation.
+# Numbers as notices, raw output as the artifact.
 
 on:
   push:
@@ -55,10 +57,7 @@ jobs:
           sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 kernel.yama.ptrace_scope=0
           perf --version
 
-      - name: Build the three navigera builds
-        env:
-          RUSTFLAGS: "-C force-frame-pointers=yes"
-          CFLAGS: "-fno-omit-frame-pointer"
+      - name: Build the navigera builds
         run: |
           rustup target add x86_64-unknown-linux-musl
           b="$RUNNER_TEMP/builds"
@@ -70,8 +69,13 @@ jobs:
           one musl-mi x86_64-unknown-linux-musl --target x86_64-unknown-linux-musl
           one musl-sys x86_64-unknown-linux-musl --target x86_64-unknown-linux-musl --features exp-sysalloc
           one glibc-sys .
+          NAVIGERA_EXP_ARENA_KIB=32768 one musl-mi-code32m x86_64-unknown-linux-musl --target x86_64-unknown-linux-musl --features exp-arena-reserve
           ls -l "$b"/*/navigera
-          echo "NAVIGERA_BUILDS=musl-mi=$b/musl-mi/navigera,musl-sys=$b/musl-sys/navigera,glibc-sys=$b/glibc-sys/navigera" >> "$GITHUB_ENV"
+          echo "NAVIGERA_BUILDS=musl-mi=$b/musl-mi/navigera,musl-sys=$b/musl-sys/navigera,glibc-sys=$b/glibc-sys/navigera,musl-mi-code32m=$b/musl-mi-code32m/navigera" >> "$GITHUB_ENV"
+          echo "NAVIGERA_ENV_ARMS=musl-mi:r0:MIMALLOC_ARENA_RESERVE=0;musl-mi:r32m:MIMALLOC_ARENA_RESERVE=32MiB;musl-mi:r256m:MIMALLOC_ARENA_RESERVE=256MiB" >> "$GITHUB_ENV"
+          for x in musl-mi musl-mi-code32m; do
+            echo "::notice title=$x mappings over 16 MiB at --version::$(strace -f -e trace=mmap -e signal=none "$b/$x/navigera" --version 2>&1 >/dev/null | awk -F, '$2+0 >= 16777216 {print $2, $3}' | tr '\n' ';')"
+          done
           echo "::notice::THP $(cat /sys/kernel/mm/transparent_hugepage/enabled) · defrag $(cat /sys/kernel/mm/transparent_hugepage/defrag) · overcommit $(cat /proc/sys/vm/overcommit_memory)"
 
       - name: Fixtures
@@ -88,57 +92,46 @@ jobs:
           sleep 1
           mkdir -p "$RUNNER_TEMP/out"
 
-      - name: The runner's provjobd and what wakes it (run 4 saw it busy only beside the mimalloc build)
+      - name: What the runner's provjobd reacts to
         run: |
           pids=$(pgrep -f provjob || true)
           echo "pids: $pids"
           for p in $pids; do
             echo "== $p"; sudo cat /proc/$p/cmdline | tr '\0' ' '; echo
             sudo ls -l /proc/$p/exe || true; cat /proc/$p/cgroup || true
-            ps -o pid,ppid,user,etimes,nlwp,args -p $p || true
           done
-          cpu() { # provjobd's CPU ticks so far, every thread
-            t=0; for p in $pids; do for f in /proc/$p/task/*/stat; do
-              set -- $(sudo cat $f 2>/dev/null | sed 's/.*) //'); t=$((t + ${12:-0} + ${13:-0})); done; done; echo $t; }
+          cpu() { # provjobd's CPU ticks so far (utime + stime of each process)
+            t=0; for p in $pids; do set -- $(sudo cat /proc/$p/stat 2>/dev/null | sed 's/.*) //'); t=$((t + ${12:-0} + ${13:-0})); done; echo $t; }
           one() { # label, command...: provjobd ticks over 200 runs of the command
             l=$1; shift; a=$(cpu); s=$(date +%s%N)
             for i in $(seq 200); do "$@" >/dev/null 2>&1; done
             e=$(date +%s%N); b=$(cpu)
-            echo "::notice title=provjobd ticks per 200 calls::$l: $((b - a)) ticks (CLK_TCK $(getconf CLK_TCK)), calls $(( (e - s) / 200000 )) us each"
+            echo "::notice title=provjobd ticks per 200 calls (CLK_TCK $(getconf CLK_TCK))::$l: $((b - a)) ticks, calls $(( (e - s) / 200000 )) us each"
           }
           IFS=, read -ra kv <<< "$NAVIGERA_BUILDS"
           for x in "${kv[@]}"; do one "${x%%=*} --version" "${x#*=}" --version; done
           mi="${kv[0]#*=}"
-          one "musl-mi --version, MIMALLOC_ARENA_RESERVE=0" env MIMALLOC_ARENA_RESERVE=0 "$mi" --version
+          for r in 0 32MiB 128MiB 256MiB 512MiB; do one "musl-mi --version, MIMALLOC_ARENA_RESERVE=$r" env MIMALLOC_ARENA_RESERVE=$r "$mi" --version; done
+          # Another program: does a plain mapping of that size do it?
+          # (size, prot: 0 = PROT_NONE, 3 = PROT_READ | PROT_WRITE)
+          map='import mmap, sys; mmap.mmap(-1, int(sys.argv[1]), flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS | mmap.MAP_NORESERVE, prot=int(sys.argv[2]))'
+          one "python3 -c pass" python3 -c pass
+          one "python3, 1 GiB PROT_NONE NORESERVE" python3 -c "$map" $((1 << 30)) 0
+          one "python3, 1 GiB PROT_READ|WRITE NORESERVE (untouched)" python3 -c "$map" $((1 << 30)) 3
+          one "python3, 32 MiB PROT_NONE NORESERVE" python3 -c "$map" $((32 << 20)) 0
           one "/bin/true" /bin/true
-          if [ -n "$pids" ]; then
-            p1=$(echo $pids | cut -d' ' -f1)
-            sudo timeout 20 strace -f -c -o "$RUNNER_TEMP/out/provjobd-strace.txt" -p $p1 &
-            sleep 1; for i in $(seq 200); do "$mi" --version >/dev/null; done; sleep 1
-            sudo pkill -INT -f "strace -f -c -o" || true; wait || true
-            sudo chmod a+r "$RUNNER_TEMP/out/provjobd-strace.txt" || true
-            echo "::notice title=provjobd syscalls over 200 musl-mi --version::$(head -12 "$RUNNER_TEMP/out/provjobd-strace.txt" | tail -8 | awk '{print $NF" "$4}' | tr '\n' ' ')"
-          fi
 
-      - name: The click by the rest before it (0.3 s, 0.02 s), interleaved
+      - name: Click, eval, --version and the 2,000-row ax per arm, with provjobd's CPU per call
         env:
-          ROUNDS: "6"
-          REST_REPS: "5"
-        run: python3 bench/probe/libc_probe.py rest http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+          ROUNDS: "8"
+          REPS: "15"
+        run: python3 bench/probe/libc_probe.py time http://127.0.0.1:8765 "$RUNNER_TEMP/out"
 
-      - name: Off-CPU view, musl + mimalloc
+      - name: Off-CPU view, musl + mimalloc with the 32 MiB reserve in code
+        run: python3 bench/probe/libc_probe.py sched musl-mi-code32m http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+
+      - name: Off-CPU view, musl + mimalloc as released
         run: python3 bench/probe/libc_probe.py sched musl-mi http://127.0.0.1:8765 "$RUNNER_TEMP/out"
-
-      - name: Off-CPU view, musl + malloc
-        run: python3 bench/probe/libc_probe.py sched musl-sys http://127.0.0.1:8765 "$RUNNER_TEMP/out"
-
-      - name: Off-CPU view, glibc
-        run: python3 bench/probe/libc_probe.py sched glibc-sys http://127.0.0.1:8765 "$RUNNER_TEMP/out"
-
-      - name: Off-CPU view, musl + mimalloc again (order and drift)
-        run: |
-          mkdir -p "$RUNNER_TEMP/out/again"
-          python3 bench/probe/libc_probe.py sched musl-mi http://127.0.0.1:8765 "$RUNNER_TEMP/out/again"
 
       - name: Upload
         if: always()
