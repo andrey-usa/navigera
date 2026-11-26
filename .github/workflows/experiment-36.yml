@@ -88,6 +88,38 @@ jobs:
           sleep 1
           mkdir -p "$RUNNER_TEMP/out"
 
+      - name: The runner's provjobd and what wakes it (run 4 saw it busy only beside the mimalloc build)
+        run: |
+          pids=$(pgrep -f provjob || true)
+          echo "pids: $pids"
+          for p in $pids; do
+            echo "== $p"; sudo cat /proc/$p/cmdline | tr '\0' ' '; echo
+            sudo ls -l /proc/$p/exe || true; cat /proc/$p/cgroup || true
+            ps -o pid,ppid,user,etimes,nlwp,args -p $p || true
+          done
+          cpu() { # provjobd's CPU ticks so far, every thread
+            t=0; for p in $pids; do for f in /proc/$p/task/*/stat; do
+              set -- $(sudo cat $f 2>/dev/null | sed 's/.*) //'); t=$((t + ${12:-0} + ${13:-0})); done; done; echo $t; }
+          one() { # label, command...: provjobd ticks over 200 runs of the command
+            l=$1; shift; a=$(cpu); s=$(date +%s%N)
+            for i in $(seq 200); do "$@" >/dev/null 2>&1; done
+            e=$(date +%s%N); b=$(cpu)
+            echo "::notice title=provjobd ticks per 200 calls::$l: $((b - a)) ticks (CLK_TCK $(getconf CLK_TCK)), calls $(( (e - s) / 200000 )) us each"
+          }
+          IFS=, read -ra kv <<< "$NAVIGERA_BUILDS"
+          for x in "${kv[@]}"; do one "${x%%=*} --version" "${x#*=}" --version; done
+          mi="${kv[0]#*=}"
+          one "musl-mi --version, MIMALLOC_ARENA_RESERVE=0" env MIMALLOC_ARENA_RESERVE=0 "$mi" --version
+          one "/bin/true" /bin/true
+          if [ -n "$pids" ]; then
+            p1=$(echo $pids | cut -d' ' -f1)
+            sudo timeout 20 strace -f -c -o "$RUNNER_TEMP/out/provjobd-strace.txt" -p $p1 &
+            sleep 1; for i in $(seq 200); do "$mi" --version >/dev/null; done; sleep 1
+            sudo pkill -INT -f "strace -f -c -o" || true; wait || true
+            sudo chmod a+r "$RUNNER_TEMP/out/provjobd-strace.txt" || true
+            echo "::notice title=provjobd syscalls over 200 musl-mi --version::$(head -12 "$RUNNER_TEMP/out/provjobd-strace.txt" | tail -8 | awk '{print $NF" "$4}' | tr '\n' ' ')"
+          fi
+
       - name: The click by the rest before it (0.3 s, 0.02 s), interleaved
         env:
           ROUNDS: "6"

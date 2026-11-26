@@ -412,7 +412,8 @@ def family(pid):
         try:
             stat = open(f"/proc/{d}/stat").read()
             ppid = int(stat.rsplit(")", 1)[1].split()[1])
-            args = open(f"/proc/{d}/cmdline", "rb").read().split(b"\0")
+            # Chrome rewrites its children's command lines into one string.
+            args = open(f"/proc/{d}/cmdline", "rb").read().replace(b"\0", b" ").split()
         except (OSError, IndexError, ValueError):
             continue
         kids.setdefault(ppid, []).append((int(d), args))
@@ -437,7 +438,10 @@ def all_tids(pids):
     return got
 
 
-SW = re.compile(r"prev_pid=(\d+) .*?prev_state=(\S+) ==> .*?next_pid=(\d+)")
+# sched_switch as the raw fields or as perf's own print of them
+# ("comm:tid [prio] state ==> comm:tid [prio]"); a comm may hold ':'.
+SW = re.compile(r"prev_pid=(\d+) .*?prev_state=(\S+) ==> .*?next_pid=(\d+)"
+                r"|:(\d+) \[-?\d+\] (\S+) ==> .*:(\d+) \[-?\d+\]\s*$")
 WK = re.compile(r"\bpid=(\d+)")
 
 
@@ -483,7 +487,8 @@ def sched_replay(txt, who, wins, ncpu):
             s_ = SW.search(trace)
             if not s_:
                 continue
-            prev, state, nxt = int(s_.group(1)), s_.group(2), int(s_.group(3))
+            g3 = s_.groups()[:3] if s_.group(1) else s_.groups()[3:]
+            prev, state, nxt = int(g3[0]), g3[1], int(g3[2])
             if prev in on:
                 g = who.get(prev)
                 if g:
@@ -570,10 +575,10 @@ def stacks_part(arm, pid, n, out_dir):
             counts[key] = counts.get(key, 0) + 1
 
     for line in txt.splitlines():
-        m = re.match(r"\s*([\d.]+):\s+(.*prev_state=(\S+).*)", line)
+        m = re.match(r"\s*([\d.]+):\s+.*(?:prev_state=|\[-?\d+\] )(\S+) ==> ", line)
         if m:
             flush()
-            cur = (float(m.group(1)) * 1e6, m.group(3), [], [])
+            cur = (float(m.group(1)) * 1e6, m.group(2), [], [])
         elif cur and line.strip():
             f = line.split(None, 1)
             if len(f) == 2:
