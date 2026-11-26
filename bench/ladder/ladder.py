@@ -965,8 +965,9 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
                 merged["runs_ms"].extend(cell.get("runs_ms") or [])
                 merged["calls"] = cell.get("calls", 1)
                 merged["errors"].extend(cell.get("errors") or [])
-                # What the screenshot ops captured: PNG size and dpr.
-                for key in ("png", "dpr"):
+                # What the screenshot ops captured: PNG size and dpr; and
+                # browser-use's viewport reads before and after its settle.
+                for key in ("png", "dpr", "settled"):
                     for v in cell.get(key) or []:
                         if v not in merged.setdefault(key, []):
                             merged[key].append(v)
@@ -1230,6 +1231,9 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
                                 # The PNG sizes (WxH) and devicePixelRatios captured.
                                 **({"png": cell["png"], "dpr": cell.get("dpr", [])}
                                    if cell.get("png") else {}),
+                                # browser-use screenshot-720: the viewport read
+                                # before its settle -> the one the rep starts from.
+                                **({"settled": cell["settled"]} if cell.get("settled") else {}),
                                 # Partial samples stay in the JSON.
                                 "runs_ms": cell.get("runs_ms", []),
                                 "ok": bool(cell.get("ok")),

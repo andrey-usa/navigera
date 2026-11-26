@@ -282,6 +282,9 @@ OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
        "screenshot", "screenshot-720", "form-batch")
 # The one viewport screenshot-720 sets in every tool, in CSS pixels.
 SHOT_720 = (1280, 720)
+# The captures browser-use's tab may take for two equal viewport reads
+# before screenshot-720's resize (bu_settled_viewport).
+BU_SETTLE_READS = 6
 
 TITLE = "(() => document.title)()"
 HEADING = "(() => document.querySelector('h1').textContent)()"
@@ -1103,6 +1106,43 @@ class Tool:
             self._bu_exec(f'cdp("Emulation.setDeviceMetricsOverride", width={width}, '
                           f'height={height}, deviceScaleFactor=0, mobile=False)\n', "setup")
 
+    def bu_settled_viewport(self) -> tuple[int, int, float]:
+        """browser-use's viewport once its tab has taken its own size (untimed).
+
+        new_tab opens a background tab, and its innerHeight can read a size
+        the tab no longer has, on the same 780x580 window: on CI 780x437
+        until the first resize and 780x493 after it, so a round's first rep
+        failed the undo check (bench 45741832137, 45744792761); locally
+        780x380 until a capture that takes 10 s, 780x437 after it. A hidden
+        tab paints no frame unless it is captured, so a read can also lag a
+        resize until the next capture. So the read before the resize comes
+        after one set, capture and clear, the calls the rep makes, then
+        captures until two reads a frame apart agree.
+        """
+        first = self.live_viewport()
+        shot = self.out_dir / f"ops-settle-{self.tag}.png"
+        self.resize(*SHOT_720)
+        self._bu_exec(f'capture_screenshot("{shot}")\n', "setup")
+        self.resize(None, None)
+        prev = None
+        for _ in range(BU_SETTLE_READS):
+            self._bu_exec(f'capture_screenshot("{shot}")\n', "setup")
+            cur = self.live_viewport()
+            if cur == prev:
+                break
+            prev = cur
+        else:
+            raise RuntimeError(f"screenshot-720: browser-use's viewport did not settle in "
+                               f"{BU_SETTLE_READS} captures (last read {prev[0]}x{prev[1]})")
+        # A clear that leaves the override on is the undo failure the rep
+        # checks for; it must not become the rep's starting point.
+        if cur[:2] == SHOT_720 != first[:2]:
+            raise RuntimeError(f"screenshot-720 undo: the viewport is {SHOT_720[0]}x{SHOT_720[1]} "
+                               f"after the clear, it was {first[0]}x{first[1]} before the resize")
+        # What the read was before the settle, and what it settled to.
+        self.settle_info = f"{first[0]}x{first[1]}->{cur[0]}x{cur[1]}"
+        return cur
+
     def op_screenshot(self, rep: int):
         ms, shot = self.take_screenshot(self.out_dir / f"ops-shot-{self.tag}-r{rep}.png")
         return ms, 1, self.check_shot(shot)
@@ -1111,7 +1151,7 @@ class Tool:
         # The same capture at one viewport for every tool: the default
         # screenshot row compares different pixel counts (1440x813 against
         # 1280x633 against 1905x2053). The resize and its undo are untimed.
-        vw, vh, _ = self.live_viewport()
+        vw, vh, _ = self.bu_settled_viewport() if self.name == "bu" else self.live_viewport()
         self._before_resize = (vw, vh)
         self.resize(*SHOT_720)
         try:
@@ -1221,8 +1261,10 @@ class Tool:
         extra: dict = {}
         pngs: list[str] = []
         dprs: list[float] = []
+        settled: list[str] = []
         for rep in range(reps):
             self.shot_info = {}
+            self.settle_info = ""
             try:
                 ms, calls, detail = method(self, rep)
                 runs.append(ms)
@@ -1234,6 +1276,8 @@ class Tool:
                     if self.shot_info["dpr"] not in dprs:
                         dprs.append(self.shot_info["dpr"])
                     extra["viewport"] = self.shot_info["viewport"]
+                if self.settle_info and self.settle_info not in settled:
+                    settled.append(self.settle_info)
             except Exception as e:
                 errors.append(f"rep {rep}: {' '.join(str(e).split())[:300]}")
                 print(f"  [ops] {self.name} {op} rep {rep + 1}/{reps}: FAILED ({e})",
@@ -1247,6 +1291,7 @@ class Tool:
                 "calls": calls, "ok": ok,
                 **({"errors": errors} if errors else {}),
                 **({"png": pngs, "dpr": dprs} if pngs else {}),
+                **({"settled": settled} if settled else {}),
                 **extra}
 
 
