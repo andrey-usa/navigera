@@ -135,9 +135,11 @@ fn a_profile_seeded_from_another_browser_starts_signed_in() {
         ok(&s.name, &["start", "--profile", &user_s, "--headless"]);
         let r = ok(&s.name, &["goto", &format!("{}/login", site.url)]);
         assert_eq!(r["title"], "signed in", "{r}");
+        // Its answer comes once the browser has let go of its profile, so
+        // the copy below needs no wait of its own.
+        let bye = ok(&s.name, &["quit", "--close-browser"]);
+        assert_eq!(bye["browser"], "closed", "{bye}");
     }
-    // Give its browser a moment to write its cookies and storage down.
-    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let s = Session { name: session_name("agent"), close_browser: true };
     ok(&s.name, &["start", "--profile", &agent_s, "--from", &user_s, "--headless"]);

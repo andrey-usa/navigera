@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, `quit --close-browser` on a `--profile` session could answer
+  while Chrome still held the profile: it waited for the DevTools port to
+  close, which happens early in a shutdown, and for `SingletonLock`, which
+  only Linux and macOS have. A `--from` that copied the profile right after
+  failed with "Default\\Network is in use" or copied it without its cookies
+  ([run 45741620458](https://github.com/andrey-usa/navigera/actions/runs/45741620458),
+  [run 45709982704](https://github.com/andrey-usa/navigera/actions/runs/45709982704)).
+  It now also waits for the `lockfile` Chrome holds there until its process
+  ends, and says so when the browser still holds its profile 15 s after it
+  was asked to close, instead of answering `closed`; `show` and `hide` on
+  a `--profile` session wait the same way before they start it again.
+
 ## [0.18.0] - 2026-11-25
 
 ### Added

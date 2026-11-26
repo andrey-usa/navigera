@@ -1164,7 +1164,13 @@ fn a_reset_never_has_two_pages_and_a_headless_browser_loads_no_address_bar() {
         s.ok(&["goto", &format!("{}/effects", site.url)]);
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(watch.join().unwrap(), 1, "a reset had the old and the new tab open at once");
+    let most = watch.join().unwrap();
+    assert!(
+        most > 0,
+        "the watcher never read a page from the browser's DevTools port {port}: {:?}",
+        browser_targets(port)
+    );
+    assert_eq!(most, 1, "a reset had the old and the new tab open at once");
     let targets = browser_targets(port);
     assert_eq!(pages(&targets), 1, "{targets:?}");
     let ui: Vec<_> = targets.iter().filter(|(kind, url)| kind != "page" && url.contains("omnibox")).collect();

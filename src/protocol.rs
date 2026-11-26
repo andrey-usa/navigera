@@ -4541,7 +4541,13 @@ impl Driver {
         let timeout_ms = self.session.timeout_ms();
         let new = match self.session.profile_dir() {
             Some(dir) => {
-                self.session.close_browser()?;
+                if !self.session.close_browser()? {
+                    anyhow::bail!(
+                        "{what}: the browser of profile {} still holds it 15 s after it was asked to close; \
+                         run {what} again once it has exited",
+                        dir.display()
+                    );
+                }
                 let target = crate::browser::AttachTarget::Profile {
                     name: dir.display().to_string(),
                     executable: Some(exe),
@@ -6734,8 +6740,15 @@ impl Driver {
             // Attached: the browser stays open, and so do the user's tabs;
             // navigera's own close (all of them stay with `--keep-tabs`).
             Command::Quit { close_browser: true, .. } if s.is_attached() => {
-                s.close_browser()?;
-                Ok(json!({ "bye": true, "browser": "closed" }))
+                if s.close_browser()? {
+                    Ok(json!({ "bye": true, "browser": "closed" }))
+                } else {
+                    Ok(json!({
+                        "bye": true,
+                        "browser": "closing: it still holds its profile 15 s after it was asked to close; \
+                                    wait for it to exit before a start or --from on that profile",
+                    }))
+                }
             }
             Command::Quit { keep_tabs, .. } if s.is_attached() => {
                 let mut bye = json!({ "bye": true, "browser": "left open" });

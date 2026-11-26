@@ -992,6 +992,24 @@ const TAB_VIEW_WAIT: Duration = Duration::from_millis(1000);
 /// event's CDP reply by a task or two). Ends early once it arrives.
 const NAV_GRACE: Duration = Duration::from_millis(150);
 
+/// How long `quit --close-browser` waits for a `--profile` browser to let
+/// go of its profile.
+const CLOSE_WAIT: Duration = Duration::from_secs(15);
+
+/// True while a Chrome-family browser holds the user data directory `dir`:
+/// its process singleton is there. On Linux and macOS that is the
+/// `SingletonLock` symlink; on Windows the `lockfile` the browser process
+/// opens with FILE_FLAG_DELETE_ON_CLOSE and holds until it ends
+/// (`process_singleton_win.cc`). The DevTools port closes early in a
+/// shutdown, before the profile is written down; on Windows the browser
+/// process (where navigera runs the network service) also keeps its cookie
+/// store locked until then, so a `--from` that copies the profile while the
+/// lock is held fails with "in use", or copies it half written.
+pub(crate) fn profile_held(dir: &std::path::Path) -> bool {
+    let name = if cfg!(windows) { "lockfile" } else { "SingletonLock" };
+    std::fs::symlink_metadata(dir.join(name)).is_ok()
+}
+
 /// A session's `clock`: the settings a new document starts it from, and
 /// per tab (target id) the identifier of the script that does.
 #[derive(Debug, Default, Clone)]
@@ -1614,22 +1632,24 @@ impl BrowserSession {
 
     /// Ask the browser itself to shut down (`quit --close-browser` on an
     /// attached session): Chrome closes its windows and saves its profile.
-    pub fn close_browser(&self) -> Result<()> {
+    /// False when a `--profile` browser still held its profile
+    /// [`CLOSE_WAIT`] later.
+    pub fn close_browser(&self) -> Result<bool> {
         self.browser.close_remote()?;
         // A `--profile` browser is done when its profile is free again, so
-        // the next `start` on it (or a `--from` that replaces it) finds no
-        // browser still on its way out.
-        if let Some(dir) = &self.profile_dir {
-            let deadline = std::time::Instant::now() + Duration::from_secs(15);
-            while std::time::Instant::now() < deadline {
-                let lock = std::fs::symlink_metadata(dir.join("SingletonLock")).is_ok();
-                if cdp::attach::live_endpoint(dir).is_none() && !lock {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(100));
+        // the next `start` on it (or a `--from` that copies or replaces it)
+        // finds no browser still on its way out.
+        let Some(dir) = &self.profile_dir else { return Ok(true) };
+        let deadline = std::time::Instant::now() + CLOSE_WAIT;
+        loop {
+            if cdp::attach::live_endpoint(dir).is_none() && !profile_held(dir) {
+                return Ok(true);
             }
+            if std::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        Ok(())
     }
 
     fn timeout(&self, override_ms: Option<f64>) -> Duration {
@@ -4779,6 +4799,25 @@ fn tab_range(count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lock a closing browser is waited on is the one Chrome makes on
+    /// this OS: a held Windows `lockfile` keeps the profile busy there (the
+    /// DevTools port closes before it), and a stray file of that name means
+    /// nothing elsewhere.
+    #[test]
+    fn a_profile_is_held_while_its_browser_lock_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!profile_held(dir.path()));
+        std::fs::write(dir.path().join("lockfile"), b"").unwrap();
+        assert_eq!(profile_held(dir.path()), cfg!(windows));
+        std::fs::remove_file(dir.path().join("lockfile")).unwrap();
+        #[cfg(unix)]
+        {
+            // Chrome's SingletonLock is a dangling symlink to "host-pid".
+            std::os::unix::fs::symlink("runner-4242", dir.path().join("SingletonLock")).unwrap();
+            assert!(profile_held(dir.path()));
+        }
+    }
 
     #[test]
     fn feature_lists_merge_into_one_flag_each() {
