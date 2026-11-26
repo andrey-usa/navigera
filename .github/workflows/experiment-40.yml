@@ -26,9 +26,19 @@ env:
   REPEATS: "30"
 
 jobs:
+  # Run 3: ci's crash rate is per job (4 of ~180 electron (macos-15) jobs
+  # since 2026-11-13), and each job is a fresh machine: 20 machines, each
+  # running the whole binary 10 times from empty app data, the first of
+  # them that machine's first Electron launch.
   electron:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     runs-on: macos-15
-    timeout-minutes: 60
+    env:
+      REPEATS: "10"
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -56,33 +66,16 @@ jobs:
         env:
           NAVIGERA_REQUIRE_ELECTRON: "1"
         run: |
-          python3 bench/probe/repeat.py --arm electron-suite-cold --n "$REPEATS" --out "$RUNNER_TEMP/out" \
+          python3 bench/probe/repeat.py --arm "electron-suite-cold-${{ matrix.shard }}" --n "$REPEATS" --out "$RUNNER_TEMP/out" \
             --before 'rm -rf "$HOME/Library/Application Support/navigera-electron-fixture"' -- \
             cargo test --locked --test electron -- --nocapture
-          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/electron-suite-cold.md" "electron suite cold"
-      - name: webview test alone, app data removed before each repeat
-        env:
-          NAVIGERA_REQUIRE_ELECTRON: "1"
-        run: |
-          python3 bench/probe/repeat.py --arm webview-alone-cold --n "$REPEATS" --out "$RUNNER_TEMP/out" \
-            --before 'rm -rf "$HOME/Library/Application Support/navigera-electron-fixture"' -- \
-            cargo test --locked --test electron -- --exact a_webview_in_an_app_window_is_a_tab_of_its_own --nocapture
-          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/webview-alone-cold.md" "webview alone cold"
-      - name: whole electron binary, every CPU busy
-        env:
-          NAVIGERA_REQUIRE_ELECTRON: "1"
-        run: |
-          for i in $(seq "$(sysctl -n hw.ncpu)"); do (while :; do :; done) & done
-          python3 bench/probe/repeat.py --arm electron-suite-loaded --n "$REPEATS" --out "$RUNNER_TEMP/out" -- \
-            cargo test --locked --test electron -- --nocapture
-          kill $(jobs -p)
-          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/electron-suite-loaded.md" "electron suite loaded"
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/electron-suite-cold-${{ matrix.shard }}.md" "electron suite cold ${{ matrix.shard }}"
       - name: app data and leftovers
         if: always()
         run: |
           { echo "== Application Support"; ls -la "$HOME/Library/Application Support" | grep -i -E 'electron|navigera' || true
             for d in "$HOME/Library/Application Support"/navigera-electron-fixture "$HOME/Library/Application Support"/Electron; do
-              [ -d "$d" ] && { echo "== $d"; ls -laR "$d" | head -200; }
+              if [ -d "$d" ]; then echo "== $d"; ls -laR "$d" | head -200; fi
             done
             echo "== processes"; ps -axo pid,ppid,etime,args | grep -i -E 'electron|navigera' | grep -v grep || true
           } > "$RUNNER_TEMP/out/leftovers.txt" 2>&1
@@ -94,7 +87,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
-          name: electron-macos
+          name: electron-macos-${{ matrix.shard }}
           path: ${{ runner.temp }}/out
           retention-days: 14
 
@@ -121,28 +114,16 @@ jobs:
           echo "::notice title=machine::$("$chrome" --version) · $(sw_vers -productVersion) $(sw_vers -buildVersion) · $(uname -m) · $(sysctl -n hw.ncpu) cpus · $(system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Resolution|Display Type' | tr -s ' ' | tr '\n' ' ')"
       - name: Build tests
         run: cargo test --locked --features http --test handoff --no-run
-      # Run 2: the same with every CPU busy (ci's macOS job runs the whole
-      # suite; run 1's quiet repeats were 0/30 and 0/30).
-      - name: natural mode alone, every CPU busy
+      # Run 3: ci's rate is about 1 in 80 macos jobs, so 300 repeats.
+      - name: natural mode alone
         env:
           NAVIGERA_REQUIRE_BROWSER: "1"
         run: |
-          for i in $(seq "$(sysctl -n hw.ncpu)"); do (while :; do :; done) & done
-          python3 bench/probe/repeat.py --arm natural-alone-loaded --n "$REPEATS" --out "$RUNNER_TEMP/out" -- \
+          python3 bench/probe/repeat.py --arm natural-alone-300 --n 300 --out "$RUNNER_TEMP/out" -- \
             cargo test --locked --features http --test handoff -- --exact natural_mode_shows_no_sign_of_automation --nocapture
-          kill $(jobs -p)
-          python3 bench/probe/signals.py "$RUNNER_TEMP/out/natural-alone-loaded" >> "$RUNNER_TEMP/out/natural-alone-loaded.md"
-          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/natural-alone-loaded.md" "natural alone loaded"
-      - name: whole handoff binary, every CPU busy
-        env:
-          NAVIGERA_REQUIRE_BROWSER: "1"
-        run: |
-          for i in $(seq "$(sysctl -n hw.ncpu)"); do (while :; do :; done) & done
-          python3 bench/probe/repeat.py --arm handoff-suite-loaded --n "$REPEATS" --out "$RUNNER_TEMP/out" -- \
-            cargo test --locked --features http --test handoff -- --nocapture
-          kill $(jobs -p)
-          python3 bench/probe/signals.py "$RUNNER_TEMP/out/handoff-suite-loaded" >> "$RUNNER_TEMP/out/handoff-suite-loaded.md"
-          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/handoff-suite-loaded.md" "handoff suite loaded"
+          python3 bench/probe/signals.py "$RUNNER_TEMP/out/natural-alone-300" > "$RUNNER_TEMP/out/signals.txt"
+          head -3 "$RUNNER_TEMP/out/signals.txt" >> "$RUNNER_TEMP/out/natural-alone-300.md"
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/natural-alone-300.md" "natural alone 300"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -151,6 +132,10 @@ jobs:
           retention-days: 14
 
   edge:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -175,19 +160,17 @@ jobs:
           echo "::notice title=machine::$(/tmp/browser/chrome-linux64/chrome --version) · $(/usr/bin/microsoft-edge --version) · $(nproc) cpus · $(free -g | awk '/Mem/{print $2}') GB · kernel $(uname -r) · $(. /etc/os-release; echo $PRETTY_NAME) · image $ImageVersion"
       - name: Build tests
         run: cargo test --locked --features http --test network_service --no-run
-      # Run 2: every CPU busy (run 1, quiet: 0/30).
-      - name: network service test, every CPU busy
+      # Run 3: 2 machines x 200 quiet repeats.
+      - name: network service test
         env:
           NAVIGERA_REQUIRE_BROWSER: "1"
         run: |
-          for i in $(seq "$(nproc)"); do (while :; do :; done) & done
-          python3 bench/probe/repeat.py --arm network-service-loaded --n "$REPEATS" --out "$RUNNER_TEMP/out" --hang-after 45 -- \
+          python3 bench/probe/repeat.py --arm "network-service-${{ matrix.shard }}" --n 200 --out "$RUNNER_TEMP/out" --hang-after 45 -- \
             cargo test --locked --features http --test network_service -- --nocapture
-          kill $(jobs -p)
-          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/network-service-loaded.md" "network service loaded"
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/network-service-${{ matrix.shard }}.md" "network service ${{ matrix.shard }}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
-          name: edge-linux
+          name: edge-linux-${{ matrix.shard }}
           path: ${{ runner.temp }}/out
           retention-days: 14
