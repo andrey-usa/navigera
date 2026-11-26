@@ -8,10 +8,16 @@
 // `--custom-user-agent=<ua>` replaces the user agent (no Electron/ in
 // it). `--webview` also opens a Notes window holding a <webview>;
 // `--webview-late=<ms>` opens it that much later (while a session that
-// launched the app is still choosing its window).
+// launched the app is still choosing its window). `--fixture-user-data=<dir>`
+// keeps the app's profile there instead of Electron's default.
 const { app, BrowserWindow, ipcMain } = require("electron");
 const fs = require("fs");
 const path = require("path");
+
+const userData = process.argv.find((arg) => arg.startsWith("--fixture-user-data="));
+if (userData) {
+  app.setPath("userData", userData.slice("--fixture-user-data=".length));
+}
 
 const pidFile = process.argv.find((arg) => arg.startsWith("--pid-file="));
 if (pidFile) {

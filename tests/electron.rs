@@ -127,6 +127,29 @@ fn windows_report(session: &str) -> String {
     out
 }
 
+/// A profile of the test's own for the app. The tests run at once, and
+/// copies of one app on Electron's default profile write the same disk
+/// caches (ci: `Unable to create cache`, then a SIGBUS in the blockfile
+/// cache thread). Declared before the session's `Quit`, so the app is gone
+/// before the directory is removed.
+struct Profile(tempfile::TempDir);
+
+impl Profile {
+    fn new() -> Self {
+        Profile(tempfile::Builder::new().prefix("nv-electron-profile-").tempdir().expect("a temp profile"))
+    }
+
+    /// The app's own argument.
+    fn app_arg(&self) -> String {
+        format!("--fixture-user-data={}", self.0.path().display())
+    }
+
+    /// The same, passed through navigera.
+    fn arg(&self) -> String {
+        format!("--electron-arg={}", self.app_arg())
+    }
+}
+
 /// Ends the session (and with it the app) if the test fails midway.
 struct Quit(String);
 
@@ -144,6 +167,7 @@ fn an_electron_app_is_driven_through_its_windows() {
     };
     let scratch = tempfile::tempdir().unwrap();
     let pid_file = scratch.path().join("app.pid");
+    let profile = Profile::new();
     let session = session_name("app");
     let _quit = Quit(session.clone());
     // The app's directory: navigera runs the Electron in its node_modules,
@@ -158,6 +182,7 @@ fn an_electron_app_is_driven_through_its_windows() {
             &format!("--electron-arg=--pid-file={}", pid_file.display()),
             "--electron-arg=--helper-window",
             "--electron-arg=--late-ui",
+            &profile.arg(),
             "--idle-timeout-s",
             "300",
         ],
@@ -262,9 +287,11 @@ fn an_mcp_client_drives_an_electron_app() {
     };
     let scratch = tempfile::tempdir().unwrap();
     let pid_file = scratch.path().join("app.pid");
+    let profile = Profile::new();
     let mut child = Command::new(tool_exe())
         .args(["mcp", "--electron", app.to_str().unwrap(), "--electron-arg=--late-ui"])
         .arg(format!("--electron-arg=--pid-file={}", pid_file.display()))
+        .arg(profile.arg())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -333,6 +360,8 @@ fn a_single_instance_app_already_running_is_named() {
         return;
     };
     let app = app.to_str().unwrap();
+    // Both copies on one profile: the single-instance lock lives in it.
+    let profile = Profile::new();
     let first = session_name("single-first");
     let _quit_first = Quit(first.clone());
     // An app with its own user agent: the version comes from its main process.
@@ -344,6 +373,7 @@ fn a_single_instance_app_already_running_is_named() {
             app,
             "--electron-arg=--single-instance",
             "--electron-arg=--custom-user-agent=OrdersApp/2.0",
+            &profile.arg(),
         ],
     );
     assert!(started && r["ok"] == true, "{r}");
@@ -353,7 +383,7 @@ fn a_single_instance_app_already_running_is_named() {
     // A second copy hands over to the first and exits: `start` says why.
     let second = session_name("single-second");
     let _quit_second = Quit(second.clone());
-    let (started, r) = run(&second, &["start", "--electron", app, "--electron-arg=--single-instance"]);
+    let (started, r) = run(&second, &["start", "--electron", app, "--electron-arg=--single-instance", &profile.arg()]);
     assert!(!started, "{r}");
     let text = r.to_string();
     // Where it quits (before its DevTools port, after it, while navigera
@@ -383,6 +413,7 @@ fn an_electron_app_already_running_is_attached() {
         eprintln!("skipping: no Electron in tests/fixtures/electron-app (run `npm install` there)");
         return;
     };
+    let profile = Profile::new();
     // The app as a user starts it for debugging: with a DevTools port.
     let mut command = Command::new(electron_binary(&app));
     command.arg("--remote-debugging-port=0");
@@ -393,6 +424,7 @@ fn an_electron_app_already_running_is_attached() {
     let mut child = command
         .arg(&app)
         .arg("--helper-window")
+        .arg(profile.app_arg())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -456,10 +488,12 @@ fn a_webview_in_an_app_window_is_a_tab_of_its_own() {
         eprintln!("skipping: no Electron in tests/fixtures/electron-app (run `npm install` there)");
         return;
     };
+    let profile = Profile::new();
     let session = session_name("webview");
     let _quit = Quit(session.clone());
     // The app also opens a Notes window holding a <webview>.
-    let (started, r) = run(&session, &["start", "--electron", app.to_str().unwrap(), "--electron-arg=--webview"]);
+    let (started, r) =
+        run(&session, &["start", "--electron", app.to_str().unwrap(), "--electron-arg=--webview", &profile.arg()]);
     assert!(started && r["ok"] == true, "{r}");
     let tree = ax(&session);
     assert!(tree.contains("heading \"Orders\""), "{tree}\n{}", windows_report(&session));
@@ -489,10 +523,13 @@ fn a_webview_that_loads_later_is_still_a_tab_of_its_own() {
         eprintln!("skipping: no Electron in tests/fixtures/electron-app (run `npm install` there)");
         return;
     };
+    let profile = Profile::new();
     let session = session_name("webview-late");
     let _quit = Quit(session.clone());
-    let (started, r) =
-        run(&session, &["start", "--electron", app.to_str().unwrap(), "--electron-arg=--webview-late=1500"]);
+    let (started, r) = run(
+        &session,
+        &["start", "--electron", app.to_str().unwrap(), "--electron-arg=--webview-late=1500", &profile.arg()],
+    );
     assert!(started && r["ok"] == true, "{r}");
     let tabs = wait_for(Duration::from_secs(15), "the late webview as a tab", || {
         let tabs = ok(&session, &["tab-list"]);
