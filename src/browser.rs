@@ -1010,6 +1010,20 @@ pub(crate) fn profile_held(dir: &std::path::Path) -> bool {
     std::fs::symlink_metadata(dir.join(name)).is_ok()
 }
 
+/// The pid of the browser holding the user data directory `dir`, on Linux
+/// and macOS: `SingletonLock` points at `<host>-<pid>`. Chrome removes it
+/// before it writes the profile down at its exit (a copy right after it
+/// went had no cookies: ci 45770033413), so a close is waited out by the
+/// process. None on Windows, where the `lockfile` lasts as long as the
+/// process does.
+pub(crate) fn profile_browser_pid(dir: &std::path::Path) -> Option<u32> {
+    if cfg!(windows) {
+        return None;
+    }
+    let target = std::fs::read_link(dir.join("SingletonLock")).ok()?;
+    target.to_str()?.rsplit_once('-')?.1.parse().ok()
+}
+
 /// A session's `clock`: the settings a new document starts it from, and
 /// per tab (target id) the identifier of the script that does.
 #[derive(Debug, Default, Clone)]
@@ -1635,6 +1649,7 @@ impl BrowserSession {
     /// False when a `--profile` browser still held its profile
     /// [`CLOSE_WAIT`] later.
     pub fn close_browser(&self) -> Result<bool> {
+        let pid = self.profile_dir.as_deref().and_then(profile_browser_pid);
         self.browser.close_remote()?;
         // A `--profile` browser is done when its profile is free again, so
         // the next `start` on it (or a `--from` that copies or replaces it)
@@ -1642,7 +1657,8 @@ impl BrowserSession {
         let Some(dir) = &self.profile_dir else { return Ok(true) };
         let deadline = std::time::Instant::now() + CLOSE_WAIT;
         loop {
-            if cdp::attach::live_endpoint(dir).is_none() && !profile_held(dir) {
+            let ended = pid.is_none_or(crate::proc::process_gone);
+            if ended && cdp::attach::live_endpoint(dir).is_none() && !profile_held(dir) {
                 return Ok(true);
             }
             if std::time::Instant::now() >= deadline {
@@ -4813,9 +4829,10 @@ mod tests {
         std::fs::remove_file(dir.path().join("lockfile")).unwrap();
         #[cfg(unix)]
         {
-            // Chrome's SingletonLock is a dangling symlink to "host-pid".
-            std::os::unix::fs::symlink("runner-4242", dir.path().join("SingletonLock")).unwrap();
+            // Chrome's SingletonLock is a dangling symlink to "<host>-<pid>".
+            std::os::unix::fs::symlink("fv-az123-4242", dir.path().join("SingletonLock")).unwrap();
             assert!(profile_held(dir.path()));
+            assert_eq!(profile_browser_pid(dir.path()), Some(4242), "the pid after the host name's own dashes");
         }
     }
 

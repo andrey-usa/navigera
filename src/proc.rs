@@ -144,6 +144,35 @@ pub fn pid_alive(pid: u32) -> bool {
     ParentWatch::new(pid).is_some()
 }
 
+/// Has the process `pid` ended? A child of this process that has exited is
+/// reaped here (else it stays a zombie, which [`pid_alive`] counts as
+/// running, until this process ends); any other process is gone once no
+/// process has its pid.
+#[cfg(unix)]
+pub fn process_gone(pid: u32) -> bool {
+    extern "C" {
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    }
+    const WNOHANG: i32 = 1; // the same on Linux and macOS
+    let Ok(id) = i32::try_from(pid) else { return true };
+    if id <= 0 {
+        return true;
+    }
+    let mut status = 0;
+    // SAFETY: `status` is a live i32 the call writes once; WNOHANG never
+    // blocks; a pid that is not our child only gets ECHILD.
+    match unsafe { waitpid(id, &mut status, WNOHANG) } {
+        r if r == id => true,
+        0 => false,
+        _ => !pid_alive(pid),
+    }
+}
+
+#[cfg(windows)]
+pub fn process_gone(pid: u32) -> bool {
+    !pid_alive(pid)
+}
+
 /// Every process: pid -> (parent pid, memory in KiB). Memory is the
 /// proportional set size on Linux (shared pages split between their
 /// users, so a tree's sum is what it costs), the resident set elsewhere.
@@ -235,6 +264,23 @@ pub fn tree_kb(table: &std::collections::HashMap<u32, (u32, u64)>, root: u32, sk
 
 #[cfg(test)]
 mod tests {
+    /// A child that exits is gone once reaped (not a zombie counted as
+    /// running); a running child and a live process not ours are not gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_is_gone_once_it_exits_and_is_reaped() {
+        let mut child = std::process::Command::new("sleep").arg("0.3").spawn().unwrap();
+        let pid = child.id();
+        assert!(!super::process_gone(pid), "running");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !super::process_gone(pid) {
+            assert!(std::time::Instant::now() < deadline, "the exited child was never reported gone");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!super::pid_alive(pid), "reaped, so not a zombie");
+        let _ = child.try_wait();
+        assert!(!super::process_gone(1), "init runs and is not our child");
+    }
     use super::*;
     use std::collections::HashMap;
 
