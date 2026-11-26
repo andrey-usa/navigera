@@ -3,6 +3,7 @@
 
     libc_probe.py time BASE_URL OUT_DIR
     libc_probe.py profile ARM BASE_URL OUT_DIR
+    libc_probe.py cli ARM BASE_URL OUT_DIR
 
 Builds, from $NAVIGERA_BUILDS (`name=path,name=path,...`): the release's
 musl + mimalloc, musl with musl's own allocator, glibc with glibc's, glibc
@@ -46,8 +47,12 @@ def arms():
     out = {}
     for name, path in BUILDS.items():
         out[name] = (path, {})
-    first = next(iter(BUILDS))
-    out[first + "-nopurge"] = (BUILDS[first], {"MIMALLOC_PURGE_DELAY": "-1"})
+    # NAVIGERA_ENV_ARMS: `build:suffix:VAR=value;...`, the build run with
+    # that environment (inherited by its session server).
+    for spec in filter(None, os.environ.get("NAVIGERA_ENV_ARMS", "").split(";")):
+        build, suffix, kv = spec.split(":", 2)
+        k, v = kv.split("=", 1)
+        out[f"{build}-{suffix}"] = (BUILDS[build], {k: v})
     return out
 
 
@@ -76,13 +81,14 @@ def session(arm):
     return name, [path, "--session", name], nav_env(extra)
 
 
-def start(arm, base):
+def start(arm, base, page="page_a.html", suffix=""):
     name, pre, env = session(arm)
+    pre = pre[:2] + [pre[2] + suffix]
     if arm == "ab":
-        run(pre + ["--json", "open", f"{base}/page_a.html"], env)
+        run(pre + ["--json", "open", f"{base}/{page}"], env)
         return None
     _, out = run(pre + ["start", "--chromium", CHROME], env)
-    run(pre + ["goto", f"{base}/page_a.html"], env)
+    run(pre + ["goto", f"{base}/{page}"], env)
     m = re.search(r'"?pid"?\s*[:=]\s*(\d+)', out)
     return int(m.group(1)) if m else None
 
@@ -96,6 +102,12 @@ def op_argv(arm, op):
         return None, pre + ["eval", "1"], env
     if op == "ax":
         return None, pre + (["snapshot"] if arm == "ab" else ["ax"]), env
+    if op == "version":
+        return None, [pre[0], "--version"], env
+    if op == "axbig":
+        # A session of its own on the 2,000-row page: the click session never reads a tree.
+        big = pre[:2] + [pre[2] + "big"]
+        return None, big + (["snapshot"] if arm == "ab" else ["ax", "--limit", "0"]), env
     raise ValueError(op)
 
 
@@ -125,7 +137,8 @@ def time_mode(base, out_dir):
     names = list(ARMS) + ["ab"]
     for a in names:
         start(a, base)
-    ops = ["click", "eval", "ax"]
+        start(a, base, "big.html", "big")
+    ops = ["click", "eval", "version", "axbig"]
     got = {op: {a: [] for a in names} for op in ops}
     for r in range(ROUNDS):
         order = names[r % len(names):] + names[:r % len(names)]
@@ -261,7 +274,51 @@ def record_part(arm, pid, plist, setup, call, env, out_dir):
     print(f"::notice title={arm} perf record self time (whole server, {PROF_N} setup+click)::" + " · ".join(top[:12]))
 
 
-if MODE == "time":
+def cli_mode(arm, base, out_dir):
+    """The CLI process itself, per call: perf stat and strace -c -f of
+    each `eval 1` and each click (with its untimed setup)."""
+    start(arm, base)
+    for op in ("eval", "click"):
+        setup, call, env = op_argv(arm, op)
+        for _ in range(3):
+            if setup:
+                run(setup, env)
+            run(call, env)
+        stat = os.path.join(out_dir, f"{arm}-cli-{op}-stat.csv")
+        tr = os.path.join(out_dir, f"{arm}-cli-{op}-strace")
+        open(stat, "w").close()
+        sums, calls, n = {}, {}, 15
+        for i in range(n):
+            if setup:
+                run(setup, env)
+                time.sleep(0.3)
+            run(["perf", "stat", "-x,", "--append", "-o", stat, "-e",
+                 "task-clock,page-faults,context-switches,cpu-migrations", "--"] + call, env)
+        for line in open(stat):
+            f = line.strip().split(",")
+            if len(f) >= 3 and not line.startswith("#"):
+                try:
+                    sums[f[2]] = sums.get(f[2], 0.0) + float(f[0])
+                except ValueError:
+                    pass
+        for i in range(n):
+            if setup:
+                run(setup, env)
+                time.sleep(0.3)
+            f = f"{tr}-{i}.txt"
+            run(["strace", "-f", "-c", "-o", f, "--"] + call, env)
+            for sc, (c, _, _) in strace_file(f).items():
+                calls[sc] = calls.get(sc, 0) + c
+        top = sorted(((c, sc) for sc, c in calls.items()), reverse=True)[:12]
+        print(f"::notice title={arm} CLI {op}, per call (perf stat; strace -c -f, {n} calls each)::"
+              + " · ".join(f"{k} {v / n:.2f}" for k, v in sums.items())
+              + " | " + " · ".join(f"{sc} {c / n:.1f}" for c, sc in top))
+    clean()
+
+
+if MODE == "cli":
+    cli_mode(sys.argv[2], sys.argv[3], sys.argv[4])
+elif MODE == "time":
     time_mode(sys.argv[2], sys.argv[3])
 elif MODE == "profile":
     profile_mode(sys.argv[2], sys.argv[3], sys.argv[4])

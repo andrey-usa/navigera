@@ -63,30 +63,38 @@ jobs:
             mkdir -p "$b/$name" && cp "target/$dir/release/navigera" "$b/$name/navigera"
           }
           one musl-mi x86_64-unknown-linux-musl --target x86_64-unknown-linux-musl
+          one musl-mi2 x86_64-unknown-linux-musl --target x86_64-unknown-linux-musl --features exp-mimalloc-v2
           one musl-sys x86_64-unknown-linux-musl --target x86_64-unknown-linux-musl --features exp-sysalloc
           one glibc-sys .
-          one glibc-mi . --features exp-mimalloc
           ls -l "$b"/*/navigera
-          echo "NAVIGERA_BUILDS=musl-mi=$b/musl-mi/navigera,musl-sys=$b/musl-sys/navigera,glibc-sys=$b/glibc-sys/navigera,glibc-mi=$b/glibc-mi/navigera" >> "$GITHUB_ENV"
+          echo "NAVIGERA_BUILDS=musl-mi=$b/musl-mi/navigera,musl-mi2=$b/musl-mi2/navigera,musl-sys=$b/musl-sys/navigera,glibc-sys=$b/glibc-sys/navigera" >> "$GITHUB_ENV"
+          echo "NAVIGERA_ENV_ARMS=musl-mi:thp0:MIMALLOC_ALLOW_THP=0;musl-mi:eager0:MIMALLOC_ARENA_EAGER_COMMIT=0" >> "$GITHUB_ENV"
+          echo "::notice::THP $(cat /sys/kernel/mm/transparent_hugepage/enabled) · defrag $(cat /sys/kernel/mm/transparent_hugepage/defrag) · overcommit $(cat /proc/sys/vm/overcommit_memory)"
 
       - name: Fixtures
         run: |
           python3 bench/ladder/gen_fixtures.py
+          python3 - <<'PY'
+          rows = "".join(f'<tr><td>Item {i}</td><td><button>Edit {i}</button></td><td><a href="#r{i}">View {i}</a></td></tr>' for i in range(2000))
+          open("bench/ladder/fixtures/big.html", "w").write(
+              "<!doctype html><title>rows</title><header><nav aria-label=Main><a href=/>Home</a> <a href=/o>Orders</a></nav>"
+              "<h1>Invoices</h1><form role=search><label>Search <input name=q></label> <button>Go</button></form></header>"
+              f"<main><table><tbody>{rows}</tbody></table></main>")
+          PY
           (cd bench/ladder/fixtures && nohup python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
           sleep 1
           mkdir -p "$RUNNER_TEMP/out"
 
       - name: Time every arm
+        env:
+          ROUNDS: "7"
         run: python3 bench/probe/libc_probe.py time http://127.0.0.1:8765 "$RUNNER_TEMP/out"
 
-      - name: Profile musl-mi (as released)
-        run: python3 bench/probe/libc_probe.py profile musl-mi http://127.0.0.1:8765 "$RUNNER_TEMP/out"
-      - name: Profile glibc-sys
-        run: python3 bench/probe/libc_probe.py profile glibc-sys http://127.0.0.1:8765 "$RUNNER_TEMP/out"
-      - name: Profile musl-sys
-        run: python3 bench/probe/libc_probe.py profile musl-sys http://127.0.0.1:8765 "$RUNNER_TEMP/out"
-      - name: Profile glibc-mi
-        run: python3 bench/probe/libc_probe.py profile glibc-mi http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+      - name: The CLI process, per build
+        run: |
+          for a in musl-mi musl-mi2 musl-sys glibc-sys musl-mi-thp0 musl-mi-eager0; do
+            python3 bench/probe/libc_probe.py cli "$a" http://127.0.0.1:8765 "$RUNNER_TEMP/out"
+          done
 
       - name: Upload
         if: always()

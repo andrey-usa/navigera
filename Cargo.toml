@@ -48,6 +48,7 @@ http = ["dep:ureq"]
 # experiment-36 only: the allocator against the libc.
 exp-sysalloc = []
 exp-mimalloc = ["dep:mimalloc"]
+exp-mimalloc-v2 = ["mimalloc/v2"]
 
 # musl's allocator is slow on the many small allocations a large snapshot makes.
 [target.'cfg(target_env = "musl")'.dependencies]
