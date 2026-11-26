@@ -184,6 +184,11 @@ fn natural_mode_shows_no_sign_of_automation() {
     }
     ok(&natural.name, &["start", "--natural"]);
     let after = signals(&natural.name, &format!("{}/", site.url));
+    // A repeat harness keeps what each run's page saw, passed or not.
+    if let Some(dir) = std::env::var_os("NV_SIGNALS_DIR") {
+        let _ =
+            std::fs::write(Path::new(&dir).join("signals.json"), format!("{{\"before\":{before},\"after\":{after}}}"));
+    }
     assert!(fired(&after).is_empty(), "natural mode shows {:?}: {after}", fired(&after));
     assert!(!after["info_ua"].as_str().unwrap().contains("Headless"), "{after}");
     // What it changed is what headless shows: the user agent says so, in the

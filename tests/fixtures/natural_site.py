@@ -33,6 +33,7 @@ PAGE = r"""<!doctype html><html><head><meta charset=utf-8><title>checking</title
   s.no_languages = !navigator.languages || navigator.languages.length === 0;
   s.no_chrome_object = typeof window.chrome === 'undefined';
   s.zero_outer = window.outerWidth === 0 || window.outerHeight === 0;
+  s.info_outer_at_check = [window.outerWidth, window.outerHeight, Math.round(performance.now())];
   s.default_headless_size = window.innerWidth === 800 && window.innerHeight === 600;
   s.screen_equals_window = screen.width === window.outerWidth && screen.height === window.outerHeight;
   try {

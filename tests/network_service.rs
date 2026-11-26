@@ -279,6 +279,7 @@ impl Launch {
     /// navigera's status and tabs, the browser's processes, the last CDP
     /// commands navigera sent and the session's logs.
     fn diagnose(&self) -> String {
+        ps_snapshot(&self.marker);
         let mut out = String::from("---- diagnostics\ntimeline:\n");
         if let Ok(lines) = TIMELINE.lock() {
             out += &lines.join("\n");
@@ -349,7 +350,30 @@ impl Drop for Launch {
             cmd.env("XDG_RUNTIME_DIR", self.dir.path());
         }
         let _ = cmd.args(["-s", "net", "quit"]).stdin(Stdio::null()).output();
+        // A repeat harness keeps every launch's session logs, passed or not.
+        if let Some(keep) = std::env::var_os("NV_KEEP_DIR") {
+            let to = Path::new(&keep).join(self.marker.trim_start_matches('-'));
+            let _ = std::fs::create_dir_all(&to);
+            for file in walk(self.dir.path()) {
+                if let Some(name) = file.file_name().filter(|_| file.extension().is_some_and(|e| e == "log")) {
+                    let _ = std::fs::copy(&file, to.join(name));
+                }
+            }
+        }
     }
+}
+
+/// The whole process table with state, age and wait channel, for a launch
+/// that hangs: saved beside the session logs when a repeat harness asks.
+fn ps_snapshot(marker: &str) {
+    let Some(keep) = std::env::var_os("NV_KEEP_DIR") else { return };
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let out =
+        Command::new("ps").args(["-ww", "-eo", "pid,ppid,pgid,stat,etimes,time,wchan:32,args", "--forest"]).output();
+    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_else(|e| format!("({e})"));
+    let _ = std::fs::write(Path::new(&keep).join(format!("ps-{}.txt", marker.trim_start_matches('-'))), text);
 }
 
 /// The files under `dir`, two levels down at most.

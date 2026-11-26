@@ -1,0 +1,169 @@
+name: experiment-40
+
+# How often three tests fail on the runner they failed on, with what each
+# failing run leaves behind (bench/probe/repeat.py): the Electron webview
+# test on macos-15 (alone, and inside its whole test binary as ci runs it),
+# natural mode's automation signs on macos-15 (alone and inside its binary),
+# and the network-service test's Edge launches on ubuntu-24.04 with the
+# runner's Edge and Chrome beta as the first browser (as in the compat
+# job). CDP trace with times on every run; macOS crash reports and Linux
+# process tables and stacks of a launch still running at 45 s are kept.
+# Counts as notices, everything else as the artifact.
+
+on:
+  push:
+    branches: [experiment-40]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: experiment-40
+  cancel-in-progress: true
+
+env:
+  NAVIGERA_OUTPUT: json
+  REPEATS: "30"
+
+jobs:
+  electron:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          cache-on-failure: false
+      - name: Electron for the fixture app
+        working-directory: tests/fixtures/electron-app
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          node node_modules/electron/install.js
+          echo "::notice title=machine::electron $(node -p "require('electron/package.json').version") · $(sw_vers -productVersion) $(sw_vers -buildVersion) · $(uname -m) · $(sysctl -n hw.ncpu) cpus · $(( $(sysctl -n hw.memsize) / 1073741824 )) GB · $(sysctl -n machdep.cpu.brand_string)"
+      - name: Build tests
+        run: cargo test --locked --test electron --no-run
+      - name: webview test alone
+        env:
+          NAVIGERA_REQUIRE_ELECTRON: "1"
+        run: |
+          python3 bench/probe/repeat.py --arm webview-alone --n "$REPEATS" --out "$RUNNER_TEMP/out" -- \
+            cargo test --locked --test electron -- --exact a_webview_in_an_app_window_is_a_tab_of_its_own --nocapture
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/webview-alone.md" "webview alone"
+      - name: whole electron binary (as ci runs it)
+        env:
+          NAVIGERA_REQUIRE_ELECTRON: "1"
+        run: |
+          python3 bench/probe/repeat.py --arm electron-suite --n "$REPEATS" --out "$RUNNER_TEMP/out" -- \
+            cargo test --locked --test electron -- --nocapture
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/electron-suite.md" "electron suite"
+      - name: app data and leftovers
+        if: always()
+        run: |
+          { echo "== Application Support"; ls -la "$HOME/Library/Application Support" | grep -i -E 'electron|navigera' || true
+            for d in "$HOME/Library/Application Support"/navigera-electron-fixture "$HOME/Library/Application Support"/Electron; do
+              [ -d "$d" ] && { echo "== $d"; ls -laR "$d" | head -200; }
+            done
+            echo "== processes"; ps -axo pid,ppid,etime,args | grep -i -E 'electron|navigera' | grep -v grep || true
+          } > "$RUNNER_TEMP/out/leftovers.txt" 2>&1
+          # Electron's own minidumps (crashpad), beside the OS crash reports.
+          for d in "$HOME/Library/Application Support"/*/Crashpad; do
+            [ -d "$d" ] && cp -R "$d" "$RUNNER_TEMP/out/crashpad-$(basename "$(dirname "$d")")" || true
+          done
+          head -c 3000 "$RUNNER_TEMP/out/leftovers.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: electron-macos
+          path: ${{ runner.temp }}/out
+          retention-days: 14
+
+  natural:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          cache-on-failure: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+      - name: Machine
+        run: |
+          chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          echo "::notice title=machine::$("$chrome" --version) · $(sw_vers -productVersion) $(sw_vers -buildVersion) · $(uname -m) · $(sysctl -n hw.ncpu) cpus · $(system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Resolution|Display Type' | tr -s ' ' | tr '\n' ' ')"
+      - name: Build tests
+        run: cargo test --locked --features http --test handoff --no-run
+      - name: natural mode alone
+        env:
+          NAVIGERA_REQUIRE_BROWSER: "1"
+        run: |
+          python3 bench/probe/repeat.py --arm natural-alone --n "$REPEATS" --out "$RUNNER_TEMP/out" -- \
+            cargo test --locked --features http --test handoff -- --exact natural_mode_shows_no_sign_of_automation --nocapture
+          python3 bench/probe/signals.py "$RUNNER_TEMP/out/natural-alone" >> "$RUNNER_TEMP/out/natural-alone.md"
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/natural-alone.md" "natural alone"
+      - name: whole handoff binary (as ci runs it)
+        env:
+          NAVIGERA_REQUIRE_BROWSER: "1"
+        run: |
+          python3 bench/probe/repeat.py --arm handoff-suite --n "$REPEATS" --out "$RUNNER_TEMP/out" -- \
+            cargo test --locked --features http --test handoff -- --nocapture
+          python3 bench/probe/signals.py "$RUNNER_TEMP/out/handoff-suite" >> "$RUNNER_TEMP/out/handoff-suite.md"
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/handoff-suite.md" "handoff suite"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: natural-macos
+          path: ${{ runner.temp }}/out
+          retention-days: 14
+
+  edge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          cache-on-failure: false
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: gdb
+      - name: Chrome beta (the first browser, as in the compat job)
+        run: |
+          url=$(python3 tools/cft_matrix.py | python3 -c 'import json,sys
+          line = next(l for l in sys.stdin if l.startswith("matrix="))
+          print(next(b["url"] for b in json.loads(line[7:]) if b["channel"] == "beta"))')
+          curl -sSfL --retry 3 -o /tmp/browser.zip "$url"
+          unzip -q /tmp/browser.zip -d /tmp/browser
+          echo "CHROME_BIN=/tmp/browser/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          echo "::notice title=machine::$(/tmp/browser/chrome-linux64/chrome --version) · $(/usr/bin/microsoft-edge --version) · $(nproc) cpus · $(free -g | awk '/Mem/{print $2}') GB · kernel $(uname -r) · $(. /etc/os-release; echo $PRETTY_NAME) · image $ImageVersion"
+      - name: Build tests
+        run: cargo test --locked --features http --test network_service --no-run
+      - name: network service test
+        env:
+          NAVIGERA_REQUIRE_BROWSER: "1"
+        run: |
+          python3 bench/probe/repeat.py --arm network-service --n "$REPEATS" --out "$RUNNER_TEMP/out" --hang-after 45 -- \
+            cargo test --locked --features http --test network_service -- --nocapture
+          python3 bench/ladder/annotate.py "$RUNNER_TEMP/out/network-service.md" "network service"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: edge-linux
+          path: ${{ runner.temp }}/out
+          retention-days: 14
