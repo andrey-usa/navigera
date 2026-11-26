@@ -100,37 +100,37 @@ with the tool, one per call), MCP servers get one `tools/call` per call,
 and every tool starts on the home page. Four tasks, 12 reps each, the tools
 at their latest npm releases; medians over each tool's 48 sessions
 ([`llm-bench.yml`](https://github.com/andrey-usa/navigera/blob/master/.github/workflows/llm-bench.yml),
-run [42228800128](https://github.com/andrey-usa/navigera/actions/runs/42228800128)).
+run [45687455711](https://github.com/andrey-usa/navigera/actions/runs/45687455711),
+2026-11-25, on `next`).
 Cost is the harness's estimate at SiliconFlow's list prices (per million
 tokens: $0.15 uncached input, $0.003 cached input, $0.60 output), not a bill:
 
 | tool | success | median turns | median tokens per session [IQR] | mean tokens | estimated $ for the 48 sessions |
 |---|---|---|---|---|---|
-| `navigera`, `batch` allowed | 48/48 | **5** | **5,094** [3,910–7,996] | **8,626** | **$0.0351** |
-| `navigera` | 48/48 | 6.5 | 7,906 [5,590–9,261] | 9,543 | $0.0373 |
-| `agent-browser` 0.41.2 | 48/48 | 8 | 8,035 [6,780–11,787] | 11,543 | $0.0393 |
-| `playwright-cli` 0.1.23 | 48/48 | 7 | 9,682 [5,681–11,286] | 13,207 | $0.0460 |
-| Playwright MCP 0.0.84 | 48/48 | 9 | 13,706 [7,759–20,145] | 15,515 | $0.0535 |
-| Chrome DevTools MCP 1.12.0 | 48/48 | 10 | 13,790 [9,665–19,193] | 14,747 | $0.0506 |
+| `navigera`, `batch` allowed | 48/48 | **5** | **5,302** [4,091–10,851] | 9,093 | $0.0320 |
+| `navigera` | 48/48 | 6.5 | 7,668 [5,071–9,858] | **8,598** | **$0.0301** |
+| `agent-browser` 0.44.0 | 48/48 | 7.5 | 8,034 [6,092–11,388] | 11,030 | $0.0328 |
+| `playwright-cli` 0.1.25 | 48/48 | 7.5 | 10,262 [7,232–12,851] | 11,544 | $0.0351 |
+| Playwright MCP 0.0.86 | 48/48 | 8.5 | 15,290 [9,374–20,744] | 15,693 | $0.0457 |
+| Chrome DevTools MCP 1.14.0 | 48/48 | 10 | 14,852 [11,112–22,718] | 16,302 | $0.0473 |
 
-Per task, the lowest median tokens: `navigera` with `batch` in all four (search
-3.9K, form 5.1K, table 4.5K, catalog 12.7K). The best other tool is
-agent-browser on search (6.2K) and form (8.1K, under `navigera` without
-`batch` at 8.4K), playwright-cli on the table (5.4K; `navigera` without
-`batch` 5.9K) and Playwright MCP on the catalog (22.0K; `navigera` without
-`batch` 13.5K).
+Per task, the lowest median tokens: `navigera` with `batch` on search
+(4.0K) and the order form (5.0K), `navigera` without it on the table
+(4.5K) and the catalog (12.9K). The best other tool on each is
+agent-browser on search (6.8K), the form (9.6K) and the catalog (18.4K),
+and Playwright MCP on the table (5.7K); `navigera` without `batch` is
+under it on all four.
 
-What navigera lost: without `batch` its median is only 1.6% under
-agent-browser's (7,906 against 8,035, inside each other's IQR), it is behind
-agent-browser on the order form, and playwright-cli and Playwright MCP
-finished the table in fewer turns (median 4 against 5). A tool's catalog
-cost varies two to six times between its reps (playwright-cli 12.2K–73.3K,
-`navigera` 6.6K–31.9K), so close rows can swap places between runs; the
-6-rep run of the same build (run
-[42177759665](https://github.com/andrey-usa/navigera/actions/runs/42177759665))
-had playwright-cli ahead of agent-browser by mean, and the 12 reps put it
-behind. Earlier runs of the same harness: 8,705 tokens a
-session without `batch` and 11,689 with it on 2026-11-03 (run
+What navigera lost: with `batch` allowed it has the fewest turns and the
+lowest median, but not the lowest mean or cost: on the catalog, which loads
+in pages, its median is 16.0K against 12.9K without `batch`, and one of
+its sessions read 76.2K. Without `batch`, its median is 4.6% under
+agent-browser's (7,668 against 8,034, inside each other's IQR). Catalog
+sessions vary up to seven times between reps, so close rows can swap
+places between runs. Earlier runs of the same harness: 7,906 tokens a
+session without `batch` and 5,094 with it, agent-browser 0.41.2 8,035 (run
+[42228800128](https://github.com/andrey-usa/navigera/actions/runs/42228800128));
+8,705 and 11,689 on 2026-11-03 (run
 [41579693623](https://github.com/andrey-usa/navigera/actions/runs/41579693623));
 16,661 and 12,755 against navigera 0.7.1 (run
 [41568863979](https://github.com/andrey-usa/navigera/actions/runs/41568863979)).
