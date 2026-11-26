@@ -11,7 +11,11 @@ Ops (all on the ladder fixtures, page_a unless noted):
   click-submit  click #place (form submit, handled by the page script)
   read-text     eval the h1 text ("Search results")
   snapshot      accessibility snapshot of page_a (default output)
-  screenshot    screenshot to a file
+  screenshot    screenshot to a file, at the tool's own default viewport
+  screenshot-720
+                the same capture after the tool's own resize command set a
+                1280x720 viewport (untimed setup, undone after the rep), so
+                every tool captures the same pixels
   form-batch    fill #cust "ada", fill #qty "2", click #place, eval #status
                 — one call for tools with a batch command (navigera batch,
                 agent-browser batch --bail), four calls otherwise.
@@ -39,7 +43,8 @@ call, for every tool including browser-use. Snapshot checks assert the
 page's known heading ("Search results") and the Search button are present;
 screenshot checks fully decode the PNG (chunk CRCs, IDAT decompression,
 exact raster size, every scanline filter byte 0-4) and assert its dimensions equal the session's live
-viewport, read untimed.
+viewport, read untimed; screenshot-720 also asserts that viewport is 1280x720.
+Both record the PNG's size and the devicePixelRatio it was taken at.
 
 Preflight (bench_harness_checks): the fixture pages are fetched over HTTP
 before any tool runs; a 404 or an empty served directory aborts the run.
@@ -274,7 +279,9 @@ FIXTURES = HERE.parent / "fixtures"
 SETUP_REST_S = 0.15
 
 OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
-       "screenshot", "form-batch")
+       "screenshot", "screenshot-720", "form-batch")
+# The one viewport screenshot-720 sets in every tool, in CSS pixels.
+SHOT_720 = (1280, 720)
 
 TITLE = "(() => document.title)()"
 HEADING = "(() => document.querySelector('h1').textContent)()"
@@ -283,6 +290,8 @@ Q_VALUE = "(() => document.getElementById('q').value)()"
 VISIBLE = "(() => document.querySelectorAll('.card:not(.hidden)').length)()"
 PLACED = "(() => window.__placed || 0)()"
 URL = "(() => location.href)()"
+VIEWPORT = ("(() => window.innerWidth + 'x' + window.innerHeight + '@' "
+            "+ window.devicePixelRatio)()")
 
 # The browser-use harness's documented AX-click workflow (from its skill):
 # AX tree -> DOM box model -> click_at_xy. Reused for its click ops.
@@ -346,6 +355,10 @@ class Tool:
         self._uids: dict[str, str] = {}  # cdmcp: element -> uid
         self._bu_chrome: subprocess.Popen | None = None
         self._bu_port: int | None = None
+        # What a screenshot op captured in its last passing rep (PNG size,
+        # viewport, devicePixelRatio); run_op collects it per op.
+        self.shot_info: dict = {}
+        self._before_resize: tuple[int, int] = (0, 0)  # screenshot-720's undo
 
     # -- generic plumbing -------------------------------------------------
     def log(self, kind: str, op: str, ms: float | None, ok: bool, detail: str = ""):
@@ -988,8 +1001,8 @@ class Tool:
             assert_snapshot_known_elements(snap_text)
         return ms, 1, f"{nbytes} bytes"
 
-    def op_screenshot(self, rep: int):
-        shot = self.out_dir / f"ops-shot-{self.tag}-r{rep}.png"
+    def take_screenshot(self, shot: Path) -> tuple[float, Path]:
+        """One timed capture of the viewport; returns (ms, where the PNG is)."""
         if self.library:
             ms, _ = self.library_call("screenshot", path=str(shot.resolve()))
         elif self.name == "nv":
@@ -1019,26 +1032,102 @@ class Tool:
         else:  # bu
             ms, out = self._bu_exec(
                 f'print(capture_screenshot("{shot}"))\n', "screenshot")
-        if not shot.exists() or shot.stat().st_size == 0:
-            raise RuntimeError(f"screenshot verify: {shot} missing or empty")
-        # existence and nonzero size are not a content
-        # check. Decode the PNG for real and assert it is exactly the
-        # session's live viewport (times devicePixelRatio), read untimed.
-        # The tools do not share one viewport here (run6: navigera
-        # 1440x900, agent-browser and playwright-cli 1280x720, browser-use
-        # and Chrome DevTools MCP 800x600), so a single hardcoded size
-        # would fail honest screenshots; the live viewport is the expected
-        # size for the session that took the shot.
-        viewport = self.eval_value(
-            "(() => window.innerWidth + 'x' + window.innerHeight + '@' "
-            "+ window.devicePixelRatio)()")
+        return ms, shot
+
+    def live_viewport(self) -> tuple[int, int, float]:
+        """The session's viewport in CSS pixels and its devicePixelRatio (untimed)."""
+        viewport = self.eval_value(VIEWPORT)
         m = re.fullmatch(r"(\d+)x(\d+)@([0-9.]+)", str(viewport).strip())
         if not m:
             raise RuntimeError(f"screenshot verify: unreadable viewport {viewport!r}")
-        ew = round(int(m.group(1)) * float(m.group(3)))
-        eh = round(int(m.group(2)) * float(m.group(3)))
+        return int(m.group(1)), int(m.group(2)), float(m.group(3))
+
+    def check_shot(self, shot: Path, want: tuple[int, int] | None = None) -> str:
+        """Decode the PNG and assert it is the live viewport times devicePixelRatio.
+
+        Existence and nonzero size are not a content check. The live
+        viewport is the expected size for the session that took the shot:
+        the tools' defaults differ (bench run 45739217756 on CI: navigera
+        1440x813, agent-browser 1280x633, playwright-cli and Playwright MCP
+        1280x720, Chrome DevTools MCP 1905x2053, browser-use 780x437 or
+        780x493). With `want`, that viewport must also be exactly `want`.
+        """
+        if not shot.exists() or shot.stat().st_size == 0:
+            raise RuntimeError(f"screenshot verify: {shot} missing or empty")
+        vw, vh, dpr = self.live_viewport()
+        if want and (vw, vh) != want:
+            raise RuntimeError(f"screenshot verify: the viewport was {vw}x{vh} at the "
+                               f"capture, expected {want[0]}x{want[1]}")
+        ew, eh = round(vw * dpr), round(vh * dpr)
         w, h = check_screenshot_png(shot, ew, eh)
-        return ms, 1, f"{shot.stat().st_size} bytes, {w}x{h} == viewport {ew}x{eh}"
+        self.shot_info = {"png": f"{w}x{h}", "viewport": f"{vw}x{vh}", "dpr": dpr}
+        return f"{shot.stat().st_size} bytes, {w}x{h} == viewport {vw}x{vh} x dpr {dpr:g}"
+
+    def resize(self, width: int | None, height: int | None):
+        """Untimed setup: the tool's own resize command; None, None undoes it.
+
+        Each tool's documented command for the viewport: navigera `set
+        viewport` (`off` clears it), agent-browser `set viewport`,
+        playwright-cli `resize`, Playwright MCP `browser_resize`, Chrome
+        DevTools MCP `resize_page`, the Firefox libraries' viewport setters.
+        browser-use has no viewport helper; its documented route for what
+        has none is raw `cdp()`, here Emulation.setDeviceMetricsOverride
+        (cleared to undo). The tools without a clear command are undone
+        by resizing back to the size read before.
+        """
+        undo = width is None
+        if undo and self.name not in ("nv", "bu"):
+            width, height = self._before_resize
+        size = [str(width), str(height)]
+        if self.library:
+            self.library_call("resize", width=width, height=height, phase="setup")
+        elif self.name == "nv":
+            exe = self.args.navigera or os.environ["NAVIGERA"]
+            self.cli([exe, "--session", self.session, "set", "viewport",
+                      *(["off"] if undo else size)], dict(os.environ), "setup")
+        elif self.name == "ab":
+            exe = os.environ.get("AGENT_BROWSER", "agent-browser")
+            self.cli([exe, "--session", self.session, "set", "viewport", *size],
+                     dict(os.environ), "setup")
+        elif self.name == "pw":
+            exe = os.environ.get("PLAYWRIGHT_CLI", "playwright-cli")
+            self.cli([exe, f"-s={self.session}", "resize", *size], dict(os.environ),
+                     "setup", cwd=self.cwd)
+        elif self.name == "pwmcp":
+            self._mcp_call("browser_resize", {"width": width, "height": height}, "setup")
+        elif self.name == "cdmcp":
+            self._cd_call("resize_page", {"width": width, "height": height}, "setup")
+        elif undo:  # bu
+            self._bu_exec('cdp("Emulation.clearDeviceMetricsOverride")\n', "setup")
+        else:
+            self._bu_exec(f'cdp("Emulation.setDeviceMetricsOverride", width={width}, '
+                          f'height={height}, deviceScaleFactor=0, mobile=False)\n', "setup")
+
+    def op_screenshot(self, rep: int):
+        ms, shot = self.take_screenshot(self.out_dir / f"ops-shot-{self.tag}-r{rep}.png")
+        return ms, 1, self.check_shot(shot)
+
+    def op_screenshot_720(self, rep: int):
+        # The same capture at one viewport for every tool: the default
+        # screenshot row compares different pixel counts (1440x813 against
+        # 1280x633 against 1905x2053). The resize and its undo are untimed.
+        vw, vh, _ = self.live_viewport()
+        self._before_resize = (vw, vh)
+        self.resize(*SHOT_720)
+        try:
+            # The resize relayouts the page; it rests first, as after a reset.
+            time.sleep(SETUP_REST_S)
+            ms, shot = self.take_screenshot(
+                self.out_dir / f"ops-shot720-{self.tag}-r{rep}.png")
+            detail = self.check_shot(shot, SHOT_720)
+        finally:
+            self.resize(None, None)
+        # Undone means back where the rep started, for the ops after it.
+        after = self.live_viewport()[:2]
+        if after != (vw, vh):
+            raise RuntimeError(f"screenshot-720 undo: the viewport is {after[0]}x{after[1]}, "
+                               f"it was {vw}x{vh} before the resize")
+        return ms, 1, detail
 
     def op_form_batch(self, rep: int):
         # Same starting state every rep: clear the status + counter (untimed).
@@ -1116,7 +1205,7 @@ class Tool:
         "goto": op_goto, "fill": op_fill, "click": op_click,
         "click-submit": op_click_submit, "read-text": op_read_text,
         "snapshot": op_snapshot, "screenshot": op_screenshot,
-        "form-batch": op_form_batch,
+        "screenshot-720": op_screenshot_720, "form-batch": op_form_batch,
     }
 
     def run_op(self, op: str, reps: int) -> dict:
@@ -1130,12 +1219,21 @@ class Tool:
         errors: list[str] = []
         calls = 1
         extra: dict = {}
+        pngs: list[str] = []
+        dprs: list[float] = []
         for rep in range(reps):
+            self.shot_info = {}
             try:
                 ms, calls, detail = method(self, rep)
                 runs.append(ms)
                 if detail:
                     extra["detail"] = detail
+                if self.shot_info:
+                    if self.shot_info["png"] not in pngs:
+                        pngs.append(self.shot_info["png"])
+                    if self.shot_info["dpr"] not in dprs:
+                        dprs.append(self.shot_info["dpr"])
+                    extra["viewport"] = self.shot_info["viewport"]
             except Exception as e:
                 errors.append(f"rep {rep}: {' '.join(str(e).split())[:300]}")
                 print(f"  [ops] {self.name} {op} rep {rep + 1}/{reps}: FAILED ({e})",
@@ -1148,6 +1246,7 @@ class Tool:
                 "median_ms": round(median(runs), 2) if runs else None,
                 "calls": calls, "ok": ok,
                 **({"errors": errors} if errors else {}),
+                **({"png": pngs, "dpr": dprs} if pngs else {}),
                 **extra}
 
 
