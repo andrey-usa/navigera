@@ -3,7 +3,7 @@
 
 Times, per variant, on CI:
   - the Moli server process's CPU over 10 s idle (3 windows), page loaded
-  - goto, click, text, ax, eval (median of 5 reps) on:
+  - goto, click, text, ax, eval (median of 10 reps) on:
       page A: the #27 example (button #b, script-appended #late)
       page B: a ~4,500-node page (generated, count asserted)
 Also records the layout-probe verdict ([layout] live vs kept until a
@@ -75,6 +75,27 @@ def run(cmd, env, timeout=120):
     return (time.monotonic() - start) * 1000.0, proc
 
 
+def unwrap(proc):
+    """A navigera command's result: the bare output, or the `result` of
+    the JSON envelope NAVIGERA_OUTPUT=json wraps it in
+    ({"id": null, "ok": true, "result": ...}). `eval` of a string prints
+    the string raw in bare mode, so a non-JSON stdout is the result; and
+    `eval` of JSON.stringify returns a JSON string, so a string result
+    that is itself JSON is parsed once more."""
+    try:
+        out = json.loads(proc.stdout)
+    except ValueError:
+        return proc.stdout.strip()
+    if isinstance(out, dict) and "result" in out and "ok" in out:
+        out = out["result"]
+    if isinstance(out, str) and out[:1] in ("{", "["):
+        try:
+            return json.loads(out)
+        except ValueError:
+            pass
+    return out
+
+
 def cpu_times(pid: int):
     stat = Path(f"/proc/{pid}/stat").read_text()
     fields = stat[stat.rfind(")") + 2 :].split()
@@ -125,15 +146,10 @@ def main() -> int:
         if proc.returncode != 0:
             print(proc.stdout + proc.stderr, file=sys.stderr)
             return 1
-        info = json.loads(proc.stdout)
-        # `start` prints the bare object by default, but with
-        # NAVIGERA_OUTPUT=json (set by bench.yml) it wraps it:
-        # {"id": null, "ok": true, "result": {...}}.
-        if "log" not in info and isinstance(info.get("result"), dict):
-            info = info["result"]
+        info = unwrap(proc)
         try:
             log_path = Path(info["log"])
-        except KeyError:
+        except (KeyError, TypeError):
             print(f"start output has no log path: {proc.stdout}", file=sys.stderr)
             return 1
 
@@ -171,21 +187,25 @@ def main() -> int:
         # Correctness once per variant: the #27 answers.
         nv_call("eval", APPEND_LATE)
         ms, proc = nv_call("eval", LATE_RECT)
-        rect = json.loads(proc.stdout) if proc.returncode == 0 else {}
+        rect = unwrap(proc) if proc.returncode == 0 else {}
+        if not isinstance(rect, dict):
+            rect = {}
         if (rect.get("x"), rect.get("y"), rect.get("width"),
                 rect.get("height")) != (400, 400, 80, 30):
             errors.append(f"late rect: {proc.stdout.strip()}")
         ms, proc = nv_call("click", "--text", "Later")
         ms, proc = nv_call("eval", "document.title")
-        if proc.stdout.strip() != "clicked":
+        if unwrap(proc) != "clicked":
             errors.append(f"click title: {proc.stdout.strip()}")
         ms, proc = nv_call("eval", "window.scrollTo(0,1059);window.scrollY")
         ms, proc = nv_call("eval", LATE_RECT)
-        rect = json.loads(proc.stdout) if proc.returncode == 0 else {}
+        rect = unwrap(proc) if proc.returncode == 0 else {}
+        if not isinstance(rect, dict):
+            rect = {}
         if rect.get("top") != 400 - 1059:
             errors.append(f"late rect after scroll: {proc.stdout.strip()}")
 
-        # Op timings: median of 5 reps, fresh page each rep.
+        # Op timings: median of 10 reps, fresh page each rep.
         ops = {}
         for name, page, steps in (
             ("page_a", PAGE_A_URL, ("eval_rect", "click", "text", "ax")),
@@ -208,7 +228,7 @@ def main() -> int:
                         ms, proc = nv_call(
                             "eval", "document.querySelectorAll('*').length"
                         )
-                        counts["nodes"] = proc.stdout.strip()
+                        counts["nodes"] = unwrap(proc)
                 ms, proc = nv_call("eval", expr)
                 times["eval_rect"].append(round(ms, 2))
                 ms, proc = nv_call(*click)
