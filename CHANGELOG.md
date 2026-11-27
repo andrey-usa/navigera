@@ -15,6 +15,13 @@ All notable changes to this project are documented here. The format follows
   Per call there, click 9.39 -> 6.33 ms, `eval` 1.62 -> 1.10 ms,
   `--version` 0.85 -> 0.62 ms, and the 2,000-row `ax` 125 -> 121 ms
   ([run 45911059272](https://github.com/andrey-usa/navigera/actions/runs/45911059272)).
+- A screenshot of the viewport asks Chrome for a PNG encoded for speed:
+  the same pixels in a larger file (1.2-1.4x on the pages measured, up
+  to 5x on a view filled by a gradient). A 1280x720 screenshot took
+  28.7 ms in [bench 45916330375](https://github.com/andrey-usa/navigera/actions/runs/45916330375)
+  and 17.4 ms in [bench 45918635350](https://github.com/andrey-usa/navigera/actions/runs/45918635350)
+  (Chrome DevTools MCP 18.7 ms). A full page or an element, which can be
+  as large as the page, keeps the smaller encoding.
 
 ### Fixed
 
