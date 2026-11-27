@@ -207,6 +207,34 @@ OPS_NOT_RANKED = ("screenshot",)
 # minute shifts every tool alike, and the cell is the median of 10.
 OPS_ROUNDS = 2
 OPS_REPS_PER_ROUND = 5
+# A capture answers on Chrome's 60 Hz frame grid: one frame (~17 ms) or two
+# (~31 ms), by the phase the request lands on. ops_agent.py jitters each
+# rest by a seeded offset in [0, 1/60 s), the same for every tool, so every
+# tool meets the same phases; ten such reps split between the two modes and
+# their median jumps from one to the other, so these ops rank by the mean
+# (the expected time over the phase). Their cells also give the one-frame
+# share: reps under ONE_FRAME_MS.
+OPS_MEAN_RANKED = ("screenshot-720",)
+SHOT_OPS = ("screenshot", "screenshot-720")
+ONE_FRAME_MS = 24.0
+# The seed of this run's rest offsets and the offsets (ms) per op and rep,
+# set by bench_ops for publish.json.
+OPS_REST: dict = {}
+
+
+def ops_rest_seed() -> int:
+    """LADDER_REST_SEED, else the run id, else a fresh one; recorded."""
+    import random
+    for key in ("LADDER_REST_SEED", "GITHUB_RUN_ID"):
+        if os.environ.get(key, "").isdigit():
+            return int(os.environ[key])
+    return random.SystemRandom().randrange(2 ** 31)
+
+
+def ops_rank_ms(op: str, cell: dict):
+    """The statistic op's losses rank by: the mean for OPS_MEAN_RANKED,
+    else the median."""
+    return cell.get("mean_ms") if op in OPS_MEAN_RANKED else cell.get("median_ms")
 
 # Parallel agents: how many sessions are held open at once.
 PARALLEL_NS = (1, 4, 8)
@@ -945,10 +973,15 @@ def merge_ops_cell(merged: dict, cell: dict) -> None:
         merged["ok"] = False
 
 
-def finish_ops_cell(merged: dict, expected_reps: int, round_errors: list[str]) -> None:
-    """Medians, rep counts and completeness of a tool's merged op cell."""
+def finish_ops_cell(merged: dict, expected_reps: int, round_errors: list[str],
+                    op: str = "") -> None:
+    """Median, mean, rep counts and completeness of a tool's merged op cell
+    (and a screenshot cell's one-frame share)."""
     runs = merged["runs_ms"]
     merged["median_ms"] = round(statistics.median(runs), 2) if runs else None
+    merged["mean_ms"] = round(statistics.fmean(runs), 2) if runs else None
+    if op in SHOT_OPS and runs:
+        merged["one_frame"] = sum(1 for x in runs if x < ONE_FRAME_MS)
     if merged.get("png_bytes"):
         merged["png_bytes_median"] = round(statistics.median(merged["png_bytes"]))
     merged["reps"] = len(runs)
@@ -1032,6 +1065,10 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
                            "errors": []} for op in OPS},
             "round_errors": [],
         }
+    seed = ops_rest_seed()
+    OPS_REST.clear()
+    OPS_REST.update({"seed": seed, "frame_ms": round(1000 / 60, 3), "offsets_ms": {}})
+    print(f"== matched operations: rest offsets seeded {seed}", flush=True)
     for rnd in range(OPS_ROUNDS):
         order = list(tools) if rnd % 2 == 0 else list(reversed(list(tools)))
         for label in order:
@@ -1046,6 +1083,7 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
             cmd = [sys.executable, str(CONTENDERS / "ops_agent.py"), *st["extra"],
                    "--reps", str(OPS_REPS_PER_ROUND), "--out", str(round_dir),
                    "--tag", slug,
+                   "--rest-seed", str(seed), "--rep-offset", str(rnd * OPS_REPS_PER_ROUND),
                    "--session", f"ops-{slug}-{rnd}-{os.getpid()}"]
             try:
                 _, _, _, out = run_once(cmd, env, 600, chrome_tag)
@@ -1073,6 +1111,11 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
             st.setdefault("browser_info", []).append(tdoc.get("browser_info", {}))
             for op, cell in tdoc.get("ops", {}).items():
                 merge_ops_cell(cells[op], cell)
+                # The same offsets for every tool: the first transcript of
+                # the round records them.
+                offs = OPS_REST["offsets_ms"].setdefault(op, [])
+                if len(offs) == rnd * OPS_REPS_PER_ROUND and cell.get("rest_offsets_ms"):
+                    offs.extend(cell["rest_offsets_ms"])
             print(f"  [ops] {label} round {rnd + 1}/{OPS_ROUNDS}: done", flush=True)
     results: dict[str, dict] = {}
     expected_reps = OPS_ROUNDS * OPS_REPS_PER_ROUND
@@ -1080,7 +1123,7 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
         cells = st["cells"]
         round_errors = st["round_errors"]
         for op in OPS:
-            finish_ops_cell(cells[op], expected_reps, round_errors)
+            finish_ops_cell(cells[op], expected_reps, round_errors, op)
         results[label] = {"cells": cells, "browser_info": st.get("browser_info", []),
                           "ok": not round_errors and all(c["ok"] or bool(c.get("not_run")) for c in cells.values()),
                           **({"round_errors": round_errors} if round_errors else {})}
@@ -1303,6 +1346,7 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
         "notes": NOTES,
         "skipped": SKIPPED,
         "build_failed": BUILD_FAILED,
+        **({"ops_rest": OPS_REST} if OPS_REST else {}),
         "agent_cli": [
             {"name": name,
              "ok": bool(r["best"].get("ok")),
@@ -1323,6 +1367,8 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
                  "ok": bool(r.get("ok")),
                  "browser_info": r.get("browser_info", []),
                  "cells": {op: {"median_ms": cell.get("median_ms"),
+                                "mean_ms": cell.get("mean_ms"),
+                                **({"one_frame": cell["one_frame"]} if "one_frame" in cell else {}),
                                 "calls": cell.get("calls"),
                                 "reps": cell.get("reps"),
                                 "expected_reps": cell.get("expected_reps"),
@@ -1853,7 +1899,7 @@ def main() -> int:
                      "browser-use"]
         ops_cols = [n for n in ops_order if n in ops_results]
         ops_cols += [n for n in ops_results if n not in ops_order]
-        lines.append("### matched operations: one call per op, warm session (median of 10)")
+        lines.append("### matched operations: one call per op, warm session (median of 10, mean beside it)")
         lines.append("")
         lines.append("One CLI process (or one MCP `tools/call`) per op, against a warm "
                      "session, on the same fixture page. `goto` re-navigates to the "
@@ -1879,7 +1925,14 @@ def main() -> int:
                      "mode (MCP tools over JSON-RPC, their only interface); no tool "
                      "is switched into a machine mode. A cell is complete only with "
                      "all 10 reps and no round error; a partial cell is shown as "
-                     "`incomplete (n/N)` and left out of the per-op losses below.")
+                     "`incomplete (n/N)` and left out of the per-op losses below. "
+                     "Each rest before a timed call (and each rep of an op without "
+                     "one) adds an offset in [0, 1/60 s), one seeded sequence per op "
+                     f"that every tool shares (seed {OPS_REST.get('seed')}, offsets in "
+                     "publish.json `ops_rest`), so every tool's calls meet the same "
+                     "phases of Chrome's 60 Hz frame grid. A screenshot cell adds its "
+                     f"one-frame share (reps under {ONE_FRAME_MS:.0f} ms); "
+                     "`screenshot-720` ranks by its mean, the other ops by the median.")
         lines.append("")
         lines.append("| op | " + " | ".join(f"`{n}`" for n in ops_cols) + " |")
         lines.append("|---|" + "---|" * len(ops_cols))
@@ -1901,9 +1954,10 @@ def main() -> int:
                                f"({cell['calls']} call{'s' if cell['calls'] != 1 else ''}{size})")
                 else:
                     n = cell.get("reps", 10)
-                    row.append(f"{cell['median_ms']:.1f} ms ({cell['calls']} call"
+                    frames = (f", one frame {cell['one_frame']}/{n}" if "one_frame" in cell else "")
+                    row.append(f"{cell['median_ms']:.1f} ms, mean {cell['mean_ms']:.1f} ({cell['calls']} call"
                                f"{'s' if cell['calls'] != 1 else ''}"
-                               + (f", n={n}" if n != 10 else "") + size + ")")
+                               + (f", n={n}" if n != 10 else "") + size + frames + ")")
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
         lines.append("Firefox API arms use persistent library sessions, not a CLI per op. "
@@ -1941,9 +1995,10 @@ def main() -> int:
                     if other == baseline:
                         continue
                     cell = ops_results[other]["cells"][op]
-                    if cell.get("complete") and cell["median_ms"] < own["median_ms"]:
-                        losses.append(f"{op}: {other} {cell['median_ms']:.1f} ms "
-                                      f"vs {own['median_ms']:.1f} ms")
+                    stat = "mean " if op in OPS_MEAN_RANKED else ""
+                    if cell.get("complete") and ops_rank_ms(op, cell) < ops_rank_ms(op, own):
+                        losses.append(f"{op}: {other} {stat}{ops_rank_ms(op, cell):.1f} ms "
+                                      f"vs {ops_rank_ms(op, own):.1f} ms")
             lines.append(f"Losses for `{baseline}` (complete cells only; "
                          "screenshot at one viewport, `screenshot-720`):")
             lines.extend(f"- {loss}" for loss in losses)

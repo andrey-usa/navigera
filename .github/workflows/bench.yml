@@ -248,6 +248,7 @@ jobs:
         run: |
           python3 bench/ladder/test_firefox_ops.py
           python3 bench/ladder/test_contender_builds.py
+          python3 bench/ladder/test_ops_rest.py
           node --check bench/ladder/contenders/firefox_library.mjs
 
       - name: Generate fixtures

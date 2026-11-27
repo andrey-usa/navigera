@@ -71,6 +71,7 @@ NAVIGERA_FIREFOX (runner Firefox; Playwright and Vibium use managed builds).
 import argparse
 import json
 import os
+import random
 import re
 import struct
 import subprocess
@@ -283,9 +284,22 @@ def assert_snapshot_known_elements(text: str):
 FIXTURES = HERE.parent / "fixtures"
 # How long the page rests after a state reset before the timed call.
 SETUP_REST_S = 0.15
+# Chrome answers a capture (and anything else that waits for a frame) on
+# its 60 Hz frame grid, and every Chrome on a machine shares that grid.
+# A fixed rest (0.15 s is exactly 9 frames) lands each tool's call at the
+# same phase of the grid every rep, so a cell would measure where its own
+# overhead falls on the grid of that CPU (one frame or two), not the call.
+# Each rest before a timed call therefore adds an offset drawn from
+# U[0, FRAME_S): one seeded sequence per op, the same for every tool
+# (paired: every tool meets the same phases), recorded in the transcript.
+FRAME_S = 1 / 60
 
 OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
        "screenshot", "screenshot-720", "form-batch", "click-large", "click-large-first")
+# The ops whose timed call follows a rest of their own (a reset's, a
+# resize's or a load's); the others get the rep's offset as their rest.
+OWN_REST_OPS = ("fill", "click", "click-submit", "screenshot-720", "form-batch",
+                "click-large", "click-large-first")
 # The ops on page_c; the session goes back to page_a (untimed) after each.
 # They run last: after a visit to page_c, every tool's snapshot of page_a
 # took longer (locally navigera 8.3 -> 21.9 ms, agent-browser 33.6 -> 57.0),
@@ -358,6 +372,14 @@ def preflight(base: str, expected: dict) -> None:
           flush=True)
 
 
+def rest_offsets(seed: int, op: str, n: int) -> list[float]:
+    """The first n rest offsets (s, each in [0, FRAME_S)) of op's reps for
+    this seed: a function of (seed, op, rep) only, so every tool and both
+    rounds of the ladder draw the same offset for the same rep."""
+    rng = random.Random(f"{seed}/{op}")
+    return [rng.random() * FRAME_S for _ in range(n)]
+
+
 def median(xs: list[float]) -> float:
     s = sorted(xs)
     n = len(s)
@@ -394,6 +416,8 @@ class Tool:
         self._large_warm = False
         # Set when a page_c op could not return the session to page_a.
         self.lost_page = ""
+        # The current rep's rest offset (s); rest() adds it.
+        self.jitter_s = 0.0
 
     # -- generic plumbing -------------------------------------------------
     def log(self, kind: str, op: str, ms: float | None, ok: bool, detail: str = ""):
@@ -812,7 +836,12 @@ class Tool:
         # The reset changes the page. An agent's call comes a model turn
         # after the page last changed, never 5 ms after: the page rests
         # first, the same for every tool, untimed.
-        time.sleep(SETUP_REST_S)
+        self.rest(SETUP_REST_S)
+
+    def rest(self, base_s: float):
+        """The untimed rest before a timed call: base_s plus this rep's
+        offset on the frame grid (FRAME_S)."""
+        time.sleep(base_s + self.jitter_s)
 
     # -- the ops ---------------------------------------------------------------
     def op_goto(self, rep: int):
@@ -969,7 +998,7 @@ class Tool:
         else:  # bu
             self._bu_exec(f'goto_url("{url}")\nwait_for_load()\n', "setup")
         self._large_warm = False
-        time.sleep(LOAD_REST_S)
+        self.rest(LOAD_REST_S)
 
     def click_more(self, op: str) -> float:
         """One click on page_c's #more, each tool's own click; timed when op is."""
@@ -1280,7 +1309,7 @@ class Tool:
         self.resize(*SHOT_720)
         try:
             # The resize relayouts the page; it rests first, as after a reset.
-            time.sleep(SETUP_REST_S)
+            self.rest(SETUP_REST_S)
             ms, shot = self.take_screenshot(
                 self.out_dir / f"ops-shot720-{self.tag}-r{rep}.png")
             detail = self.check_shot(shot, SHOT_720)
@@ -1373,7 +1402,7 @@ class Tool:
         "screenshot-720": op_screenshot_720, "form-batch": op_form_batch,
     }
 
-    def run_op(self, op: str, reps: int) -> dict:
+    def run_op(self, op: str, reps: int, seed: int = 0, rep_offset: int = 0) -> dict:
         if self.library and op == "snapshot" and self.name in ("ppff", "wdioff"):
             reason = ("Puppeteer BiDi has no accessibility snapshot API" if self.name == "ppff"
                       else "WebdriverIO has no Firefox accessibility snapshot API")
@@ -1390,9 +1419,15 @@ class Tool:
         # bytes for capture time, so the time alone is half the trade.
         png_bytes: list[int] = []
         settled: list[str] = []
+        # This round's reps are reps rep_offset.. of the cell.
+        offsets = rest_offsets(seed, op, rep_offset + reps)[rep_offset:]
         for rep in range(reps):
             self.shot_info = {}
             self.settle_info = ""
+            self.jitter_s = offsets[rep]
+            if op not in OWN_REST_OPS:
+                # No rest of its own before the timed call: the offset alone.
+                time.sleep(self.jitter_s)
             try:
                 ms, calls, detail = method(self, rep)
                 runs.append(ms)
@@ -1427,9 +1462,11 @@ class Tool:
         print(f"  [ops] {self.name} {op}: "
               + (f"median {median(runs):.1f} ms over {len(runs)} reps, {calls} call(s)"
                  if runs else "no passing reps"), flush=True)
+        self.jitter_s = 0.0
         return {"runs_ms": [round(x, 2) for x in runs],
                 "median_ms": round(median(runs), 2) if runs else None,
                 "calls": calls, "ok": ok,
+                "rest_offsets_ms": [round(x * 1000, 3) for x in offsets],
                 **({"errors": errors} if errors else {}),
                 **({"png": pngs, "dpr": dprs, "png_bytes": png_bytes} if pngs else {}),
                 **({"settled": settled} if settled else {}),
@@ -1473,6 +1510,10 @@ def main() -> int:
     ap.add_argument("--chrome", default="")
     ap.add_argument("--browser-use", default="")
     ap.add_argument("--own-browser", action="store_true")
+    ap.add_argument("--rest-seed", type=int, default=0,
+                    help="seed of the rests' frame offsets; the same for every tool in a run")
+    ap.add_argument("--rep-offset", type=int, default=0,
+                    help="index of this round's first rep in the cell (round 2: 5)")
     args = ap.parse_args()
 
     base = os.environ["LADDER_BASE"]
@@ -1488,7 +1529,7 @@ def main() -> int:
     try:
         tool.start()
         for op in OPS:
-            results[op] = tool.run_op(op, args.reps)
+            results[op] = tool.run_op(op, args.reps, args.rest_seed, args.rep_offset)
             if tool.lost_page:
                 raise RuntimeError(tool.lost_page)
     except Exception as e:
@@ -1497,6 +1538,7 @@ def main() -> int:
     finally:
         tool.close()
     doc = {"tool": args.tool, "tag": tool.tag, "reps": args.reps, "ops": results,
+           "rest_seed": args.rest_seed, "rep_offset": args.rep_offset,
            "calls": tool.calls, "browser_info": tool.browser_info, **({"error": error} if error else {})}
     (out_dir / f"ops-{tool.tag}.json").write_text(json.dumps(doc, indent=2) + "\n",
                                                 encoding="utf-8")

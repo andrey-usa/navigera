@@ -342,8 +342,10 @@ if ops:
     ops_label = {**label,
                  "navigera (baseline)": "`navigera` (baseline build)",
                  "browser-use": f"`browser-use` {ver('browser-use', '')} (exec model)".replace("  ", " ")}
+    rest = doc.get("ops_rest")
     ops_lines = [
-        "### Matched operations (one call per op, warm session, median of 10)",
+        "### Matched operations (one call per op, warm session, median of 10"
+        + (", mean beside it)" if rest else ")"),
         "",
         numbers + ".",
         "",
@@ -368,6 +370,17 @@ if ops:
         "round error; a partial cell is shown as `incomplete (n/N)` and left out of the",
         "per-op losses, which rank `screenshot-720`, not the default-viewport row.",
         "",
+    ] + ([
+        "Each cell gives the median of the 10 reps, then their mean. Chrome answers a",
+        "capture on its 60 Hz frame grid, in one frame (~17 ms) or two (~31 ms) by the",
+        "moment the request lands, so each rest before a timed call is lengthened by an",
+        "offset in [0, 1/60 s), one seeded sequence that every tool shares",
+        f"(seed {rest['seed']}, in publish.json): every tool meets the same moments. A",
+        "screenshot cell adds its one-frame share (reps under 24 ms), and `screenshot-720`",
+        "is ranked by its mean, the time expected over the frame grid; the other ops by",
+        "the median.",
+        "",
+    ] if rest else []) + [
         "| op | " + " | ".join(ops_label.get(o["name"], o["name"]) for o in ops_cols) + " |",
         "|---|" + "---|" * len(ops_cols),
     ]
@@ -390,8 +403,11 @@ if ops:
                 row.append(f"incomplete ({n}/{n_expected}) {cell['median_ms']:.1f} ms "
                            f"({cell['calls']} call{'s' if cell['calls'] != 1 else ''}{size})")
             else:
-                row.append(f"{cell['median_ms']:.1f} ms ({cell['calls']} call"
-                           f"{'s' if cell['calls'] != 1 else ''}{size})")
+                mean = f", mean {cell['mean_ms']:.1f}" if cell.get("mean_ms") is not None else ""
+                frames = (f", one frame {cell['one_frame']}/{cell.get('reps', 10)}"
+                          if "one_frame" in cell else "")
+                row.append(f"{cell['median_ms']:.1f} ms{mean} ({cell['calls']} call"
+                           f"{'s' if cell['calls'] != 1 else ''}{size}{frames})")
         ops_lines.append("| " + " | ".join(row) + " |")
     if any(png_kb(c) for o in ops_cols for c in (o.get("cells") or {}).values()):
         ops_lines += [
@@ -525,6 +541,19 @@ def ops_engine(o):
     return "Firefox" if "Firefox" in o["name"] else "Chrome"
 
 
+# Captures answer on Chrome's frame grid (one frame or two by the request's
+# moment; the bench spreads the moments evenly), so ten reps split between
+# two modes and their median jumps: these ops rank by the mean. Runs from
+# before means were recorded rank by the median.
+MEAN_RANKED = ("screenshot-720",)
+
+
+def rank_ms(op, cell):
+    if op in MEAN_RANKED and cell.get("mean_ms") is not None:
+        return cell["mean_ms"]
+    return cell.get("median_ms")
+
+
 # Per-op losses: each navigera arm against the tools on its own browser
 # (navigera against the Chrome tools, navigera Firefox against the Firefox
 # ones): a capture or a read on another browser is another engine's cost.
@@ -538,7 +567,7 @@ for nav_ops in [o for o in ops if o["name"].startswith("navigera")]:
     for op in ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
                "screenshot-720", "form-batch", "click-large", "click-large-first"):
         mine = (nav_ops.get("cells") or {}).get(op) or {}
-        mine_ms, mine_calls = mine.get("median_ms"), mine.get("calls")
+        mine_ms, mine_calls = rank_ms(op, mine), mine.get("calls")
         if mine_ms is None or mine.get("incomplete"):
             continue
         rivals = []
@@ -546,16 +575,17 @@ for nav_ops in [o for o in ops if o["name"].startswith("navigera")]:
             if o["name"].startswith("navigera") or not o.get("cells") or ops_engine(o) != engine:
                 continue
             cell = o["cells"].get(op) or {}
-            if (cell.get("median_ms") is not None and not cell.get("incomplete")
+            if (rank_ms(op, cell) is not None and not cell.get("incomplete")
                     and cell.get("calls") == mine_calls):
-                rivals.append((cell["median_ms"], o))
+                rivals.append((rank_ms(op, cell), o))
         if not rivals:
             continue
         v, o = min(rivals, key=lambda t: t[0])
         if v < mine_ms * (1 - TIE):
             on = "" if engine == "Chrome" else f" on {engine}"
             # A screenshot loss names both PNG sizes: the faster file can be the larger.
-            losses.append(f"{op} per call{on}: {tool(o)} {v:.1f} ms{png_note(o['cells'][op])}, "
+            stat = " (mean)" if op in MEAN_RANKED and mine.get("mean_ms") is not None else ""
+            losses.append(f"{op} per call{on}{stat}: {tool(o)} {v:.1f} ms{png_note(o['cells'][op])}, "
                           f"{nav_ops['name']} {mine_ms:.1f} ms{png_note(mine)}")
 loss_text = ("Where another tool did better in this run (by more than 2%): " + "; ".join(losses) + "."
              if losses else "No other tool did better than navigera by more than 2% on any measure in this run.")

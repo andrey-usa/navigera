@@ -63,8 +63,16 @@ calls as navigera's skill tells agents to; `navigera (own browser)` and
 `navigera (baseline)` (with `baseline_ref`) are diagnostics.
 
 **Matched operations** (`contenders/ops_agent.py`, scenario `ops`):
-one call per op, warm session, median of 10 — the per-call table the README
-quotes instead of the session's per-step mean. Ops, on the listing page
+one call per op, warm session, median of 10 with the mean beside it — the
+per-call table the README quotes instead of the session's per-step mean.
+Chrome answers a capture on its 60 Hz frame grid, in one frame or two by the
+moment the request lands, and a fixed rest (0.15 s is 9 frames) would land
+each tool at one moment every rep. So every rest before a timed call (and
+each rep of an op without one) adds an offset in [0, 1/60 s): one sequence
+per op from the run's seed (`LADDER_REST_SEED`, else the run id), the same
+for every tool, recorded in publish.json `ops_rest`. Screenshot cells add the
+one-frame share (reps under 24 ms), and `screenshot-720` ranks by its mean.
+Ops, on the listing page
 unless noted: `goto`, `fill`, `click` (Search, no navigation), `click-submit`
 (the order form's submit, handled by the page script, no navigation),
 `click-large` (a button on `page_c`, ~60,000 elements with 40 open shadow
