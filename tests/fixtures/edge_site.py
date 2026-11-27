@@ -101,6 +101,23 @@ async function login() { try {
   out.textContent = 'signed in as ' + new TextDecoder().decode(c.response.userHandle); } catch (e) { out.textContent = 'error ' + e.name; } }
 </script>""",
     "/to-missing": """<!doctype html><title>start</title><a href="/status?code=404">gone</a>""",
+    # Text in open shadow roots: a custom element defined after its tag
+    # was parsed (so its root is attached late), a root inside a root, a
+    # slot showing a light child, a light child no slot shows, and a
+    # closed root, which a page's own scripts cannot read either.
+    "/shadow": """<!doctype html><title>shadow</title><h1>Orders</h1>
+<x-card></x-card>
+<div id=host><span slot=s>slotted line</span><span>unslotted light text</span></div>
+<p>Footer</p>
+<script>
+customElements.define('x-inner', class extends HTMLElement { constructor() { super();
+  this.attachShadow({ mode: 'open' }).innerHTML = '<p>nested root text</p>'; } });
+customElements.define('x-card', class extends HTMLElement { constructor() { super();
+  this.attachShadow({ mode: 'open' }).innerHTML = '<div><span>card</span> <button type=button>Open</button></div><x-inner></x-inner>'; } });
+host.attachShadow({ mode: 'open' }).innerHTML = '<style>p { color: red }</style><p>shadow paragraph</p><slot name=s></slot>';
+const closed = document.createElement('div'); document.body.appendChild(closed);
+closed.attachShadow({ mode: 'closed' }).innerHTML = '<p>closed root text</p>';
+</script>""",
     "/keys": """<!doctype html><title>keys</title><input id=i autofocus><p id=p>no form here</p>""",
     # A single-page app: the list arrives by fetch, then renders a beat later.
     "/spa": """<!doctype html><title>spa</title><p id=s role=status>Loading items…</p><script>

@@ -3480,6 +3480,90 @@ fn shifted_char(c: char) -> char {
     PLAIN.chars().position(|p| p == c).and_then(|i| SHIFTED.chars().nth(i)).unwrap_or(c)
 }
 
+/// An element's text as it reads, open shadow roots included: `innerText`
+/// walks the element's own children, so neither Chrome nor Lightpanda puts
+/// in it what a shadow root shows (a custom element's whole content) or
+/// what a slot shows from the light DOM. With no open shadow root under
+/// `el` (one element walk), that `innerText` as it is. Else the elements
+/// between `el` and the roots are walked in the flat tree (a host by its
+/// shadow root, a slot by what is assigned to it), every other element
+/// read by its own `innerText`, and the pieces joined with the line breaks
+/// `innerText` puts around blocks (two around a paragraph). At most 2000
+/// roots. `byTag`: which elements are blocks is told by their tag, as
+/// Lightpanda's own `innerText` does (its computed `display` says `block`
+/// for a button or a custom element, which Chrome and its `innerText` lay
+/// out inline); else by their computed `display`.
+const FLAT_TEXT: &str = r#"(el, byTag) => {
+  if (!el) return '';
+  const MAX = 2000, hosts = [], scopes = [el];
+  for (let i = 0; i < scopes.length && hosts.length < MAX; i++) {
+    const s = scopes[i];
+    if (i === 0 && s.shadowRoot) { hosts.push(s); scopes.push(s.shadowRoot); }
+    const w = document.createTreeWalker(s, 1);
+    for (let n = w.nextNode(); n && hosts.length < MAX; n = w.nextNode()) {
+      if (n.shadowRoot) { hosts.push(n); scopes.push(n.shadowRoot); }
+    }
+  }
+  if (!hosts.length) return el.innerText ?? el.textContent ?? '';
+  const on = new Set();
+  const up = (n) => {
+    while (n && n !== el && !on.has(n)) {
+      on.add(n);
+      n = n.parentNode && n.parentNode.nodeType === 11 ? n.parentNode.host : n.parentNode;
+    }
+  };
+  const assigned = (slot) => (slot.assignedNodes ? slot.assignedNodes({ flatten: true }) : []);
+  for (const h of hosts) {
+    up(h);
+    for (const slot of h.shadowRoot.querySelectorAll('slot')) if (assigned(slot).length) up(slot);
+  }
+  const parts = [];
+  const SKIP = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT', 'HEAD', 'TITLE', 'META', 'LINK']);
+  const BLOCK = new Set(('ARTICLE ASIDE FOOTER HEADER MAIN NAV SECTION ADDRESS CENTER DIV FIELDSET FIGCAPTION FIGURE SEARCH '
+    + 'H1 H2 H3 H4 H5 H6 DL OL UL BLOCKQUOTE PLAINTEXT PRE TABLE HR SUMMARY DETAILS DIALOG MENU DD DT FORM LI TR CAPTION OPTION').split(' '));
+  const walk = (n, top) => {
+    if (n.nodeType === 3) { parts.push(n.data.replace(/[ \t\n\r\f]+/g, ' ')); return; }
+    if (n.nodeType !== 1 || SKIP.has(n.tagName)) return;
+    if (n.tagName === 'BR') { parts.push('\n'); return; }
+    let display = 'inline';
+    try { display = getComputedStyle(n).display || 'inline'; } catch {}
+    if (display === 'none' && !top) return;
+    const block = byTag ? BLOCK.has(n.tagName) : !/^(inline|contents|ruby|table-cell)/.test(display);
+    const breaks = top ? 0 : n.tagName === 'P' ? 2 : block ? 1 : 0;
+    parts.push(breaks);
+    if (!on.has(n) && !top) {
+      parts.push(n.innerText ?? n.textContent ?? '');
+    } else {
+      const slotted = n.tagName === 'SLOT' ? assigned(n) : [];
+      const kids = n.shadowRoot ? n.shadowRoot.childNodes : slotted.length ? slotted : n.childNodes;
+      for (const k of kids) walk(k, false);
+    }
+    parts.push(breaks);
+  };
+  walk(el, true);
+  // Joined once at the end: no string is copied per piece.
+  const out = [];
+  let pending = 0, end = '';
+  const trim = () => {
+    const i = out.length - 1, t = out[i];
+    let k = t.length;
+    while (k && t.charCodeAt(k - 1) === 32) k--;
+    out[i] = t.slice(0, k);
+  };
+  for (const p of parts) {
+    if (typeof p === 'number') { if (out.length) pending = Math.max(pending, p); continue; }
+    // A space where a line starts, or after a space, is not shown.
+    let s = p;
+    if (s.startsWith(' ') && (pending || !out.length || end === ' ' || end === '\n')) s = s.slice(1);
+    if (!s) continue;
+    if (pending) { trim(); out.push('\n'.repeat(pending)); pending = 0; }
+    out.push(s);
+    end = s[s.length - 1];
+  }
+  if (out.length) trim();
+  return out.join('');
+}"#;
+
 /// Does Enter on the focused element (through open shadow roots and
 /// same-origin frames) possibly navigate? Form controls, links, buttons.
 /// In a form (implicit submission, or its button) "form": the submit is
@@ -7732,26 +7816,33 @@ impl Page {
         Ok(self.evaluate_raw("navigator.userAgent", timeout)?.as_str().unwrap_or_default().to_string())
     }
 
-    /// The page's whole text as it reads (`innerText` of the body).
+    /// The page's whole text as it reads (the body's, open shadow roots
+    /// included: see FLAT_TEXT).
     pub fn page_text(&self, timeout: Duration) -> Result<String> {
         self.fresh_layout(timeout);
-        let value = self
-            .evaluate_raw(&ascii_safe("(document.body || document.documentElement || {}).innerText ?? ''"), timeout)?;
+        let value = self.evaluate_raw(
+            &ascii_safe(&format!(
+                "({FLAT_TEXT})(document.body || document.documentElement, {})",
+                self.shared.is_single_target()
+            )),
+            timeout,
+        )?;
         Ok(from_ascii_safe(value)?.as_str().unwrap_or_default().to_string())
     }
 
-    /// The first match's text as it reads (`innerText`: a list reads as
-    /// lines, as the page's whole `text` does), or its `textContent` when
+    /// The first match's text as it reads (`innerText`, open shadow roots
+    /// included: a list reads as lines, as the page's whole `text` does), or its `textContent` when
     /// it is not rendered (hidden, a script, or an engine without layout).
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
+        let by_tag = self.shared.is_single_target();
         self.fresh_layout(timeout);
         // Code and styles inside the element aren't text a user reads (an
         // element that is itself a script, e.g. a JSON blob, keeps its own).
         let value = self.evaluate_raw(
             &ascii_safe(&format!(
                 "(() => {{ const el = {DEEP}.first({sel}); if (!el) return null; \
-                 if (typeof el.innerText === 'string' && el.getClientRects().length) return el.innerText; \
+                 if (typeof el.innerText === 'string' && el.getClientRects().length) return ({FLAT_TEXT})(el, {by_tag}); \
                  if (!el.querySelector || !el.querySelector('script, style, template, noscript')) return el.textContent; \
                  const c = el.cloneNode(true); \
                  for (const n of c.querySelectorAll('script, style, template, noscript')) n.remove(); \

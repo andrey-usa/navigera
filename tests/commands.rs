@@ -797,6 +797,29 @@ fn click_until_gone_loads_a_whole_list() {
     }
 }
 
+/// `text` reads what open shadow roots show, as the page shows it: a
+/// custom element's content, a root inside a root, a slot's light child in
+/// the slot's place. Neither engine's `innerText` has any of it. A light
+/// child no slot shows and a closed root's text stay out.
+#[test]
+fn text_reads_open_shadow_roots() {
+    let Some(site) = edge_site() else { return };
+    for (engine, bin) in engines() {
+        let a = Agent::new("shadow", engine, bin);
+        a.ok(&["goto", &format!("{}/shadow", site.base)]);
+        let text = a.text(&["text"]);
+        assert_eq!(
+            text, "Orders\ncard Open\n\nnested root text\n\nshadow paragraph\n\nslotted line\n\nFooter",
+            "[{engine}]"
+        );
+        assert_eq!(a.text(&["text", "--selector", "x-card"]), "card Open\n\nnested root text", "[{engine}]");
+        // The same page without roots reads as before: the engine's own
+        // innerText, untouched.
+        a.ok(&["goto", &format!("{}/form", site.base)]);
+        assert_eq!(a.text(&["text"]), a.text(&["eval", "document.body.innerText"]), "[{engine}]");
+    }
+}
+
 /// A navigation the browser refuses names that browser: Lightpanda said
 /// "Chrome refuses to open that port".
 #[test]
