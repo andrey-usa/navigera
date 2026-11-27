@@ -221,8 +221,9 @@ jobs:
           file "$bin" | tee /dev/stderr | grep -q 'static'
           "$bin" --version
           # mimalloc's arena reserve is set to 32 MiB at startup (src/bin/navigera.rs):
-          # a process of this binary maps nothing of 512 MiB or more.
-          sleep 3 | "$bin" serve >/dev/null & pid=$!
+          # a process of this binary maps nothing of 512 MiB or more. `mcp` starts no
+          # browser before a tool call, so it stays up where there is none (arm).
+          sleep 3 | "$bin" mcp >/dev/null & pid=$!
           sleep 1
           big=$(python3 -c 'import sys; print(" ".join(r for r in (l.split()[0] for l in open(f"/proc/{sys.argv[1]}/maps")) if int(r.split("-")[1], 16) - int(r.split("-")[0], 16) >= 1 << 29))' "$pid")
           wait $pid || true
