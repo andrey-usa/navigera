@@ -16,7 +16,7 @@ run in CI (`.github/workflows/bench.yml`) on identical hardware.
 | `puppeteer` | `puppeteer-core`, system Chrome | Node |
 | `chromiumoxide` | `chromiumoxide` 0.9 (bench-only crate in `contenders/`) | native Rust |
 | `chromey` | `chromey` 3.x, maintained chromiumoxide fork (`contenders/`) | native Rust |
-| `chromedp` | `chromedp` v0.19.1 (bench-only module in `contenders/`) | native Go |
+| `chromedp` | `chromedp` v0.24.0 (bench-only module in `contenders/`) | native Go |
 | `gorod` | `go-rod` v0.116.2 (bench-only module in `contenders/`) | native Go |
 | `gorod-shell` | the same go-rod build on chrome-headless-shell (`$SHELL_BIN`): `nv-shell`'s pair | native Go |
 
