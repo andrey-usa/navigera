@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The Moli engine now starts `moli serve --layout --realtime` (Moli
+  1.1.28+, which rejects the flag before that): with realtime layout the
+  probe finds Moli's layout live, so navigera takes no 1x1 screenshot
+  before it reads boxes or text. The November 22 example from
+  [issue #27](https://github.com/andrey-usa/navigera/issues/27) — a button a
+  script adds, then a scroll — now reads its box at once and clicks it, and
+  `getBoundingClientRect()` follows the scroll (verified locally against
+  Moli 1.1.28; the Moli leg of `tests/cdp_servers.rs` passes).
 - The static Linux binaries reserve mimalloc's memory 32 MiB at a time
   instead of 1 GiB. Every CLI call is a process, and some machines run an
   agent that spends CPU on each process mapping that much: on GitHub's

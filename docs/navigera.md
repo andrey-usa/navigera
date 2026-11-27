@@ -756,20 +756,22 @@ take Chrome's paths; each session gets a browser of its own.
   - `eval`: Obscura runs a script it is asked to check for side effects, so
     navigera can't tell a read from a change there and runs every `eval` as
     an action (the page's change watch armed first), never as a read.
-- **`--engine moli`** (experimental; tested on Moli 1.1.27) starts
-  `moli serve --layout`: without `--layout` Moli answers geometry from a
-  fixed compatibility layout and paints nothing. The binary comes from
+- **`--engine moli`** (experimental; tested on Moli 1.1.28) starts
+  `moli serve --layout --realtime`: without `--layout` Moli answers geometry from a
+  fixed compatibility layout and paints nothing. `--realtime` (1.1.28+; it
+  takes precedence over `--layout`) keeps geometry current without a
+  screenshot, and Moli before 1.1.28 rejects the flag, so 1.1.28 is the
+  floor. The binary comes from
   `$MOLI_BIN` or `PATH`, or from `--chromium`. Tabs, popups (as tabs),
   dialogs and screenshots work as on Chrome. Differences:
-  - layout: Moli builds it at the first geometry read and keeps it until a
-    screenshot, so an element a script adds afterwards has no box and no
-    `innerText` there. navigera takes a 1x1 screenshot before it reads
-    boxes or text (an element op, `text`, `ax`, `eval`, each 100 ms of a
-    `wait`) when a document (the page's or a same-origin frame's), its DOM,
-    its scroll or its viewport changed since the last one: a whole layout,
-    1.7 ms on a small page, 157 ms on 4,500 nodes. Changes inside a shadow
-    root aren't counted, and an `eval` that changes the page and then reads
-    a box reads the layout from before its change.
+  - layout: with `--realtime` Moli keeps geometry current, so an element a
+    script adds afterwards has a box and `innerText` at the next read and
+    boxes follow a scroll; navigera's probe finds the layout live and takes
+    no 1x1 screenshot before it reads boxes or text. Before 1.1.28 Moli kept
+    the layout it built at the first geometry read until a screenshot, and
+    navigera refreshed it with a 1x1 screenshot before reads (1.7 ms on a
+    small page, 157 ms on 4,500 nodes); the probe still runs, and an engine
+    whose layout is kept still gets the refresh.
   - refs are Moli's node ids, large numbers (`[ref=2000000017]`).
   - a `<select>`'s value in `ax` is the selected option's value, not its
     label.

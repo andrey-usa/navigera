@@ -1033,10 +1033,15 @@ fn obscura_serve_args(port: u16) -> Vec<String> {
 
 /// `moli serve` arguments. Without `--layout` Moli answers geometry from a
 /// fixed compatibility layout and paints nothing: clicks would land on
-/// made-up boxes and screenshots would fail.
+/// made-up boxes and screenshots would fail. `--realtime` (Moli 1.1.28+)
+/// keeps geometry current without a screenshot, so a script-added element
+/// has a box and `innerText` at the next read and boxes follow a scroll;
+/// it takes precedence over `--layout`, which stays for the first layout.
+/// Moli before 1.1.28 rejects the unknown flag, so 1.1.28 is the floor.
+/// Whether the engine's layout is live is still probed, not assumed.
 fn moli_serve_args(port: u16) -> Vec<String> {
     let port = port.to_string();
-    ["serve", "--host", "127.0.0.1", "--port", &port, "--layout"].iter().map(|s| s.to_string()).collect()
+    ["serve", "--host", "127.0.0.1", "--port", &port, "--layout", "--realtime"].iter().map(|s| s.to_string()).collect()
 }
 
 /// `lightpanda serve` arguments. `serve` loads no sub-resources by default:
@@ -1128,6 +1133,7 @@ mod tests {
         let args = serve_args(CdpServer::Moli, 9335);
         assert_eq!(&args[..5], ["serve", "--host", "127.0.0.1", "--port", "9335"]);
         assert!(args.iter().any(|a| a == "--layout"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--realtime"), "{args:?}");
         assert!(serve_env(CdpServer::Obscura).is_empty() && serve_env(CdpServer::Moli).is_empty());
     }
 }
