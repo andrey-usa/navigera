@@ -1041,6 +1041,17 @@ if (location.search.includes('closed')) {
 
 # Many more style rules than elements (a site's whole CSS bundle on a small
 # page): a read leaves walking them to the first action.
+PAGES["/index-churn"] = ("index churn", "", """
+<h1 id=top>Start</h1>
+<div id=status role=status>ready</div>
+<input id=a> <button id=go>Go</button>
+<div id=area></div>
+<script>
+let went = 0;
+document.getElementById('go').onclick = () => { document.getElementById('status').textContent = 'went ' + (++went); };
+</script>""")
+
+
 PAGES["/many-rules"] = ("many rules",
     "".join(f".p{i}{{color:#{i % 4096:03x}}}" for i in range(12000)) + " .row:hover{cursor:pointer}", """
 <button id=add onclick="const li = document.createElement('li'); li.className = 'row'; li.textContent = 'Added row'; rows.prepend(li)">Add</button>

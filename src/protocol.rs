@@ -4143,14 +4143,21 @@ const HISTORY_MAX: usize = 1000;
 
 /// A history entry's `page`: the visible top heading and the status or
 /// alert messages showing, each one line of up to 120 characters.
-const PAGE_SAYS: &str = "(() => {
-  const line = (e) => ((e && (e.innerText || e.textContent)) || '').replace(/\\s+/g, ' ').trim().slice(0, 120);
+/// The candidates come from the document's element index (`nvFind`): a
+/// query of the whole document on the first entry, then only what changed.
+const PAGE_SAYS: &str = concat!(
+    "(() => {",
+    crate::cdp::page::element_index_js!(),
+    r#"
+  const line = (e) => ((e && (e.innerText || e.textContent)) || '').replace(/\s+/g, ' ').trim().slice(0, 120);
   const shown = (e) => e.getClientRects().length > 0;
-  const h1 = [...document.querySelectorAll('h1')].find(shown);
-  const said = [...document.querySelectorAll('[role=status],[role=alert],[aria-live=polite],[aria-live=assertive],output')]
-    .filter(shown).map(line).filter(Boolean);
+  const says = nvFind(document, 'says');
+  const h1 = says.find((e) => e.matches('h1') && shown(e));
+  const live = '[role=status],[role=alert],[aria-live=polite],[aria-live=assertive],output';
+  const said = says.filter((e) => e.matches(live) && shown(e)).map(line).filter(Boolean);
   return { title: document.title, h1: line(h1), status: [...new Set(said)].slice(0, 3) };
-})()";
+})()"#
+);
 
 /// One op's result plus side effects the agent should know about.
 pub struct Outcome {

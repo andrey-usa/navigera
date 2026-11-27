@@ -33,6 +33,13 @@ All notable changes to this project are documented here. The format follows
   popovers before each click: a popover that the click opens or closes
   is told by its `beforetoggle`, which fires inside the call that changes
   it, and a dialog or a `<details>` by its `open` attribute.
+- The heading and status messages an action's history entry records,
+  and the form controls a click compares, come from an index kept for
+  each document: the first action in a document queries it whole, as
+  every action did before, and later ones look only at what the page
+  inserted, removed or changed `role` or `aria-live` on since; each
+  query was a pass over the whole document. An engine whose DOM observer
+  misses a change is queried whole every time.
 
 ### Fixed
 

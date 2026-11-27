@@ -979,6 +979,108 @@ fn a_click_that_changes_nothing_says_so() {
     assert!(r.get("no_effect").is_none(), "checkbox: {r}");
 }
 
+/// A seeded run of DOM changes in the page: after each one, the element
+/// index a click and a history entry read from (`nvFind`, kept per
+/// document as `__nvIdx`) must list what a query of the whole document
+/// lists, the same elements in the same order. Changes cover insertions,
+/// removals, moves (also into and out of a shadow root), `innerHTML`,
+/// `replaceWith`, `role`/`aria-live` set and removed, attributes the index
+/// ignores, and inserts too big to re-match (the index is queried again).
+/// Records reach the index both ways: taken at the call, and delivered to
+/// its observer between steps.
+const INDEX_CHURN: &str = r#"
+const k = window.__nvIdx;
+if (!k || !k.mo) return 'no index, or no observer: ' + !!k;
+const SEL = { says: 'h1,[role=status],[role=alert],[aria-live=polite],[aria-live=assertive],output', controls: 'input,textarea,select' };
+let seed = 0, checks = 0, bulk = 0, shadowed = 0, moved = 0;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+const area = document.getElementById('area');
+const TAGS = ['div', 'span', 'p', 'section', 'h1', 'h2', 'output', 'input', 'textarea', 'select'];
+const LEAF = new Set(['input', 'textarea', 'select']);
+const make = (depth) => {
+  const e = document.createElement(TAGS[rnd(TAGS.length)]);
+  const r = rnd(6);
+  if (r === 0) e.setAttribute('role', ['status', 'alert', 'note'][rnd(3)]);
+  if (r === 1) e.setAttribute('aria-live', ['polite', 'assertive', 'off'][rnd(3)]);
+  if (!LEAF.has(e.localName) && depth > 0) for (let i = rnd(4); i > 0; i--) e.appendChild(make(depth - 1));
+  return e;
+};
+const pick = () => { const all = area.getElementsByTagName('*'); return all.length ? all[rnd(all.length)] : area; };
+const box = () => { const e = pick(); return LEAF.has(e.localName) ? area : e; };
+for (const seed0 of [7, 1234, 99991]) {
+  seed = seed0;
+  area.textContent = '';
+  const host = document.createElement('div');
+  area.appendChild(host);
+  const sr = host.attachShadow({ mode: 'open' });
+  for (let step = 0; step < 300; step++) {
+    try {
+      const op = rnd(13), e = pick();
+      if (op <= 2) { const p = box(); p.insertBefore(make(3), rnd(2) ? p.firstChild : null); }
+      else if (op === 3 && e !== area) e.remove();
+      else if (op === 4) { const t = box(); if (!e.contains(t)) { (t.moveBefore && rnd(2) ? t.moveBefore(e, null) : t.appendChild(e)); moved++; } }
+      else if (op === 5) { if (rnd(2)) e.setAttribute('role', ['status', 'alert', 'note'][rnd(3)]); else e.removeAttribute('role'); }
+      else if (op === 6) { if (rnd(2)) e.setAttribute('aria-live', ['polite', 'assertive', 'off'][rnd(3)]); else e.removeAttribute('aria-live'); }
+      else if (op === 7) box().innerHTML = rnd(2) ? '<p><output>o</output><span role=alert>x</span><input></p><h1>h</h1>' : '';
+      else if (op === 8) { if (e !== area && !e.contains(host) && rnd(3)) { sr.appendChild(e); shadowed++; } else if (sr.firstElementChild) box().appendChild(sr.firstElementChild); }
+      else if (op === 9 && e !== area) { e.className = 'c' + rnd(9); e.id = 'i' + rnd(99); }
+      else if (op === 10 && rnd(6) === 0) { const f = document.createDocumentFragment(); for (let i = 0; i < 350; i++) f.appendChild(make(0)); area.appendChild(f); bulk++; }
+      else if (op === 11 && e !== area) e.replaceWith(make(2));
+      else if (op === 12 && area.getElementsByTagName('*').length > 1500) area.textContent = '';
+    } catch (_) {}
+    if (rnd(3) === 0) await null;
+    for (const g of ['says', 'controls']) {
+      const a = k.get(g), b = [...document.querySelectorAll(SEL[g])];
+      checks++;
+      if (a.length !== b.length || a.some((x, i) => x !== b[i])) return `seed ${seed0} step ${step} ${g}: index lists ${a.length}, the document ${b.length}`;
+    }
+  }
+}
+return { ok: document.getElementById('area') === area, checks, bulk, shadowed, moved, live: k.live };
+"#;
+
+/// What a history entry's `page` was read as before the element index: a
+/// query of the whole document for each part.
+const PAGE_SAYS_BY_QUERY: &str = r#"(() => {
+  const line = (e) => ((e && (e.innerText || e.textContent)) || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const shown = (e) => e.getClientRects().length > 0;
+  const h1 = [...document.querySelectorAll('h1')].find(shown);
+  const said = [...document.querySelectorAll('[role=status],[role=alert],[aria-live=polite],[aria-live=assertive],output')]
+    .filter(shown).map(line).filter(Boolean);
+  return { title: document.title, h1: line(h1), status: [...new Set(said)].slice(0, 3) };
+})()"#;
+
+#[test]
+fn the_element_index_lists_what_a_query_of_the_document_does() {
+    let (true, Some(site)) = (chrome(), site()) else { return };
+    let s = Session::start("index", &[]);
+    s.ok(&["goto", &format!("{}/index-churn", site.url)]);
+    // A click builds both groups: the form fields it compares, and the
+    // heading and status messages its history entry reads.
+    s.ok(&["click", "--selector", "#go"]);
+    let h = s.ok(&["history"]);
+    let page = &h["history"].as_array().unwrap().last().unwrap()["page"];
+    assert_eq!(page, &s.ok(&["eval", PAGE_SAYS_BY_QUERY]), "{h}");
+    assert_eq!(page["status"][0], "went 1", "{h}");
+    let r = s.ok(&["eval", INDEX_CHURN]);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(r["checks"].as_u64().unwrap() >= 1800 && r["bulk"].as_u64().unwrap() > 0, "{r}");
+    assert!(r["shadowed"].as_u64().unwrap() > 0 && r["moved"].as_u64().unwrap() > 0, "{r}");
+    // After the churn, a heading and a message the page adds later, and
+    // the first heading hidden by style (no element changed): the history
+    // entry says what a query of the document says.
+    s.ok(&[
+        "eval",
+        "document.getElementById('area').textContent = ''; document.getElementById('top').style.display = 'none'; \
+         document.getElementById('area').innerHTML = '<section><h1>Later heading</h1><p aria-live=polite>Saved 3</p></section>'",
+    ]);
+    s.ok(&["click", "--selector", "#go"]);
+    let h = s.ok(&["history"]);
+    let page = &h["history"].as_array().unwrap().last().unwrap()["page"];
+    assert_eq!(page, &s.ok(&["eval", PAGE_SAYS_BY_QUERY]), "{h}");
+    assert_eq!((page["h1"].as_str(), page["status"].as_array().map(Vec::len)), (Some("Later heading"), Some(2)), "{h}");
+}
+
 /// `show()` and `showPopover()` queue their `toggle` as a later task, so an
 /// earlier click's can land while the next click watches for its effect: a
 /// toggle saying a dialog or popover went to the state it already had is

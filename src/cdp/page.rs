@@ -449,6 +449,112 @@ macro_rules! shadow_roots_js {
     };
 }
 
+/// `nvFind(d, g)`: the elements of document `d` (its own tree: not its
+/// shadow roots or frames) that group `g` matches, in document order, as
+/// `d.querySelectorAll` gives them; `says` is the history entry's heading
+/// and status messages, `controls` the form fields a click compares. Kept
+/// per document between calls (`__nvIdx` on its window), because each
+/// query is a pass over the whole document (about 0.6 ms per selector
+/// part at 76,000 elements, Chrome 153) and pages change little between
+/// two actions. A group's first call queries the document; after that one
+/// observer of the document's insertions and of `role`/`aria-live`
+/// changes keeps what changed, and a call re-matches only that: inserted
+/// subtrees and changed elements, entries out of the document dropped when
+/// an element was removed. A page that changes more than `MAX` elements
+/// between two calls is queried whole again (cheaper than re-matching
+/// that much). An engine whose observer misses a change made to an element
+/// out of the page (asked once per document) is queried every time.
+macro_rules! element_index_js {
+    () => {
+        r#"
+    const nvFind = (d, g) => {
+        const SEL = {
+            says: 'h1,[role=status],[role=alert],[aria-live=polite],[aria-live=assertive],output',
+            controls: 'input,textarea,select',
+        };
+        const v = d.defaultView;
+        let k = v && v.__nvIdx;
+        if (!v) return [...d.querySelectorAll(SEL[g])];
+        if (!k || k.d !== d || k.ver !== 1) {
+            const MAX = 300;
+            k = { ver: 1, d, groups: {}, added: [], attrd: [], rm: false, live: false, mo: null };
+            // The engine's observer, asked on an element out of the page
+            // (nothing the page sees): an insertion, an attribute, and
+            // `innerHTML` replacing what was inserted.
+            try {
+                const t = d.createElement('div'), x = d.createElement('div'), o = new v.MutationObserver(() => {});
+                o.observe(t, { childList: true, subtree: true, attributes: true, attributeFilter: ['role'] });
+                t.appendChild(x);
+                x.setAttribute('role', 'status');
+                t.innerHTML = '<p></p>';
+                const recs = o.takeRecords();
+                o.disconnect();
+                if (recs.length === 3 && recs[0].addedNodes[0] === x && recs[1].attributeName === 'role'
+                    && recs[2].removedNodes[0] === x && recs[2].addedNodes[0] === t.firstChild) {
+                    k.mo = new v.MutationObserver((recs) => k.take(recs));
+                }
+            } catch (_) {}
+            k.drop = () => {
+                k.live = false; k.groups = {}; k.added = []; k.attrd = []; k.rm = false;
+                if (k.mo) k.mo.disconnect();
+            };
+            k.take = (recs) => {
+                if (!k.live) return;
+                for (const r of recs) {
+                    if (r.type === 'attributes') { k.attrd.push(r.target); continue; }
+                    for (const n of r.addedNodes) if (n.nodeType === 1) k.added.push(n);
+                    if (!k.rm) for (const n of r.removedNodes) if (n.nodeType === 1) { k.rm = true; break; }
+                }
+                if (k.added.length + k.attrd.length > MAX) k.drop();
+            };
+            const order = (a, b) => (a.compareDocumentPosition(b) & 2 ? 1 : -1);
+            k.get = (g) => {
+                if (k.live) k.take(k.mo.takeRecords());
+                let G = k.groups[g];
+                if (k.live && (k.added.length || k.attrd.length || k.rm)) {
+                    const added = k.added, attrd = k.attrd, rm = k.rm;
+                    k.added = []; k.attrd = []; k.rm = false;
+                    for (const h in k.groups) {
+                        const H = k.groups[h], sel = SEL[h];
+                        // An inserted element may have moved: its place is
+                        // asked again. An element leaves the document only
+                        // with a removed element (it or an ancestor).
+                        const put = (e) => { H.set.add(e); H.sort = true; };
+                        for (const n of added) {
+                            if (n.matches(sel)) put(n);
+                            if (n.firstElementChild) for (const e of n.querySelectorAll(sel)) put(e);
+                        }
+                        for (const t of attrd) {
+                            if (!t.matches(sel)) { if (H.set.delete(t)) H.cut = true; } else if (!H.set.has(t)) put(t);
+                        }
+                        if (rm) for (const e of H.set) if (!d.contains(e)) { H.set.delete(e); H.cut = true; }
+                    }
+                }
+                if (!G) {
+                    const all = d.querySelectorAll(SEL[g]);
+                    G = { set: new Set(all), list: [...all], sort: false, cut: false };
+                    if (!k.mo) return G.list;
+                    k.groups[g] = G;
+                    if (!k.live) {
+                        k.live = true;
+                        k.mo.observe(d, { childList: true, subtree: true, attributes: true, attributeFilter: ['role', 'aria-live'] });
+                    }
+                    return G.list;
+                }
+                if (G.sort) G.list = [...G.set].sort(order);
+                else if (G.cut) G.list = G.list.filter((e) => G.set.has(e));
+                G.sort = false; G.cut = false;
+                return G.list;
+            };
+            Object.defineProperty(v, '__nvIdx', { value: k, configurable: true, enumerable: false, writable: true });
+        }
+        return k.get(g);
+    };
+"#
+    };
+}
+pub(crate) use element_index_js;
+
 /// Scroll the element into view and, if it is visible and actually receives
 /// a pointer event at its centre, return that point for a *trusted* CDP
 /// mouse event (`isTrusted: true`, default actions, focus, user activation
@@ -615,6 +721,7 @@ const CLICK_PREP: &str = concat!(
     };
 "#,
     shadow_roots_js!(),
+    element_index_js!(),
     r#"
     // A styled checkbox/radio is often a hidden or covered <input> inside a
     // visible <label>: clicking the label is what a user does and toggles it.
@@ -741,12 +848,12 @@ const CLICK_PREP: &str = concat!(
         };
         // The form controls are looked up once, when armed: `state` is read
         // again only while no DOM change was seen, so the same ones are in
-        // the page (each lookup is a pass over the document: 1.9 ms at
-        // 76,000 elements, Chrome 153).
+        // the page. From the document's index (`nvFind`): a pass over the
+        // document is 1.9 ms at 76,000 elements, Chrome 153.
         const controls = [];
         if (!skip) {
             for (const d of docs) {
-                const cs = d.querySelectorAll('input, textarea, select');
+                const cs = nvFind(d, 'controls');
                 for (let i = 0; i < cs.length && i < 300; i++) controls.push(cs[i]);
             }
         }
