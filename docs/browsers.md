@@ -81,12 +81,15 @@ Lightpanda they open tabs and lay pages out, so they take Chrome's paths.
 navigation, the accessibility tree and acting on its refs, fill, a form
 submitted with the keyboard (the server checks the sign-in), a checkbox
 click, a select, tabs, a screenshot, and the engine's server gone after
-`quit`. CI runs it on Moli's newest stable release on every push (1.1.27
+`quit`. CI runs it on Moli's newest stable release on every push (1.1.28
 at this writing); on Obscura it last ran on 0.2.7
 ([run 45312041662](https://github.com/andrey-usa/navigera/actions/runs/45312041662)).
 Run with either
 one as the default engine (`NAVIGERA_ENGINE`), the rest of the suite shows
 how far each is from Chrome; the differences agents meet are listed in
-[docs/navigera.md](navigera.md#obscura-and-moli). Moli's
-biggest one, for now: it keeps the layout it built at the first geometry
-read, so content a page's scripts render later has no box to click.
+[docs/navigera.md](navigera.md#obscura-and-moli). Moli's layout now stays
+current (`--realtime`, 1.1.28+), so content a page's scripts render later
+has a box to click at once; what remains is mostly surface: refs are
+Moli's large node ids, a `<select>`'s value in `ax` is the selected
+option's value rather than its label, and a few roles differ from
+Chrome's.
