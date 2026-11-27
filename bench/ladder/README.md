@@ -55,9 +55,13 @@ calls as navigera's skill tells agents to; `navigera (own browser)` and
 
 **Matched operations** (`contenders/ops_agent.py`, scenario `ops`):
 one call per op, warm session, median of 10 — the per-call table the README
-quotes instead of the session's per-step mean. Ops, all on the listing page:
-`goto`, `fill`, `click` (Search, no navigation), `click-submit` (the order
-form's submit, handled by the page script, no navigation), `read-text`,
+quotes instead of the session's per-step mean. Ops, on the listing page
+unless noted: `goto`, `fill`, `click` (Search, no navigation), `click-submit`
+(the order form's submit, handled by the page script, no navigation),
+`click-large` (a button on `page_c`, ~60,000 elements with 40 open shadow
+roots, no navigation; the page is loaded and clicked once, untimed, before
+the reps), `click-large-first` (the same click as the first action on a
+freshly loaded `page_c`, untimed goto before each rep), `read-text`,
 `snapshot`, `screenshot` (at the tool's own default viewport),
 `screenshot-720` (the same capture after the tool's own resize command set
 a 1280x720 viewport, untimed and undone after the rep: the losses rank this

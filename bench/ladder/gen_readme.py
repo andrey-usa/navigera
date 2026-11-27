@@ -322,8 +322,8 @@ if ops:
     ops_cols = [o for o in ops if o["name"] in ops_order]
     ops_cols.sort(key=lambda o: ops_order.index(o["name"]))
     ops_cols += [o for o in ops if o["name"] not in ops_order]
-    op_names = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
-                "screenshot", "screenshot-720", "form-batch")
+    op_names = ("goto", "fill", "click", "click-submit", "click-large", "click-large-first",
+                "read-text", "snapshot", "screenshot", "screenshot-720", "form-batch")
     ops_label = {**label,
                  "navigera (baseline)": "`navigera` (baseline build)",
                  "browser-use": f"`browser-use` {ver('browser-use', '')} (exec model)".replace("  ", " ")}
@@ -336,7 +336,11 @@ if ops:
         "on the same fixture page. `goto` re-navigates to the listing; `fill` fills",
         "the search box; `click` clicks Search (client-side filter, no navigation);",
         "`click-submit` clicks the order form's submit, which a script handles (no",
-        "navigation); `read-text` reads the heading; `snapshot` is each tool's default",
+        "navigation); `click-large` clicks a button on a large page (~60,000 elements,",
+        "40 open shadow roots; no navigation) that was loaded and clicked once before",
+        "(untimed), and `click-large-first` is the same click as the first action on the",
+        "freshly loaded page: a cost that grows with the page shows there;",
+        "`read-text` reads the heading; `snapshot` is each tool's default",
         "accessibility output; `screenshot` writes a PNG at the tool's own default",
         "viewport (the PNG's size in the cell); `screenshot-720` is the same capture after",
         "the tool's own resize command set a 1280x720 viewport (untimed, undone after), so",
@@ -509,8 +513,8 @@ def ops_engine(o):
 # default-viewport row captures each tool's own size, unequal pixel counts.
 for nav_ops in [o for o in ops if o["name"].startswith("navigera")]:
     engine = ops_engine(nav_ops)
-    for op in ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
-               "screenshot-720", "form-batch"):
+    for op in ("goto", "fill", "click", "click-submit", "click-large", "click-large-first",
+               "read-text", "snapshot", "screenshot-720", "form-batch"):
         mine = (nav_ops.get("cells") or {}).get(op) or {}
         mine_ms, mine_calls = mine.get("median_ms"), mine.get("calls")
         if mine_ms is None or mine.get("incomplete"):

@@ -9,6 +9,12 @@ Ops (all on the ladder fixtures, page_a unless noted):
   fill          fill #q with "widget"
   click         click #search (client-side filter, no navigation)
   click-submit  click #place (form submit, handled by the page script)
+  click-large   click #more on page_c (~60,000 elements, 40 open shadow
+                roots; no navigation), a later click: the page is loaded
+                and clicked once (untimed) before the reps
+  click-large-first
+                the same click as the first action on a freshly loaded
+                page_c (untimed goto before each rep)
   read-text     eval the h1 text ("Search results")
   snapshot      accessibility snapshot of page_a (default output)
   screenshot    screenshot to a file, at the tool's own default viewport
@@ -278,8 +284,13 @@ FIXTURES = HERE.parent / "fixtures"
 # How long the page rests after a state reset before the timed call.
 SETUP_REST_S = 0.15
 
-OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
-       "screenshot", "screenshot-720", "form-batch")
+OPS = ("goto", "fill", "click", "click-submit", "click-large", "click-large-first",
+       "read-text", "snapshot", "screenshot", "screenshot-720", "form-batch")
+# The ops on page_c; the session goes back to page_a (untimed) after each.
+LARGE_OPS = ("click-large", "click-large-first")
+# After an untimed goto to page_c, before the next call: the page has
+# loaded, and an agent's next call comes a model turn later.
+LOAD_REST_S = 0.3
 # The one viewport screenshot-720 sets in every tool, in CSS pixels.
 SHOT_720 = (1280, 720)
 # The captures browser-use's tab may take for two equal viewport reads
@@ -293,6 +304,19 @@ Q_VALUE = "(() => document.getElementById('q').value)()"
 VISIBLE = "(() => document.querySelectorAll('.card:not(.hidden)').length)()"
 PLACED = "(() => window.__placed || 0)()"
 URL = "(() => location.href)()"
+# page_c's state in one read: title, element count, open shadow roots,
+# #status, whether #more's row is marked, path. Single quotes only: the
+# browser-use route passes the expression inside a double-quoted string.
+LARGE_STATE = ("(() => [document.title, document.getElementsByTagName('*').length, "
+               "Array.prototype.filter.call(document.getElementsByTagName('x-card'), "
+               "e => e.shadowRoot && e.shadowRoot.mode === 'open').length, "
+               "document.getElementById('status').textContent, "
+               "document.getElementById('{row}').classList.contains('on'), "
+               "location.pathname].join('|'))()")
+# The per-rep read of click-large: #status, the marked row, path.
+LARGE_AFTER = ("(() => [document.getElementById('status').textContent, "
+               "document.getElementById('{row}').classList.contains('on'), "
+               "location.pathname].join('|'))()")
 VIEWPORT = ("(() => window.innerWidth + 'x' + window.innerHeight + '@' "
             "+ window.devicePixelRatio)()")
 
@@ -316,7 +340,7 @@ def click_named(name, role="button"):
 
 def preflight(base: str, expected: dict) -> None:
     """Fetch each fixture page over HTTP before any tool runs."""
-    for page in ("page_a.html", "page_b.html"):
+    for page in ("page_a.html", "page_b.html", "page_c.html"):
         url = f"{base}/{page}"
         try:
             with urllib.request.urlopen(url, timeout=10) as r:
@@ -327,7 +351,8 @@ def preflight(base: str, expected: dict) -> None:
             raise RuntimeError(f"preflight: {url} returned {r.status}")
         if not body:
             raise RuntimeError(f"preflight: {url} served an empty page")
-    print(f"preflight: {base}/page_a.html and page_b.html serve over HTTP", flush=True)
+    print(f"preflight: {base}/page_a.html, page_b.html and page_c.html serve over HTTP",
+          flush=True)
 
 
 def median(xs: list[float]) -> float:
@@ -362,6 +387,10 @@ class Tool:
         # viewport, devicePixelRatio); run_op collects it per op.
         self.shot_info: dict = {}
         self._before_resize: tuple[int, int] = (0, 0)  # screenshot-720's undo
+        # click-large: page_c is loaded and was clicked once (untimed).
+        self._large_warm = False
+        # Set when a page_c op could not return the session to page_a.
+        self.lost_page = ""
 
     # -- generic plumbing -------------------------------------------------
     def log(self, kind: str, op: str, ms: float | None, ok: bool, detail: str = ""):
@@ -598,7 +627,7 @@ class Tool:
         else:
             self._cd_goto(f"{self.base}/page_a.html")
 
-    def _cd_goto(self, url: str):
+    def _cd_goto(self, url: str, op: str = "start"):
         """chrome-devtools-mcp navigate, with its --page-id-routing."""
         assert self.mcp
         if "pageId" in self.mcp.schemas.get("navigate_page", {}):
@@ -609,7 +638,7 @@ class Tool:
         args = {"type": "url", "url": url}
         if "pageId" in self.mcp.schemas.get("navigate_page", {}) and getattr(self, "_cd_page", None) is not None:
             args["pageId"] = self._cd_page
-        self._mcp_call("navigate_page", args, "start")
+        self._mcp_call("navigate_page", args, op)
 
     def _mcp_call(self, tool_name: str, tool_args: dict, op: str) -> tuple[float, str]:
         """One timed MCP tools/call (or a setup/verify call when op says so)."""
@@ -669,7 +698,8 @@ class Tool:
     # Snapshot patterns for the form elements (cdmcp uid / pwmcp ref).
     # #q is the first textbox (no accessible name); the rest match by name.
     MCP_PATTERNS = {"search": r'button "Search', "cust": r'textbox "Name"',
-                    "qty": r'textbox "Qty"', "place": r'button "Place order"'}
+                    "qty": r'textbox "Qty"', "place": r'button "Place order"',
+                    "more": r'button "More"'}
 
     def _mcp_resolve_one(self, element: str):
         """Resolve one element's ref/uid from a fresh snapshot (untimed setup).
@@ -724,7 +754,8 @@ class Tool:
                 ms, _ = self._mcp_call("browser_click", {"target": f"#{element}"}, op)
             else:
                 self._mcp_resolve_one(element)
-                name = {"search": "Search button", "place": "Place order button"}[element]
+                name = {"search": "Search button", "place": "Place order button",
+                        "more": "More button"}[element]
                 ms, _ = self._mcp_call("browser_click",
                                        {"element": name, "ref": self._refs[element]}, op)
         else:
@@ -912,6 +943,94 @@ class Tool:
             raise RuntimeError(f"click-submit verify: status {status!r} has no 'placed:'")
         if not url.startswith(self.base):
             raise RuntimeError(f"click-submit verify: navigation happened: {url}")
+        return ms, 1, ""
+
+    def goto_setup(self, url: str):
+        """Untimed navigation (setup), each tool's own goto, then a rest."""
+        if self.library:
+            self.library_call("goto", url=url, phase="setup")
+        elif self.name == "nv":
+            exe = self.args.navigera or os.environ["NAVIGERA"]
+            self.cli([exe, "--session", self.session, "goto", url], dict(os.environ), "setup")
+        elif self.name == "ab":
+            exe = os.environ.get("AGENT_BROWSER", "agent-browser")
+            self.cli([exe, "--session", self.session, "open", url], dict(os.environ), "setup")
+        elif self.name == "pw":
+            exe = os.environ.get("PLAYWRIGHT_CLI", "playwright-cli")
+            self.cli([exe, f"-s={self.session}", "goto", url], dict(os.environ), "setup",
+                     cwd=self.cwd)
+        elif self.name == "pwmcp":
+            self._mcp_call("browser_navigate", {"url": url}, "setup")
+        elif self.name == "cdmcp":
+            self._cd_goto(url, "setup")
+        else:  # bu
+            self._bu_exec(f'goto_url("{url}")\nwait_for_load()\n', "setup")
+        self._large_warm = False
+        time.sleep(LOAD_REST_S)
+
+    def click_more(self, op: str) -> float:
+        """One click on page_c's #more, each tool's own click; timed when op is."""
+        if self.library:
+            ms, _ = self.library_call("click", selector="#more",
+                                      **({} if op in OPS else {"phase": op}))
+        elif self.name == "nv":
+            exe = self.args.navigera or os.environ["NAVIGERA"]
+            ms, _ = self.cli([exe, "--session", self.session, "click",
+                              "--selector", "#more"], dict(os.environ), op)
+        elif self.name == "ab":
+            exe = os.environ.get("AGENT_BROWSER", "agent-browser")
+            ms, _ = self.cli([exe, "--session", self.session,
+                              "click", "#more"], dict(os.environ), op)
+        elif self.name == "pw":
+            exe = os.environ.get("PLAYWRIGHT_CLI", "playwright-cli")
+            ms, _ = self.cli([exe, f"-s={self.session}", "click", "#more"],
+                             dict(os.environ), op, cwd=self.cwd)
+        elif self.name in ("pwmcp", "cdmcp"):
+            ms = self._mcp_click("more", op)
+        else:  # bu
+            # The same AX-click route as its other clicks: on page_c the AX
+            # tree it reads is the large page's, part of its timed click.
+            ms, _ = self._bu_exec(BU_CLICK + 'click_named("More")\n', op)
+        return ms
+
+    def check_large(self, op: str, marked_status: str):
+        """Untimed: page_c is the page, whole (elements, open shadow roots),
+        and #status/#more's row read as one click from a reset left them."""
+        row = self.expected["mark_row_c"]
+        got = str(self.eval_value(LARGE_STATE.replace("{row}", row)))
+        want = "|".join([self.expected["title_c"], str(self.expected["elements_c"]),
+                         str(self.expected["shadow_roots_c"]), marked_status,
+                         "true", "/page_c.html"])
+        if got != want:
+            raise RuntimeError(f"{op} verify: page state {got!r} != {want!r}")
+
+    def op_click_large(self, rep: int):
+        # A later click on the large page: the first rep loads page_c and
+        # clicks #more once (untimed), so every timed rep is a click after
+        # the first one in the document, the same for every tool.
+        row = self.expected["mark_row_c"]
+        if not self._large_warm:
+            self.goto_setup(f"{self.base}/page_c.html")
+            self.click_more("setup")
+            self.check_large("click-large", self.expected["status_after_more"])
+            self._large_warm = True
+        # Same starting state every rep (untimed): status cleared, counter
+        # 0, the row unmarked, so the click changes the page each time.
+        self.setup("document.getElementById('status').textContent=''; window.__more=0; "
+                   f"document.getElementById('{row}').classList.remove('on')")
+        ms = self.click_more("click-large")
+        got = str(self.eval_value(LARGE_AFTER.replace("{row}", row)))
+        want = f"{self.expected['status_after_more']}|true|/page_c.html"
+        if got != want:
+            raise RuntimeError(f"click-large verify: {got!r} != {want!r}")
+        return ms, 1, ""
+
+    def op_click_large_first(self, rep: int):
+        # The first click in a freshly loaded page_c: what an agent's click
+        # right after a goto costs, per-document warm-up included.
+        self.goto_setup(f"{self.base}/page_c.html")
+        ms = self.click_more("click-large-first")
+        self.check_large("click-large-first", self.expected["status_after_more"])
         return ms, 1, ""
 
     def op_read_text(self, rep: int):
@@ -1243,7 +1362,8 @@ class Tool:
 
     OP_METHODS = {
         "goto": op_goto, "fill": op_fill, "click": op_click,
-        "click-submit": op_click_submit, "read-text": op_read_text,
+        "click-submit": op_click_submit, "click-large": op_click_large,
+        "click-large-first": op_click_large_first, "read-text": op_read_text,
         "snapshot": op_snapshot, "screenshot": op_screenshot,
         "screenshot-720": op_screenshot_720, "form-batch": op_form_batch,
     }
@@ -1282,6 +1402,18 @@ class Tool:
                 errors.append(f"rep {rep}: {' '.join(str(e).split())[:300]}")
                 print(f"  [ops] {self.name} {op} rep {rep + 1}/{reps}: FAILED ({e})",
                       flush=True)
+        if op in LARGE_OPS:
+            # The ops after it run on page_a. Not back there, this op's
+            # cell is failed and main ends the round: their reps could not
+            # pass.
+            try:
+                self.goto_setup(f"{self.base}/page_a.html")
+                title = self.eval_value(TITLE)
+                if title != self.expected["title_a"]:
+                    raise RuntimeError(f"title {title!r} != {self.expected['title_a']!r}")
+            except Exception as e:
+                self.lost_page = f"{op}: not back on page_a: {' '.join(str(e).split())[:300]}"
+                errors.append(self.lost_page)
         ok = len(runs) == reps and not errors
         print(f"  [ops] {self.name} {op}: "
               + (f"median {median(runs):.1f} ms over {len(runs)} reps, {calls} call(s)"
@@ -1348,6 +1480,8 @@ def main() -> int:
         tool.start()
         for op in OPS:
             results[op] = tool.run_op(op, args.reps)
+            if tool.lost_page:
+                raise RuntimeError(tool.lost_page)
     except Exception as e:
         error = " ".join(str(e).split())
         print(f"[ops] {args.tool}: ABORTED: {error}", flush=True)
