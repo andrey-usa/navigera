@@ -55,7 +55,11 @@ All notable changes to this project are documented here. The format follows
   status messages its answer reports are read with its last look at
   where the press arrived, when nothing has crossed the connection
   since; a click that navigates, logs, fetches or opens anything reads
-  them again after it, as before.
+  them again after it, as before. On a fast runner the saving is inside
+  the noise: click 7.93 and 8.23 ms before and after, a click that
+  submits 5.98 and 5.21, the large page's later click 46.60 and 46.59
+  ([bench 45984473497](https://github.com/andrey-usa/navigera/actions/runs/45984473497));
+  on a slower machine each of the two took 0.6-0.7 ms.
 
 ### Fixed
 
