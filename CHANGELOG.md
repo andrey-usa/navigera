@@ -102,6 +102,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `network` over chromedriver 158's WebDriver BiDi could list a redirect's
+  target with the redirect's status (`302` for a page that answered
+  `200 OK`), about once in 400 redirects on macOS: chromium-bidi 17 gives
+  the target the redirect's late raw response when the server spells its
+  header `Location`. A redirect status that comes with a reason phrase of
+  no redirect ("OK", "Not Found") now lists the phrase's status until a
+  later hop of the request shows it did redirect. HTTP/2 has no phrase,
+  so there the mix-up can remain; Chrome 159 fixes it at the source.
 - A browser's answer of more than 16 MiB over a WebSocket (an engine that
   is its own CDP server, an attached browser, WebDriver BiDi) ended the
   connection, and the session read as "the browser is gone": Lightpanda

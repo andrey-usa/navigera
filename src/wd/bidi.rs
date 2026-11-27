@@ -73,8 +73,10 @@ struct Hop {
     /// Its place in the request's redirect chain (`redirectCount`), which
     /// with the request's id names it.
     count: u64,
-    /// The redirect status its response's own reason phrase names, when
-    /// the status it came with is no redirect's.
+    /// The status it takes once a later hop shows that it redirected,
+    /// where its response's status and reason phrase disagree: the
+    /// redirect status the phrase names (a 200 "Found"), or the redirect
+    /// status it came with under a phrase of no redirect (a 302 "OK").
     phrase: Option<u64>,
 }
 
@@ -103,6 +105,33 @@ fn redirect_phrase(text: &str) -> Option<u64> {
         "see other" => 303,
         "temporary redirect" => 307,
         "permanent redirect" => 308,
+        _ => return None,
+    })
+}
+
+/// The status a standard reason phrase of no redirect names (HTTP/1.x).
+/// chromium-bidi 17 (Chrome 158) can give a redirect's target its
+/// redirect's status, with the target's own phrase ("302 OK"), when the
+/// browser reports the redirect's raw response late and the server named
+/// its `Location` header in capitals.
+fn plain_phrase(text: &str) -> Option<u64> {
+    Some(match text.trim().to_ascii_lowercase().as_str() {
+        "ok" => 200,
+        "created" => 201,
+        "accepted" => 202,
+        "no content" => 204,
+        "partial content" => 206,
+        "bad request" => 400,
+        "unauthorized" => 401,
+        "forbidden" => 403,
+        "not found" => 404,
+        "method not allowed" => 405,
+        "gone" => 410,
+        "too many requests" => 429,
+        "internal server error" => 500,
+        "bad gateway" => 502,
+        "service unavailable" => 503,
+        "gateway timeout" => 504,
         _ => return None,
     })
 }
@@ -380,12 +409,20 @@ fn log_request(log: &mut VecDeque<Hop>, last: &mut u64, method: &str, params: &V
         "network.responseStarted" | "network.responseCompleted" => {
             let response = &params["response"];
             let status = response["status"].as_u64();
-            let phrase = status
-                .filter(|s| !(300..400).contains(s))
-                .and(response["statusText"].as_str().and_then(redirect_phrase));
+            let text = response["statusText"].as_str();
+            // The status shown while no later hop is known, and the one
+            // the hop takes once one is (it redirected): the reason phrase
+            // decides where it and the status disagree.
+            let (shown, phrase) = match status {
+                Some(s) if (300..400).contains(&s) => match text.and_then(plain_phrase) {
+                    Some(own) => (Some(own), Some(s)),
+                    None => (status, None),
+                },
+                _ => (status, status.and(text.and_then(redirect_phrase))),
+            };
             let Hop { r, phrase: own, .. } = &mut log[i];
             *own = phrase;
-            r.status = if redirected { phrase.or(status) } else { status };
+            r.status = if redirected { phrase.or(status) } else { shown };
             r.mime = response["mimeType"].as_str().unwrap_or("").split(';').next().unwrap_or("").trim().to_string();
             r.response_headers = crate::cdp::logs::kept_headers(Some(&header_object(&response["headers"])));
             r.from_cache = response["fromCache"] == true;
@@ -3107,6 +3144,41 @@ mod network_tests {
         created["response"]["statusText"] = json!("Found");
         log_request(&mut log, &mut last, "network.responseStarted", &created);
         assert_eq!(log[2].r.status, Some(201));
+    }
+
+    /// chromium-bidi 17 (Chrome 158) can give a redirect's target the
+    /// redirect's status under the target's own phrase: the phrase wins
+    /// while no later hop is known, the status once one is.
+    #[test]
+    fn a_redirect_status_under_a_phrase_of_no_redirect_is_the_phrases_until_a_later_hop() {
+        let (mut log, mut last) = (VecDeque::new(), 0);
+        let with = |mut e: Value, text: &str| {
+            e["response"]["statusText"] = json!(text);
+            e
+        };
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("1", "http://a/to", 1000.0, 0));
+        log_request(&mut log, &mut last, "network.responseStarted", &with(done("1", 302, 1001.0), "Found"));
+        assert_eq!(log[0].r.status, Some(302), "a redirect's own phrase: as reported");
+        let mut target = hop(with(done("1", 302, 1002.0), "OK"), 1);
+        target["request"] = sent("1", "http://a/next.html", 1002.0, 1)["request"].clone();
+        log_request(&mut log, &mut last, "network.responseStarted", &target);
+        log_request(&mut log, &mut last, "network.responseCompleted", &target);
+        assert_eq!((log[0].r.status, log[1].r.status), (Some(302), Some(200)));
+        let mut missing = hop(with(done("2", 302, 1003.0), "Not Found"), 0);
+        missing["request"] = sent("2", "http://a/gone", 1003.0, 0)["request"].clone();
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("2", "http://a/gone", 1003.0, 0));
+        log_request(&mut log, &mut last, "network.responseStarted", &missing);
+        assert_eq!(log[2].r.status, Some(404));
+        // A server's own "302 OK" that does redirect: the phrase's status
+        // until the next hop, then the redirect's, late events included.
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("3", "http://a/odd", 1004.0, 0));
+        let odd = with(done("3", 302, 1004.0), "OK");
+        log_request(&mut log, &mut last, "network.responseStarted", &odd);
+        assert_eq!(log[3].r.status, Some(200));
+        log_request(&mut log, &mut last, "network.beforeRequestSent", &sent("3", "http://a/after", 1005.0, 1));
+        assert_eq!(log[3].r.status, Some(302));
+        log_request(&mut log, &mut last, "network.responseCompleted", &odd);
+        assert_eq!(log[3].r.status, Some(302));
     }
 
     /// `network --clear` hides what it took: an event of a cleared request
