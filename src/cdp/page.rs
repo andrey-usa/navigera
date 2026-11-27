@@ -3780,9 +3780,12 @@ fn http_origin(url: &str) -> Option<String> {
 }
 
 /// What a navigation's `net::ERR_…` code means to the person who asked for
-/// the page, with the code kept at the end for searching.
-fn net_error(code: &str) -> String {
+/// the page, with the code kept at the end for searching. `engine` names
+/// the browser that refused, where that is the meaning (Lightpanda answers
+/// with Chromium's codes too).
+fn net_error(code: &str, engine: &str) -> String {
     let name = code.strip_prefix("net::").unwrap_or(code);
+    let named: String;
     let meaning = match name {
         "ERR_NAME_NOT_RESOLVED" => "the host name did not resolve; a typo, or no network?",
         "ERR_CONNECTION_REFUSED" => "nothing answered on that port; is the server running?",
@@ -3792,15 +3795,24 @@ fn net_error(code: &str) -> String {
         "ERR_CONNECTION_TIMED_OUT" | "ERR_TIMED_OUT" => "the server did not answer in time",
         "ERR_INTERNET_DISCONNECTED" | "ERR_NETWORK_CHANGED" => "the network is down or changed",
         "ERR_ADDRESS_UNREACHABLE" => "that address can't be reached from here",
-        "ERR_UNSAFE_PORT" => "Chrome refuses to open that port, one on its list of unsafe ports",
+        "ERR_UNSAFE_PORT" => {
+            named = format!("{engine} refuses to open that port, one on its list of unsafe ports");
+            &named
+        }
         "ERR_HTTP_RESPONSE_CODE_FAILURE" => {
-            "the server answered with an error status and no page; the tab now shows Chrome's error page"
+            named = format!(
+                "the server answered with an error status and no page; the tab now shows {engine}'s error page"
+            );
+            &named
         }
         "ERR_TOO_MANY_REDIRECTS" => "the page redirects in a loop",
         "ERR_BLOCKED_BY_CLIENT" => "the request was blocked by a request rule or an extension",
         "ERR_BLOCKED_BY_RESPONSE" => "the site does not allow this page to be opened this way",
         "ERR_FILE_NOT_FOUND" => "no such file",
-        "ERR_INVALID_URL" => "that is not a URL Chrome can open",
+        "ERR_INVALID_URL" => {
+            named = format!("that is not a URL {engine} can open");
+            &named
+        }
         "ERR_ABORTED" => "the navigation was stopped before a page loaded",
         "ERR_SSL_PROTOCOL_ERROR" => "the TLS handshake with the server failed",
         n if n.starts_with("ERR_CERT_") => "the site's TLS certificate was not accepted",
@@ -5386,7 +5398,7 @@ impl Page {
             }
             let res = res?;
             if let Some(error) = res.get("errorText").and_then(Value::as_str) {
-                bail!("{}", net_error(error));
+                bail!("{}", net_error(error, self.shared.engine_name()));
             }
             if wait == "commit" {
                 if res.get("loaderId").is_some() {
@@ -9869,13 +9881,34 @@ mod tests {
 
     #[test]
     fn a_navigation_error_says_what_it_means_and_keeps_its_code() {
-        let e = net_error("net::ERR_NAME_NOT_RESOLVED");
+        let e = net_error("net::ERR_NAME_NOT_RESOLVED", "Chrome");
         assert!(e.starts_with("the host name did not resolve;"), "{e}");
         assert!(e.ends_with("(net::ERR_NAME_NOT_RESOLVED)"), "{e}");
-        assert!(net_error("net::ERR_CERT_DATE_INVALID").contains("certificate"));
+        assert!(net_error("net::ERR_CERT_DATE_INVALID", "Chrome").contains("certificate"));
         // Callers that look for the code still find it.
-        assert!(net_error("net::ERR_ABORTED").contains("ERR_ABORTED"));
-        assert_eq!(net_error("net::ERR_SOMETHING_NEW"), "the page could not be loaded (net::ERR_SOMETHING_NEW)");
+        assert!(net_error("net::ERR_ABORTED", "Chrome").contains("ERR_ABORTED"));
+        assert_eq!(
+            net_error("net::ERR_SOMETHING_NEW", "Chrome"),
+            "the page could not be loaded (net::ERR_SOMETHING_NEW)"
+        );
+    }
+
+    #[test]
+    fn a_refused_navigation_names_the_engine_that_refused() {
+        for engine in ["Lightpanda", "Chrome", "Edge", "the browser"] {
+            for code in ["net::ERR_UNSAFE_PORT", "net::ERR_HTTP_RESPONSE_CODE_FAILURE", "net::ERR_INVALID_URL"] {
+                let e = net_error(code, engine);
+                assert!(e.contains(engine), "{code} on {engine}: {e}");
+                assert!(e.ends_with(&format!("({code})")), "{e}");
+                if engine != "Chrome" {
+                    assert!(!e.contains("Chrome"), "{code} on {engine} names Chrome: {e}");
+                }
+            }
+        }
+        assert_eq!(
+            net_error("net::ERR_UNSAFE_PORT", "Lightpanda"),
+            "Lightpanda refuses to open that port, one on its list of unsafe ports (net::ERR_UNSAFE_PORT)"
+        );
     }
 
     #[test]

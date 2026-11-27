@@ -29,6 +29,27 @@ pub struct LaunchOptions {
     pub pipe: bool,
 }
 
+/// The name messages give a Chrome-family browser, by its executable's
+/// file name: Edge, Brave, Vivaldi, Opera or Chromium, else Chrome (its
+/// channels and chrome-headless-shell too).
+pub fn chromium_name(exe: &str) -> &'static str {
+    let file =
+        std::path::Path::new(exe).file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    [("edge", "Edge"), ("brave", "Brave"), ("vivaldi", "Vivaldi"), ("opera", "Opera"), ("chromium", "Chromium")]
+        .iter()
+        .find(|(part, _)| file.contains(part))
+        .map_or("Chrome", |(_, name)| name)
+}
+
+/// A CDP server engine's name as messages say it.
+fn server_title(server: CdpServer) -> &'static str {
+    match server {
+        CdpServer::Lightpanda => "Lightpanda",
+        CdpServer::Obscura => "Obscura",
+        CdpServer::Moli => "Moli",
+    }
+}
+
 /// Read in a tab: whether it is on screen, whether its window has the
 /// keyboard, and when it last came on screen (Chrome 115+ records each
 /// change as a `visibility-state` performance entry; the tab's own clock
@@ -218,6 +239,7 @@ impl Browser {
             // whether its tree holds shadow roots and whether its press
             // reaches into them is asked with its first tab.
             let browser = Self::finish(handle, client, Some(child), None, ws_url);
+            let _ = browser.shared.engine.set(server_title(server));
             browser.shared.dialogs_mode.store(events::DIALOGS_ASK, std::sync::atomic::Ordering::Relaxed);
             browser.shared.layout_mode.store(events::LAYOUT_ASK, std::sync::atomic::Ordering::Relaxed);
             browser.shared.ax_shadow_mode.store(events::AX_SHADOW_ASK, std::sync::atomic::Ordering::Relaxed);
@@ -226,6 +248,7 @@ impl Browser {
         }
         let shared = Arc::new(Shared::default());
         shared.single_target.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = shared.engine.set(server_title(server));
         events::spawn(handle, &client, Arc::clone(&shared));
         Ok(Self {
             handle: handle.clone(),
@@ -258,6 +281,7 @@ impl Browser {
             let mut browser =
                 Self::finish(handle, client, Some(launched.child), Some(launched.profile_dir), "pipe".into());
             browser.stderr = Some(launched.stderr);
+            let _ = browser.shared.engine.set(chromium_name(&opts.exe));
             return Ok(browser);
         }
         let LaunchedChrome { child, profile_dir, ws_url, job } =
@@ -269,6 +293,7 @@ impl Browser {
         crate::timing::record("ws_connect", connect_started);
         let mut browser = Self::finish(handle, client, Some(child), Some(profile_dir), ws_url);
         browser.job = job;
+        let _ = browser.shared.engine.set(chromium_name(&opts.exe));
         Ok(browser)
     }
 
@@ -308,6 +333,7 @@ impl Browser {
         browser.job = launched.job;
         browser.node_ws = launched.node_ws;
         browser.shared.adopt_windows.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = browser.shared.engine.set("Electron");
         Ok(browser)
     }
 
@@ -1173,6 +1199,22 @@ fn wait_exit(child: &mut std::process::Child, wait: Duration) -> Option<std::pro
 #[cfg(test)]
 mod tests {
     use super::TabView;
+
+    #[test]
+    fn a_chrome_family_browser_is_named_by_its_executable() {
+        for (exe, name) in [
+            ("/opt/google/chrome/chrome", "Chrome"),
+            ("/home/u/.cache/navigera/chrome-headless-shell-linux64/chrome-headless-shell", "Chrome"),
+            ("/usr/bin/microsoft-edge", "Edge"),
+            ("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Edge"),
+            ("/usr/bin/brave-browser", "Brave"),
+            ("/usr/bin/chromium-browser", "Chromium"),
+            ("/usr/bin/vivaldi-stable", "Vivaldi"),
+            ("/usr/bin/opera", "Opera"),
+        ] {
+            assert_eq!(chromium_name(exe), name, "{exe}");
+        }
+    }
 
     #[test]
     fn the_users_tab_is_the_focused_one_else_the_one_shown_last() {

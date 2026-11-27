@@ -246,6 +246,10 @@ pub struct Shared {
     /// Lightpanda: one page target per process, dialogs answered from an
     /// armed response, popups opened as frames that are not targets.
     pub single_target: AtomicBool,
+    /// The browser's name as messages say it ("Chrome", "Edge",
+    /// "Lightpanda"), set where navigera launched it or knows its binary
+    /// (see [`Shared::engine_name`]).
+    pub engine: std::sync::OnceLock<&'static str>,
     /// session id -> the dialog response armed there (Lightpanda).
     pub armed: Mutex<HashMap<String, DialogPolicy>>,
     /// Top-level frames a page opened that are not targets (Lightpanda's
@@ -776,6 +780,12 @@ async fn modify_response(
 }
 
 impl Shared {
+    /// The browser's name as messages say it: "the browser" for one that
+    /// was not named (a browser navigera attached to).
+    pub fn engine_name(&self) -> &'static str {
+        self.engine.get().copied().unwrap_or("the browser")
+    }
+
     pub fn register(&self, session_id: &str, target_id: &str, scope: &str) {
         self.sessions.lock().unwrap().insert(session_id.to_string(), target_id.to_string());
         self.scopes.lock().unwrap().insert(session_id.to_string(), scope.to_string());

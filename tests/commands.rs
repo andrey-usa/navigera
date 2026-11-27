@@ -797,6 +797,27 @@ fn click_until_gone_loads_a_whole_list() {
     }
 }
 
+/// A navigation the browser refuses names that browser: Lightpanda said
+/// "Chrome refuses to open that port".
+#[test]
+fn a_refused_port_names_the_engine_that_refused() {
+    for (engine, bin) in engines() {
+        let a = Agent::new("port", engine, bin);
+        let e = a.err(&["goto", "http://127.0.0.1:9/"]);
+        assert!(e.contains("ERR_UNSAFE_PORT"), "[{engine}] {e}");
+        // On a Chrome leg the binary may be Edge or Chromium: named as such.
+        let name = match engine {
+            "lightpanda" => "Lightpanda",
+            _ => navigera::browser::resolve_executable_for(None, true)
+                .map_or("Chrome", |exe| navigera::cdp::chromium_name(&exe)),
+        };
+        assert!(e.contains(&format!("{name} refuses to open that port")), "[{engine}] {e}");
+        if engine == "lightpanda" {
+            assert!(!e.contains("Chrome"), "[{engine}] {e}");
+        }
+    }
+}
+
 #[test]
 fn locators_reads_states_and_keys() {
     let Some(site) = edge_site() else { return };

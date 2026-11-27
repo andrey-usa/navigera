@@ -1276,6 +1276,7 @@ impl BrowserSession {
         crate::timing::record("shared_connect", started);
         let client = crate::shared::client(stream, &handle)?;
         let browser = Browser::on_host(&handle, client, format!("shared browser {}", socket.display()));
+        let _ = browser.shared().engine.set(crate::cdp::chromium_name(&exe));
         // Other sessions' tabs are in this browser too: popups and closed
         // tabs count only when they are this session's (as for a fork).
         browser.shared().forked.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1406,6 +1407,9 @@ impl BrowserSession {
         // Chrome asks the user to Allow a connection to their own profile:
         // give them time to click.
         let browser = Browser::connect(&handle, &ws_url, Duration::from_secs(120))?;
+        if let Some(exe) = &profile_exe {
+            let _ = browser.shared().engine.set(crate::cdp::chromium_name(exe));
+        }
         crate::timing::log(&format!("[browser] {what}: connected to {ws_url}"));
         crate::timing::record("browser_up", started);
         // An Electron app started with a DevTools port: it has no browser
@@ -1415,6 +1419,7 @@ impl BrowserSession {
             && adopt.is_none()
             && browser.user_agent().is_ok_and(|agent| agent.contains("Electron/"));
         let (pages, active, handed) = if electron {
+            let _ = browser.shared().engine.set("Electron");
             browser.shared().adopt_windows.store(true, std::sync::atomic::Ordering::Relaxed);
             let mut pages = Vec::new();
             for (id, url) in browser.tab_targets()? {
