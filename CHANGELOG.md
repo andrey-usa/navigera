@@ -32,14 +32,22 @@ All notable changes to this project are documented here. The format follows
   at each look, and the page is no longer searched for open dialogs and
   popovers before each click: a popover that the click opens or closes
   is told by its `beforetoggle`, which fires inside the call that changes
-  it, and a dialog or a `<details>` by its `open` attribute.
+  it, and a dialog or a `<details>` by its `open` attribute. A later click
+  on a page of 60,051 elements and 40 open shadow roots took 57.70 ms
+  before and 50.89 ms after, on one runner (agent-browser 79.61 ms;
+  [bench 45942016287](https://github.com/andrey-usa/navigera/actions/runs/45942016287)).
 - The heading and status messages an action's history entry records,
   and the form controls a click compares, come from an index kept for
   each document: the first action in a document queries it whole, as
   every action did before, and later ones look only at what the page
   inserted, removed or changed `role` or `aria-live` on since; each
   query was a pass over the whole document. An engine whose DOM observer
-  misses a change is queried whole every time.
+  misses a change is queried whole every time. On one runner, a later
+  click on the 60,051-element page took 76.50 ms before and 71.34 ms
+  after (agent-browser 91.78 ms), the first click there 95.16 and
+  91.95 ms (agent-browser 99.56), and a click on the small listing page
+  11.77 and 10.47 ms (agent-browser 7.71)
+  ([bench 45946428618](https://github.com/andrey-usa/navigera/actions/runs/45946428618)).
 
 ### Fixed
 
