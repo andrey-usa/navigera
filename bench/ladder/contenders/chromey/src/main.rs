@@ -1,5 +1,6 @@
 //! Bench-only contender: canonical ladder session via chromey (spider-rs fork
-//! of chromiumoxide; same library name and API). Copy of ../chromiumoxide.
+//! of chromiumoxide; the same API, as `chromey` since 3.0). Copy of
+//! ../chromiumoxide.
 //!
 //! Modes (argv[1]): `session` | `eval` | `cold`. Contract matches the other
 //! contenders; see bench/ladder/README.md. Env: CHROME_BIN, LADDER_BASE,
@@ -8,8 +9,8 @@
 use std::env;
 use std::time::Instant;
 
-use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
-use chromiumoxide::{browser::HeadlessMode, Browser, BrowserConfig};
+use chromey::cdp::browser_protocol::page::CaptureScreenshotFormat;
+use chromey::{browser::HeadlessMode, Browser, BrowserConfig};
 use futures::StreamExt;
 use serde::Deserialize;
 
@@ -63,7 +64,7 @@ async fn launch() -> anyhow::Result<Browser> {
 
 async fn run_session() -> anyhow::Result<serde_json::Value> {
     let base = env::var("LADDER_BASE")?;
-    let mut browser = launch().await?;
+    let browser = launch().await?;
     let mut counts = serde_json::Map::new();
 
     let page = browser
@@ -120,7 +121,7 @@ async fn run_session() -> anyhow::Result<serde_json::Value> {
     counts.insert("visible".into(), serde_json::json!(visible));
     let png = page
         .screenshot(
-            chromiumoxide::page::ScreenshotParams::builder()
+            chromey::page::ScreenshotParams::builder()
                 .format(CaptureScreenshotFormat::Png)
                 .build(),
         )
@@ -162,7 +163,7 @@ async fn run_session() -> anyhow::Result<serde_json::Value> {
 
 async fn run_eval(n: usize) -> anyhow::Result<Vec<f64>> {
     let base = env::var("LADDER_BASE")?;
-    let mut browser = launch().await?;
+    let browser = launch().await?;
     let page = browser
         .new_page("about:blank")
         .await
@@ -189,7 +190,7 @@ async fn run_eval(n: usize) -> anyhow::Result<Vec<f64>> {
 }
 
 async fn run_cold() -> anyhow::Result<()> {
-    let mut browser = launch().await?;
+    let browser = launch().await?;
     let page = browser
         .new_page("about:blank")
         .await
@@ -207,7 +208,7 @@ async fn run_cold() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn eval_str(page: &chromiumoxide::Page, expr: &str) -> anyhow::Result<serde_json::Value> {
+async fn eval_str(page: &chromey::Page, expr: &str) -> anyhow::Result<serde_json::Value> {
     // Retry transient failures: right after navigation the execution context
     // can be torn down, and chromiumoxide surfaces "No value found" (or a
     // context error) even though a retry with a fresh context id succeeds.
@@ -232,7 +233,7 @@ async fn eval_str(page: &chromiumoxide::Page, expr: &str) -> anyhow::Result<serd
 /// checking page.url() (target info, updates early) + a readyState eval (may
 /// hit the *old* page's context) can both succeed while the new page's
 /// context is still torn down -> later evals fail with "No value found".
-async fn wait_for_url_and_ready(page: &chromiumoxide::Page, url_prefix: &str) -> anyhow::Result<()> {
+async fn wait_for_url_and_ready(page: &chromey::Page, url_prefix: &str) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     loop {
         let href: Option<String> = page
@@ -269,7 +270,7 @@ async fn wait_for_url_and_ready(page: &chromiumoxide::Page, url_prefix: &str) ->
 }
 
 async fn run_realworld() -> anyhow::Result<serde_json::Value> {
-    let mut browser = launch().await?;
+    let browser = launch().await?;
     let page = browser
         .new_page("about:blank")
         .await
@@ -296,7 +297,7 @@ async fn run_realworld() -> anyhow::Result<serde_json::Value> {
 }
 
 async fn run_browse() -> anyhow::Result<serde_json::Value> {
-    let mut browser = launch().await?;
+    let browser = launch().await?;
     let page = browser
         .new_page("about:blank")
         .await

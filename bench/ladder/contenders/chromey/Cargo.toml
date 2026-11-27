@@ -5,9 +5,10 @@ edition = "2021"
 
 # Bench-only contender: the same canonical session as the chromiumoxide
 # contender, built on chromey — spider-rs's actively developed successor to
-# chromiumoxide (same `chromiumoxide` library name and API; SIMD JSON
-# decoding, pipelined frame decode, maintained Chrome launch defaults).
-# The source is a copy of ../chromiumoxide/src/main.rs.
+# chromiumoxide (the same API under the library name `chromey` since 3.0;
+# SIMD JSON decoding, pipelined frame decode, maintained Chrome launch
+# defaults). The source is ../chromiumoxide/src/main.rs with the crate
+# renamed.
 
 [[bin]]
 name = "ladder-chromey"
@@ -15,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-chromiumoxide = { package = "chromey", version = "2" }
+chromey = "3"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
