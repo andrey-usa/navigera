@@ -1,0 +1,56 @@
+name: experiment-41
+
+# Where does a Page.captureScreenshot call's time go, at 1280x720 vs
+# 1440x813, with the default PNG encoder vs `optimizeForSpeed`?
+# (bench/probe/trace_probe.mjs, raw CDP + a per-capture trace.)
+# 3 runners; numbers as notices, traces + per-capture extracts as the
+# artifact. No navigera code is built or changed.
+
+on:
+  push:
+    branches: [experiment-41]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+
+      - name: Chrome
+        run: |
+          CHROME_BIN=$(which google-chrome)
+          echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
+          echo "::notice::$("$CHROME_BIN" --version) · $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) · $(nproc) cpus · kernel $(uname -r)"
+
+      - name: Fixtures
+        run: |
+          python3 bench/ladder/gen_fixtures.py
+          (cd bench/ladder/fixtures && nohup python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 1
+          mkdir -p "$RUNNER_TEMP/out"
+
+      - name: Trace the capture at two sizes, fast vs default encoder
+        run: |
+          node bench/probe/trace_probe.mjs "$CHROME_BIN" http://127.0.0.1:8765/page_a.html 5 4 "$RUNNER_TEMP/out"
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: probe-${{ matrix.run }}
+          path: ${{ runner.temp }}/out
