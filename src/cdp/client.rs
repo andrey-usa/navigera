@@ -1307,7 +1307,8 @@ mod tests {
         let client = CdpClient::connect_within(&format!("ws://{addr}"), T).await.unwrap();
         // A Chrome method with its required parameter: CI checks every traced
         // command against the browser's protocol, fake servers included.
-        let got = client.send("Runtime.evaluate", json!({ "expression": "1" }), None, Duration::from_secs(30)).await.unwrap();
+        let got =
+            client.send("Runtime.evaluate", json!({ "expression": "1" }), None, Duration::from_secs(30)).await.unwrap();
         assert_eq!(got["value"].as_str().map(str::len), Some(20 << 20));
         assert!(!client.is_closed());
     }
