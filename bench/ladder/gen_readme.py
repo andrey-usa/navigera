@@ -494,14 +494,21 @@ if nav_agent:
         v, a = min(rivals, key=lambda t: t[0])
         if v < mine * (1 - TIE):
             losses.append(f"{what}: {tool(a)} {fmt(v)}, navigera {fmt(mine)}")
-nav_ops = next((o for o in ops if o["name"] == "navigera"), None)
-if nav_ops:
-    # Per-op losses: only against tools that took the same number of calls
-    # (the form-batch cell is 1 call for batch tools, 4 for the rest).
-    # Incomplete cells are left out entirely: a partial median
-    # is not a ranking, for navigera or for a rival. The screenshot is
-    # ranked at one viewport (screenshot-720): the default-viewport row
-    # captures each tool's own size, unequal pixel counts.
+def ops_engine(o):
+    """The browser an ops arm drives: the Firefox arms say so in their name."""
+    return "Firefox" if "Firefox" in o["name"] else "Chrome"
+
+
+# Per-op losses: each navigera arm against the tools on its own browser
+# (navigera against the Chrome tools, navigera Firefox against the Firefox
+# ones): a capture or a read on another browser is another engine's cost.
+# Only against tools that took the same number of calls (the form-batch
+# cell is 1 call for batch tools, 4 for the rest). Incomplete cells are
+# left out entirely: a partial median is not a ranking, for navigera or for
+# a rival. The screenshot is ranked at one viewport (screenshot-720): the
+# default-viewport row captures each tool's own size, unequal pixel counts.
+for nav_ops in [o for o in ops if o["name"].startswith("navigera")]:
+    engine = ops_engine(nav_ops)
     for op in ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
                "screenshot-720", "form-batch"):
         mine = (nav_ops.get("cells") or {}).get(op) or {}
@@ -510,7 +517,7 @@ if nav_ops:
             continue
         rivals = []
         for o in ops:
-            if o["name"].startswith("navigera") or not o.get("cells"):
+            if o["name"].startswith("navigera") or not o.get("cells") or ops_engine(o) != engine:
                 continue
             cell = o["cells"].get(op) or {}
             if (cell.get("median_ms") is not None and not cell.get("incomplete")
@@ -520,7 +527,8 @@ if nav_ops:
             continue
         v, o = min(rivals, key=lambda t: t[0])
         if v < mine_ms * (1 - TIE):
-            losses.append(f"{op} per call: {tool(o)} {v:.1f} ms, navigera {mine_ms:.1f} ms")
+            on = "" if engine == "Chrome" else f" on {engine}"
+            losses.append(f"{op} per call{on}: {tool(o)} {v:.1f} ms, {nav_ops['name']} {mine_ms:.1f} ms")
 loss_text = ("Where another tool did better in this run (by more than 2%): " + "; ".join(losses) + "."
              if losses else "No other tool did better than navigera by more than 2% on any measure in this run.")
 
@@ -530,7 +538,9 @@ if page_path:
             "Each measure of the benchmarks on which another tool beat navigera in this",
             "run by more than 2%, from its publish.json: navigera on Chrome against every",
             "other driver on the same Chrome, navigera on chrome-headless-shell against",
-            "go-rod on it, and navigera against every other agent tool. Closer",
+            "go-rod on it, navigera against every other agent tool, and each op",
+            "against the tools on the same browser (Chrome, or Firefox for navigera",
+            "Firefox). Closer",
             "than 2% is a tie. Driver CPU is left out: the kernel counts it in 10 ms",
             "ticks, so every native driver ties.", ""]
     lose += [f"- {x[0].upper() + x[1:]}." for x in losses] or ["- None in this run."]
