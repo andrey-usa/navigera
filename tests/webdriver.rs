@@ -998,8 +998,8 @@ fn lone_surrogates(args: &[&str], engine: &str) {
 
 /// A document that is not the page asked for says so where the engine can
 /// tell: Cloudflare's challenge page by its own script on every engine; an
-/// error status where the engine gives the page one (Chrome's
-/// `responseStatus`) or from a request log already on (BiDi, after
+/// error status where the engine gives the page one (`responseStatus`:
+/// Chrome, Firefox) or from a request log already on (BiDi, after
 /// `network`); the challenge headers alone from that log too. Said once
 /// per document, and nothing on a page that is fine.
 fn error_pages(args: &[&str], engine: &str, status_on_page: bool, log: bool) {
@@ -1075,7 +1075,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     screencast_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", None);
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
     hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
-    error_pages(&["--engine", "firefox", "--executable", &firefox], "firefox", false, true);
+    error_pages(&["--engine", "firefox", "--executable", &firefox], "firefox", true, true);
 }
 
 /// One WebDriver BiDi command in a session of its own, ended after it:

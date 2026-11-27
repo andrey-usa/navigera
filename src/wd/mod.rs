@@ -883,7 +883,7 @@ impl Driver {
     }
 
     /// [`crate::browser::BrowserSession::doc_report`] here: the page's own
-    /// read (Firefox and Safari give no status, only the challenge marker),
+    /// read (Safari gives no status, only the challenge marker),
     /// then a request log that is already on (none is started for this).
     fn doc_report(&mut self, doc: &crate::docstatus::Doc, url: &str) -> Option<(Value, String)> {
         let (mut status, mut challenge) = (doc.status, doc.challenge);

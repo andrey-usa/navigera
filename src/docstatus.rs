@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 /// `[status, timeOrigin, challenge]` of the document now shown:
 /// - its navigation entry's HTTP status: 0 where the engine doesn't say
-///   (Firefox and Safari have no `responseStatus`) or the page didn't come
+///   (Safari has no `responseStatus`) or the page didn't come
 ///   over HTTP;
 /// - its time origin, which tells documents apart: a new document has a
 ///   new one, a page restored from the back/forward cache keeps its own;

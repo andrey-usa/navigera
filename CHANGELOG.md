@@ -19,9 +19,9 @@ All notable changes to this project are documented here. The format follows
   entry, read with the URL and the title, so it costs no round trip; a
   challenge is recognized by the script of Cloudflare's challenge page or
   by the headers each service marks its challenge with, from the request
-  log. Lightpanda asks `LP.getPageStatus` when neither tells. Firefox and
-  Safari give a page no status: there the challenge page is still said,
-  and the status is said once a `network` log is on.
+  log. Lightpanda asks `LP.getPageStatus` when neither tells. Safari gives
+  a page no status: there the challenge page is still said, and a
+  status once a `network` log is on.
 
 ### Changed
 
