@@ -3670,10 +3670,9 @@ impl BrowserSession {
 
     /// [`cdp::Page::take_tail`] on the active tab: the URL, the title and
     /// what `also` gave, as [`Self::url_title_and`] would read them now.
-    pub fn take_tail(&self) -> Option<(String, String, Option<serde_json::Value>)> {
+    pub fn take_tail(&self) -> Option<(String, String, Option<serde_json::Value>, Option<crate::docstatus::Doc>)> {
         let v = self.active_tab().take_tail()?;
-        let get = |i: usize| v.get(i).and_then(|x| x.as_str()).unwrap_or_default().to_string();
-        Some((get(0), get(1), v.get(2).filter(|s| !s.is_null()).cloned()))
+        Some(Self::tail_parts(&v))
     }
 
     /// [`cdp::Page::settle_unhook`] on the active tab.
@@ -3816,27 +3815,73 @@ impl BrowserSession {
         self.active_tab().is_loading()
     }
 
-    /// Current URL and title in one round trip.
-    pub fn url_title(&self) -> (String, String) {
-        let v = self.active_tab().evaluate("[location.href, document.title]", self.timeout(None)).unwrap_or_default();
-        let get = |i: usize| v.get(i).and_then(|x| x.as_str()).unwrap_or_default().to_string();
-        (get(0), get(1))
+    /// Current URL and title, and what the document is
+    /// ([`crate::docstatus::DOC_JS`]), in one round trip.
+    pub fn url_title(&self) -> (String, String, Option<crate::docstatus::Doc>) {
+        let (url, title, _, doc) = self.url_title_and("null");
+        (url, title, doc)
     }
 
     /// [`Self::url_title`], and what the expression `also` gives there
     /// (None when it throws), in the same round trip.
-    pub fn url_title_and(&self, also: &str) -> (String, String, Option<serde_json::Value>) {
-        let v = self
-            .active_tab()
-            .evaluate(
-                &format!(
-                    "(() => {{ let s = null; try {{ s = {also}; }} catch (_) {{}} return [location.href, document.title, s]; }})()"
-                ),
-                self.timeout(None),
-            )
-            .unwrap_or_default();
+    pub fn url_title_and(
+        &self,
+        also: &str,
+    ) -> (String, String, Option<serde_json::Value>, Option<crate::docstatus::Doc>) {
+        let v = self.active_tab().evaluate(&cdp::page::tail_js(also), self.timeout(None)).unwrap_or_default();
+        Self::tail_parts(&v)
+    }
+
+    /// The parts of a [`cdp::page::tail_js`] read.
+    fn tail_parts(v: &serde_json::Value) -> (String, String, Option<serde_json::Value>, Option<crate::docstatus::Doc>) {
         let get = |i: usize| v.get(i).and_then(|x| x.as_str()).unwrap_or_default().to_string();
-        (get(0), get(1), v.get(2).filter(|s| !s.is_null()).cloned())
+        (get(0), get(1), v.get(2).filter(|s| !s.is_null()).cloned(), v.get(3).and_then(crate::docstatus::Doc::parse))
+    }
+
+    /// The answer's fields and note for the active tab's document at `url`,
+    /// read as `doc`, when it is not the page asked for (an error status, a
+    /// bot challenge). The page's own read first; then, where it can change
+    /// the answer, the document's response in the request log (a challenge
+    /// declared in its headers, a status the page didn't give); on
+    /// Lightpanda, last, `LP.getPageStatus` (one round trip, for such a
+    /// document only).
+    pub fn doc_report(&self, doc: &crate::docstatus::Doc, url: &str) -> Option<(serde_json::Value, String)> {
+        let (mut status, mut challenge) = (doc.status, doc.challenge);
+        if doc.wants_more() && (url.starts_with("http://") || url.starts_with("https://")) {
+            let page = url.split('#').next().unwrap_or(url);
+            let logged = self
+                .requests(false)
+                .into_iter()
+                .rev()
+                .find(|r| r.kind == "Document" && r.url.split('#').next() == Some(page) && r.status.is_some());
+            if let Some(r) = logged {
+                let code = r.status.unwrap_or(0);
+                if status == 0 {
+                    status = u16::try_from(code).ok().filter(|c| *c < 1000).unwrap_or(0);
+                }
+                if u64::from(status) == code {
+                    challenge = challenge.or(crate::docstatus::challenge_from_headers(code, &r.response_headers));
+                }
+            }
+            let still = crate::docstatus::Doc { status, origin: doc.origin, challenge };
+            if self.is_lightpanda() && still.wants_more() {
+                if let Ok(v) = self.active_tab().send_cdp("LP.getPageStatus", serde_json::json!({}), self.timeout(None))
+                {
+                    if status == 0 {
+                        status =
+                            v.get("httpStatus").and_then(serde_json::Value::as_u64).filter(|c| *c < 1000).unwrap_or(0)
+                                as u16;
+                    }
+                    challenge = challenge.or(match v.get("botChallenge").and_then(serde_json::Value::as_str) {
+                        Some("cloudflare") => Some("cloudflare"),
+                        Some("vercel") => Some("vercel"),
+                        Some("aws_waf") => Some("aws-waf"),
+                        _ => None,
+                    });
+                }
+            }
+        }
+        crate::docstatus::report(status, challenge)
     }
 
     /// Current page URL.

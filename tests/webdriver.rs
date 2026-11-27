@@ -100,6 +100,11 @@ document.addEventListener('keyup', (e) => window.seen.push('up ' + e.key));
 
 /// A server for the pages, on a thread (not Python's `http.server`:
 /// on macOS runners it spends ~35 s per start resolving the host name).
+const GONE: &str = "<!doctype html><title>Gone</title><h1>404</h1>";
+const CHALLENGE: &str =
+    "<!doctype html><title>Just a moment...</title><script>window._cf_chl_opt = { cType: 'managed' };</script>";
+const CHALLENGE_PLAIN: &str = "<!doctype html><title>Just a moment...</title>";
+
 fn serve() -> String {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
@@ -137,6 +142,24 @@ fn serve() -> String {
                             "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nCache-Control: no-store\r\n\r\n"
                         );
                         if s.write_all(head.as_bytes()).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                    // The server's error page, and Cloudflare's challenge
+                    // page with its own script or by its headers alone.
+                    let (status, extra, body) = match path.as_str() {
+                        "/gone.html" => ("404 Not Found", "", GONE),
+                        "/challenge.html" => ("403 Forbidden", "cf-mitigated: challenge\r\n", CHALLENGE),
+                        "/challenge-plain.html" => ("403 Forbidden", "cf-mitigated: challenge\r\n", CHALLENGE_PLAIN),
+                        _ => ("", "", ""),
+                    };
+                    if !status.is_empty() {
+                        let head = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: text/html\r\n{extra}Content-Length: {}\r\nCache-Control: no-store\r\n\r\n",
+                            body.len()
+                        );
+                        if s.write_all(head.as_bytes()).and_then(|_| s.write_all(body.as_bytes())).is_err() {
                             return;
                         }
                         continue;
@@ -973,6 +996,44 @@ fn lone_surrogates(args: &[&str], engine: &str) {
     }
 }
 
+/// A document that is not the page asked for says so where the engine can
+/// tell: Cloudflare's challenge page by its own script on every engine; an
+/// error status where the engine gives the page one (Chrome's
+/// `responseStatus`) or from a request log already on (BiDi, after
+/// `network`); the challenge headers alone from that log too. Said once
+/// per document, and nothing on a page that is fine.
+fn error_pages(args: &[&str], engine: &str, status_on_page: bool, log: bool) {
+    let site = serve();
+    let goto = |id: u64, path: &str| json!({ "id": id, "op": "goto", "url": format!("{site}{path}") });
+    let mut script =
+        vec![goto(1, "/"), goto(2, "/gone.html"), goto(3, "/challenge.html"), json!({ "id": 4, "op": "url" })];
+    if log {
+        script.push(json!({ "id": 5, "op": "network" }));
+        script.push(goto(6, "/gone.html"));
+        script.push(goto(7, "/challenge-plain.html"));
+    }
+    script.push(json!({ "id": 9, "op": "quit" }));
+    let a = session(args, &script);
+    let answer =
+        |id: u64| a.iter().find(|x| x["id"] == id).unwrap_or_else(|| panic!("{engine}: no answer {id}: {a:?}"));
+    assert!(ok(&a, 1).get("status").is_none() && answer(1).get("notes").is_none(), "{engine}: {}", answer(1));
+    if status_on_page {
+        assert_eq!(ok(&a, 2)["status"], 404, "{engine}: {}", answer(2));
+        assert!(answer(2)["notes"].to_string().contains("404 Not Found"), "{engine}: {}", answer(2));
+        assert_eq!(ok(&a, 3)["status"], 403, "{engine}: {}", answer(3));
+    } else {
+        assert!(ok(&a, 2).get("status").is_none(), "{engine}: {}", answer(2));
+    }
+    assert_eq!(ok(&a, 3)["challenge"], "cloudflare", "{engine}: {}", answer(3));
+    assert!(answer(3)["notes"].to_string().contains("a bot challenge (Cloudflare)"), "{engine}: {}", answer(3));
+    assert!(answer(4).get("notes").is_none(), "{engine}: said once: {}", answer(4));
+    if log {
+        assert_eq!(ok(&a, 6)["status"], 404, "{engine}: {}", answer(6));
+        assert_eq!(ok(&a, 7)["challenge"], "cloudflare", "{engine}: {}", answer(7));
+        assert_eq!(ok(&a, 7)["status"], 403, "{engine}: {}", answer(7));
+    }
+}
+
 /// A list of allowed hosts is held by Chrome's engine only: a WebDriver
 /// engine refuses to start with one, rather than run unrestricted.
 #[test]
@@ -1014,6 +1075,7 @@ fn firefox_over_bidi_reads_acts_and_navigates() {
     screencast_ops(&["--engine", "firefox", "--executable", &firefox], "firefox", None);
     nav_clicks(&["--engine", "firefox", "--executable", &firefox], "firefox");
     hash_links(&["--engine", "firefox", "--executable", &firefox], "firefox");
+    error_pages(&["--engine", "firefox", "--executable", &firefox], "firefox", false, true);
 }
 
 /// One WebDriver BiDi command in a session of its own, ended after it:
@@ -1257,6 +1319,8 @@ fn a_webdriver_server_is_driven_over_classic_webdriver_and_over_bidi() {
     viewport_back(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back_per_window(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic");
     viewport_back(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi");
+    error_pages(&["--webdriver", &url, "--capabilities", &caps], "webdriver classic", true, false);
+    error_pages(&["--webdriver", &url, "--bidi", "--capabilities", &caps], "webdriver bidi", true, true);
     #[cfg(unix)]
     {
         extern "C" {

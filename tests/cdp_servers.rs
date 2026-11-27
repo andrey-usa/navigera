@@ -72,6 +72,17 @@ fn acme() -> Option<Site> {
     Some(Site { child, base })
 }
 
+/// tests/fixtures/edge_site.py on a free port.
+fn edge_site() -> Option<Site> {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/edge_site.py");
+    let mut child =
+        Command::new(python()).args([script, "0"]).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().ok()?;
+    let mut line = String::new();
+    BufReader::new(child.stdout.take()?).read_line(&mut line).ok()?;
+    let base = line.split_whitespace().nth(1)?.to_string();
+    Some(Site { child, base })
+}
+
 fn server_state(base: &str) -> Value {
     use std::io::{Read, Write};
     let addr = base.trim_start_matches("http://");
@@ -394,4 +405,42 @@ fn frames_and_shadow_roots_on_obscura() {
 #[test]
 fn frames_and_shadow_roots_on_moli() {
     frames_and_shadow_roots("moli");
+}
+
+/// An error page or a bot challenge is said in the answer that first
+/// shows it, on an engine that is its own CDP server too.
+fn error_pages(engine: &'static str) {
+    let Some(bin) = binary(engine) else {
+        eprintln!("skipping: no {engine} binary");
+        return;
+    };
+    let Some(site) = edge_site() else {
+        eprintln!("skipping: python3 not available for the fixture site");
+        return;
+    };
+    let agent = Agent::new(engine, bin, "docstatus");
+    let fine = agent.run(&["goto", &format!("{}/keys", site.base)]);
+    assert!(fine["result"].get("status").is_none() && fine.get("notes").is_none(), "{engine}: {fine}");
+    for (path, status, challenge) in [
+        ("/status?code=404", 404, None),
+        ("/status?code=500", 500, None),
+        ("/status?challenge=cloudflare&marker=1", 403, Some("cloudflare")),
+        ("/status?challenge=cloudflare", 403, Some("cloudflare")),
+    ] {
+        let r = agent.run(&["goto", &format!("{}{path}", site.base)]);
+        assert_eq!(r["ok"], true, "{engine}: {path}: {r}");
+        assert_eq!(r["result"]["status"], status, "{engine}: {path}: {r}");
+        assert_eq!(r["result"].get("challenge").and_then(Value::as_str), challenge, "{engine}: {path}: {r}");
+    }
+    agent.ok(&["quit"]);
+}
+
+#[test]
+fn error_pages_on_obscura() {
+    error_pages("obscura");
+}
+
+#[test]
+fn error_pages_on_moli() {
+    error_pages("moli");
 }

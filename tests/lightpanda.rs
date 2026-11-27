@@ -326,3 +326,35 @@ fn start_refuses_a_session_running_another_engine() {
     // Asking for the engine it runs is fine.
     assert_eq!(agent.ok(&["start"])["already_running"], true);
 }
+
+/// On Lightpanda too, an error page or a bot challenge is said in the
+/// answer that first shows it (the page's `responseStatus`, the request
+/// log's headers, `LP.getPageStatus` last).
+#[test]
+fn an_error_page_or_a_bot_challenge_is_said() {
+    let Some(bin) = lightpanda() else {
+        eprintln!("skipping: no lightpanda binary");
+        return;
+    };
+    let Some(site) = start_site("tests/fixtures/edge_site.py", &["0"]) else {
+        eprintln!("skipping: python3 not available for the fixture site");
+        return;
+    };
+    let agent = Agent::new("docstatus", bin);
+    let fine = agent.ok_response(&["goto", &format!("{}/keys", site.base)]);
+    assert!(fine["result"].get("status").is_none() && fine.get("notes").is_none(), "{fine}");
+    for (path, status, challenge) in [
+        ("/status?code=404", 404, None),
+        ("/status?code=500", 500, None),
+        ("/status?challenge=cloudflare&marker=1", 403, Some("cloudflare")),
+        ("/status?challenge=cloudflare", 403, Some("cloudflare")),
+        ("/status?challenge=vercel", 429, Some("vercel")),
+    ] {
+        let r = agent.ok_response(&["goto", &format!("{}{path}", site.base)]);
+        assert_eq!(r["result"]["status"], status, "{path}: {r}");
+        assert_eq!(r["result"].get("challenge").and_then(Value::as_str), challenge, "{path}: {r}");
+        assert!(r["notes"].as_array().is_some_and(|n| !n.is_empty()), "{path}: {r}");
+    }
+    let r = agent.ok_response(&["url"]);
+    assert!(r.get("notes").is_none(), "said once: {r}");
+}

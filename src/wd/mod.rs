@@ -369,6 +369,11 @@ fn move_to(x: i64, y: i64) -> Value {
 /// The page's location and title.
 const URL_TITLE: &str = "() => [location.href, document.title]";
 
+/// [`URL_TITLE`] and what the document is ([`crate::docstatus::DOC_JS`]).
+fn url_title_doc() -> String {
+    format!("() => [location.href, document.title, {}]", crate::docstatus::DOC_JS)
+}
+
 /// How long an action is watched for a navigation to start.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Watch {
@@ -436,6 +441,12 @@ pub trait Wire: Send {
     /// (`clear`: and forget them).
     fn requests(&mut self, _clear: bool) -> Result<Vec<crate::cdp::logs::Request>> {
         bail!("classic WebDriver does not report network requests; use --engine firefox or chrome (or --bidi with a server that has them)")
+    }
+    /// The newest logged response of a document at `url` (its status and
+    /// headers), from a request log that is already on: never one started
+    /// for it (WebDriver BiDi's costs the browser for every request).
+    fn logged_document(&mut self, _url: &str) -> Option<(u64, Value)> {
+        None
     }
     /// What the `requests` just before it should say with its list: that
     /// the log started then (WebDriver BiDi starts it at the first `network`).
@@ -701,6 +712,11 @@ pub struct Driver {
     /// While `set viewport` or `set device` sizes the page: its own viewport,
     /// read before (`null` if that read failed), for `off` to wait for.
     viewport_own: Option<Value>,
+    /// The document the last state read saw (its time origin, see
+    /// [`crate::docstatus::DOC_JS`]), and what to add for one that is not
+    /// the page asked for, until the op's outcome takes it.
+    doc_seen: Option<f64>,
+    doc_said: Option<(Value, String)>,
 }
 
 impl Driver {
@@ -753,6 +769,8 @@ impl Driver {
             tabs_seen: usize::MAX,
             ua_by_device: false,
             viewport_own: None,
+            doc_seen: None,
+            doc_said: None,
         })
     }
 
@@ -789,9 +807,20 @@ impl Driver {
     }
 
     pub fn run_op(&mut self, command: &Command) -> Result<Outcome> {
-        let result = self.dispatch(command)?;
+        let mut result = self.dispatch(command)?;
         let dialogs = self.wire.dialogs();
-        Ok(Outcome { result, dialogs, new_tabs: Vec::new(), notes: Vec::new(), recovered: None })
+        let mut notes = Vec::new();
+        // The document the answer shows is an error page or a bot
+        // challenge: its status and what to do.
+        if let Some((fields, note)) = self.doc_said.take() {
+            if let (Some(map), Some(add)) =
+                (result.as_object_mut().filter(|m| m.contains_key("url")), fields.as_object())
+            {
+                map.extend(add.clone());
+            }
+            notes.push(note);
+        }
+        Ok(Outcome { result, dialogs, new_tabs: Vec::new(), notes, recovered: None })
     }
 
     /// Run `function` in the page with `args`; its answer.
@@ -843,9 +872,32 @@ impl Driver {
     }
 
     fn state(&mut self) -> Result<Value> {
-        let (v, tabs) = self.call_tabs(URL_TITLE, json!([]))?;
+        let (v, tabs) = self.call_tabs(&url_title_doc(), json!([]))?;
         let at = |i: usize| v.get(i).and_then(Value::as_str).unwrap_or("").to_string();
+        if let Some(doc) = v.get(2).and_then(crate::docstatus::Doc::parse) {
+            if self.doc_seen.replace(doc.origin) != Some(doc.origin) {
+                self.doc_said = self.doc_report(&doc, &at(0));
+            }
+        }
         Ok(self.state_of(at(0), at(1), tabs))
+    }
+
+    /// [`crate::browser::BrowserSession::doc_report`] here: the page's own
+    /// read (Firefox and Safari give no status, only the challenge marker),
+    /// then a request log that is already on (none is started for this).
+    fn doc_report(&mut self, doc: &crate::docstatus::Doc, url: &str) -> Option<(Value, String)> {
+        let (mut status, mut challenge) = (doc.status, doc.challenge);
+        if doc.wants_more() && (url.starts_with("http://") || url.starts_with("https://")) {
+            if let Some((code, headers)) = self.wire.logged_document(url) {
+                if status == 0 {
+                    status = u16::try_from(code).ok().filter(|c| *c < 1000).unwrap_or(0);
+                }
+                if u64::from(status) == code {
+                    challenge = challenge.or(crate::docstatus::challenge_from_headers(code, &headers));
+                }
+            }
+        }
+        crate::docstatus::report(status, challenge)
     }
 
     fn state_of(&mut self, url: String, title: String, tabs: Vec<String>) -> Value {

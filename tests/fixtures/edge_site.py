@@ -100,6 +100,7 @@ async function login() { try {
   const c = await navigator.credentials.get({ publicKey: pk({ rpId: location.hostname, userVerification: 'required' }) });
   out.textContent = 'signed in as ' + new TextDecoder().decode(c.response.userHandle); } catch (e) { out.textContent = 'error ' + e.name; } }
 </script>""",
+    "/to-missing": """<!doctype html><title>start</title><a href="/status?code=404">gone</a>""",
     "/keys": """<!doctype html><title>keys</title><input id=i autofocus><p id=p>no form here</p>""",
     # A single-page app: the list arrives by fetch, then renders a beat later.
     "/spa": """<!doctype html><title>spa</title><p id=s role=status>Loading items…</p><script>
@@ -172,6 +173,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
+            return
+        if url.path == "/status":
+            # A document that is not the page asked for: the server's error
+            # page (?code=), or a bot challenge as its service answers one
+            # (?challenge=cloudflare|vercel|aws); &marker=1 adds the script
+            # Cloudflare's challenge page defines `_cf_chl_opt` in.
+            code = int(query.get("code", ["404"])[0])
+            kind = query.get("challenge", [""])[0]
+            title, headers, script = "error %d" % code, {}, ""
+            if kind == "cloudflare":
+                code, title, headers = 403, "Just a moment...", {"cf-mitigated": "challenge", "Server": "cloudflare"}
+                if query.get("marker"):
+                    script = "<script>window._cf_chl_opt = { cType: 'managed' };</script>"
+            elif kind == "vercel":
+                code, title, headers = 429, "Vercel Security Checkpoint", {"x-vercel-mitigated": "challenge"}
+            elif kind == "aws":
+                code, title, headers = 202, "", {"x-amzn-waf-action": "challenge"}
+            body = ("<!doctype html><title>%s</title>%s<h1>%s</h1>" % (title, script, title or "checking")).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html")
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if url.path == "/slow":
             time.sleep(int(query.get("ms", ["1000"])[0]) / 1000)

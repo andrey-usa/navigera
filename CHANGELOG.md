@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- An answer that shows a document which is not the page asked for says so:
+  the server's error page carries `status` (404, 500, ...) and a bot
+  challenge carries `challenge` (`cloudflare`, `vercel`, `aws-waf`), each
+  with a note saying what to do. `goto` answered "ok" with the title for a
+  404, a 500 and Cloudflare's "Just a moment..." page before; only `errors`
+  showed the failed load. Said once per document, on the answer that first
+  shows it (a `goto`, a click that navigates, `back`, `reload`), and never
+  for a page that is fine. The status comes from the page's own navigation
+  entry, read with the URL and the title, so it costs no round trip; a
+  challenge is recognized by the script of Cloudflare's challenge page or
+  by the headers each service marks its challenge with, from the request
+  log. Lightpanda asks `LP.getPageStatus` when neither tells. Firefox and
+  Safari give a page no status: there the challenge page is still said,
+  and the status is said once a `network` log is on.
+
 ### Changed
 
 - The static Linux binaries reserve mimalloc's memory 32 MiB at a time

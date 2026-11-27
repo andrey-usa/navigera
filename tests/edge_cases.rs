@@ -698,3 +698,48 @@ fn click_right_after_switching_tabs_lands() {
     }
     let _ = std::fs::remove_file(shot);
 }
+
+/// A document that is not the page asked for says so in the answer that
+/// first shows it: the server's error status, or the bot challenge it is
+/// (by Cloudflare's own script, or by the challenge headers alone), with
+/// what to do. Once per document: a read of the same page again says
+/// nothing more, a click that lands on one says it, and a page that is
+/// fine never adds anything.
+#[test]
+fn an_error_page_or_a_bot_challenge_is_said_once_per_document() {
+    if !chrome_available() {
+        return;
+    }
+    let site = start_site();
+    let s = Session::start("docstatus");
+    let goto = |path: &str| {
+        let (r, _) = s.run(&["goto", &format!("{}{path}", site.base)]);
+        assert_eq!(r["ok"], true, "{path}: {r}");
+        r
+    };
+    let fine = goto("/keys");
+    assert!(fine["result"].get("status").is_none() && fine.get("notes").is_none(), "{fine}");
+    for (path, status, challenge, says) in [
+        ("/status?code=404", 404, None, "the server answered 404 Not Found; "),
+        ("/status?code=500", 500, None, "the server answered 500 Internal Server Error; "),
+        ("/status?code=403", 403, None, "the server answered 403 Forbidden; "),
+        ("/status?challenge=cloudflare&marker=1", 403, Some("cloudflare"), "a bot challenge (Cloudflare)"),
+        ("/status?challenge=cloudflare", 403, Some("cloudflare"), "a bot challenge (Cloudflare)"),
+        ("/status?challenge=vercel", 429, Some("vercel"), "a bot challenge (Vercel)"),
+        ("/status?challenge=aws", 202, Some("aws-waf"), "a bot challenge (AWS WAF)"),
+    ] {
+        let r = goto(path);
+        assert_eq!(r["result"]["status"], status, "{path}: {r}");
+        assert_eq!(r["result"].get("challenge").and_then(Value::as_str), challenge, "{path}: {r}");
+        assert!(r["notes"].to_string().contains(says), "{path}: {r}");
+    }
+    let (r, _) = s.run(&["url"]);
+    assert!(r["result"].get("challenge").is_none() && r.get("notes").is_none(), "said once: {r}");
+    goto("/to-missing");
+    let (r, _) = s.run(&["click", "--text", "gone"]);
+    assert_eq!(r["result"]["status"], 404, "{r}");
+    // A new document of the same URL is said again.
+    let (r, _) = s.run(&["reload"]);
+    assert_eq!(r["result"]["status"], 404, "{r}");
+    assert!(goto("/keys").get("notes").is_none());
+}

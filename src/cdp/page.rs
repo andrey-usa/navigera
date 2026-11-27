@@ -1280,6 +1280,16 @@ const SETTLE_ARM: &str = r#"(() => {
     return c.arm();
 })()"#;
 
+/// `[location.href, document.title, also, doc]`: the state an action's
+/// answer reports, what the expression `also` gives (null if it throws),
+/// and what the document is ([`crate::docstatus::DOC_JS`]), in one read.
+pub fn tail_js(also: &str) -> String {
+    format!(
+        "(() => {{ let s = null; try {{ s = {also}; }} catch (_) {{}} return [location.href, document.title, s, {}]; }})()",
+        crate::docstatus::DOC_JS
+    )
+}
+
 /// A read made for [`Page::want_tail`]: the connection's command and event
 /// counts from before it was written, and what it read.
 type TailRead = ([u64; 2], Value);
@@ -4806,9 +4816,7 @@ impl Page {
     /// The expression [`Page::want_tail`] adds to a look, if one is wanted.
     fn tail_expression(&self) -> Option<String> {
         let also = (*self.tail_also.lock().unwrap())?;
-        Some(format!(
-            "(() => {{ let s = null; try {{ s = {also}; }} catch (_) {{}} return [location.href, document.title, s]; }})()"
-        ))
+        Some(tail_js(also))
     }
 
     /// The arm to send: the whole of [`SETTLE_ARM`] in a document that may

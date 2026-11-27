@@ -2022,6 +2022,17 @@ impl Wire for Bidi {
         std::mem::take(&mut self.log_note).then_some(LOG_STARTED)
     }
 
+    fn logged_document(&mut self, url: &str) -> Option<(u64, Value)> {
+        let page = url.split('#').next().unwrap_or(url);
+        self.requests
+            .as_ref()?
+            .iter()
+            .rev()
+            .map(|h| &h.r)
+            .find(|r| r.kind == "Document" && r.url.split('#').next() == Some(page) && r.status.is_some())
+            .map(|r| (r.status.unwrap_or(0), r.response_headers.clone()))
+    }
+
     fn response_body(&mut self, request: &str) -> Result<(String, bool)> {
         if self.collector.is_none() {
             bail!("this browser keeps no response bodies for WebDriver BiDi (network.addDataCollector)")

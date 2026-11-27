@@ -3409,6 +3409,13 @@ pub struct Driver {
     /// turn of the page's event loop (see `page_change`): its state read
     /// asks for the turn first, so the two share a round trip.
     turn_wanted: std::cell::Cell<bool>,
+    /// The document the last state read saw (its time origin, see
+    /// [`crate::docstatus::DOC_JS`]): a document that is not the page
+    /// asked for is said once, on the first answer that shows it.
+    doc_seen: std::cell::Cell<Option<f64>>,
+    /// What to add for such a document (its fields and the note), until
+    /// the op's outcome takes it.
+    doc_said: std::cell::RefCell<Option<(Value, String)>>,
     /// The last report was compact: an agent reads what actions change.
     compact: bool,
     /// Reads are an agent's that reads again (the MCP server's), whatever
@@ -4204,6 +4211,8 @@ impl Driver {
                 owed: None,
                 said: Default::default(),
                 turn_wanted: Default::default(),
+                doc_seen: Default::default(),
+                doc_said: Default::default(),
                 compact: false,
                 agent_reads: false,
                 read_answer: None,
@@ -4228,6 +4237,8 @@ impl Driver {
                 owed: None,
                 said: Default::default(),
                 turn_wanted: Default::default(),
+                doc_seen: Default::default(),
+                doc_said: Default::default(),
                 compact: false,
                 agent_reads: false,
                 read_answer: None,
@@ -4259,6 +4270,8 @@ impl Driver {
             owed: None,
             said: Default::default(),
             turn_wanted: Default::default(),
+            doc_seen: Default::default(),
+            doc_said: Default::default(),
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -4292,6 +4305,8 @@ impl Driver {
             owed: None,
             said: Default::default(),
             turn_wanted: Default::default(),
+            doc_seen: Default::default(),
+            doc_said: Default::default(),
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -4340,6 +4355,8 @@ impl Driver {
             owed: None,
             said: Default::default(),
             turn_wanted: Default::default(),
+            doc_seen: Default::default(),
+            doc_said: Default::default(),
             compact: false,
             agent_reads: false,
             read_answer: None,
@@ -4389,18 +4406,25 @@ impl Driver {
         if self.turn_wanted.take() {
             self.session.turn_start(ACTION_TRAFFIC_GRACE);
         }
-        let (url, title) = if let Some((url, title, said)) = tail {
+        let (url, title, doc) = if let Some((url, title, said, doc)) = tail {
             if self.said.borrow().is_some() {
                 *self.said.borrow_mut() = Some(said);
             }
-            (url, title)
+            (url, title, doc)
         } else if self.said.borrow().is_some() {
-            let (url, title, said) = self.session.url_title_and(PAGE_SAYS);
+            let (url, title, said, doc) = self.session.url_title_and(PAGE_SAYS);
             *self.said.borrow_mut() = Some(said);
-            (url, title)
+            (url, title, doc)
         } else {
             self.session.url_title()
         };
+        // A document not seen before that is not the page asked for (an
+        // error status, a bot challenge): the op's outcome says so.
+        if let Some(doc) = doc {
+            if self.doc_seen.replace(Some(doc.origin)) != Some(doc.origin) {
+                *self.doc_said.borrow_mut() = self.session.doc_report(&doc, &url);
+            }
+        }
         let mut state = json!({
             "tab": self.session.active_page(),
             "tabs": self.session.page_count(),
@@ -5559,11 +5583,21 @@ impl Driver {
             notes.push(format!("this click closed its tab; tab {} is active now", self.session.active_page()));
         }
         let dialogs = self.session.take_dialogs();
-        let result = match (result, new_tabs.is_empty() && notes.is_empty()) {
+        let mut result = match (result, new_tabs.is_empty() && notes.is_empty()) {
             // A click that opened a tab: report the state of the new tab.
             (Ok(r), false) if r.get("tab").is_some() => Ok(self.state_json()),
             (r, _) => r,
         }?;
+        // The document the answer shows is an error page or a bot
+        // challenge: its status and what to do, after the state.
+        if let Some((fields, note)) = self.doc_said.take() {
+            if let (Some(map), Some(add)) =
+                (result.as_object_mut().filter(|m| m.contains_key("url")), fields.as_object())
+            {
+                map.extend(add.clone());
+            }
+            notes.push(note);
+        }
         // Last: what this snapshot itself waited for, if anything. It goes
         // after the tree notes so their order does not change.
         // An app window with nothing in it yet: an Electron app that is still
