@@ -1,6 +1,6 @@
 # Where navigera is not ahead
 
-Numbers: [bench run 45950542045](https://github.com/andrey-usa/navigera/actions/runs/45950542045).
+Numbers: [bench run 46044180770](https://github.com/andrey-usa/navigera/actions/runs/46044180770).
 
 Each measure of the benchmarks on which another tool beat navigera in this
 run by more than 2%, from its publish.json: navigera on Chrome against every
@@ -11,13 +11,11 @@ Firefox). Closer
 than 2% is a tie. Driver CPU is left out: the kernel counts it in 10 ms
 ticks, so every native driver ties.
 
-- Warm eval: go-rod 0.116.2 (Go) 0.43 ms, navigera 0.50 ms.
-- Warm eval on chrome-headless-shell: go-rod 0.116.2 (Go, chrome-headless-shell) 0.39 ms, navigera 0.43 ms.
-- Click per call: agent-browser 0.45.0 7.0 ms, navigera 9.4 ms.
-- Click-submit per call: agent-browser 0.45.0 5.7 ms, navigera 6.3 ms.
-- Screenshot-720 per call: Chrome DevTools MCP 1.14.0 21.2 ms (49 KB PNG), navigera 30.9 ms (49 KB PNG).
-- Form-batch per call: agent-browser 0.45.0 27.2 ms, navigera 28.9 ms.
-- Goto per call on Firefox: Vibium Firefox API 41.0 ms, navigera Firefox 50.0 ms.
-- Read-text per call on Firefox: Puppeteer Firefox BiDi API 0.8 ms, navigera Firefox 1.8 ms.
-- Snapshot per call on Firefox: Vibium Firefox API 14.1 ms, navigera Firefox 14.5 ms.
-- Screenshot-720 per call on Firefox: Puppeteer Firefox BiDi API 14.7 ms (48 KB PNG), navigera Firefox 15.5 ms (48 KB PNG).
+- Warm eval: go-rod 0.116.2 (Go) 0.18 ms, navigera 0.31 ms.
+- Browser memory: puppeteer-core 25.19.0 (Node) 323 MB, navigera 359 MB.
+- Warm eval on chrome-headless-shell: go-rod 0.116.2 (Go, chrome-headless-shell) 0.15 ms, navigera 0.18 ms.
+- Click per call: agent-browser 0.45.0 6.5 ms, navigera 8.8 ms.
+- Form-batch per call: agent-browser 0.45.0 20.6 ms, navigera 23.5 ms.
+- Goto per call on Firefox: Playwright Firefox Node API 27.9 ms, navigera Firefox 47.3 ms.
+- Read-text per call on Firefox: Puppeteer Firefox BiDi API 1.1 ms, navigera Firefox 1.6 ms.
+- Snapshot per call on Firefox: Vibium Firefox API 9.4 ms, navigera Firefox 11.2 ms.
