@@ -1158,6 +1158,11 @@ impl Bidi {
                         return Ok(None);
                     }
                 }
+                // A message over the bound: how large, and how to read less.
+                Err(e @ tungstenite::Error::Capacity(_)) => {
+                    self.closed = true;
+                    bail!("{}", crate::cdp::client::ws_read_failed(&e))
+                }
                 Err(e) => {
                     self.closed = true;
                     bail!("the BiDi connection failed ({e})")
