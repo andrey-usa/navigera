@@ -945,6 +945,21 @@ fn a_click_that_changes_nothing_says_so() {
     assert_eq!(s.text(&["get", "text", "--selector", "#out"]), "later");
     let r = s.ok(&["click", "--role", "button", "--name", "Bump"]);
     assert!(r.get("no_effect").is_none(), "shadow root: {r}");
+    // Components the page adds later: the roots inserted are watched from
+    // the next click on (the document's list takes what was inserted).
+    s.ok(&["click", "--selector", "#add-pair"]);
+    let r = s.ok(&["click", "--role", "button", "--name", "Raise"]);
+    assert!(r.get("no_effect").is_none(), "inserted shadow root: {r}");
+    assert!(r["effect_trace"].as_str().unwrap_or_default().contains("dom"), "inserted shadow root: {r}");
+    // A root attached to an element already in the page isn't in the list:
+    // the click doesn't say nothing changed, and the root is watched after.
+    s.ok(&["eval", "attachLate()"]);
+    let r = s.ok(&["click", "--selector", "#poke"]);
+    assert!(r.get("no_effect").is_none(), "late shadow root: {r}");
+    let r = s.ok(&["click", "--selector", "#poke"]);
+    assert!(r["effect_trace"].as_str().unwrap_or_default().contains("dom"), "late shadow root, again: {r}");
+    let r = s.ok(&["click", "--selector", "#noop"]);
+    assert!(r.get("no_effect").is_some(), "every root watched: {r}");
     // Typing into a field or opening a <select> isn't judged.
     let r = s.ok(&["click", "--selector", "#q"]);
     assert!(r.get("no_effect").is_none(), "field: {r}");
@@ -981,6 +996,12 @@ fn a_toggle_an_earlier_click_queued_is_not_the_next_clicks_effect() {
     for target in ["#late-tip", "#late-dlg", "#noop"] {
         let r = s.ok(&["click", "--selector", target]);
         assert!(r.get("no_effect").is_some(), "{target}: {r}");
+    }
+    // A dialog or a <details> says it opened or closed in its `open`
+    // attribute (its own `toggle` comes a task later).
+    for target in ["#sum", "#close-dlg"] {
+        let r = s.ok(&["click", "--selector", target]);
+        assert!(r.get("no_effect").is_none(), "{target}: {r}");
     }
 }
 

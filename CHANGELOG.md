@@ -22,6 +22,17 @@ All notable changes to this project are documented here. The format follows
   and 17.4 ms in [bench 45918635350](https://github.com/andrey-usa/navigera/actions/runs/45918635350)
   (Chrome DevTools MCP 18.7 ms). A full page or an element, which can be
   as large as the page, keeps the smaller encoding.
+- A click finds the page's shadow roots, which it watches for what the
+  click changes, in a list kept for each document: the first click in a
+  document walks every element for them, as every click did before, and
+  later clicks walk only what the page inserted since. Before a click
+  says that nothing changed, the whole document is walked again, so a
+  root attached to an element that was already there is not missed. The
+  form controls a click compares are looked up once per click instead of
+  at each look, and the page is no longer searched for open dialogs and
+  popovers before each click: a popover that the click opens or closes
+  is told by its `beforetoggle`, which fires inside the call that changes
+  it, and a dialog or a `<details>` by its `open` attribute.
 
 ### Fixed
 

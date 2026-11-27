@@ -382,6 +382,73 @@ macro_rules! invalid_listener_js {
 }
 pub(crate) use invalid_listener_js;
 
+/// `nvRoots(d, whole)`: the open shadow roots in document `d` (nested ones
+/// too, at most 2000), kept per document between calls (`__nvRoots` on its
+/// window). The first call walks every element, about 0.09 ms per
+/// thousand (7 ms at 76,000, Chrome 153). After that an observer of
+/// insertions in the document and in each root keeps what was added, and
+/// a call walks only that. When a page inserts too much between two calls,
+/// the observer stops and the next call walks the whole document again.
+/// A root attached to an element that was already in the page (a late
+/// `attachShadow`, or a custom element defined after its elements were
+/// parsed) is found only by a whole walk: a caller that needs every root
+/// asks for one with `whole`.
+macro_rules! shadow_roots_js {
+    () => {
+        r#"
+    const nvRoots = (d, whole) => {
+        const MAX = 2000, v = d.defaultView;
+        let k = v && v.__nvRoots;
+        if (!k || k.d !== d) {
+            k = { d, list: [], has: new Set(), added: [], recs: 0, stale: true };
+            k.take = (recs) => {
+                if (k.stale) return;
+                k.recs += recs.length;
+                for (const r of recs) for (const n of r.addedNodes) if (n.nodeType === 1) k.added.push(n);
+                if (k.recs > 20000 || k.added.length > 5000) { k.stale = true; k.added = []; k.mo.disconnect(); }
+            };
+            k.mo = new MutationObserver(k.take);
+            k.add = (r) => {
+                if (k.has.has(r) || k.list.length >= MAX) return;
+                k.has.add(r); k.list.push(r);
+                k.mo.observe(r, { childList: true, subtree: true });
+                k.walk(r);
+            };
+            k.walk = (scope) => {
+                if (scope.shadowRoot) k.add(scope.shadowRoot);
+                const all = scope.getElementsByTagName ? scope.getElementsByTagName('*') : scope.querySelectorAll('*');
+                for (let i = 0; i < all.length && k.list.length < MAX; i++) {
+                    const r = all[i].shadowRoot;
+                    if (r) k.add(r);
+                }
+            };
+            if (v) Object.defineProperty(v, '__nvRoots', { value: k, configurable: true, enumerable: false, writable: true });
+        }
+        if (!k.stale && !whole) {
+            k.take(k.mo.takeRecords());
+        }
+        if (k.stale || whole) {
+            k.mo.disconnect();
+            k.list = []; k.has = new Set(); k.added = []; k.recs = 0; k.stale = false;
+            k.mo.observe(d, { childList: true, subtree: true });
+            k.walk(d);
+            return k.list;
+        }
+        // Roots whose host left the page are dropped (an engine without
+        // `isConnected` keeps them: watched for nothing).
+        const added = k.added;
+        k.added = [];
+        if (k.list.some((r) => r.isConnected === false)) {
+            k.list = k.list.filter((r) => r.isConnected !== false);
+            k.has = new Set(k.list);
+        }
+        for (const n of added) if (n.isConnected !== false) k.walk(n);
+        return k.list;
+    };
+"#
+    };
+}
+
 /// Scroll the element into view and, if it is visible and actually receives
 /// a pointer event at its centre, return that point for a *trusted* CDP
 /// mouse event (`isTrusted: true`, default actions, focus, user activation
@@ -546,6 +613,9 @@ const CLICK_PREP: &str = concat!(
         };
         Object.defineProperty(w.top, '__nvNav', { value: n, configurable: true, enumerable: false, writable: true });
     };
+"#,
+    shadow_roots_js!(),
+    r#"
     // A styled checkbox/radio is often a hidden or covered <input> inside a
     // visible <label>: clicking the label is what a user does and toggles it.
     const labels = (el.labels ? [...el.labels] : []);
@@ -576,35 +646,15 @@ const CLICK_PREP: &str = concat!(
         const docs = doc === top.document ? [top.document] : [top.document, doc];
         const fx = { m: 0, e: 0, obs: [], offs: [] };
         // Every open shadow root too (a button in one component often
-        // changes another): about 0.1 ms per thousand elements.
+        // changes another), as the document's list has them (`nvRoots`):
+        // walked whole once per document, then only what was inserted.
         const roots = [...docs], seen = new Set(roots);
-        const add = (r) => { if (r && !seen.has(r)) { seen.add(r); roots.push(r); return true; } return false; };
-        const walk = (scope) => {
-            const all = scope.getElementsByTagName ? scope.getElementsByTagName('*') : scope.querySelectorAll('*');
-            for (let i = 0; i < all.length && roots.length < 1000; i++) {
-                const r = all[i].shadowRoot;
-                if (add(r)) walk(r);
-            }
-        };
+        const add = (r) => { if (r && !seen.has(r) && roots.length < 1000) { seen.add(r); roots.push(r); } };
         if (!skip) {
             for (let r = el.getRootNode(); r && r.host; r = r.host.getRootNode()) add(r);
-            for (const d of docs) walk(d);
+            for (const d of docs) for (const r of nvRoots(d, false)) add(r);
         }
         const partial = roots.length >= 1000;
-        // `show()`, `showPopover()` and `details.open` queue their `toggle`
-        // as a later task, so an earlier action's can land in this click's
-        // window: one saying a dialog, <details> or popover went to the
-        // state it already had when this click was armed is that earlier
-        // change's, not this click's. (`toggle` doesn't leave a shadow
-        // tree, so the documents are enough.)
-        const openAtArm = new Set();
-        if (!skip) {
-            for (const d of docs) {
-                try { for (const n of d.querySelectorAll('dialog[open], details[open], :popover-open')) openAtArm.add(n); } catch (_) {
-                    try { for (const n of d.querySelectorAll('dialog[open], details[open]')) openAtArm.add(n); } catch (_) {}
-                }
-            }
-        }
         if (!skip) {
             for (const r of roots) {
                 const o = new MutationObserver((recs) => { fx.m += recs.length; });
@@ -616,13 +666,17 @@ const CLICK_PREP: &str = concat!(
                 // the document or an ancestor a frame later: not the click's.
                 const t = e.target;
                 if (e.type === 'scroll' && (t.nodeType === 9 || (t.contains && t.contains(el)))) return;
-                if (e.type === 'toggle' && e.oldState !== e.newState
-                    && e.newState === (openAtArm.has(t) ? 'open' : 'closed')) return;
                 fx.e++;
             };
             const wins = w === top ? [top] : [top, w];
             for (const v of wins) {
-                for (const t of ['input', 'change', 'submit', 'reset', 'toggle', 'scroll', 'select', 'invalid', 'hashchange',
+                // A popover opening or closing changes no attribute: its
+                // `beforetoggle` says so, fired inside `showPopover()` and
+                // the like, so always this click's. Not `toggle`, which is
+                // queued as a later task: an earlier action's can land in
+                // this click's window. A dialog or a <details> changes its
+                // `open` attribute, which the observers see.
+                for (const t of ['input', 'change', 'submit', 'reset', 'beforetoggle', 'scroll', 'select', 'invalid', 'hashchange',
                     'play', 'pause', 'copy', 'cut', 'fullscreenchange']) {
                     v.addEventListener(t, onEvent, true);
                     fx.offs.push(() => v.removeEventListener(t, onEvent, true));
@@ -685,20 +739,30 @@ const CLICK_PREP: &str = concat!(
                 a = n;
             }
         };
-        const state = () => {
-            let s = top.location.href + ' ' + top.history.length + ' ' + top.scrollX + ',' + top.scrollY + ' ' + ctl.checked + ' ' + ctl.value;
+        // The form controls are looked up once, when armed: `state` is read
+        // again only while no DOM change was seen, so the same ones are in
+        // the page (each lookup is a pass over the document: 1.9 ms at
+        // 76,000 elements, Chrome 153).
+        const controls = [];
+        if (!skip) {
             for (const d of docs) {
                 const cs = d.querySelectorAll('input, textarea, select');
-                for (let i = 0; i < cs.length && i < 300; i++) s += '\u0001' + cs[i].value + (cs[i].checked ? '+' : '-') + cs[i].selectedIndex;
+                for (let i = 0; i < cs.length && i < 300; i++) controls.push(cs[i]);
             }
+        }
+        const state = () => {
+            let s = top.location.href + ' ' + top.history.length + ' ' + top.scrollX + ',' + top.scrollY + ' ' + ctl.checked + ' ' + ctl.value;
+            for (const c of controls) s += '\u0001' + c.value + (c.checked ? '+' : '-') + c.selectedIndex;
             return s;
         };
         const before = skip ? '' : state(), focus = focused();
-        // Same-origin frames nobody watched (or too many shadow roots): a
-        // change there would go unseen, so "nothing changed" can't be said.
+        // Same-origin frames nobody watched, too many shadow roots, or a
+        // root the list didn't have (attached to an element already in the
+        // page: a whole walk finds it): a change there would go unseen, so
+        // "nothing changed" can't be said.
         const unwatched = () => partial || docs.some((d) => [...d.querySelectorAll('iframe, frame')].some((f) => {
             try { const fd = f.contentDocument; return !!(fd && !seen.has(fd) && fd.body && fd.body.childElementCount); } catch (_) { return false; }
-        }));
+        })) || docs.some((d) => nvRoots(d, true).some((r) => !seen.has(r)));
         // The path is kept only after a click that changed nothing: then
         // `Page::wired_later` reads it, and removes it.
         const done = (keepPath) => {

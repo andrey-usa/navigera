@@ -794,6 +794,8 @@ PAGES["/effects"] = ("effects", "#strip{width:200px;overflow-x:auto;white-space:
 <a id=self href="#">Top</a> <button id=copy>Copy</button> <button id=clip>Copy link</button>
 <button id=save>Save</button>
 <x-panel id=panel></x-panel> <x-badge id=badge></x-badge>
+<button id=add-pair>Add pair</button> <span id=pairs></span>
+<div id=bare>plain</div> <button id=poke>Poke</button>
 <p id=out>none</p>
 <script>
 const out = (t) => { document.getElementById('out').textContent = t; };
@@ -821,8 +823,21 @@ customElements.define('x-badge', class extends HTMLElement {
 });
 customElements.define('x-panel', class extends HTMLElement {
   constructor() { super(); this.attachShadow({ mode: 'open' }).innerHTML = '<button id=bump>Bump</button>'; let n = 0;
-    this.shadowRoot.querySelector('button').onclick = () => { document.getElementById('badge').count = ++n; }; }
+    this.shadowRoot.querySelector('button').onclick = () => { document.getElementById(this.getAttribute('for') || 'badge').count = ++n; }; }
+  connectedCallback() { this.shadowRoot.querySelector('button').textContent = this.getAttribute('label') || 'Bump'; }
 });
+// A pair added after the page was first clicked.
+document.getElementById('add-pair').onclick = () => {
+  document.getElementById('pairs').innerHTML = '<x-badge id=badge2></x-badge><x-panel for=badge2 label=Raise></x-panel>';
+};
+// A shadow root attached to an element that was already in the page, and
+// a button that changes only what is inside it.
+function attachLate() { document.getElementById('bare').attachShadow({ mode: 'open' }).innerHTML = '<i>0</i>'; }
+let pokes = 0;
+document.getElementById('poke').onclick = () => {
+  const r = document.getElementById('bare').shadowRoot;
+  if (r) r.querySelector('i').textContent = String(++pokes);
+};
 </script>""")
 
 
@@ -830,7 +845,8 @@ PAGES["/toggles"] = ("toggles", "#tip{inset:auto;top:240px;left:20px;margin:0}#d
 <button id=open-tip>Open tip</button> <button id=close-tip>Close tip</button>
 <button id=late-tip>Late tip</button> <button id=late-dlg>Late dialog</button> <button id=noop>Does nothing</button>
 <div id=tip popover=manual>Tip</div>
-<dialog id=dlg>Dialog</dialog>
+<dialog id=dlg>Dialog</dialog> <button id=close-dlg>Close dialog</button>
+<details id=more><summary id=sum>More</summary>Details</details>
 <script>
 const tip = document.getElementById('tip'), dlg = document.getElementById('dlg');
 // A popover opening or closing changes no attribute: only its toggle says so.
@@ -841,6 +857,7 @@ document.getElementById('close-tip').onclick = () => tip.hidePopover();
 const late = (n) => n.dispatchEvent(new ToggleEvent('toggle', { oldState: 'closed', newState: 'open' }));
 document.getElementById('late-tip').onclick = () => late(tip);
 document.getElementById('late-dlg').onclick = () => late(dlg);
+document.getElementById('close-dlg').onclick = () => dlg.close();
 dlg.show();
 </script>""")
 
