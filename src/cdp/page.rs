@@ -7541,6 +7541,16 @@ impl Page {
         let emulated = full_page || clip.is_some() || self.metrics.load(std::sync::atomic::Ordering::Relaxed);
         if full_page || clip.is_some() {
             params["captureBeyondViewport"] = Value::Bool(true);
+        } else if quality.is_none() {
+            // A viewport PNG is encoded for speed: the same pixels, a larger
+            // file. At 1280x720 on Chrome 153, Chrome's CPU per capture
+            // 21.5 -> 14.0 ms, the call 32.6 -> 24.6 ms, the file 1.2-1.4x
+            // on content pages and up to 5x on a full-view gradient (781 KiB).
+            // An agent pays for an image by its pixels, and the viewport
+            // bounds the file. A full page or an element, which can be as
+            // large as the page, keeps the compact encoding (a full page:
+            // 3.9 MB, 4.6 MB encoded for speed).
+            params["optimizeForSpeed"] = Value::Bool(true);
         }
         if let Some(mut clip) = clip {
             clip["scale"] = json!(1);

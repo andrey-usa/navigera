@@ -160,6 +160,21 @@ pub fn content_census(png: &[u8]) -> String {
     format!("{} bytes, hash {hash:016x}, {count} pixels not white in {bbox:?}", png.len())
 }
 
+/// An image's size and a hash of its decoded RGB pixels: equal for two
+/// PNGs of the same pixels, however each was encoded. None when the image
+/// cannot be read (see [`rows`]).
+pub fn pixel_digest(png: &[u8]) -> Option<String> {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let (w, h) = rows(png, None, |_, row, bpp| {
+        for p in row.chunks_exact(bpp) {
+            for &b in &p[..3] {
+                hash = (hash ^ b as u64).wrapping_mul(0x100_0000_01b3);
+            }
+        }
+    })?;
+    Some(format!("{w}x{h}, pixels {hash:016x}"))
+}
+
 /// Decode an 8-bit RGB or RGBA, non-interlaced PNG's rows down to `last`
 /// (all of them when None), handing each to `visit` with its index and
 /// bytes per pixel. Returns (width, height); None when the image cannot

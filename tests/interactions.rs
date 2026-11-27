@@ -3017,6 +3017,31 @@ fn a_screenshot_with_a_quality_is_a_jpeg() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `screenshot` asks Chrome for a PNG encoded for speed: it must hold the
+/// pixels of Chrome's default encoding of the same view, at its size.
+#[test]
+fn a_png_screenshot_has_the_pixels_of_chromes_default_encoding() {
+    use base64::Engine as _;
+    if !chrome() {
+        return;
+    }
+    let s = Session::start("shot-fast-png", &[]);
+    s.ok(&[
+        "goto",
+        "data:text/html,<body style='margin:0;background:linear-gradient(90deg,%23c33,%2339c)'>\
+         <h1 style='color:white'>navigera</h1><p>Every pixel the same.</p></body>",
+    ]);
+    let path = std::env::temp_dir().join(format!("nv-fast-png-{}.png", std::process::id()));
+    s.ok(&["screenshot", "--path", &path.display().to_string()]);
+    let fast = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).ok();
+    let r = s.ok(&["cdp", "Page.captureScreenshot", r#"{"format":"png"}"#]);
+    let data = r["result"]["data"].as_str().unwrap_or_else(|| panic!("{r}"));
+    let default = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
+    let digest = |png: &[u8]| navigera::annotate::pixel_digest(png).expect("an 8-bit RGB(A) PNG");
+    assert_eq!(digest(&fast), digest(&default), "{} vs {} bytes", fast.len(), default.len());
+}
+
 /// A capture asked for right after a click that confirm()s, posts and reloads
 /// the page used to go unanswered for the session's whole 35 s timeout.
 #[test]
