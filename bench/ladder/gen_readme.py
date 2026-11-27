@@ -322,8 +322,8 @@ if ops:
     ops_cols = [o for o in ops if o["name"] in ops_order]
     ops_cols.sort(key=lambda o: ops_order.index(o["name"]))
     ops_cols += [o for o in ops if o["name"] not in ops_order]
-    op_names = ("goto", "fill", "click", "click-submit", "click-large", "click-large-first",
-                "read-text", "snapshot", "screenshot", "screenshot-720", "form-batch")
+    op_names = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
+                "screenshot", "screenshot-720", "form-batch", "click-large", "click-large-first")
     ops_label = {**label,
                  "navigera (baseline)": "`navigera` (baseline build)",
                  "browser-use": f"`browser-use` {ver('browser-use', '')} (exec model)".replace("  ", " ")}
@@ -513,8 +513,8 @@ def ops_engine(o):
 # default-viewport row captures each tool's own size, unequal pixel counts.
 for nav_ops in [o for o in ops if o["name"].startswith("navigera")]:
     engine = ops_engine(nav_ops)
-    for op in ("goto", "fill", "click", "click-submit", "click-large", "click-large-first",
-               "read-text", "snapshot", "screenshot-720", "form-batch"):
+    for op in ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
+               "screenshot-720", "form-batch", "click-large", "click-large-first"):
         mine = (nav_ops.get("cells") or {}).get(op) or {}
         mine_ms, mine_calls = mine.get("median_ms"), mine.get("calls")
         if mine_ms is None or mine.get("incomplete"):

@@ -9,12 +9,6 @@ Ops (all on the ladder fixtures, page_a unless noted):
   fill          fill #q with "widget"
   click         click #search (client-side filter, no navigation)
   click-submit  click #place (form submit, handled by the page script)
-  click-large   click #more on page_c (~60,000 elements, 40 open shadow
-                roots; no navigation), a later click: the page is loaded
-                and clicked once (untimed) before the reps
-  click-large-first
-                the same click as the first action on a freshly loaded
-                page_c (untimed goto before each rep)
   read-text     eval the h1 text ("Search results")
   snapshot      accessibility snapshot of page_a (default output)
   screenshot    screenshot to a file, at the tool's own default viewport
@@ -25,6 +19,12 @@ Ops (all on the ladder fixtures, page_a unless noted):
   form-batch    fill #cust "ada", fill #qty "2", click #place, eval #status
                 — one call for tools with a batch command (navigera batch,
                 agent-browser batch --bail), four calls otherwise.
+  click-large   click #more on page_c (~60,000 elements, 40 open shadow
+                roots; no navigation), a later click: the page is loaded
+                and clicked once (untimed) before the reps
+  click-large-first
+                the same click as the first action on a freshly loaded
+                page_c (untimed goto before each rep)
 
 Timing is the wall of the call itself: one CLI process (or one MCP
 tools/call) per op, against the warm session — the way an agent's tool
@@ -284,9 +284,12 @@ FIXTURES = HERE.parent / "fixtures"
 # How long the page rests after a state reset before the timed call.
 SETUP_REST_S = 0.15
 
-OPS = ("goto", "fill", "click", "click-submit", "click-large", "click-large-first",
-       "read-text", "snapshot", "screenshot", "screenshot-720", "form-batch")
+OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
+       "screenshot", "screenshot-720", "form-batch", "click-large", "click-large-first")
 # The ops on page_c; the session goes back to page_a (untimed) after each.
+# They run last: after a visit to page_c, every tool's snapshot of page_a
+# took longer (locally navigera 8.3 -> 21.9 ms, agent-browser 33.6 -> 57.0),
+# so ahead of the other ops they would change those cells, not measure them.
 LARGE_OPS = ("click-large", "click-large-first")
 # After an untimed goto to page_c, before the next call: the page has
 # loaded, and an agent's next call comes a model turn later.
