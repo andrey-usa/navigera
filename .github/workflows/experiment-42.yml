@@ -1,0 +1,61 @@
+name: experiment-42
+
+# Lightpanda's own CDP commands (the LP domain) next to navigera's ops on
+# the same pages: snapshot vs LP.getSemanticTree, text vs LP.dump markdown,
+# click/fill by ref vs LP.clickNode/LP.fillNode, form reads vs
+# LP.detectForms, navigera's goto/errors vs LP.getPageStatus.
+# (bench/probe/lp_probe.py; navigera next built as is, no code change.)
+# 2 runners; tables in the job summary, results.json as the artifact.
+
+on:
+  push:
+    branches: [experiment-42]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: experiment-42
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          cache-on-failure: false
+
+      - name: Lightpanda binary
+        uses: ./.github/actions/lightpanda
+
+      - name: Build navigera
+        run: |
+          cargo build --release --locked
+          echo "::notice title=machine::$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) · $(nproc) cpus · $ImageOS $ImageVersion · $(./target/release/navigera --version) · Lightpanda $LIGHTPANDA_RELEASE"
+
+      - name: Fixtures
+        run: python3 bench/ladder/gen_fixtures.py
+
+      - name: LP domain vs navigera
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          python3 bench/probe/lp_probe.py --navigera "$PWD/target/release/navigera" \
+            --lightpanda "$LIGHTPANDA_BIN" --out "$RUNNER_TEMP/out" --reps 20
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: probe-${{ matrix.run }}
+          path: ${{ runner.temp }}/out
