@@ -8,7 +8,7 @@ use std::env;
 use std::time::Instant;
 
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
-use chromiumoxide::{browser::HeadlessMode, Browser, BrowserConfig};
+use chromiumoxide::{Browser, BrowserConfig};
 use futures::StreamExt;
 use serde::Deserialize;
 
@@ -34,16 +34,20 @@ async fn launch() -> anyhow::Result<Browser> {
     let config = BrowserConfig::builder()
         .chrome_executable(chrome_bin)
         // Match the other contenders: new headless mode (old `--headless`
-        // is a different, slower legacy path).
-        .headless_mode(HeadlessMode::New)
+        // is a different, slower legacy path). 0.9 no longer exports
+        // HeadlessMode, so the builder's own method sets it.
+        .new_headless_mode()
+        // Since 0.9 an argument is a switch name without its dashes (the
+        // builder adds `--`, and `key=value` would be read as one name), so
+        // a value goes in as a (name, value) pair.
+        .arg(("disable-blink-features", "AutomationControlled"))
+        .arg(("window-size", "1440,900"))
         .args(vec![
-            "--disable-blink-features=AutomationControlled",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-infobars",
-            "--window-size=1440,900",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
+            "no-first-run",
+            "no-default-browser-check",
+            "disable-infobars",
+            "no-sandbox",
+            "disable-dev-shm-usage",
         ])
         .build()
         .map_err(|e| anyhow::anyhow!("browser config: {e}"))?;

@@ -14,7 +14,7 @@ run in CI (`.github/workflows/bench.yml`) on identical hardware.
 | `playwright` | `playwright-core`, `channel: 'chrome'` | Node |
 | `playwright-bun` | the same `playwright-core` script, run by Bun | Bun |
 | `puppeteer` | `puppeteer-core`, system Chrome | Node |
-| `chromiumoxide` | `chromiumoxide` 0.7 (bench-only crate in `contenders/`) | native Rust |
+| `chromiumoxide` | `chromiumoxide` 0.9 (bench-only crate in `contenders/`) | native Rust |
 | `chromey` | `chromey` 3.x, maintained chromiumoxide fork (`contenders/`) | native Rust |
 | `chromedp` | `chromedp` v0.19.1 (bench-only module in `contenders/`) | native Go |
 | `gorod` | `go-rod` v0.116.2 (bench-only module in `contenders/`) | native Go |
