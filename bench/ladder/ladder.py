@@ -127,8 +127,8 @@ BROWSER_TAGS = {"nv-edge": "msedge", "nv-brave": "brave", "nv-lightpanda": "ligh
 OPTIONAL_SCENARIOS = ("eval", "cold", "realworld", "browse", "agent", "parallel", "ops")
 
 # Matched-operation per-call stage: one call per op, warm session.
-OPS = ("goto", "fill", "click", "click-submit", "click-large", "click-large-first",
-       "read-text", "snapshot", "screenshot", "screenshot-720", "form-batch")
+OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
+       "screenshot", "screenshot-720", "form-batch", "click-large", "click-large-first")
 # The default-viewport screenshot captures each tool's own viewport (different
 # pixel counts), so the losses compare screenshot-720 (one viewport) instead.
 OPS_NOT_RANKED = ("screenshot",)
