@@ -4190,8 +4190,8 @@ impl Page {
         }
     }
 
-    /// The engine keeps its first layout until a screenshot (Moli 1.1.27,
-    /// see [`super::events::LAYOUT_SHOT`]).
+    /// The engine keeps its first layout until a screenshot (Moli before
+    /// 1.1.28, see [`super::events::LAYOUT_SHOT`]).
     pub fn layout_kept(&self) -> bool {
         self.shared.layout_mode.load(std::sync::atomic::Ordering::Relaxed) == super::events::LAYOUT_SHOT
     }
@@ -4200,7 +4200,7 @@ impl Page {
     /// its first layout until a screenshot: lay the page out again with a
     /// 1x1 screenshot, only when the document, its DOM (a change count),
     /// its scroll or its viewport changed since the last time (it costs a
-    /// layout of the whole page: 157 ms on 4,505 nodes on Moli 1.1.27).
+    /// layout of the whole page: 157 ms on 4,505 nodes on Moli before 1.1.28).
     /// Nothing elsewhere. True when it did.
     pub fn fresh_layout(&self, timeout: Duration) -> bool {
         if !self.layout_kept() {

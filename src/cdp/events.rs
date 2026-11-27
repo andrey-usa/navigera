@@ -332,7 +332,7 @@ pub const LAYOUT_LIVE: u8 = 0;
 /// [`Shared::layout_mode`]: a CDP server engine, not asked yet.
 pub const LAYOUT_ASK: u8 = 1;
 /// [`Shared::layout_mode`]: the engine keeps the layout it built at the
-/// first geometry read until a screenshot (Moli 1.1.27): an element a
+/// first geometry read until a screenshot (Moli before 1.1.28): an element a
 /// script adds afterwards has no box, no `innerText` and no hit. A 1x1
 /// screenshot lays the page out again (Moli 1.1.27 on ubuntu-24.04:
 /// 1.7 ms on 19 nodes, 157 ms on 4,505; a whole-page shot 56 / 236 ms).
