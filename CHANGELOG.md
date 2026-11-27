@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The static Linux binaries reserve mimalloc's memory 32 MiB at a time
+  instead of 1 GiB. Every CLI call is a process, and some machines run an
+  agent that spends CPU on each process mapping that much: on GitHub's
+  Linux runner a daemon took 11.9 ms of CPU per call from the browser.
+  Per call there, click 9.39 -> 6.33 ms, `eval` 1.62 -> 1.10 ms,
+  `--version` 0.85 -> 0.62 ms, and the 2,000-row `ax` 125 -> 121 ms
+  ([run 45911059272](https://github.com/andrey-usa/navigera/actions/runs/45911059272)).
+
 ### Fixed
 
 - `quit --close-browser` on a `--profile` session could answer while
