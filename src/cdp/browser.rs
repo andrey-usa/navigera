@@ -1233,23 +1233,37 @@ mod tests {
         assert!(!rejects_realtime(""));
     }
 
-    fn fake_engine(name: &str, script: &str) -> std::path::PathBuf {
+    fn fake_engine(name: &str, unix_script: &str, windows_script: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("navigera-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("fake-moli");
-        std::fs::write(&bin, script).unwrap();
         #[cfg(unix)]
         {
+            let _ = windows_script;
+            let bin = dir.join("fake-moli");
+            std::fs::write(&bin, unix_script).unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bin
         }
-        bin
+        #[cfg(windows)]
+        {
+            let _ = unix_script;
+            // Windows cannot execute a shebang script (os error 193);
+            // a .bat file runs through cmd.exe.
+            let bin = dir.join("fake-moli.bat");
+            std::fs::write(&bin, windows_script).unwrap();
+            bin
+        }
     }
 
     #[test]
     fn a_server_that_exits_before_listening_fails_at_once() {
-        let bin = fake_engine("fake-engine-exits", "#!/bin/sh\necho 'fake engine: cannot start (test)' >&2\nexit 2\n");
+        let bin = fake_engine(
+            "fake-engine-exits",
+            "#!/bin/sh\necho 'fake engine: cannot start (test)' >&2\nexit 2\n",
+            "@echo off\r\necho fake engine: cannot start (test) 1>&2\r\nexit /b 2\r\n",
+        );
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let started = std::time::Instant::now();
         let err = match Browser::launch_server(rt.handle(), CdpServer::Moli, bin.to_str().unwrap()) {
@@ -1259,7 +1273,9 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
         let msg = format!("{err:#}");
         assert!(msg.contains("fake engine: cannot start (test)"), "{msg}");
-        assert!(msg.contains("exit status: 2"), "{msg}");
+        // ExitStatus displays as "exit status: 2" on Unix, "exit code: 2"
+        // on Windows.
+        assert!(msg.contains("exit status: 2") || msg.contains("exit code: 2"), "{msg}");
     }
 
     #[test]
@@ -1271,6 +1287,7 @@ mod tests {
         let bin = fake_engine(
             "fake-engine-fallback",
             "#!/bin/sh\ncase \"$*\" in\n  *--realtime*) echo \"error: unexpected argument '--realtime' found\" >&2; exit 2;;\n  *) echo 'fake engine: layout-only run also failed (test)' >&2; exit 2;;\nesac\n",
+            "@echo off\r\necho %* | findstr /C:\"--realtime\" >nul\r\nif %errorlevel%==0 (\r\n  echo error: unexpected argument '--realtime' found 1>&2\r\n  exit /b 2\r\n)\r\necho fake engine: layout-only run also failed (test) 1>&2\r\nexit /b 2\r\n",
         );
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let started = std::time::Instant::now();
