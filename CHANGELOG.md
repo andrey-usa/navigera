@@ -102,6 +102,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A navigation the browser refuses names that browser: on Lightpanda the
+  unsafe-port error said "Chrome refuses to open that port".
 - `network` over chromedriver 158's WebDriver BiDi could list a redirect's
   target with the redirect's status (`302` for a page that answered
   `200 OK`), about once in 400 redirects on macOS: chromium-bidi 17 gives
