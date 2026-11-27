@@ -57,6 +57,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # Full history: the baseline step below checks a base ref out of
+          # the local objects, and GitHub does not serve a bare SHA fetch
+          # (`git fetch origin <sha>` -> "couldn't find remote ref").
+          fetch-depth: 0
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
@@ -192,8 +196,11 @@ jobs:
         # .cargo/config.toml from the working directory, and the baseline's
         # build settings are part of what the A/B compares.
         run: |
-          git fetch --depth=1 origin "$BASELINE_REF"
-          git worktree add /tmp/nv-baseline FETCH_HEAD
+          # A bare SHA is not fetchable from GitHub, so take the base from
+          # the local objects (the checkout above is full history); a branch
+          # or tag name still fetches as before.
+          git cat-file -e "$BASELINE_REF" 2>/dev/null || git fetch --depth=1 origin "$BASELINE_REF"
+          git worktree add /tmp/nv-baseline "$BASELINE_REF"
           cd /tmp/nv-baseline
           # A released tree: a warning a newer cargo has for it can't be
           # fixed there, so it is not denied there.

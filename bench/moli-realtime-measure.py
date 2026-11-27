@@ -89,7 +89,11 @@ def main() -> int:
     ap.add_argument("--label", required=True)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
-    nv = str(Path(args.binary).resolve())
+    binary = Path(args.binary)
+    if not binary.is_file():
+        print(f"binary is not an existing file: {args.binary}", file=sys.stderr)
+        return 1
+    nv = str(binary.resolve())
     env = dict(os.environ)
     env["MOLI_BIN"] = str(Path(args.moli_bin).resolve())
     env["NAVIGERA_TIMINGS"] = "1"
@@ -122,7 +126,16 @@ def main() -> int:
             print(proc.stdout + proc.stderr, file=sys.stderr)
             return 1
         info = json.loads(proc.stdout)
-        log_path = Path(info["log"])
+        # `start` prints the bare object by default, but with
+        # NAVIGERA_OUTPUT=json (set by bench.yml) it wraps it:
+        # {"id": null, "ok": true, "result": {...}}.
+        if "log" not in info and isinstance(info.get("result"), dict):
+            info = info["result"]
+        try:
+            log_path = Path(info["log"])
+        except KeyError:
+            print(f"start output has no log path: {proc.stdout}", file=sys.stderr)
+            return 1
 
         def nv_call(*a):
             return run([nv, "--session", session, *a], env)
