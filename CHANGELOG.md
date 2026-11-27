@@ -20,7 +20,11 @@ All notable changes to this project are documented here. The format follows
   [issue #27](https://github.com/andrey-usa/navigera/issues/27) — a button a
   script adds, then a scroll — now reads its box at once and clicks it, and
   `getBoundingClientRect()` follows the scroll (verified locally against
-  Moli 1.1.28; the Moli leg of `tests/cdp_servers.rs` passes).
+  Moli 1.1.28; the Moli leg of `tests/cdp_servers.rs` passes). Measured on
+  CI in [bench 45954451657](https://github.com/andrey-usa/navigera/actions/runs/45954451657)
+  (median of 10, Moli 1.1.28 both arms): idle Moli CPU 0.4% vs 0.3% of one
+  core, text on a 4,509-node page 12.6 vs 125.9 ms; the one loss is goto on
+  the small page, 5.59 → 13.67 ms on all 10 reps.
 - The static Linux binaries reserve mimalloc's memory 32 MiB at a time
   instead of 1 GiB. Every CLI call is a process, and some machines run an
   agent that spends CPU on each process mapping that much: on GitHub's
