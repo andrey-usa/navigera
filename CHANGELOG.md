@@ -11,7 +11,12 @@ All notable changes to this project are documented here. The format follows
 - The Moli engine now starts `moli serve --layout --realtime` (Moli
   1.1.28+, which rejects the flag before that): with realtime layout the
   probe finds Moli's layout live, so navigera takes no 1x1 screenshot
-  before it reads boxes or text. The November 22 example from
+  before it reads boxes or text. Moli before 1.1.28 is started with
+  `--layout` only instead, with a launch note saying so, and still works
+  through the 1x1 refresh. A CDP-server engine (Moli, Obscura,
+  Lightpanda) whose server process exits before it listens now fails the
+  launch at once with its exit status and the last lines of its output,
+  instead of waiting the full 60 s. The November 22 example from
   [issue #27](https://github.com/andrey-usa/navigera/issues/27) — a button a
   script adds, then a scroll — now reads its box at once and clicks it, and
   `getBoundingClientRect()` follows the scroll (verified locally against

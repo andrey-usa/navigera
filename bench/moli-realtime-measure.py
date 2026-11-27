@@ -45,7 +45,7 @@ APPEND_LATE = (
 )
 LATE_RECT = "JSON.stringify(document.getElementById('late').getBoundingClientRect())"
 BUY_RECT = "JSON.stringify(document.getElementById('buy').getBoundingClientRect())"
-N_REPS = 5
+N_REPS = 10
 IDLE_WINDOWS = 3
 IDLE_SECS = 10
 HTTP_PORT = 8931

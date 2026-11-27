@@ -89,7 +89,9 @@ one as the default engine (`NAVIGERA_ENGINE`), the rest of the suite shows
 how far each is from Chrome; the differences agents meet are listed in
 [docs/navigera.md](navigera.md#obscura-and-moli). Moli's layout now stays
 current (`--realtime`, 1.1.28+), so content a page's scripts render later
-has a box to click at once; what remains is mostly surface: refs are
+has a box to click at once; 1.1.28 is the floor for live layout, and older
+Moli still works — navigera starts it with `--layout` only and refreshes
+layout with a 1x1 screenshot. What remains is mostly surface: refs are
 Moli's large node ids, a `<select>`'s value in `ax` is the selected
 option's value rather than its label, and a few roles differ from
 Chrome's.

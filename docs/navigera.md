@@ -760,8 +760,10 @@ take Chrome's paths; each session gets a browser of its own.
   `moli serve --layout --realtime`: without `--layout` Moli answers geometry from a
   fixed compatibility layout and paints nothing. `--realtime` (1.1.28+; it
   takes precedence over `--layout`) keeps geometry current without a
-  screenshot, and Moli before 1.1.28 rejects the flag, so 1.1.28 is the
-  floor. The binary comes from
+  screenshot. Moli before 1.1.28 rejects the flag at startup, so navigera
+  starts it with `--layout` only and says so in the launch note: 1.1.28 is
+  the floor for live layout, and older Moli still works, with the 1x1
+  refresh below. The binary comes from
   `$MOLI_BIN` or `PATH`, or from `--chromium`. Tabs, popups (as tabs),
   dialogs and screenshots work as on Chrome. Differences:
   - layout: with `--realtime` Moli keeps geometry current, so an element a

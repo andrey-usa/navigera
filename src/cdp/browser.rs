@@ -99,6 +99,72 @@ pub struct Browser {
     node_client: Mutex<Option<CdpClient>>,
 }
 
+/// The last lines of a server's output file, for "why did it die" errors.
+fn log_tail(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path)
+        .map(|s| {
+            let lines: Vec<&str> = s.lines().collect();
+            let start = lines.len().saturating_sub(30);
+            lines[start..].join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// Spawn a CDP server engine and wait for its `/json/version` endpoint.
+/// If the server process exits before it listens, fail at once with its
+/// exit status and the last lines of its output — no 60 s wait for a
+/// process that is already dead. That is the whole point: a bad flag (an
+/// old Moli rejecting `--realtime`) or a missing library shows up in under
+/// a second instead of after the full timeout.
+fn try_launch_server(
+    program: &str,
+    args: &[String],
+    server: CdpServer,
+    port: u16,
+    log_path: &std::path::Path,
+) -> Result<(std::process::Child, String)> {
+    let log_file = crate::session::create_log(log_path).ok();
+    let log_file_err = log_file.as_ref().and_then(|f| f.try_clone().ok());
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
+        .args(args)
+        .envs(serve_env(server).iter().copied())
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
+        .stderr(log_file_err.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
+        .spawn()
+        .with_context(|| format!("spawn `{program} {}`", args.join(" ")))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match transport::poll_ws_url_standalone(port, Duration::from_millis(250)) {
+            Ok(url) => return Ok((child, url)),
+            Err(e) => {
+                if let Ok(Some(status)) = child.try_wait() {
+                    let tail = log_tail(log_path);
+                    anyhow::bail!(
+                        "`{program} {}` exited ({status}) before listening on 127.0.0.1:{port}\nlog tail ({log_path:?}):\n{tail}",
+                        args.join(" ")
+                    );
+                }
+                if std::time::Instant::now() >= deadline {
+                    let tail = log_tail(log_path);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    anyhow::bail!(
+                        "`{program} {}` did not come up on 127.0.0.1:{port}: {e:#}\nlog tail ({log_path:?}):\n{tail}",
+                        args.join(" ")
+                    );
+                }
+            }
+        }
+    }
+}
+
 impl Browser {
     /// Launch a CDP server engine's `serve` directly (no Chromium flags, no
     /// shim) and connect the browser-level CDP session.
@@ -119,38 +185,27 @@ impl Browser {
         let log_path = crate::session::private_temp_dir()
             .unwrap_or_else(|_| std::env::temp_dir())
             .join(format!("{name}-serve-{port}.log"));
-        let log_file = crate::session::create_log(&log_path).ok();
-        let log_file_err = log_file.as_ref().and_then(|f| f.try_clone().ok());
-        let mut cmd = std::process::Command::new(&program);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-        let mut child = cmd
-            .args(&args)
-            .envs(serve_env(server).iter().copied())
-            .stdin(std::process::Stdio::null())
-            .stdout(log_file.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
-            .stderr(log_file_err.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
-            .spawn()
-            .with_context(|| format!("spawn `{program} {}`", args.join(" ")))?;
-        let ws_url = match transport::poll_ws_url_standalone(port, Duration::from_secs(60)) {
-            Ok(url) => url,
+        // Old Moli (before 1.1.28) rejects --realtime at startup: run it
+        // once more with --layout only. It still works; the probe falls
+        // back to the 1x1 refresh for layout.
+        let (child, ws_url) = match try_launch_server(&program, &args, server, port, &log_path) {
+            Ok(v) => v,
             Err(e) => {
-                let log_tail = std::fs::read_to_string(&log_path)
-                    .map(|s| {
-                        let lines: Vec<&str> = s.lines().collect();
-                        let start = lines.len().saturating_sub(30);
-                        lines[start..].join("\n")
-                    })
-                    .unwrap_or_default();
-                let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!(
-                    "`{program} {}` did not come up on 127.0.0.1:{port}: {e:#}\nlog tail ({log_path:?}):\n{log_tail}",
-                    args.join(" ")
-                );
+                if server == CdpServer::Moli && rejects_realtime(&log_tail(&log_path)) {
+                    let version = moli_version(&program);
+                    let who = if version.is_empty() { "Moli".to_string() } else { format!("Moli {version}") };
+                    // Unconditional, not timing::log: this is a one-time
+                    // degradation notice, not routine launch chatter, and
+                    // the user only learns their Moli is old from it. It
+                    // lands in the session log.
+                    eprintln!(
+                        "[browser] {who} has no --realtime: started with --layout; layouts are refreshed by a 1x1 screenshot; update Moli to 1.1.28+"
+                    );
+                    let fallback = moli_serve_args_layout_only(port);
+                    try_launch_server(&program, &fallback, server, port, &log_path)?
+                } else {
+                    return Err(e);
+                }
             }
         };
         crate::timing::log(&format!("[browser] {name} serve on 127.0.0.1:{port} -> {ws_url}"));
@@ -1037,11 +1092,40 @@ fn obscura_serve_args(port: u16) -> Vec<String> {
 /// keeps geometry current without a screenshot, so a script-added element
 /// has a box and `innerText` at the next read and boxes follow a scroll;
 /// it takes precedence over `--layout`, which stays for the first layout.
-/// Moli before 1.1.28 rejects the unknown flag, so 1.1.28 is the floor.
-/// Whether the engine's layout is live is still probed, not assumed.
+/// Moli before 1.1.28 rejects the unknown flag, so 1.1.28 is the floor for
+/// live layout — older Moli still works, via the fallback below and the
+/// 1x1 refresh. Whether the engine's layout is live is still probed, not
+/// assumed.
 fn moli_serve_args(port: u16) -> Vec<String> {
     let port = port.to_string();
     ["serve", "--host", "127.0.0.1", "--port", &port, "--layout", "--realtime"].iter().map(|s| s.to_string()).collect()
+}
+
+/// The same launch without `--realtime`: what old Moli runs after it
+/// rejects the flag (see `launch_server`).
+fn moli_serve_args_layout_only(port: u16) -> Vec<String> {
+    moli_serve_args(port).into_iter().filter(|a| a != "--realtime").collect()
+}
+
+/// clap's rejection of an unknown `--realtime` flag, as Moli before 1.1.28
+/// prints it: `error: unexpected argument '--realtime' found`.
+fn rejects_realtime(log_tail: &str) -> bool {
+    log_tail.contains("unexpected argument '--realtime'")
+}
+
+/// Moli's version (`moli 1.1.27` -> `1.1.27`); best effort, empty when the
+/// binary cannot say.
+fn moli_version(bin: &str) -> String {
+    std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8(o.stdout)
+                .ok()
+                .and_then(|s| s.split_whitespace().last().map(|v| v.trim_start_matches('v').to_string()))
+        })
+        .unwrap_or_default()
 }
 
 /// `lightpanda serve` arguments. `serve` loads no sub-resources by default:
@@ -1135,5 +1219,69 @@ mod tests {
         assert!(args.iter().any(|a| a == "--layout"), "{args:?}");
         assert!(args.iter().any(|a| a == "--realtime"), "{args:?}");
         assert!(serve_env(CdpServer::Obscura).is_empty() && serve_env(CdpServer::Moli).is_empty());
+        let layout_only = moli_serve_args_layout_only(9335);
+        assert!(layout_only.iter().any(|a| a == "--layout"), "{layout_only:?}");
+        assert!(!layout_only.iter().any(|a| a == "--realtime"), "{layout_only:?}");
+    }
+
+    #[test]
+    fn rejects_realtime_spots_clap() {
+        assert!(rejects_realtime(
+            "error: unexpected argument '--realtime' found\n\nUsage: moli serve --host <HOST> --port <PORT> --layout"
+        ));
+        assert!(!rejects_realtime("error: something else went wrong"));
+        assert!(!rejects_realtime(""));
+    }
+
+    fn fake_engine(name: &str, script: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("navigera-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("fake-moli");
+        std::fs::write(&bin, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        bin
+    }
+
+    #[test]
+    fn a_server_that_exits_before_listening_fails_at_once() {
+        let bin = fake_engine("fake-engine-exits", "#!/bin/sh\necho 'fake engine: cannot start (test)' >&2\nexit 2\n");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let started = std::time::Instant::now();
+        let err = match Browser::launch_server(rt.handle(), CdpServer::Moli, bin.to_str().unwrap()) {
+            Ok(_) => panic!("launch_server should have failed"),
+            Err(e) => e,
+        };
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
+        let msg = format!("{err:#}");
+        assert!(msg.contains("fake engine: cannot start (test)"), "{msg}");
+        assert!(msg.contains("exit status: 2"), "{msg}");
+    }
+
+    #[test]
+    fn old_moli_falls_back_to_layout_only() {
+        // First spawn prints clap's rejection and exits 2; the relaunch
+        // (no --realtime) prints a different error and exits 2. The launch
+        // must fail fast on the layout-only command line, proving the
+        // relaunch ran.
+        let bin = fake_engine(
+            "fake-engine-fallback",
+            "#!/bin/sh\ncase \"$*\" in\n  *--realtime*) echo \"error: unexpected argument '--realtime' found\" >&2; exit 2;;\n  *) echo 'fake engine: layout-only run also failed (test)' >&2; exit 2;;\nesac\n",
+        );
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let started = std::time::Instant::now();
+        let err = match Browser::launch_server(rt.handle(), CdpServer::Moli, bin.to_str().unwrap()) {
+            Ok(_) => panic!("launch_server should have failed"),
+            Err(e) => e,
+        };
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--layout"), "{msg}");
+        assert!(!msg.contains("--realtime"), "{msg}");
+        assert!(msg.contains("layout-only run also failed"), "{msg}");
     }
 }
