@@ -88,6 +88,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.27"
+          # The Go contenders build from their committed go.sum (-mod=readonly).
+          cache-dependency-path: |
+            bench/ladder/contenders/chromedp/go.sum
+            bench/ladder/contenders/gorod/go.sum
 
       - name: Chrome version
         run: |

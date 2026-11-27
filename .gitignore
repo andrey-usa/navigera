@@ -1,7 +1,6 @@
 /target
 bench/ladder/contenders/chromiumoxide/target
 bench/ladder/contenders/chromey/target
-bench/ladder/contenders/chromey/Cargo.lock
 .env
 *.log
 /reports/
