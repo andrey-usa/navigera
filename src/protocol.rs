@@ -4382,10 +4382,19 @@ impl Driver {
         // A recorded command's history entry wants what the page says
         // after it: read here, with the URL and the title, in one round
         // trip instead of one more.
+        // A click read them with its last look at the page, and nothing
+        // has happened on the connection since: no round trip for them.
+        // Taken before the turn below, which is a command of its own.
+        let tail = self.session.take_tail();
         if self.turn_wanted.take() {
             self.session.turn_start(ACTION_TRAFFIC_GRACE);
         }
-        let (url, title) = if self.said.borrow().is_some() {
+        let (url, title) = if let Some((url, title, said)) = tail {
+            if self.said.borrow().is_some() {
+                *self.said.borrow_mut() = Some(said);
+            }
+            (url, title)
+        } else if self.said.borrow().is_some() {
             let (url, title, said) = self.session.url_title_and(PAGE_SAYS);
             *self.said.borrow_mut() = Some(said);
             (url, title)
@@ -5376,9 +5385,24 @@ impl Driver {
         } else if matches!(command, Command::Eval { .. }) {
             // A `Runtime` command itself: its arm needs no round trip.
             self.session.mark_action_pipelined();
+        } else if matches!(command, Command::Click { .. }) {
+            // Its look at the element is `Runtime` commands, run after the
+            // arm: the arm's answer is read before the press, not waited
+            // for on its own.
+            self.session.mark_action_posted();
         } else if command.is_action() {
             self.session.mark_action();
         }
+        // A click's last look at the page can bring the state its answer
+        // reports (see `state_json`).
+        let tail = matches!(command, Command::Click { until_gone: None, .. }).then(|| {
+            if self.said.borrow().is_some() {
+                PAGE_SAYS
+            } else {
+                "null"
+            }
+        });
+        self.session.want_tail(tail);
         if command.steers() {
             self.session.mark_steered();
         }

@@ -1591,9 +1591,13 @@ fn what_a_page_made_clickable_has_a_ref_that_clicks() {
     for what in ["Pass-through", "#empty", "#guard"] {
         assert!(!ax.lines().any(|l| l.contains("clickable") && l.contains(what)), "{what}: {ax}");
     }
-    s.ok(&["click", &send]);
+    // The click's own answer has the title its handler set: the state it
+    // reports is read after the press (with the press's last look).
+    let r = s.ok(&["click", &send]);
+    assert_eq!(r["title"], "send-forward", "{r}");
     assert_eq!(s.ok(&["title"]), "send-forward");
-    s.ok(&["click", &row]);
+    let r = s.ok(&["click", &row]);
+    assert_eq!(r["title"], "open KelceyQuisque", "{r}");
     assert_eq!(s.ok(&["title"]), "open KelceyQuisque");
 }
 

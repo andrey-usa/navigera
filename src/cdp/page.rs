@@ -1280,6 +1280,10 @@ const SETTLE_ARM: &str = r#"(() => {
     return c.arm();
 })()"#;
 
+/// A read made for [`Page::want_tail`]: the connection's command and event
+/// counts from before it was written, and what it read.
+type TailRead = ([u64; 2], Value);
+
 /// What decides whether [`Page::fresh_layout`] lays the page out again:
 /// the document (a random id kept in it), its DOM changes so far (a
 /// `MutationObserver` count; without one, a new value each time), its
@@ -3976,6 +3980,14 @@ pub struct Page {
     /// The navigation generation whose document holds the settle arm, plus
     /// one (0: none known); see [`SETTLE_REARM`].
     armed_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// The settle arm [`Page::mark_action_posted`] wrote, not yet answered,
+    /// and whether it was a rearm (see [`Page::arm_answered`]).
+    posted_arm: Arc<std::sync::Mutex<Option<(super::client::Posted, bool)>>>,
+    /// What an action's last look at the page also reads for the state the
+    /// answer reports (see [`Page::want_tail`]), and that read once made,
+    /// with the connection's counts from before it was written.
+    tail_also: Arc<std::sync::Mutex<Option<&'static str>>>,
+    tail_read: Arc<std::sync::Mutex<Option<TailRead>>>,
     /// Whether this tab has a device metrics override (`set viewport`, `set
     /// device`, or one sent with `cdp`): Chrome then emulates for every
     /// capture, so none is asked twice at once (see [`Page::screenshot_clip`]).
@@ -4160,6 +4172,9 @@ impl Page {
             primed: Default::default(),
             pre_journal: Default::default(),
             armed_generation: Default::default(),
+            posted_arm: Default::default(),
+            tail_also: Default::default(),
+            tail_read: Default::default(),
             metrics: Default::default(),
             layout_token: Default::default(),
         }
@@ -4702,6 +4717,7 @@ impl Page {
 
     /// An action is about to run here (see [`Shared::mark_action`]).
     pub fn mark_action(&self) {
+        self.arm_answered();
         let generation = self.nav_generation();
         self.shared.mark_action(&self.session_id, generation);
         // Baseline the DOM-change count and start counting short timers
@@ -4724,6 +4740,77 @@ impl Page {
         self.armed_generation.store(generation + 1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// [`Page::mark_action`] for an action whose first commands here are
+    /// `Runtime` ones (a click's look at its element), which the renderer
+    /// runs after the arm: the arm is written without waiting, and
+    /// [`Page::arm_answered`], called before the action's first `Input`
+    /// command, reads its answer, which is in by then. The arm stops
+    /// costing a round trip of its own, and a rearm that finds no arm
+    /// still gets the whole one before the press, as with `mark_action`.
+    pub fn mark_action_posted(&self) {
+        self.arm_answered();
+        let generation = self.nav_generation();
+        self.shared.mark_action(&self.session_id, generation);
+        let (expression, rearm) = self.arm_expression(generation);
+        let posted = self.client.post_kept(
+            "Runtime.evaluate",
+            json!({ "expression": expression, "returnByValue": true }),
+            Some(&self.session_id),
+        );
+        *self.posted_arm.lock().unwrap() = Some((posted, rearm));
+        self.armed_generation.store(generation + 1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The answer to the arm [`Page::mark_action_posted`] wrote, if one is
+    /// still unread: waited for up to 500 ms, as `mark_action` waits. Its
+    /// commands to another renderer (an element in a cross-origin frame)
+    /// may be answered first; this wait keeps the press after the arm
+    /// there too. A rearm that found no arm in the document (-1) sends the
+    /// whole of [`SETTLE_ARM`] now.
+    pub fn arm_answered(&self) {
+        let Some((posted, rearm)) = self.posted_arm.lock().unwrap().take() else {
+            return;
+        };
+        let answer = self.block_on(posted.answer(Duration::from_millis(500)));
+        if rearm && answer.ok().and_then(|r| r.pointer("/result/value").and_then(Value::as_i64)) == Some(-1) {
+            let _ = self.block_on(self.client.send_harmless(
+                "Runtime.evaluate",
+                json!({ "expression": SETTLE_ARM, "returnByValue": true }),
+                Some(&self.session_id),
+                Duration::from_millis(500),
+            ));
+        }
+    }
+
+    /// The action about to run here may read `[location.href,
+    /// document.title, also]` with its last look at the page (a click's
+    /// look at where its press arrived), so that the state its answer
+    /// reports needs no round trip of its own (see [`Page::take_tail`]).
+    /// `also` is an expression; one that throws gives null.
+    pub fn want_tail(&self, also: &'static str) {
+        *self.tail_also.lock().unwrap() = Some(also);
+        *self.tail_read.lock().unwrap() = None;
+    }
+
+    /// What the last look read for [`Page::want_tail`], if the connection
+    /// has carried nothing since that read was written: no other command,
+    /// and no event of any tab (a navigation, a request, a dialog, a log
+    /// line: anything the page did since). Otherwise None, and the caller
+    /// reads the page as it would have.
+    pub fn take_tail(&self) -> Option<Value> {
+        self.tail_also.lock().unwrap().take();
+        let (before, read) = self.tail_read.lock().unwrap().take()?;
+        (self.client.commands_sent() == before[0] + 1 && self.client.events_sent() == before[1]).then_some(read)
+    }
+
+    /// The expression [`Page::want_tail`] adds to a look, if one is wanted.
+    fn tail_expression(&self) -> Option<String> {
+        let also = (*self.tail_also.lock().unwrap())?;
+        Some(format!(
+            "(() => {{ let s = null; try {{ s = {also}; }} catch (_) {{}} return [location.href, document.title, s]; }})()"
+        ))
+    }
+
     /// The arm to send: the whole of [`SETTLE_ARM`] in a document that may
     /// not have it yet, else [`SETTLE_REARM`] (true). The navigation
     /// generation can trail a new document by an event; a rearm sent there
@@ -4744,6 +4831,7 @@ impl Page {
     /// that starts with an `Input` command, which the browser process
     /// handles and may deliver to the page before the arm has run.
     pub fn mark_action_pipelined(&self) {
+        self.arm_answered();
         let generation = self.nav_generation();
         self.shared.mark_action(&self.session_id, generation);
         let (expression, _) = self.arm_expression(generation);
@@ -6079,6 +6167,7 @@ impl Page {
             )
         };
         if opts.force {
+            self.arm_answered();
             return dom(self);
         }
         // Watch what the click changes (not on Lightpanda: no layout, so its
@@ -6121,7 +6210,11 @@ impl Page {
                 timeout,
             )
         };
-        let mut point = prep(&settle)?;
+        let prepared = prep(&settle);
+        // Everything up to here ran in the page after the action's settle
+        // arm (see `mark_action_posted`); the press must not overtake it.
+        self.arm_answered();
+        let mut point = prepared?;
         // An engine that keeps its first layout (Moli) shows no box for an
         // element a script added while the click waited for it: once more
         // after laying the page out again, with no second wait.
@@ -6584,8 +6677,17 @@ impl Page {
             };
             let listened = if first { path_listeners(true) } else { "null".to_string() };
             let api = first;
-            let expression =
-                format!("[window.__nvSeen, window.__nvMissed, window.__nvOff && window.__nvOff(), {listened}{also}]");
+            // The state the answer reports, read with this look (the last
+            // one may be the action's last read; see `want_tail`).
+            let tail = self.tail_expression();
+            let (also, tail_part) = match &tail {
+                Some(t) => (if also.is_empty() { ", null".to_string() } else { also }, format!(", {t}")),
+                None => (also, String::new()),
+            };
+            let expression = format!(
+                "[window.__nvSeen, window.__nvMissed, window.__nvOff && window.__nvOff(), {listened}{also}{tail_part}]"
+            );
+            let before = [self.client.commands_sent(), self.client.events_sent()];
             let seen = self
                 .send(
                     "Runtime.evaluate",
@@ -6595,6 +6697,9 @@ impl Page {
                 .ok()
                 .map(|r| {
                     let v = r.pointer("/result/value");
+                    if let Some(read) = v.and_then(|v| v.get(5)).filter(|t| tail.is_some() && t.is_array()) {
+                        *self.tail_read.lock().unwrap() = Some((before, read.clone()));
+                    }
                     if first {
                         heard = v.and_then(|v| v.get(3)).and_then(Value::as_u64);
                     }

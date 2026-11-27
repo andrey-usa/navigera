@@ -72,6 +72,32 @@ enum Refusal {
     Other(String),
 }
 
+/// A command [`CdpClient::post_kept`] wrote, and the way to its answer.
+pub struct Posted {
+    method: String,
+    /// None: nothing was written (the connection had closed).
+    answer: Option<oneshot::Receiver<Result<Value, Refusal>>>,
+}
+
+impl Posted {
+    /// What the browser answered, waiting up to `timeout` for it. A
+    /// harmless command's errors (see [`CdpClient::send_harmless`]): it
+    /// leaves no effect unproven.
+    pub async fn answer(self, timeout: Duration) -> Result<Value> {
+        let method = self.method;
+        let Some(rx) = self.answer else {
+            return Err(NeverReached(method).into());
+        };
+        match tokio::time::timeout(timeout, rx).await {
+            Err(_) => anyhow::bail!("{NO_ANSWER} within {} ms ({method})", timeout.as_millis()),
+            Ok(Err(_)) | Ok(Ok(Err(Refusal::Closed))) => anyhow::bail!("{CLOSED} ({method})"),
+            Ok(Ok(Err(Refusal::NeverReached))) => Err(NeverReached(method).into()),
+            Ok(Ok(Err(Refusal::Other(e)))) => anyhow::bail!("the browser refused {method}: {e}"),
+            Ok(Ok(Ok(value))) => Ok(value),
+        }
+    }
+}
+
 /// A command waiting for its answer, the tab session it went to, and
 /// whether its result is handed over as JSON text (see [`TEXT_RESULT`]).
 type Pending = HashMap<u64, (Option<String>, bool, Responder)>;
@@ -482,15 +508,24 @@ impl CdpClient {
     /// saves a round trip. A closed connection: nothing is written, and the
     /// next command meets it.
     pub fn post_harmless(&self, method: &str, params: Value, session_id: Option<&str>) {
+        // The answer is read by the reader task as any other and dropped
+        // with the receiver; a connection that closes first answers it
+        // CLOSED to no one.
+        drop(self.post_kept(method, params, session_id));
+    }
+
+    /// [`CdpClient::post_harmless`], keeping the way to its answer: the
+    /// command is written now, and [`Posted::answer`] waits for what the
+    /// browser said, which is already in when a command written after it
+    /// to the same renderer has been answered.
+    pub fn post_kept(&self, method: &str, params: Value, session_id: Option<&str>) -> Posted {
         trace(method, &params);
+        let unsent = Posted { method: method.to_string(), answer: None };
         if self.inner.closed.load(Ordering::SeqCst) {
-            return;
+            return unsent;
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
-        // The answer is read by the reader task as any other and dropped
-        // here, with its receiver; a connection that closes first answers
-        // it CLOSED to no one.
-        let (tx, _) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let text = TEXT_RESULT.contains(&method);
         self.inner.pending.lock().unwrap().insert(id, (session_id.map(str::to_string), text, tx));
         let mut msg = serde_json::json!({ "id": id, "method": method, "params": params });
@@ -500,7 +535,9 @@ impl CdpClient {
         let sent = self.inner.writer.lock().unwrap().as_ref().is_some_and(|w| w.send(msg.to_string()).is_ok());
         if !sent {
             self.inner.pending.lock().unwrap().remove(&id);
+            return unsent;
         }
+        Posted { method: method.to_string(), answer: Some(rx) }
     }
 
     fn unproven(&self, counted: bool) {
@@ -616,6 +653,13 @@ impl CdpClient {
     /// How many events have been broadcast to subscribers so far.
     pub fn events_sent(&self) -> u64 {
         self.inner.events_sent.load(Ordering::SeqCst)
+    }
+
+    /// How many commands have been given an id so far (written, or meant
+    /// to be): with [`CdpClient::events_sent`], whether the connection has
+    /// carried anything either way since a moment.
+    pub fn commands_sent(&self) -> u64 {
+        self.inner.next_id.load(Ordering::SeqCst) - 1
     }
 
     /// Subscribe to CDP events (method-keyed messages without `id`).

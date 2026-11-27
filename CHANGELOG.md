@@ -48,6 +48,14 @@ All notable changes to this project are documented here. The format follows
   91.95 ms (agent-browser 99.56), and a click on the small listing page
   11.77 and 10.47 ms (agent-browser 7.71)
   ([bench 45946428618](https://github.com/andrey-usa/navigera/actions/runs/45946428618)).
+- A click makes two round trips to the page fewer. The page's timers and
+  DOM changes start being counted for the click with the first command
+  of its look at the element instead of one before it, and the press
+  still waits until that has happened. The URL, title, heading and
+  status messages its answer reports are read with its last look at
+  where the press arrived, when nothing has crossed the connection
+  since; a click that navigates, logs, fetches or opens anything reads
+  them again after it, as before.
 
 ### Fixed
 

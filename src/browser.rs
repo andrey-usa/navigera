@@ -3653,6 +3653,29 @@ impl BrowserSession {
         self.active_tab().mark_action_pipelined();
     }
 
+    /// [`cdp::Page::mark_action_posted`] on the active tab.
+    pub fn mark_action_posted(&self) {
+        self.active_tab().mark_action_posted();
+    }
+
+    /// [`cdp::Page::want_tail`] on the active tab: the command about to run
+    /// may read the URL, the title and what `also` gives with its last look
+    /// (None: it reads none of them).
+    pub fn want_tail(&self, also: Option<&'static str>) {
+        match also {
+            Some(also) => self.active_tab().want_tail(also),
+            None => drop(self.active_tab().take_tail()),
+        }
+    }
+
+    /// [`cdp::Page::take_tail`] on the active tab: the URL, the title and
+    /// what `also` gave, as [`Self::url_title_and`] would read them now.
+    pub fn take_tail(&self) -> Option<(String, String, Option<serde_json::Value>)> {
+        let v = self.active_tab().take_tail()?;
+        let get = |i: usize| v.get(i).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        Some((get(0), get(1), v.get(2).filter(|s| !s.is_null()).cloned()))
+    }
+
     /// [`cdp::Page::settle_unhook`] on the active tab.
     pub fn settle_unhook(&self) {
         self.active_tab().settle_unhook();
@@ -4031,8 +4054,13 @@ impl BrowserSession {
         timeout_ms: Option<f64>,
     ) -> Result<serde_json::Value> {
         let (wait, timeout) = self.element_budget(timeout_ms);
-        let before = self.active_tab().activity();
-        let point = self.active_tab().click(target, opts, wait, timeout)?;
+        let tab = self.active_tab();
+        let before = tab.activity();
+        let point = tab.click(target, opts, wait, timeout);
+        // A click that failed before its press leaves its posted settle
+        // arm unread (see `mark_action_posted`).
+        tab.arm_answered();
+        let point = point?;
         if point.get("nav").and_then(|v| v.as_bool()) == Some(true) {
             self.active_tab().navigation_started_since(before, NAV_GRACE);
         }
