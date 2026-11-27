@@ -282,6 +282,33 @@ fn acme_supply_on_lightpanda() {
     assert!(support.contains("button \"Submit request\" [ref="), "{support}");
 }
 
+/// A page whose tree is larger than tungstenite's default 16 MiB frame:
+/// Lightpanda sends such an answer in one frame (30.6 MB for the bench's
+/// 60,051-element page), and the session read it instead of losing the
+/// connection ("the browser is gone").
+#[test]
+fn a_page_whose_tree_is_larger_than_a_websocket_frame_is_read() {
+    let Some(bin) = lightpanda() else {
+        eprintln!("skipping: no lightpanda binary");
+        return;
+    };
+    let Some(site) = start_site("tests/fixtures/edge_site.py", &["0"]) else {
+        eprintln!("skipping: python3 not available for the fixture site");
+        return;
+    };
+    let agent = Agent::new("large", bin);
+    agent.ok(&["goto", &format!("{}/slow?ms=0", site.base)]);
+    let rows = agent.ok(&[
+        "eval",
+        "(() => { const pad = 'x'.repeat(60); for (let i = 0; i < 150000; i++) { const d = document.createElement('div'); \
+         d.textContent = 'row ' + i + ' ' + pad; document.body.appendChild(d); } return document.body.children.length })()",
+    ]);
+    assert!(rows.as_u64().is_some_and(|n| n >= 150000), "{rows}");
+    let ax = agent.ax(&["--limit", "20"]);
+    assert!(ax.contains("row 0"), "{ax}");
+    assert_eq!(agent.ok(&["eval", "1 + 1"]), 2, "the session lived through the large answer");
+}
+
 #[test]
 fn start_refuses_a_session_running_another_engine() {
     let Some(bin) = lightpanda() else {

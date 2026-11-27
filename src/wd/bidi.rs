@@ -148,8 +148,12 @@ pub(crate) fn open_ws(url: &str, timeout: Duration) -> Result<WebSocket<MaybeTls
         .with_context(|| format!("could not connect to the BiDi endpoint {shown}"))?;
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(timeout)).ok();
-    let (ws, _) = tungstenite::client::client(url, MaybeTlsStream::Plain(stream))
-        .map_err(|e| anyhow!("BiDi handshake with {shown} failed: {e}"))?;
+    let (ws, _) = tungstenite::client::client_with_config(
+        url,
+        MaybeTlsStream::Plain(stream),
+        Some(crate::cdp::client::ws_config()),
+    )
+    .map_err(|e| anyhow!("BiDi handshake with {shown} failed: {e}"))?;
     Ok(ws)
 }
 

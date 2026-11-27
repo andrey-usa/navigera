@@ -59,6 +59,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A browser's answer of more than 16 MiB over a WebSocket (an engine that
+  is its own CDP server, an attached browser, WebDriver BiDi) ended the
+  connection, and the session read as "the browser is gone": Lightpanda
+  sends a large page's tree as one frame (30.6 MB for a page of 60,051
+  elements). Every such connection now reads messages up to 256 MiB, in
+  one frame or several; a larger one still closes it, and the session's
+  log says how large it was and how to read a part of the page instead.
 - `quit --close-browser` on a `--profile` session could answer while
   Chrome was still writing the profile down. It waited for the DevTools
   port to close, which happens early in a shutdown, and for

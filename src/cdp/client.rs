@@ -31,6 +31,38 @@ pub const SESSION_GONE: &str = "Session with given id not found";
 /// Start of the error for a command the browser did not answer in time.
 pub const NO_ANSWER: &str = "the browser did not answer";
 
+/// The largest message read from a browser over a WebSocket, in one frame
+/// or several. A page's tree on a large page is tens of megabytes
+/// (Lightpanda's `LP.getSemanticTree` on a 60,051-element page: 30.6 MB in
+/// one frame), and tungstenite's defaults (16 MiB a frame, 64 MiB a
+/// message) closed the connection on it, which read as the browser gone.
+/// A larger message still closes it, and the session log says why.
+pub const WS_MESSAGE_MAX: usize = 256 << 20;
+
+/// The WebSocket settings for every connection to a browser (CDP and
+/// WebDriver BiDi): tungstenite's, with [`WS_MESSAGE_MAX`] for a frame
+/// and for a message.
+pub fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(WS_MESSAGE_MAX))
+        .max_frame_size(Some(WS_MESSAGE_MAX))
+}
+
+/// Why a WebSocket read ended the connection, for the session log: a
+/// message over [`WS_MESSAGE_MAX`] is named as such.
+pub fn ws_read_failed(e: &tokio_tungstenite::tungstenite::Error) -> String {
+    use tokio_tungstenite::tungstenite::error::{CapacityError, Error};
+    match e {
+        Error::Capacity(CapacityError::MessageTooLong { size, max_size }) => format!(
+            "the browser sent a message of {} MiB, more than the {} MiB navigera reads; the connection is closed \
+             (on a page that large, read a part of it: `ax --grep <words>`, `ax --max-depth <n>` or `text --selector <css>`)",
+            size >> 20,
+            max_size >> 20
+        ),
+        e => format!("reading from the browser failed: {e}"),
+    }
+}
+
 /// Start of the error for a connection to the browser that has ended.
 pub const CLOSED: &str = "the connection to the browser closed";
 
@@ -242,18 +274,18 @@ impl CdpClient {
                 if let Some(proxy) = crate::proxy::Proxy::for_secure(&host)? {
                     let authority = format!("{host}:{}", request.uri().port_u16().unwrap_or(443));
                     let stream = proxy.tunnel(&authority).await?;
-                    return tokio_tungstenite::client_async_tls_with_config(request, stream, None, tls).await.map_err(
-                        |e| {
+                    return tokio_tungstenite::client_async_tls_with_config(request, stream, Some(ws_config()), tls)
+                        .await
+                        .map_err(|e| {
                             anyhow::anyhow!(
                                 "connect to the browser at {shown} through the proxy {}: {}",
                                 proxy.shown(),
                                 connect_error(&e)
                             )
-                        },
-                    );
+                        });
                 }
             }
-            tokio_tungstenite::connect_async_tls_with_config(ws_url, None, false, tls)
+            tokio_tungstenite::connect_async_tls_with_config(ws_url, Some(ws_config()), false, tls)
                 .await
                 .map_err(|e| anyhow::anyhow!("connect to the browser at {shown}: {}", connect_error(&e)))
         };
@@ -298,7 +330,10 @@ impl CdpClient {
                             }
                             Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
                             Some(Ok(_)) => {} // ping/pong/binary: ignore
-                            Some(Err(_)) => break,
+                            Some(Err(e)) => {
+                                eprintln!("[cdp] {}", ws_read_failed(&e));
+                                break;
+                            }
                         }
                     }
                 }
@@ -1246,6 +1281,41 @@ mod tests {
         assert!(msg.contains(CLOSED) && !msg.contains(NEVER_REACHED), "{msg}");
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(dispatches.load(Ordering::SeqCst), 1, "second mutation never dispatched, never retried");
+    }
+
+    /// A browser's answer of more than tungstenite's default 16 MiB frame
+    /// (Lightpanda sends a large page's tree as one) is read whole, not
+    /// the end of the connection.
+    #[tokio::test]
+    async fn a_websocket_answer_larger_than_sixteen_mib_in_one_frame_is_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            use futures_util::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::Message;
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let id = serde_json::from_str::<Value>(&text).unwrap()["id"].clone();
+                let big = "x".repeat(20 << 20);
+                let answer = json!({ "id": id, "result": { "value": big } }).to_string();
+                // One frame: tungstenite's writer sends a message whole.
+                ws.send(Message::Text(answer.into())).await.unwrap();
+            }
+            let _ = ws.next().await;
+        });
+        let client = CdpClient::connect_within(&format!("ws://{addr}"), T).await.unwrap();
+        let got = client.send("LP.getSemanticTree", json!({}), None, Duration::from_secs(30)).await.unwrap();
+        assert_eq!(got["value"].as_str().map(str::len), Some(20 << 20));
+        assert!(!client.is_closed());
+    }
+
+    #[test]
+    fn a_message_over_the_bound_is_named_in_the_log() {
+        use tokio_tungstenite::tungstenite::error::{CapacityError, Error};
+        let e = Error::Capacity(CapacityError::MessageTooLong { size: 300 << 20, max_size: WS_MESSAGE_MAX });
+        let said = ws_read_failed(&e);
+        assert!(said.contains("300 MiB") && said.contains("256 MiB") && said.contains("ax --grep"), "{said}");
     }
 
     /// Over a websocket the same rule holds: a write that may have
