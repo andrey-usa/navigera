@@ -169,6 +169,9 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           browser-use --version || true
 
+      - name: Install Moli (newest stable, for the --realtime measurement below)
+        uses: ./.github/actions/moli
+
       - uses: ./.github/actions/apt-install
         with:
           packages: musl-tools
@@ -256,6 +259,81 @@ jobs:
           python3 bench/ladder/ladder.py --out-dir bench/ladder/out \
             --reps "$REPS" --only "$ONLY" \
             --scenarios "$SCENARIOS" 2>&1 | tee bench/ladder/out/ladder.log
+
+      - name: Moli --realtime vs --layout measurement
+        # Measurement-only (issue #27): the Moli server's idle CPU over 10 s
+        # and goto/click/text/ax/eval on the #27 example and a ~4,500-node
+        # page — branch build (--realtime) vs baseline build (--layout only),
+        # same machine, same run. Runs even if the ladder above failed; the
+        # binaries are built by earlier steps. Not part of the ladder table.
+        if: always()
+        run: |
+          set -o pipefail
+          mkdir -p bench/ladder/out
+          python3 bench/moli-realtime-measure.py --binary "$NAVIGERA" --moli-bin "$MOLI_BIN" --label realtime --out bench/ladder/out/moli-realtime.json 2>&1 | tee bench/ladder/out/moli-realtime.log || true
+          python3 bench/moli-realtime-measure.py --binary "$NAVIGERA_BASELINE" --moli-bin "$MOLI_BIN" --label layout --out bench/ladder/out/moli-layout.json 2>&1 | tee bench/ladder/out/moli-layout.log || true
+          python3 - <<'EOF'
+          import json, statistics
+          from pathlib import Path
+          out = Path('bench/ladder/out')
+          def load(name):
+              p = out / name
+              return json.loads(p.read_text()) if p.exists() else None
+          rt, lo = load('moli-realtime.json'), load('moli-layout.json')
+          lines = ['# Moli --realtime vs --layout (CI, ubuntu-24.04)', '']
+          if rt is None or lo is None:
+              lines.append(f"missing results: realtime={'ok' if rt else 'MISSING'}, layout={'ok' if lo else 'MISSING'}")
+              (out / 'moli-realtime.md').write_text('\n'.join(lines) + '\n')
+              print('\n'.join(lines))
+              raise SystemExit(1)
+          lines.append(f"navigera realtime: {rt['navigera']}; layout: {lo['navigera']}")
+          lines.append(f"Moli: {rt['moli']} (both variants)")
+          lines.append(f"layout probe: realtime `{rt['layout_probe']}`; layout `{lo['layout_probe']}`")
+          lines.append(f"layout_refresh phases in session log: realtime {rt['layout_refresh_phases']}; layout {lo['layout_refresh_phases']}")
+          lines.append(f"Moli RSS kB: realtime {rt.get('moli_rss_kb')}; layout {lo.get('moli_rss_kb')}")
+          lines.append('')
+          lines.append('## Idle CPU, Moli process, % of one core over 10 s (3 windows)')
+          lines.append('')
+          lines.append('| variant | w1 | w2 | w3 | median |')
+          lines.append('|---|---|---|---|---|')
+          for tag, r in (('realtime', rt), ('layout', lo)):
+              w = r['idle_cpu_pct_10s']
+              lines.append(f"| {tag} | {w[0]} | {w[1]} | {w[2]} | {statistics.median(w)} |")
+          lines.append('')
+          lines.append('## Op times, median of 5 reps, ms')
+          lines.append('')
+          lines.append('| page | op | realtime | layout | realtime - layout |')
+          lines.append('|---|---|---|---|---|')
+          for page in ('page_a', 'page_b'):
+              nodes = rt['ops_ms_median'][page].get('nodes', '')
+              lines.append(f"| {page} ({nodes} nodes) | | | | |")
+              for op in ('goto', 'click', 'text', 'ax', 'eval_rect'):
+                  a = rt['ops_ms_median'][page][op]
+                  b = lo['ops_ms_median'][page][op]
+                  d = round(a - b, 2) if a is not None and b is not None else None
+                  lines.append(f"| {page} | {op} | {a} | {b} | {d} |")
+          lines.append('')
+          for tag, r in (('realtime', rt), ('layout', lo)):
+              if r['errors']:
+                  lines.append(f"errors ({tag}): {r['errors']}")
+          (out / 'moli-realtime.md').write_text('\n'.join(lines) + '\n')
+          print('\n'.join(lines))
+          if rt['errors'] or lo['errors']:
+              raise SystemExit(1)
+          EOF
+          cat bench/ladder/out/moli-realtime.md
+
+      - name: Upload Moli measurement
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: moli-realtime-measure
+          path: |
+            bench/ladder/out/moli-realtime.json
+            bench/ladder/out/moli-layout.json
+            bench/ladder/out/moli-realtime.md
+            bench/ladder/out/moli-realtime.log
+            bench/ladder/out/moli-layout.log
 
       - name: Table as annotations (readable via the checks API)
         if: always()
