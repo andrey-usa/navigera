@@ -127,8 +127,8 @@ BROWSER_TAGS = {"nv-edge": "msedge", "nv-brave": "brave", "nv-lightpanda": "ligh
 OPTIONAL_SCENARIOS = ("eval", "cold", "realworld", "browse", "agent", "parallel", "ops")
 
 # Matched-operation per-call stage: one call per op, warm session.
-OPS = ("goto", "fill", "click", "click-submit", "read-text", "snapshot",
-       "screenshot", "screenshot-720", "form-batch")
+OPS = ("goto", "fill", "click", "click-submit", "click-large", "click-large-first",
+       "read-text", "snapshot", "screenshot", "screenshot-720", "form-batch")
 # The default-viewport screenshot captures each tool's own viewport (different
 # pixel counts), so the losses compare screenshot-720 (one viewport) instead.
 OPS_NOT_RANKED = ("screenshot",)
@@ -1738,6 +1738,11 @@ def main() -> int:
                      "listing; `fill` fills the search box; `click` clicks Search "
                      "(client-side filter, no navigation); `click-submit` clicks the "
                      "order form's submit, which a script handles (no navigation); "
+                     "`click-large` clicks a button on a large page (~60,000 elements, "
+                     "40 open shadow roots; no navigation) after the page was loaded and "
+                     "clicked once (untimed), and `click-large-first` is the same click "
+                     "as the first action on the freshly loaded page, so a cost that "
+                     "grows with the page shows; "
                      "`read-text` reads the heading; `snapshot` is each tool's default "
                      "accessibility output; `screenshot` writes a PNG at the tool's "
                      "own default viewport (its size in the cell); `screenshot-720` "
