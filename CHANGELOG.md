@@ -25,7 +25,8 @@ All notable changes to this project are documented here. The format follows
   [bench 46043211348](https://github.com/andrey-usa/navigera/actions/runs/46043211348)
   (10 reps, against the build before it on the same runner) goto took
   26.5 vs 25.4 ms by median and 26.2 vs 26.7 by mean, and every other
-  action's fastest rep is within 0.4 ms of the build before.
+  action's fastest rep is within 0.4 ms of the build before, except the
+  two screenshots, which take one or two 60 Hz frames either way.
 
 ### Changed
 
