@@ -1270,7 +1270,9 @@ mod tests {
             Ok(_) => panic!("launch_server should have failed"),
             Err(e) => e,
         };
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
+        // Fail-fast means seconds, not the 60 s wait: 5 s leaves margin
+        // for a slow Windows runner (cmd.exe spawn measured 2.02 s).
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
         let msg = format!("{err:#}");
         assert!(msg.contains("fake engine: cannot start (test)"), "{msg}");
         // ExitStatus displays as "exit status: 2" on Unix, "exit code: 2"
