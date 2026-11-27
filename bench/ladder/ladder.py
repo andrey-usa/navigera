@@ -854,6 +854,48 @@ def bench_parallel(tools: dict[str, str], env: dict, chrome_tag: str) -> dict:
     return results
 
 
+def merge_ops_cell(merged: dict, cell: dict) -> None:
+    """Add one round's transcript cell for an op to the tool's merged cell."""
+    if cell.get("not_run"):
+        merged["not_run"] = cell["not_run"]
+    merged["runs_ms"].extend(cell.get("runs_ms") or [])
+    merged["calls"] = cell.get("calls", 1)
+    merged["errors"].extend(cell.get("errors") or [])
+    # What the screenshot ops captured: PNG size and dpr; and
+    # browser-use's viewport reads before and after its settle.
+    for key in ("png", "dpr", "settled"):
+        for v in cell.get(key) or []:
+            if v not in merged.setdefault(key, []):
+                merged[key].append(v)
+    # The PNG file size of every passing rep, both rounds in order.
+    if cell.get("png_bytes"):
+        merged.setdefault("png_bytes", []).extend(cell["png_bytes"])
+    if not cell.get("ok"):
+        merged["ok"] = False
+
+
+def finish_ops_cell(merged: dict, expected_reps: int, round_errors: list[str]) -> None:
+    """Medians, rep counts and completeness of a tool's merged op cell."""
+    runs = merged["runs_ms"]
+    merged["median_ms"] = round(statistics.median(runs), 2) if runs else None
+    if merged.get("png_bytes"):
+        merged["png_bytes_median"] = round(statistics.median(merged["png_bytes"]))
+    merged["reps"] = len(runs)
+    merged["expected_reps"] = expected_reps
+    # Complete only with every expected rep and no round error: a
+    # round that failed outright cannot leave a complete cell
+    # behind, even for ops that passed in the other round.
+    complete = (len(runs) == expected_reps and not merged["errors"]
+                and not round_errors)
+    merged["complete"] = complete
+    merged["incomplete"] = (not complete and bool(runs))
+    merged["ok"] = complete
+    if not runs and not merged.get("not_run"):
+        merged["errors"].append("no passing reps in either round")
+    if not merged["errors"]:
+        merged.pop("errors")
+
+
 def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
               expected: dict) -> tuple[dict, dict]:
     """Matched-operation per-call stage: one call per op, warm
@@ -959,20 +1001,7 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
                 continue
             st.setdefault("browser_info", []).append(tdoc.get("browser_info", {}))
             for op, cell in tdoc.get("ops", {}).items():
-                merged = cells[op]
-                if cell.get("not_run"):
-                    merged["not_run"] = cell["not_run"]
-                merged["runs_ms"].extend(cell.get("runs_ms") or [])
-                merged["calls"] = cell.get("calls", 1)
-                merged["errors"].extend(cell.get("errors") or [])
-                # What the screenshot ops captured: PNG size and dpr; and
-                # browser-use's viewport reads before and after its settle.
-                for key in ("png", "dpr", "settled"):
-                    for v in cell.get(key) or []:
-                        if v not in merged.setdefault(key, []):
-                            merged[key].append(v)
-                if not cell.get("ok"):
-                    merged["ok"] = False
+                merge_ops_cell(cells[op], cell)
             print(f"  [ops] {label} round {rnd + 1}/{OPS_ROUNDS}: done", flush=True)
     results: dict[str, dict] = {}
     expected_reps = OPS_ROUNDS * OPS_REPS_PER_ROUND
@@ -980,23 +1009,7 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
         cells = st["cells"]
         round_errors = st["round_errors"]
         for op in OPS:
-            merged = cells[op]
-            runs = merged["runs_ms"]
-            merged["median_ms"] = round(statistics.median(runs), 2) if runs else None
-            merged["reps"] = len(runs)
-            merged["expected_reps"] = expected_reps
-            # Complete only with every expected rep and no round error: a
-            # round that failed outright cannot leave a complete cell
-            # behind, even for ops that passed in the other round.
-            complete = (len(runs) == expected_reps and not merged["errors"]
-                        and not round_errors)
-            merged["complete"] = complete
-            merged["incomplete"] = (not complete and bool(runs))
-            merged["ok"] = complete
-            if not runs and not merged.get("not_run"):
-                merged["errors"].append("no passing reps in either round")
-            if not merged["errors"]:
-                merged.pop("errors")
+            finish_ops_cell(cells[op], expected_reps, round_errors)
         results[label] = {"cells": cells, "browser_info": st.get("browser_info", []),
                           "ok": not round_errors and all(c["ok"] or bool(c.get("not_run")) for c in cells.values()),
                           **({"round_errors": round_errors} if round_errors else {})}
@@ -1231,6 +1244,10 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
                                 # The PNG sizes (WxH) and devicePixelRatios captured.
                                 **({"png": cell["png"], "dpr": cell.get("dpr", [])}
                                    if cell.get("png") else {}),
+                                # The PNG file size per passing rep, and its median.
+                                **({"png_bytes": cell["png_bytes"],
+                                    "png_bytes_median": cell.get("png_bytes_median")}
+                                   if cell.get("png_bytes") else {}),
                                 # browser-use screenshot-720: the viewport read
                                 # before its settle -> the one the rep starts from.
                                 **({"settled": cell["settled"]} if cell.get("settled") else {}),
@@ -1766,6 +1783,8 @@ def main() -> int:
             for name in ops_cols:
                 cell = ops_results[name]["cells"][op]
                 size = (", " + "/".join(cell["png"])) if cell.get("png") else ""
+                if cell.get("png_bytes_median") is not None:
+                    size += f", {cell['png_bytes_median'] / 1024:.0f} KB"
                 if cell.get("not_run"):
                     row.append("not run: " + cell["not_run"])
                 elif cell.get("median_ms") is None:

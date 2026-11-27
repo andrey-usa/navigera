@@ -119,6 +119,17 @@ def best_of(stage):
     return f" ({w:.2f})" if w is not None else ""
 
 
+def png_kb(cell, sep=""):
+    """A screenshot cell's median PNG file size, `sep` + "49 KB"; "" without one."""
+    b = cell.get("png_bytes_median")
+    return f"{sep}{b / 1024:.0f} KB" if b is not None else ""
+
+
+def png_note(cell):
+    """' (49 KB PNG)' after a loss line's time; "" without a size."""
+    return f" ({png_kb(cell)} PNG)" if png_kb(cell) else ""
+
+
 lines = [
     "## Benchmarks",
     "",
@@ -364,6 +375,7 @@ if ops:
         for o in ops_cols:
             cell = (o.get("cells") or {}).get(op) or {}
             size = (", " + "/".join(cell["png"])) if cell.get("png") else ""
+            size += png_kb(cell, ", ")
             if cell.get("not_run"):
                 row.append("not run: " + cell["not_run"])
             elif cell.get("median_ms") is None:
@@ -377,6 +389,12 @@ if ops:
                 row.append(f"{cell['median_ms']:.1f} ms ({cell['calls']} call"
                            f"{'s' if cell['calls'] != 1 else ''}{size})")
         ops_lines.append("| " + " | ".join(row) + " |")
+    if any(png_kb(c) for o in ops_cols for c in (o.get("cells") or {}).values()):
+        ops_lines += [
+            "",
+            "The KB in a screenshot cell is the median PNG file size over its reps (1 KB =",
+            "1,024 bytes): a tool may trade bytes for time, a faster encoding writing a larger file.",
+        ]
     ops_lines += [
         "",
         "Firefox API arms use persistent library sessions, with the JSON-line control pipe",
@@ -532,7 +550,9 @@ for nav_ops in [o for o in ops if o["name"].startswith("navigera")]:
         v, o = min(rivals, key=lambda t: t[0])
         if v < mine_ms * (1 - TIE):
             on = "" if engine == "Chrome" else f" on {engine}"
-            losses.append(f"{op} per call{on}: {tool(o)} {v:.1f} ms, {nav_ops['name']} {mine_ms:.1f} ms")
+            # A screenshot loss names both PNG sizes: the faster file can be the larger.
+            losses.append(f"{op} per call{on}: {tool(o)} {v:.1f} ms{png_note(o['cells'][op])}, "
+                          f"{nav_ops['name']} {mine_ms:.1f} ms{png_note(mine)}")
 loss_text = ("Where another tool did better in this run (by more than 2%): " + "; ".join(losses) + "."
              if losses else "No other tool did better than navigera by more than 2% on any measure in this run.")
 

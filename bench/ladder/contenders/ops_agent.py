@@ -1185,8 +1185,10 @@ class Tool:
                                f"capture, expected {want[0]}x{want[1]}")
         ew, eh = round(vw * dpr), round(vh * dpr)
         w, h = check_screenshot_png(shot, ew, eh)
-        self.shot_info = {"png": f"{w}x{h}", "viewport": f"{vw}x{vh}", "dpr": dpr}
-        return f"{shot.stat().st_size} bytes, {w}x{h} == viewport {vw}x{vh} x dpr {dpr:g}"
+        nbytes = shot.stat().st_size
+        self.shot_info = {"png": f"{w}x{h}", "viewport": f"{vw}x{vh}", "dpr": dpr,
+                          "bytes": nbytes}
+        return f"{nbytes} bytes, {w}x{h} == viewport {vw}x{vh} x dpr {dpr:g}"
 
     def resize(self, width: int | None, height: int | None):
         """Untimed setup: the tool's own resize command; None, None undoes it.
@@ -1384,6 +1386,9 @@ class Tool:
         extra: dict = {}
         pngs: list[str] = []
         dprs: list[float] = []
+        # One PNG file size per passing rep, in rep order: a tool can trade
+        # bytes for capture time, so the time alone is half the trade.
+        png_bytes: list[int] = []
         settled: list[str] = []
         for rep in range(reps):
             self.shot_info = {}
@@ -1399,6 +1404,7 @@ class Tool:
                     if self.shot_info["dpr"] not in dprs:
                         dprs.append(self.shot_info["dpr"])
                     extra["viewport"] = self.shot_info["viewport"]
+                    png_bytes.append(self.shot_info["bytes"])
                 if self.settle_info and self.settle_info not in settled:
                     settled.append(self.settle_info)
             except Exception as e:
@@ -1425,7 +1431,7 @@ class Tool:
                 "median_ms": round(median(runs), 2) if runs else None,
                 "calls": calls, "ok": ok,
                 **({"errors": errors} if errors else {}),
-                **({"png": pngs, "dpr": dprs} if pngs else {}),
+                **({"png": pngs, "dpr": dprs, "png_bytes": png_bytes} if pngs else {}),
                 **({"settled": settled} if settled else {}),
                 **extra}
 

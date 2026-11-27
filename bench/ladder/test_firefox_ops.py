@@ -130,9 +130,12 @@ class Screenshot720(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, patch.object(ops_agent, 'SETUP_REST_S', 0):
             tool, calls, state = self.tool(d, (1440, 813))
             ms, n, detail = tool.op_screenshot_720(0)
+            shot, = Path(d).glob('ops-shot720-*r0.png')
+            size = shot.stat().st_size
         self.assertEqual((ms, n), (1.5, 1))
         self.assertIn('1280x720', detail)
-        self.assertEqual(tool.shot_info, {'png': '1280x720', 'viewport': '1280x720', 'dpr': 1.0})
+        self.assertEqual(tool.shot_info, {'png': '1280x720', 'viewport': '1280x720', 'dpr': 1.0,
+                                          'bytes': size})
         self.assertEqual([c[0] for c in calls], ['setup', 'screenshot', 'setup'])
         self.assertEqual(calls[0][1], ['set', 'viewport', '1280', '720'])
         self.assertEqual(calls[2][1], ['set', 'viewport', '1440', '813'])
@@ -165,6 +168,53 @@ class Screenshot720(unittest.TestCase):
         self.assertEqual(doc['ops'][0]['cells']['screenshot']['dpr'], [1.0])
         self.assertIn('screenshot-720', ladder.OPS)
         self.assertEqual(ladder.OPS, ops_agent.OPS)
+
+    def test_every_passing_rep_records_its_png_bytes(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(ops_agent, 'SETUP_REST_S', 0):
+            tool, _, state = self.tool(d, (1440, 813))
+            real = tool.cli
+            sizes = iter([(1440, 813), (64, 32), (300, 200)])
+
+            def varied(argv, env, op, **kw):
+                # A viewport per rep, so each file differs and a size kept
+                # from one rep only would show.
+                if argv[3] == 'screenshot':
+                    state['vp'] = next(sizes)
+                return real(argv, env, op, **kw)
+            tool.cli = varied
+            cell = tool.run_op('screenshot', 3)
+            want = [next(Path(d).glob(f'ops-shot-*r{i}.png')).stat().st_size for i in range(3)]
+        self.assertEqual(len(set(want)), 3)
+        self.assertEqual(cell['png_bytes'], want)
+        self.assertTrue(all(type(b) is int for b in cell['png_bytes']))
+
+    def test_two_rounds_merge_png_bytes_and_publish_the_median(self):
+        merged = {'runs_ms': [], 'calls': 1, 'ok': True, 'errors': []}
+        ladder.merge_ops_cell(merged, {'runs_ms': [17.0, 18.0], 'calls': 1, 'ok': True,
+                                       'png': ['1280x720'], 'dpr': [1.0],
+                                       'png_bytes': [50000, 51000]})
+        ladder.merge_ops_cell(merged, {'runs_ms': [16.0, 19.0], 'calls': 1, 'ok': True,
+                                       'png': ['1280x720'], 'dpr': [1.0],
+                                       'png_bytes': [52000, 60000]})
+        ladder.finish_ops_cell(merged, 4, [])
+        self.assertEqual(merged['png_bytes'], [50000, 51000, 52000, 60000])
+        self.assertEqual(merged['png_bytes_median'], 51500)
+        self.assertEqual(merged['png'], ['1280x720'])
+        self.assertTrue(merged['complete'])
+        ops = {'Chrome DevTools MCP': {'ok': True, 'cells': {'screenshot-720': merged}}}
+        with tempfile.TemporaryDirectory() as d:
+            ladder.write_publish_json(Path(d), {}, {}, 1, 'test', ops_results=ops)
+            doc = json.loads((Path(d) / 'publish.json').read_text())
+        cell = doc['ops'][0]['cells']['screenshot-720']
+        self.assertEqual(cell['png_bytes'], [50000, 51000, 52000, 60000])
+        self.assertEqual(cell['png_bytes_median'], 51500)
+
+    def test_cells_without_png_bytes_publish_none(self):
+        merged = {'runs_ms': [], 'calls': 1, 'ok': True, 'errors': []}
+        ladder.merge_ops_cell(merged, {'runs_ms': [3.0], 'calls': 1, 'ok': True})
+        ladder.finish_ops_cell(merged, 1, [])
+        self.assertNotIn('png_bytes', merged)
+        self.assertNotIn('png_bytes_median', merged)
 
 
 if __name__ == '__main__':
