@@ -181,6 +181,10 @@ lines += [
     "of the reps' peaks, since one short session's peak is caught or missed by phase.",
     "",
 ]
+# A contender whose build failed in this run has no row: say so, not nothing.
+if doc.get("build_failed"):
+    lines += ["Not measured in this run: " + ", ".join(
+        f"`{n}` ({why})" for n, why in doc["build_failed"].items()) + ".", ""]
 nv_best = next(r for r in chrome if r["name"].startswith("nv-"))
 serve_row = next((r for r in chrome if r["name"] == "nv-serve"), None)
 # Rows on chrome-headless-shell: compared with each other, not with Chrome.

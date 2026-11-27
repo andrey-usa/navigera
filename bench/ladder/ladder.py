@@ -11,9 +11,10 @@ Contenders (each drives the same headless Chrome on the same fixture pages):
   playwright      playwright-core + channel:chrome (Node)
   playwright-bun  the same script run by Bun
   puppeteer       puppeteer-core (Node)
-  chromiumoxide   chromiumoxide 0.7 (native Rust CDP)
-  chromedp        chromedp v0.19.1 (native Go CDP)
-  gorod           go-rod v0.116.2 (native Go CDP)
+  chromiumoxide   chromiumoxide (native Rust CDP)
+  chromey         chromey, the maintained chromiumoxide fork (native Rust CDP)
+  chromedp        chromedp (native Go CDP)
+  gorod           go-rod (native Go CDP)
   gorod-shell     go-rod on chrome-headless-shell ($SHELL_BIN): nv-shell's pair
 
 Engine variants (nv-edge/nv-brave/nv-lightpanda) are skipped gracefully when
@@ -52,6 +53,10 @@ Env:
   CHROME_BIN     chrome executable (required)
   LADDER_BASE    fixture server base URL (set by this script itself)
   LADDER_REPS    session repetitions (default 3)
+  LADDER_BUILDS  directory of build_contender.py records: a compiled
+                 contender runs only when its record says this build passed
+                 and the binary is the one it built; its version comes from
+                 the record (unset: the binaries already in contenders/)
 
 Outputs (in --out-dir): results.json, table.md, publish.json (every run, the
 median, and the version of every contender and browser), per-contender
@@ -112,6 +117,72 @@ def parse_phases(text: str) -> dict:
 # Contenders that did not run, with the reason — printed in table.md so a
 # missing row is never silent.
 SKIPPED: dict[str, str] = {}
+
+# Compiled contenders -> the build_contender.py record that built their
+# binary (gorod-shell runs the gorod binary), and the versions key each
+# library reports under.
+COMPILED = {"chromiumoxide": "chromiumoxide", "chromey": "chromey", "chromedp": "chromedp",
+            "gorod": "gorod", "gorod-shell": "gorod"}
+BUILD_VERSION_KEYS = {"chromiumoxide": "chromiumoxide", "chromey": "chromey",
+                      "chromedp": "chromedp", "gorod": "go-rod"}
+# Compiled contenders this run did not build, with why: they are not
+# measured, their cells read "build failed" and no version is reported.
+BUILD_FAILED: dict[str, str] = {}
+
+
+def load_build_records(builds_dir: Path) -> dict[str, dict]:
+    records = {}
+    for name in set(COMPILED.values()):
+        try:
+            records[name] = json.loads((builds_dir / f"{name}.json").read_text())
+        except (OSError, ValueError):
+            pass
+    return records
+
+
+def build_failure(record: dict | None, binary: str) -> str | None:
+    """Why a compiled contender's binary is not this run's build, or None."""
+    import hashlib
+    if record is None:
+        return "build failed (no build record from this run)"
+    if record.get("exit") != 0:
+        if record.get("exit") is None:
+            return f"build failed ({record.get('error') or 'no binary'})"
+        return f"build failed (exit {record['exit']})"
+    try:
+        digest = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
+    except OSError:
+        return "build failed (its binary is gone)"
+    if digest != record.get("sha256"):
+        return "build failed (the binary is not the one this run built)"
+    return None
+
+
+def drop_failed_builds(contenders: dict[str, list[str]], records: dict[str, dict]) -> None:
+    """Move every compiled contender whose binary this run did not build
+    from `contenders` to BUILD_FAILED."""
+    for name, record_name in COMPILED.items():
+        argv = contenders.get(name)
+        if argv is None:
+            continue
+        why = build_failure(records.get(record_name), argv[-1])
+        if why:
+            BUILD_FAILED[name] = why
+            contenders.pop(name)
+
+
+def build_versions(records: dict[str, dict]) -> dict[str, str]:
+    """Each compiled library's version from the build that ran; none for a
+    failed build or a binary that is not that build."""
+    return {key: records[name]["version"] for name, key in BUILD_VERSION_KEYS.items()
+            if name in records and records[name].get("exit") == 0 and records[name].get("version")
+            and name not in BUILD_FAILED}
+
+
+def build_failed_rows(names, cols: int) -> list[str]:
+    """Table rows for contenders that were not measured: the reason in the
+    first cell, a dash in the other cols - 1."""
+    return [f"| `{n}` | {BUILD_FAILED[n]} |" + " — |" * (cols - 1) for n in names if n in BUILD_FAILED]
 
 # Experimental contenders: a failure in any stage, or a correctness mismatch,
 # is recorded in the table instead of aborting the ladder. Lightpanda is a
@@ -1018,7 +1089,7 @@ def bench_ops(contenders: dict, env: dict, out_dir: Path, chrome_tag: str,
     return results, {}
 
 
-def collect_versions() -> dict[str, str]:
+def collect_versions(records: dict[str, dict] | None = None) -> dict[str, str]:
     """The version of every contender, tool and browser this run measured.
 
     Contenders come from semver ranges or @latest (the weekly run measures
@@ -1034,6 +1105,14 @@ def collect_versions() -> dict[str, str]:
             return ""
         text = (r.stdout or r.stderr or "").strip()
         return text.splitlines()[0].strip() if text else ""
+
+    def first_line_matching(argv: list[str], pattern: str) -> str:
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        except Exception:
+            return ""
+        m = re.search(pattern, r.stdout or "", re.M)
+        return m.group(1) if m else ""
 
     v: dict[str, str] = {"navigera": first_line([os.environ["NAVIGERA"], "--version"])}
     if "nv-baseline" in NAVIGERA_ENGINE_ARGS:
@@ -1056,22 +1135,30 @@ def collect_versions() -> dict[str, str]:
             pass
     if shutil.which("bun"):
         v["bun"] = first_line(["bun", "--version"])
-    for crate in ("chromiumoxide", "chromey"):
-        try:
-            lock = (CONTENDERS / crate / "Cargo.lock").read_text()
-            m = re.search(r'\[\[package\]\]\nname = "' + crate + r'"\nversion = "([^"]+)"', lock)
-            if m:
-                v[crate] = m.group(1)
-        except OSError:
-            pass
-    for label, module, d in (("chromedp", "github.com/chromedp/chromedp", "chromedp"),
-                             ("go-rod", "github.com/go-rod/rod", "gorod")):
-        try:
-            m = re.search(re.escape(module) + r"\s+(v\S+)", (CONTENDERS / d / "go.mod").read_text())
-            if m:
-                v[label] = m.group(1)
-        except OSError:
-            pass
+    if records is not None:
+        # The versions the builds of this run resolved; none for a failed one.
+        v.update(build_versions(records))
+    else:
+        # Run by hand without build records: the lockfile the last build
+        # wrote, and the module versions Go linked into the binary.
+        for crate in ("chromiumoxide", "chromey"):
+            if not (CONTENDERS / crate / "target" / "release" / f"ladder-{crate}").exists():
+                continue
+            try:
+                lock = (CONTENDERS / crate / "Cargo.lock").read_text()
+                m = re.search(r'\[\[package\]\]\nname = "' + crate + r'"\nversion = "([^"]+)"', lock)
+                if m:
+                    v[crate] = m.group(1)
+            except OSError:
+                pass
+        for label, module, d in (("chromedp", "github.com/chromedp/chromedp", "chromedp"),
+                                 ("go-rod", "github.com/go-rod/rod", "gorod")):
+            binary = CONTENDERS / d / f"ladder-{d}"
+            if binary.exists() and shutil.which("go"):
+                out = first_line_matching(["go", "version", "-m", str(binary)],
+                                          r"^\s*dep\s+" + re.escape(module) + r"\s+(\S+)")
+                if out:
+                    v[label] = out
     npm = shutil.which("npm")
     if npm:
         try:
@@ -1215,6 +1302,7 @@ def write_publish_json(out_dir: Path, results: dict, contenders: dict,
         "contenders": rows,
         "notes": NOTES,
         "skipped": SKIPPED,
+        "build_failed": BUILD_FAILED,
         "agent_cli": [
             {"name": name,
              "ok": bool(r["best"].get("ok")),
@@ -1392,7 +1480,12 @@ def main() -> int:
     # then execs it, so the process measured is go-rod's own.
     shell_bin = os.environ.get("SHELL_BIN")
     gorod_bin = CONTENDERS / "gorod" / "ladder-gorod"
-    if shell_bin and Path(shell_bin).exists() and gorod_bin.exists():
+    # bench.yml builds every compiled contender with build_contender.py,
+    # which records each build; with the records, a contender whose build
+    # failed is reported as such and never run from an older binary.
+    builds_dir = os.environ.get("LADDER_BUILDS")
+    build_records = load_build_records(Path(builds_dir)) if builds_dir else None
+    if shell_bin and Path(shell_bin).exists() and (gorod_bin.exists() or build_records is not None):
         contenders["gorod-shell"] = ["env", f"CHROME_BIN={shell_bin}", str(gorod_bin)]
     else:
         SKIPPED["gorod-shell"] = f"no binary (SHELL_BIN={shell_bin}, {gorod_bin.name})"
@@ -1404,8 +1497,11 @@ def main() -> int:
     with open(FIXTURES / "expected.json", encoding="utf-8") as f:
         expected = json.load(f)
 
-    # Path-based contenders whose build step failed (optional ones are
-    # continue-on-error) are reported, not fatal.
+    if build_records is not None:
+        drop_failed_builds(contenders, build_records)
+        for name, why in BUILD_FAILED.items():
+            print(f"== {name}: not measured: {why}", flush=True)
+    # Run by hand: a path-based contender that was not built is reported.
     for name, argv in list(contenders.items()):
         if argv and os.path.isabs(argv[0]) and not Path(argv[0]).exists():
             SKIPPED[name] = f"binary not built ({argv[0]})"
@@ -1414,11 +1510,13 @@ def main() -> int:
     if only:
         missing = only - set(contenders)
         if missing:
-            print(f"== --only names not available (skipped or unknown): {sorted(missing)}", flush=True)
+            print(f"== --only names not available (skipped, build failed or unknown): {sorted(missing)}", flush=True)
         for name in list(contenders):
             if name not in only:
                 contenders.pop(name)
                 NAVIGERA_ENGINE_ARGS.pop(name, None)
+    # The failed builds this run was asked to measure get cells that say so.
+    failed_builds = [n for n in BUILD_FAILED if not only or n in only]
 
     # Warm each browser binary once (page cache, font cache, first-run
     # profile work) so the first contender doesn't absorb a cold-start
@@ -1648,6 +1746,7 @@ def main() -> int:
             f"{b.get('cpu_reaped_s', float('nan')):.2f}s | "
             f"{b['browser_cpu_s']:.2f}s | {b['maxrss_kb'] / 1024:.0f} MB | "
             f"{results[name]['session']['browser_pss_kb'] / 1024:.0f} MB | {runs}s |")
+    lines.extend(build_failed_rows(failed_builds, 7))
     lines.append("")
     lines.append("\\* browser numbers: whole browser process tree, /proc-sampled every 50 ms (approximate). "
                  "† CPU of descendants the driver itself waited for (its Chrome, "
@@ -1662,6 +1761,8 @@ def main() -> int:
             continue
         b = results[name]["eval"]["best"]
         lines.append(f"| `{name}` | {b['mean_ms']:.2f} ms | {b['p95_ms']:.2f} ms |")
+    if "eval" in scenarios:
+        lines.extend(build_failed_rows(failed_builds, 2))
     lines.append("")
     lines.append(f"### cold start: launch → new page → one eval → close (median of {args.cold_reps})")
     lines.append("")
@@ -1672,6 +1773,8 @@ def main() -> int:
             continue
         walls = [x["wall_s"] for x in results[name]["cold"]["runs"]]
         lines.append(f"| `{name}` | {statistics.median(walls):.3f}s | {min(walls):.3f}s | {max(walls):.3f}s |")
+    if "cold" in scenarios:
+        lines.extend(build_failed_rows(failed_builds, 3))
     lines.append("")
     phase_rows = [(n, results[n]["cold"]["best"].get("phases") or {}) for n in contenders
                   if results[n].get("cold") and (results[n]["cold"]["best"].get("phases"))]
@@ -1696,6 +1799,7 @@ def main() -> int:
             ok = "✓" if b.get("ok") else "✗"
             lines.append(f"| `{name}` | {_live_median(results[name]['realworld'])} | {b['wall_s']:.2f}s | "
                          f"{_passed(results[name]['realworld'])} | {ok} {b.get('title','')} | {(b.get('h1') or '')[:20]} |")
+        lines.extend(build_failed_rows(failed_builds, 5))
         lines.append("")
     browse_names = [n for n in contenders if results[n].get("browse")]
     if browse_names:
@@ -1712,6 +1816,7 @@ def main() -> int:
             clicked = (f.get("trending_clicked_url") or "").replace("https://github.com/", "")
             lines.append(f"| `{name}` | {_live_median(results[name]['browse'])} | {b['wall_s']:.2f}s | "
                          f"{_passed(results[name]['browse'])} | {top3[:60]} | {clicked[:40]} |")
+        lines.extend(build_failed_rows(failed_builds, 5))
         lines.append("")
     if agent_results:
         lines.append("### agent tools: one CLI process (or one MCP tools/call) per step, warm session (best of 3)")
@@ -1873,6 +1978,12 @@ def main() -> int:
             for note in notes:
                 lines.append(f"- `{name}`: {note.replace('|', '/')}")
         lines.append("")
+    if BUILD_FAILED:
+        lines.append("### Build failed (not measured, no version reported)")
+        lines.append("")
+        for name, reason in BUILD_FAILED.items():
+            lines.append(f"- `{name}`: {reason.replace('|', '/')}")
+        lines.append("")
     if SKIPPED:
         lines.append("### Skipped")
         lines.append("")
@@ -1880,7 +1991,7 @@ def main() -> int:
             lines.append(f"- `{name}`: {reason.replace('|', '/')}")
         lines.append("")
     (out_dir / "table.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    versions = collect_versions()
+    versions = collect_versions(build_records)
     write_publish_json(out_dir, results, contenders, args.reps, env_line(""), agent_results, versions,
                        parallel_results, ops_results)
     print("\n".join(lines), flush=True)

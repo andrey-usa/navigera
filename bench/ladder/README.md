@@ -26,6 +26,15 @@ served from 127.0.0.1 by a threaded server — no network weather, no bot
 walls). Every contender's version (and the browsers') is recorded in
 `publish.json` under `versions`.
 
+The compiled contenders (chromiumoxide, chromey, chromedp, go-rod) are
+built by `build_contender.py`, which deletes the old binary first and
+records the build's exit status, the binary's hash and the library version
+the build resolved (cargo's artifact messages; the module list Go links
+into the binary). With those records (`LADDER_BUILDS`, as `bench.yml` sets
+it) a contender whose build failed is not measured: its cells read
+`build failed (exit N)`, no version is reported, `publish.json` lists it
+under `build_failed`, and the workflow fails after publishing the table.
+
 One per-driver note: `go-rod`'s `Page.Eval` wraps the JS as
 `function() { return (JS).apply(this, arguments) }`, so it invokes a bare
 function expression itself — an explicit IIFE would break there (its
@@ -112,9 +121,8 @@ Each screenshot cell records the PNG's size and the dpr it was taken at.
 python3 bench/ladder/gen_fixtures.py
 # the released build: static musl (needs musl-tools and the rustup target)
 cargo build --release --locked --bin navigera --target x86_64-unknown-linux-musl
-cargo build --release --manifest-path bench/ladder/contenders/chromiumoxide/Cargo.toml
-cd bench/ladder/contenders/chromedp && go mod tidy && go build -o ladder-chromedp . && cd ../..
-cd bench/ladder/contenders/gorod && go mod tidy && go build -o ladder-gorod . && cd ../..
+export LADDER_BUILDS=$PWD/bench/ladder/out/builds
+for c in chromiumoxide chromey chromedp gorod; do python3 bench/ladder/build_contender.py $c; done
 cd bench/ladder && npm install
 NAVIGERA=$PWD/../../target/x86_64-unknown-linux-musl/release/navigera \
 CHROME_BIN=$(which google-chrome) \

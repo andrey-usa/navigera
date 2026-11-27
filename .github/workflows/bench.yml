@@ -53,6 +53,9 @@ jobs:
     timeout-minutes: 90
     env:
       REPS: ${{ inputs.reps || '3' }}
+      # build_contender.py's records; ladder.py measures a compiled
+      # contender only from the binary its record describes.
+      LADDER_BUILDS: ${{ github.workspace }}/bench/ladder/out/builds
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -202,27 +205,21 @@ jobs:
           echo "NAVIGERA_BASELINE_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "baseline: $(git rev-parse --short HEAD)"
 
+      # Each compiled contender: the binary is deleted first (the Cargo cache
+      # restores contenders/*/target), then built, and the build's exit
+      # status, binary hash and library version recorded in $LADDER_BUILDS.
+      # A failed build does not stop the run: the ladder reports its cells
+      # as "build failed" with no version, and the last step fails the job.
       - name: Build chromiumoxide contender (release)
-        run: |
-          cargo build --release \
-            --manifest-path bench/ladder/contenders/chromiumoxide/Cargo.toml
+        run: python3 bench/ladder/build_contender.py chromiumoxide
 
       - name: Build chromey contender (release)
-        # Optional (crates.io latest): a build failure shows under "Skipped".
-        continue-on-error: true
-        run: |
-          cargo build --release \
-            --manifest-path bench/ladder/contenders/chromey/Cargo.toml
+        run: python3 bench/ladder/build_contender.py chromey
 
       - name: Build Go contenders
         run: |
-          set -e
-          cd bench/ladder/contenders/chromedp
-          go mod tidy
-          go build -o ladder-chromedp .
-          cd ../gorod
-          go mod tidy
-          go build -o ladder-gorod .
+          python3 bench/ladder/build_contender.py chromedp
+          python3 bench/ladder/build_contender.py gorod
 
       - name: Install node contenders
         working-directory: bench/ladder
@@ -236,9 +233,10 @@ jobs:
           npx playwright install --with-deps firefox
           npx vibium install --engine firefox
 
-      - name: Check Firefox ops harness
+      - name: Check ladder harness
         run: |
           python3 bench/ladder/test_firefox_ops.py
+          python3 bench/ladder/test_contender_builds.py
           node --check bench/ladder/contenders/firefox_library.mjs
 
       - name: Generate fixtures
@@ -294,3 +292,21 @@ jobs:
             cat bench/ladder/out/table.md
           } >> "$GITHUB_STEP_SUMMARY"
           cat bench/ladder/out/table.md
+
+      - name: Contender builds
+        # After the table and the results are published: a contender that did
+        # not build fails the run, so a missing row is never green.
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json, os, pathlib, sys
+          failed = []
+          for p in sorted(pathlib.Path(os.environ["LADDER_BUILDS"]).glob("*.json")):
+              r = json.loads(p.read_text())
+              if r.get("exit") != 0:
+                  why = r.get("error") or f"`{r.get('failed_command')}` exited {r.get('exit')}"
+                  failed.append(f"{r['name']}: {why}")
+          for line in failed:
+              print(f"::error title=contender build failed::{line}")
+          sys.exit(1 if failed else 0)
+          EOF
