@@ -1,7 +1,7 @@
 name: experiment-52
 
-# `navigera text` end to end, d323f4f (the reader's 9 KB source sent with
-# every call) vs 7cf81df (the reader kept in the document called by name),
+# `navigera text` end to end, b35aa5a (before open shadow roots were read)
+# vs 7cf81df (shadow roots, the reader kept in the document called by name),
 # both static musl builds as released, on one runner in one job: page_b and
 # page_c of bench/ladder, Chrome and Lightpanda, 5 rounds of A B per engine,
 # 31 calls a page per session (bench/probe/text_ab.py). Numbers as notices and in
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
-      REF_A: d323f4ffdce2bb36bfcd0a9fcb63656cf570f851
+      REF_A: b35aa5a1d8c868206bbe6e5b7e1f0cb2bd536b87
       REF_B: 7cf81df109ea12fb17bb4c5022d597ded852e3be
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
