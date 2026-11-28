@@ -3725,13 +3725,9 @@ const FLAT_TEXT: &str = r#"(el, byTag) => {
   return out.join('');
 }"#;
 
-/// FLAT_TEXT as a call: the function is kept on the document's window
-/// (`__nvText`, tagged with a hash of its source, so a newer navigera never
-/// runs an older copy) and reused, warm. A script sent by
-/// `Runtime.evaluate` is a new function each time and runs cold: on the
-/// bench's 60,051-element page with 40 roots, 19-29 ms a call sent afresh
-/// against 16-19 kept (9 calls each, Chrome, local).
-fn flat_text_fn() -> String {
+/// FLAT_TEXT's tag on the window's copy: a hash of its source, so a newer
+/// navigera never runs an older copy.
+const FLAT_TEXT_V: u32 = {
     const fn fnv1a(s: &str) -> u32 {
         let b = s.as_bytes();
         let (mut h, mut i) = (0x811c_9dc5_u32, 0);
@@ -3741,13 +3737,29 @@ fn flat_text_fn() -> String {
         }
         h
     }
-    const V: u32 = fnv1a(FLAT_TEXT);
+    fnv1a(FLAT_TEXT)
+};
+
+/// FLAT_TEXT as a call: the function is kept on the document's window
+/// (`__nvText`, tagged with [`FLAT_TEXT_V`]) and reused, warm. A script
+/// sent by `Runtime.evaluate` is a new function each time and runs cold:
+/// on the bench's 60,051-element page with 40 roots, 19-29 ms a call sent
+/// afresh against 16-19 kept (9 calls each, Chrome, local).
+fn flat_text_fn() -> String {
     format!(
-        "(() => {{ const k = window.__nvText; if (typeof k === 'function' && k.v === {V}) return k; \
-         const f = {FLAT_TEXT}; f.v = {V}; \
+        "(() => {{ const k = window.__nvText; if (typeof k === 'function' && k.v === {FLAT_TEXT_V}) return k; \
+         const f = {FLAT_TEXT}; f.v = {FLAT_TEXT_V}; \
          try {{ Object.defineProperty(window, '__nvText', {{ value: f, configurable: true, enumerable: false, writable: true }}); }} catch (_) {{}} \
          return f; }})()"
     )
+}
+
+/// The kept FLAT_TEXT by name, without its 9 KB source; null where the
+/// document holds no copy of this navigera's (see [`Page::flat_text`]).
+/// Sending and compiling the source cost 0.31-0.37 ms of every call on a
+/// 2,000-element page even with the copy kept (Chrome, local).
+fn flat_text_kept() -> String {
+    format!("((k) => typeof k === 'function' && k.v === {FLAT_TEXT_V} ? k : null)(window.__nvText)")
 }
 
 /// Does Enter on the focused element (through open shadow roots and
@@ -4269,6 +4281,11 @@ pub struct Page {
     /// What [`LAYOUT_TOKEN`] read when [`Page::fresh_layout`] last had the
     /// page laid out again.
     layout_token: Arc<std::sync::Mutex<Option<String>>>,
+    /// The navigation generation, plus one, whose document FLAT_TEXT was
+    /// last sent to, and whether to call its kept copy there by name (false
+    /// once that missed: the page replaced it, so the source goes every
+    /// time). See [`Page::flat_text`].
+    text_fn: Arc<std::sync::Mutex<(u64, bool)>>,
     /// The navigation generation whose document holds the settle arm, plus
     /// one (0: none known); see [`SETTLE_REARM`].
     armed_generation: Arc<std::sync::atomic::AtomicU64>,
@@ -4469,6 +4486,7 @@ impl Page {
             tail_read: Default::default(),
             metrics: Default::default(),
             layout_token: Default::default(),
+            text_fn: Default::default(),
         }
     }
 
@@ -8006,15 +8024,16 @@ impl Page {
     /// included: see FLAT_TEXT).
     pub fn page_text(&self, timeout: Duration) -> Result<String> {
         self.fresh_layout(timeout);
-        let value = self.evaluate_raw(
-            &ascii_safe(&format!(
-                "({})(document.body || document.documentElement, {})",
-                flat_text_fn(),
-                self.shared.is_single_target()
-            )),
+        let by_tag = self.shared.is_single_target();
+        let value = self.flat_text(
+            |f| {
+                format!(
+                    "(() => {{ const f = {f}; return f ? f(document.body || document.documentElement, {by_tag}) : false; }})()"
+                )
+            },
             timeout,
         )?;
-        Ok(from_ascii_safe(value)?.as_str().unwrap_or_default().to_string())
+        Ok(value.as_str().unwrap_or_default().to_string())
     }
 
     /// The first match's text as it reads (`innerText`, open shadow roots
@@ -8023,22 +8042,46 @@ impl Page {
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
         let by_tag = self.shared.is_single_target();
-        let flat = flat_text_fn();
         self.fresh_layout(timeout);
         // Code and styles inside the element aren't text a user reads (an
         // element that is itself a script, e.g. a JSON blob, keeps its own).
-        let value = self.evaluate_raw(
-            &ascii_safe(&format!(
-                "(() => {{ const el = {DEEP}.first({sel}); if (!el) return null; \
-                 if (typeof el.innerText === 'string' && el.getClientRects().length) return ({flat})(el, {by_tag}); \
-                 if (!el.querySelector || !el.querySelector('script, style, template, noscript')) return el.textContent; \
-                 const c = el.cloneNode(true); \
-                 for (const n of c.querySelectorAll('script, style, template, noscript')) n.remove(); \
-                 return c.textContent; }})()"
-            )),
+        let value = self.flat_text(
+            |f| {
+                format!(
+                    "(() => {{ const el = {DEEP}.first({sel}); if (!el) return null; \
+                     if (typeof el.innerText === 'string' && el.getClientRects().length) {{ const f = {f}; return f ? f(el, {by_tag}) : false; }} \
+                     if (!el.querySelector || !el.querySelector('script, style, template, noscript')) return el.textContent; \
+                     const c = el.cloneNode(true); \
+                     for (const n of c.querySelectorAll('script, style, template, noscript')) n.remove(); \
+                     return c.textContent; }})()"
+                )
+            },
             timeout,
         )?;
-        Ok(from_ascii_safe(value)?.as_str().map(str::to_string))
+        Ok(value.as_str().map(str::to_string))
+    }
+
+    /// Evaluate `script(f)`, where `f` is an expression for FLAT_TEXT and
+    /// the script answers `false` when `f` is null (and never otherwise).
+    /// In a document this tab already sent the source to, `f` is the kept
+    /// copy by name ([`flat_text_kept`]); else, or when that missed (a
+    /// navigation the generation has not caught up with, a page that
+    /// replaced it), the source itself ([`flat_text_fn`]), which keeps a copy.
+    fn flat_text(&self, script: impl Fn(&str) -> String, timeout: Duration) -> Result<Value> {
+        let generation = self.nav_generation() + 1;
+        if *self.text_fn.lock().unwrap() == (generation, true) {
+            let value = from_ascii_safe(self.evaluate_raw(&ascii_safe(&script(&flat_text_kept())), timeout)?)?;
+            if value != Value::Bool(false) {
+                return Ok(value);
+            }
+            *self.text_fn.lock().unwrap() = (generation, false);
+        }
+        let value = from_ascii_safe(self.evaluate_raw(&ascii_safe(&script(&flat_text_fn())), timeout)?)?;
+        let mut sent = self.text_fn.lock().unwrap();
+        if sent.0 != generation {
+            *sent = (generation, true);
+        }
+        Ok(value)
     }
 
     /// One poll of a `wait` condition; true when satisfied.

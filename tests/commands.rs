@@ -846,6 +846,31 @@ fn text_reads_shadow_roots_in_a_long_list() {
     }
 }
 
+/// `text` calls the reader it left in the document by name after the first
+/// call there, and sends it again where the page replaced or removed it,
+/// or the document is a new one.
+#[test]
+fn text_reads_the_same_when_the_page_replaces_its_reader() {
+    let Some(site) = edge_site() else { return };
+    for (engine, bin) in engines() {
+        let a = Agent::new("textkept", engine, bin);
+        a.ok(&["goto", &format!("{}/shadow-rows", site.base)]);
+        let want = a.text(&["text"]);
+        assert!(want.starts_with("row 0\nrow 1\n") && want.contains("card 99"), "[{engine}] {want}");
+        assert_eq!(a.text(&["text"]), want, "[{engine}] the kept reader");
+        a.ok(&["eval", "window.__nvText = () => 'not the text'; 0"]);
+        assert_eq!(a.text(&["text"]), want, "[{engine}] a replaced reader");
+        assert_eq!(a.text(&["text"]), want, "[{engine}] a replaced reader, again");
+        a.ok(&["goto", &format!("{}/form", site.base)]);
+        let list = a.text(&["text", "--selector", "ul"]);
+        assert!(list.contains("one") && list.contains("three"), "[{engine}] {list}");
+        assert_eq!(a.text(&["text", "--selector", "ul"]), list, "[{engine}] the kept reader, an element");
+        a.ok(&["eval", "delete window.__nvText; 0"]);
+        assert_eq!(a.text(&["text", "--selector", "ul"]), list, "[{engine}] a removed reader, an element");
+        assert!(a.text(&["text"]).contains("three"), "[{engine}]");
+    }
+}
+
 /// A navigation the browser refuses names that browser: Lightpanda said
 /// "Chrome refuses to open that port".
 #[test]
