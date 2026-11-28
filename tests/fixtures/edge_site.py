@@ -18,6 +18,19 @@ from local_server import Server
 
 OTHER = {"port": 0}
 
+def shadow_rows(row):
+    """100 rows of `row` ({i}: the row's number), a card after every 25th."""
+    return (
+        "<!doctype html><title>rows</title><div id=list>\n"
+        + "\n".join(f"<div>{row.replace('{i}', str(i))}</div>"
+                    + (f'<x-row-card data-n="{i}"></x-row-card>' if i % 25 == 24 else "") for i in range(100))
+        + """</div><script>
+customElements.define('x-row-card', class extends HTMLElement { constructor() { super();
+  this.attachShadow({ mode: 'open' }).innerHTML = '<p>card ' + this.dataset.n + '</p>'; } });
+</script>"""
+    )
+
+
 PAGES = {
     # A visually hidden checkbox under a styled box, inside its label.
     "/checkbox": """<!doctype html><title>cb</title><style>
@@ -118,6 +131,12 @@ host.attachShadow({ mode: 'open' }).innerHTML = '<style>p { color: red }</style>
 const closed = document.createElement('div'); document.body.appendChild(closed);
 closed.attachShadow({ mode: 'closed' }).innerHTML = '<p>closed root text</p>';
 </script>""",
+    # A long list with a custom element after every 25th row: text reads
+    # the list by one innerText and puts each card's text in its place.
+    # "/shadow-same": the rows are all alike, so a card's place is not
+    # sure and text walks the rows one by one; the same text either way.
+    "/shadow-rows": shadow_rows("row {i}"),
+    "/shadow-same": shadow_rows("same row"),
     "/keys": """<!doctype html><title>keys</title><input id=i autofocus><p id=p>no form here</p>""",
     # A single-page app: the list arrives by fetch, then renders a beat later.
     "/spa": """<!doctype html><title>spa</title><p id=s role=status>Loading items…</p><script>

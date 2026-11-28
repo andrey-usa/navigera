@@ -3493,15 +3493,28 @@ fn shifted_char(c: char) -> char {
 /// Lightpanda's own `innerText` does (its computed `display` says `block`
 /// for a button or a custom element, which Chrome and its `innerText` lay
 /// out inline); else by their computed `display`.
+///
+/// An element on that path with 64 or more other element children and
+/// only shadow hosts among them on the path (a long list with a few
+/// custom elements in it) is read by ONE `innerText`, not one per child:
+/// each run of hosts is found in that text between the text of the
+/// children beside it, and its own text put there. A place found two ways
+/// (identical rows around a host), text right beside a host, or a host's
+/// light text not where it should be: the per-child walk, as before. On
+/// the bench's 60,051-element page with 40 roots, 15 ms against 11 for the
+/// bare `innerText` and 20-25 for the per-child walk (Chrome, in a navigera
+/// session, median of 11); 4-5 ms of it is the search for roots, which no
+/// faster walk changes (a tree walker, `getElementsByTagName('*')`,
+/// `querySelectorAll('*')` and a child-by-child recursion: 4-8 ms each).
 const FLAT_TEXT: &str = r#"(el, byTag) => {
   if (!el) return '';
   const MAX = 2000, hosts = [], scopes = [el];
+  if (el.shadowRoot) { hosts.push(el); scopes.push(el.shadowRoot); }
   for (let i = 0; i < scopes.length && hosts.length < MAX; i++) {
-    const s = scopes[i];
-    if (i === 0 && s.shadowRoot) { hosts.push(s); scopes.push(s.shadowRoot); }
-    const w = document.createTreeWalker(s, 1);
-    for (let n = w.nextNode(); n && hosts.length < MAX; n = w.nextNode()) {
-      if (n.shadowRoot) { hosts.push(n); scopes.push(n.shadowRoot); }
+    const w = document.createTreeWalker(scopes[i], 1);
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      const r = n.shadowRoot;
+      if (r) { hosts.push(n); scopes.push(r); if (hosts.length >= MAX) break; }
     }
   }
   if (!hosts.length) return el.innerText ?? el.textContent ?? '';
@@ -3509,7 +3522,8 @@ const FLAT_TEXT: &str = r#"(el, byTag) => {
   const up = (n) => {
     while (n && n !== el && !on.has(n)) {
       on.add(n);
-      n = n.parentNode && n.parentNode.nodeType === 11 ? n.parentNode.host : n.parentNode;
+      const p = n.parentNode;
+      n = p && p.nodeType === 11 ? p.host : p;
     }
   };
   const assigned = (slot) => (slot.assignedNodes ? slot.assignedNodes({ flatten: true }) : []);
@@ -3521,48 +3535,220 @@ const FLAT_TEXT: &str = r#"(el, byTag) => {
   const SKIP = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT', 'HEAD', 'TITLE', 'META', 'LINK']);
   const BLOCK = new Set(('ARTICLE ASIDE FOOTER HEADER MAIN NAV SECTION ADDRESS CENTER DIV FIELDSET FIGCAPTION FIGURE SEARCH '
     + 'H1 H2 H3 H4 H5 H6 DL OL UL BLOCKQUOTE PLAINTEXT PRE TABLE HR SUMMARY DETAILS DIALOG MENU DD DT FORM LI TR CAPTION OPTION').split(' '));
-  const walk = (n, top) => {
-    if (n.nodeType === 3) { parts.push(n.data.replace(/[ \t\n\r\f]+/g, ' ')); return; }
-    if (n.nodeType !== 1 || SKIP.has(n.tagName)) return;
-    if (n.tagName === 'BR') { parts.push('\n'); return; }
-    let display = 'inline';
-    try { display = getComputedStyle(n).display || 'inline'; } catch {}
-    if (display === 'none' && !top) return;
-    const block = byTag ? BLOCK.has(n.tagName) : !/^(inline|contents|ruby|table-cell)/.test(display);
-    const breaks = top ? 0 : n.tagName === 'P' ? 2 : block ? 1 : 0;
-    parts.push(breaks);
-    if (!on.has(n) && !top) {
-      parts.push(n.innerText ?? n.textContent ?? '');
-    } else {
-      const slotted = n.tagName === 'SLOT' ? assigned(n) : [];
-      const kids = n.shadowRoot ? n.shadowRoot.childNodes : slotted.length ? slotted : n.childNodes;
-      for (const k of kids) walk(k, false);
+  const INLINE = /^(inline|contents|ruby|table-cell)/, WS = /[ \t\n\r\f]+/g, BLANK = /^[ \t\n\r\f]*$/;
+  const display = (n) => { try { return getComputedStyle(n).display || 'inline'; } catch { return 'inline'; } };
+  const breaksOf = (n, d) => (n.tagName === 'P' ? 2 : (byTag ? BLOCK.has(n.tagName) : !INLINE.test(d)) ? 1 : 0);
+  // Splice: at least this many off-path element children.
+  const SPLICE_MIN = 64;
+  // Does t[s, e) read as `want` (whitespace dropped from both)?
+  const sameBut = (t, s, e, want) => {
+    let j = 0;
+    for (let i = s; i < e; i++) {
+      const c = t.charCodeAt(i);
+      if (c <= 32 || c === 160) continue;
+      if (j >= want.length || c !== want.charCodeAt(j)) return false;
+      j++;
     }
-    parts.push(breaks);
+    return j === want.length;
+  };
+  const squeeze = (s) => s.replace(/[\s ]+/g, '');
+  // Parts of n's children through n.innerText, or false (nothing pushed).
+  const splice = (n) => {
+    const kids = [];
+    let off = 0, anyOn = false;
+    for (let k = n.firstChild; k; k = k.nextSibling) {
+      kids.push(k);
+      if (k.nodeType !== 1) continue;
+      if (on.has(k)) { if (!k.shadowRoot) return false; anyOn = true; } else off++;
+    }
+    if (off < SPLICE_MIN || !anyOn) return false;
+    // What each child is, read when needed: 'on' (a host on the path),
+    // 'none' (no parts but whitespace or breaks), 'text' (an element with
+    // text: an anchor), 'bad' (text or a <br> right beside a host).
+    const info = new Array(kids.length);
+    const look = (i) => {
+      let r = info[i];
+      if (r) return r;
+      const k = kids[i];
+      if (k.nodeType === 3) r = BLANK.test(k.data) ? { kind: 'none' } : { kind: 'bad' };
+      else if (k.nodeType !== 1 || SKIP.has(k.tagName)) r = { kind: 'none' };
+      else if (k.tagName === 'BR') r = { kind: 'bad' };
+      else if (on.has(k)) r = { kind: 'on' };
+      else {
+        const d = display(k);
+        if (d === 'none') r = { kind: 'none' };
+        else {
+          const t = k.innerText ?? k.textContent ?? '';
+          r = t ? { kind: 'text', t, br: breaksOf(k, d) } : { kind: 'none' };
+        }
+      }
+      return (info[i] = r);
+    };
+    // Clusters: hosts with no text between them, each between two anchors.
+    const clusters = [];
+    for (let i = 0; i < kids.length; i++) {
+      const ki = kids[i];
+      if (ki.nodeType !== 1 || !on.has(ki) || look(i).kind !== 'on') continue;
+      let a = i - 1;
+      while (a >= 0 && look(a).kind === 'none') a--;
+      if (a >= 0 && look(a).kind === 'bad') return false;
+      let last = i, b = i + 1;
+      for (;;) {
+        while (b < kids.length && look(b).kind === 'none') b++;
+        if (b < kids.length && look(b).kind === 'on') { last = b; b++; continue; }
+        break;
+      }
+      if (b < kids.length && look(b).kind === 'bad') return false;
+      let light = '';
+      for (let j = i; j <= last; j++) if (info[j].kind === 'on') light += kids[j].innerText ?? '';
+      clusters.push({ a: a >= 0 ? a : -1, b: b < kids.length ? b : -1, from: a + 1, to: b < kids.length ? b : kids.length, light: squeeze(light) });
+      i = last;
+    }
+    const T = n.innerText;
+    if (typeof T !== 'string') return false;
+    const A = (c) => (c.a >= 0 ? info[c.a].t : null), B = (c) => (c.b >= 0 ? info[c.b].t : null);
+    // Earliest places, then latest: one place for each cluster when they agree.
+    const fw = [];
+    let cur = 0;
+    for (const c of clusters) {
+      const at = A(c), bt = B(c);
+      let got = null;
+      let a = at === null ? (cur === 0 ? 0 : -1) : T.indexOf(at, cur);
+      while (a >= 0) {
+        const ae = at === null ? 0 : a + at.length;
+        const b = bt === null ? T.length : T.indexOf(bt, ae);
+        if (b < 0) break;
+        if (sameBut(T, ae, b, c.light)) { got = [ae, b]; break; }
+        if (at === null) break;
+        a = T.indexOf(at, a + 1);
+      }
+      if (!got) return false;
+      fw.push(got);
+      cur = got[1];
+    }
+    cur = T.length;
+    for (let ci = clusters.length - 1; ci >= 0; ci--) {
+      const c = clusters[ci], at = A(c), bt = B(c);
+      let got = null;
+      let b = bt === null ? (cur === T.length ? T.length : -1) : cur - bt.length >= 0 ? T.lastIndexOf(bt, cur - bt.length) : -1;
+      while (b >= 0) {
+        let ae = 0;
+        if (at !== null) {
+          const a = b - at.length >= 0 ? T.lastIndexOf(at, b - at.length) : -1;
+          if (a < 0) break;
+          ae = a + at.length;
+        }
+        if (sameBut(T, ae, b, c.light)) { got = [ae, b]; break; }
+        if (bt === null || b === 0) break;
+        b = T.lastIndexOf(bt, b - 1);
+      }
+      if (!got || got[0] !== fw[ci][0] || got[1] !== fw[ci][1]) return false;
+      cur = got[0];
+    }
+    // The ends: the first and last children with text (none of them 'bad').
+    let first = 0;
+    while (first < kids.length && look(first).kind === 'none') first++;
+    let lastT = kids.length - 1;
+    while (lastT >= 0 && look(lastT).kind === 'none') lastT--;
+    if (look(first).kind === 'bad' || look(lastT).kind === 'bad') return false;
+    // Children before the first text, as the walk reads them.
+    let k = 0;
+    const walkTo = (end) => { for (; k < end; k++) walk(kids[k], false); };
+    let pos = 0;
+    for (let ci = 0; ci < clusters.length; ci++) {
+      const c = clusters[ci];
+      if (c.a >= 0) {
+        // The run of text before the cluster, from T: [its first, ..., c.a].
+        const startIdx = ci === 0 ? first : clusters[ci - 1].b;
+        if (ci === 0) walkTo(first);
+        const s = info[startIdx];
+        if (s.br) parts.push(s.br);
+        parts.push(T.slice(pos, fw[ci][0]));
+        if (info[c.a].br) parts.push(info[c.a].br);
+        k = c.a + 1;
+      }
+      walkTo(c.to);
+      pos = fw[ci][1];
+    }
+    const lc = clusters[clusters.length - 1];
+    if (lc.b >= 0) {
+      const s = info[lc.b];
+      if (s.br) parts.push(s.br);
+      parts.push(T.slice(pos));
+      if (info[lastT].br) parts.push(info[lastT].br);
+      k = lastT + 1;
+    }
+    walkTo(kids.length);
+    return true;
+  };
+  const walk = (n, top) => {
+    const type = n.nodeType;
+    if (type === 3) { const d = n.data; parts.push(BLANK.test(d) ? (d ? ' ' : '') : d.replace(WS, ' ')); return; }
+    if (type !== 1) return;
+    const tag = n.tagName;
+    if (SKIP.has(tag)) return;
+    if (tag === 'BR') { parts.push('\n'); return; }
+    const d = display(n);
+    if (d === 'none' && !top) return;
+    const breaks = top ? 0 : breaksOf(n, d);
+    if (breaks) parts.push(breaks);
+    if (!top && !on.has(n)) {
+      parts.push(n.innerText ?? n.textContent ?? '');
+    } else if (n.shadowRoot) {
+      for (let k = n.shadowRoot.firstChild; k; k = k.nextSibling) walk(k, false);
+    } else {
+      const slotted = tag === 'SLOT' ? assigned(n) : null;
+      if (slotted && slotted.length) for (const k of slotted) walk(k, false);
+      else if (!splice(n)) for (let k = n.firstChild; k; k = k.nextSibling) walk(k, false);
+    }
+    if (breaks) parts.push(breaks);
   };
   walk(el, true);
-  // Joined once at the end: no string is copied per piece.
   const out = [];
   let pending = 0, end = '';
   const trim = () => {
     const i = out.length - 1, t = out[i];
     let k = t.length;
     while (k && t.charCodeAt(k - 1) === 32) k--;
-    out[i] = t.slice(0, k);
+    if (k < t.length) out[i] = t.slice(0, k);
   };
   for (const p of parts) {
-    if (typeof p === 'number') { if (out.length) pending = Math.max(pending, p); continue; }
-    // A space where a line starts, or after a space, is not shown.
+    if (typeof p === 'number') { if (out.length && p > pending) pending = p; continue; }
     let s = p;
-    if (s.startsWith(' ') && (pending || !out.length || end === ' ' || end === '\n')) s = s.slice(1);
+    if (s.charCodeAt(0) === 32 && (pending || !out.length || end === ' ' || end === '\n')) s = s.slice(1);
     if (!s) continue;
-    if (pending) { trim(); out.push('\n'.repeat(pending)); pending = 0; }
+    if (pending) { trim(); out.push(pending === 2 ? '\n\n' : '\n'); pending = 0; }
     out.push(s);
     end = s[s.length - 1];
   }
   if (out.length) trim();
   return out.join('');
 }"#;
+
+/// FLAT_TEXT as a call: the function is kept on the document's window
+/// (`__nvText`, tagged with a hash of its source, so a newer navigera never
+/// runs an older copy) and reused, warm. A script sent by
+/// `Runtime.evaluate` is a new function each time and runs cold: on the
+/// bench's 60,051-element page with 40 roots, 19-29 ms a call sent afresh
+/// against 16-19 kept (9 calls each, Chrome, local).
+fn flat_text_fn() -> String {
+    const fn fnv1a(s: &str) -> u32 {
+        let b = s.as_bytes();
+        let (mut h, mut i) = (0x811c_9dc5_u32, 0);
+        while i < b.len() {
+            h = (h ^ b[i] as u32).wrapping_mul(0x0100_0193);
+            i += 1;
+        }
+        h
+    }
+    const V: u32 = fnv1a(FLAT_TEXT);
+    format!(
+        "(() => {{ const k = window.__nvText; if (typeof k === 'function' && k.v === {V}) return k; \
+         const f = {FLAT_TEXT}; f.v = {V}; \
+         try {{ Object.defineProperty(window, '__nvText', {{ value: f, configurable: true, enumerable: false, writable: true }}); }} catch (_) {{}} \
+         return f; }})()"
+    )
+}
 
 /// Does Enter on the focused element (through open shadow roots and
 /// same-origin frames) possibly navigate? Form controls, links, buttons.
@@ -7822,7 +8008,8 @@ impl Page {
         self.fresh_layout(timeout);
         let value = self.evaluate_raw(
             &ascii_safe(&format!(
-                "({FLAT_TEXT})(document.body || document.documentElement, {})",
+                "({})(document.body || document.documentElement, {})",
+                flat_text_fn(),
                 self.shared.is_single_target()
             )),
             timeout,
@@ -7836,13 +8023,14 @@ impl Page {
     pub fn text_content(&self, selector: &str, timeout: Duration) -> Result<Option<String>> {
         let sel = serde_json::to_string(selector)?;
         let by_tag = self.shared.is_single_target();
+        let flat = flat_text_fn();
         self.fresh_layout(timeout);
         // Code and styles inside the element aren't text a user reads (an
         // element that is itself a script, e.g. a JSON blob, keeps its own).
         let value = self.evaluate_raw(
             &ascii_safe(&format!(
                 "(() => {{ const el = {DEEP}.first({sel}); if (!el) return null; \
-                 if (typeof el.innerText === 'string' && el.getClientRects().length) return ({FLAT_TEXT})(el, {by_tag}); \
+                 if (typeof el.innerText === 'string' && el.getClientRects().length) return ({flat})(el, {by_tag}); \
                  if (!el.querySelector || !el.querySelector('script, style, template, noscript')) return el.textContent; \
                  const c = el.cloneNode(true); \
                  for (const n of c.querySelectorAll('script, style, template, noscript')) n.remove(); \

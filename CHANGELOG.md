@@ -102,6 +102,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `text` (and `text --selector`) leaves out nothing an open shadow root
+  shows: a custom element's content, a root inside a root, a slot's light
+  child in the slot's place. The browsers' `innerText` has none of it, on
+  Chrome as on Lightpanda; a page with no open shadow root reads as before.
+  The cost, timed in the page per call (Chrome, local, 9 calls each): the
+  search for roots walks every element, 4-5 ms on the bench's
+  60,051-element page and about 0.1 ms on 2,000 elements. With roots, the
+  elements on the way to them are walked and the rest read by their own
+  `innerText`; a long list with a few custom elements in it is read by one
+  `innerText` with each card's text put in its place, and the function is
+  kept in the page so later calls run it warm. The bench's large page with
+  40 roots reads in 16-19 ms (24-26 ms on the first calls in a document)
+  against 12-13 for the bare `innerText`; reading each row on its own took
+  19-29 ms every call.
 - A navigation the browser refuses names that browser: on Lightpanda the
   unsafe-port error said "Chrome refuses to open that port".
 - `network` over chromedriver 158's WebDriver BiDi could list a redirect's

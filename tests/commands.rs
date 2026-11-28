@@ -820,6 +820,32 @@ fn text_reads_open_shadow_roots() {
     }
 }
 
+/// A long list with a few custom elements in it: each card's text in its
+/// place, whether text reads the list by one `innerText` (rows of their
+/// own text) or row by row (identical rows: a card's place is not sure).
+#[test]
+fn text_reads_shadow_roots_in_a_long_list() {
+    let Some(site) = edge_site() else { return };
+    for (engine, bin) in engines() {
+        let a = Agent::new("shadowrows", engine, bin);
+        for (path, same) in [("/shadow-rows", false), ("/shadow-same", true)] {
+            let row = |i: usize| if same { "same row".to_string() } else { format!("row {i}") };
+            let mut want = String::new();
+            for i in 0..100 {
+                if i > 0 {
+                    want += if i % 25 == 0 { "\n\n" } else { "\n" };
+                }
+                want += &row(i);
+                if i % 25 == 24 {
+                    want += &format!("\n\ncard {i}");
+                }
+            }
+            a.ok(&["goto", &format!("{}{path}", site.base)]);
+            assert_eq!(a.text(&["text"]), want, "[{engine}] {path}");
+        }
+    }
+}
+
 /// A navigation the browser refuses names that browser: Lightpanda said
 /// "Chrome refuses to open that port".
 #[test]
