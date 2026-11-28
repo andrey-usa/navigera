@@ -175,8 +175,8 @@ impl Recording {
     /// Stop, write the player, and say what was recorded.
     pub fn stop(mut self) -> Result<Value> {
         self.leave_tab();
-        let ms = (epoch_ms() - self.started).max(0.0) as u64;
         let frames = self.frames.lock().unwrap().clone();
+        let ms = recording_ms(self.started, epoch_ms(), &frames);
         let player = self.dir.join("index.html");
         crate::protocol::write_own(&player, player_html(&frames, ms).as_bytes())
             .with_context(|| format!("screencast: writing {}", player.display()))?;
@@ -283,6 +283,16 @@ pub(crate) fn push_frame(dir: &Path, started: f64, frames: &mut Vec<Frame>, byte
     Ok(())
 }
 
+/// How long a recording that started at `started` (epoch ms) lasted at
+/// `now`: never less than its last frame's time. Chrome stamps a frame by
+/// its own clock, which ran up to 10 ms ahead of navigera's on arrival
+/// (62 of 77 frames, local): a frame that came just before the stop was
+/// otherwise later than the recording's end.
+pub(crate) fn recording_ms(started: f64, now: f64, frames: &[Frame]) -> u64 {
+    let ms = (now - started).max(0.0) as u64;
+    frames.last().map_or(ms, |f| ms.max(f.ms))
+}
+
 /// A page that plays `frames` at their times: play/pause (space), a
 /// scrubber, step a frame (arrows), speed.
 pub fn player_html(frames: &[Frame], ms: u64) -> String {
@@ -348,6 +358,22 @@ mod tests {
         assert!(html.contains(r#"{"frames":[["frame-00001.jpg",0],["frame-00002.jpg",340]],"ms":900}"#), "{html}");
         assert!(!html.contains("/*DATA*/"));
         assert_eq!(html.matches("</script>").count(), 1);
+    }
+
+    #[test]
+    fn a_recording_lasts_until_its_last_frame() {
+        let dir = std::env::temp_dir().join(format!("nv-cast-ms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (started, mut frames) = (1_000_000.0, Vec::new());
+        assert_eq!(recording_ms(started, started + 900.4, &frames), 900);
+        push_frame(&dir, started, &mut frames, b"jpeg", started + 120.0).unwrap();
+        // Stamped by the browser's clock, ahead of the stop's.
+        push_frame(&dir, started, &mut frames, b"jpeg", started + 907.0).unwrap();
+        assert_eq!(recording_ms(started, started + 900.4, &frames), 907);
+        assert_eq!(recording_ms(started, started + 1500.0, &frames), 1500);
+        // A clock set back while recording.
+        assert_eq!(recording_ms(started, started - 50.0, &frames), 907);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -102,6 +102,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A screencast's `ms` is never shorter than its last frame's time. Chrome
+  stamps each frame by its own clock, which ran up to 10 ms ahead of
+  navigera's when the frame arrived, so a frame that came just before
+  `screencast stop` was timed after the recording's end.
 - `text` (and `text --selector`) leaves out nothing an open shadow root
   shows: a custom element's content, a root inside a root, a slot's light
   child in the slot's place. The browsers' `innerText` has none of it, on

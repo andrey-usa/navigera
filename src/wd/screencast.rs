@@ -231,7 +231,7 @@ impl Looks {
     /// Write the player and say what was recorded. A recording that kept no
     /// frame always says why.
     pub fn finish(self) -> Result<Value> {
-        let ms = (epoch_ms() - self.started).max(0.0) as u64;
+        let ms = crate::screencast::recording_ms(self.started, epoch_ms(), &self.frames);
         let player = self.dir.join("index.html");
         crate::protocol::write_own(&player, crate::screencast::player_html(&self.frames, ms).as_bytes())
             .with_context(|| format!("screencast: writing {}", player.display()))?;
