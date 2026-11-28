@@ -53,14 +53,24 @@ pub fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig 
 pub fn ws_read_failed(e: &tokio_tungstenite::tungstenite::Error) -> String {
     use tokio_tungstenite::tungstenite::error::{CapacityError, Error};
     match e {
-        Error::Capacity(CapacityError::MessageTooLong { size, max_size }) => format!(
-            "the browser sent a message of {} MiB, more than the {} MiB navigera reads; the connection is closed \
-             (on a page that large, read a part of it: `ax --grep <words>`, `ax --max-depth <n>` or `text --selector <css>`)",
-            size >> 20,
-            max_size >> 20
-        ),
+        Error::Capacity(CapacityError::MessageTooLong { size, max_size }) => too_long(Some(*size), *max_size),
         e => format!("reading from the browser failed: {e}"),
     }
+}
+
+/// The session log's line for a browser message over `max` bytes: its
+/// size where known (a NUL-framed one is cut off at the bound) and what
+/// to read instead.
+fn too_long(size: Option<usize>, max: usize) -> String {
+    let size = match size {
+        Some(size) => format!("of {} MiB, more than", size >> 20),
+        None => "over".to_string(),
+    };
+    format!(
+        "the browser sent a message {size} the {} MiB navigera reads; the connection is closed \
+         (on a page that large, read a part of it: `ax --grep <words>`, `ax --max-depth <n>` or `text --selector <css>`)",
+        max >> 20
+    )
 }
 
 /// Start of the error for a connection to the browser that has ended.
@@ -380,8 +390,20 @@ impl CdpClient {
 
     /// Connect over a byte stream carrying NUL-terminated JSON messages, as
     /// Chrome's pipe does: the pipe itself, or a shared-browser host's
-    /// socket (see `crate::shared`).
-    pub fn connect_framed<R, W>(mut reader: R, mut writer: W) -> Self
+    /// socket (see `crate::shared`). A message is bounded as on a
+    /// WebSocket ([`WS_MESSAGE_MAX`]).
+    pub fn connect_framed<R, W>(reader: R, writer: W) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::connect_framed_max(reader, writer, WS_MESSAGE_MAX)
+    }
+
+    /// [`CdpClient::connect_framed`] with a message bound of `max` bytes:
+    /// a longer message closes the connection, and the session log says
+    /// why.
+    fn connect_framed_max<R, W>(mut reader: R, mut writer: W, max: usize) -> Self
     where
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -451,27 +473,40 @@ impl CdpClient {
         let raw_pump = Arc::clone(&raw);
         let on_close_pump = Arc::clone(&on_close);
         tokio::spawn(async move {
-            let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+            // The start of a message that an earlier read ended inside.
+            let mut partial: Vec<u8> = Vec::new();
             let mut chunk = vec![0u8; 256 * 1024];
-            let mut scanned = 0;
-            loop {
-                match reader.read(&mut chunk).await {
+            'read: loop {
+                let mut data = match reader.read(&mut chunk).await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        buf.extend_from_slice(&chunk[..n]);
-                        // A capture's answer is megabytes: searched for its
-                        // end a vector at a time, not a byte.
-                        while let Some(pos) = memchr::memchr(0, &buf[scanned..]) {
-                            let end = scanned + pos;
-                            if let Ok(text) = std::str::from_utf8(&buf[..end]) {
-                                dispatch(text, &pending_pump, &event_tx_pump, &sent_pump, &raw_pump);
-                            }
-                            buf.drain(..=end);
-                            scanned = 0;
-                        }
-                        scanned = buf.len();
+                    Ok(n) => &chunk[..n],
+                };
+                // A message that lies whole in this read is handed on from
+                // it; only one that spans reads is copied, once. A capture's
+                // answer is megabytes: its end is searched for a vector at a
+                // time, not a byte.
+                while let Some(pos) = memchr::memchr(0, data) {
+                    if partial.len() + pos > max {
+                        eprintln!("[cdp] {}", too_long(None, max));
+                        break 'read;
                     }
+                    let message = if partial.is_empty() {
+                        &data[..pos]
+                    } else {
+                        partial.extend_from_slice(&data[..pos]);
+                        &partial[..]
+                    };
+                    if let Ok(text) = std::str::from_utf8(message) {
+                        dispatch(text, &pending_pump, &event_tx_pump, &sent_pump, &raw_pump);
+                    }
+                    partial.clear();
+                    data = &data[pos + 1..];
                 }
+                if partial.len() + data.len() > max {
+                    eprintln!("[cdp] {}", too_long(None, max));
+                    break;
+                }
+                partial.extend_from_slice(data);
             }
             close_all(&closed_pump, &raw_pump, &on_close_pump);
             // Ending the writer task ends the connection: it classifies
@@ -1025,6 +1060,59 @@ mod tests {
         let (a, b) = UnixStream::pair().unwrap();
         let (r, w) = a.into_split();
         (CdpClient::connect_framed(r, w), b)
+    }
+
+    /// A NUL-framed message is bounded as on a WebSocket: one of exactly
+    /// the bound arrives, across reads; one byte more closes the
+    /// connection, whether its NUL never comes or comes after the bound,
+    /// and a command still waiting is answered CLOSED, not left to time out.
+    #[tokio::test]
+    async fn a_framed_message_over_the_bound_closes_the_connection() {
+        const MAX: usize = 1 << 20;
+        for nul_after_bound in [false, true] {
+            let (a, mut peer) = UnixStream::pair().unwrap();
+            let (r, w) = a.into_split();
+            let client = CdpClient::connect_framed_max(r, w, MAX);
+            let mut events = client.subscribe();
+            let c = client.clone();
+            let waiting =
+                tokio::spawn(async move { c.send("Runtime.evaluate", json!({ "expression": "1" }), None, T).await });
+            let mut buf = Vec::new();
+            read_frame(&mut peer, &mut buf).await;
+            let (head, tail) = (r#"{"method":"Page.loadEventFired","params":{"v":""#, r#""}}"#);
+            let at_bound = format!("{head}{}{tail}", "x".repeat(MAX - head.len() - tail.len()));
+            assert_eq!(at_bound.len(), MAX);
+            for piece in at_bound.as_bytes().chunks(MAX / 3) {
+                peer.write_all(piece).await.unwrap();
+            }
+            peer.write_all(&[0]).await.unwrap();
+            let got = tokio::time::timeout(T, events.recv()).await.unwrap().unwrap();
+            assert_eq!(got["params"]["v"].as_str().map(str::len), Some(MAX - head.len() - tail.len()));
+            // One byte over: unterminated, or its NUL after the bound
+            // (MAX bytes read first, then the last byte and the NUL).
+            let over = vec![b'y'; MAX];
+            peer.write_all(&over).await.unwrap();
+            if nul_after_bound {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                peer.write_all(b"y\0").await.unwrap();
+            } else {
+                peer.write_all(b"y").await.unwrap();
+            }
+            let err = tokio::time::timeout(T, waiting).await.unwrap().unwrap().unwrap_err();
+            assert!(format!("{err:#}").contains(CLOSED), "nul_after_bound={nul_after_bound}: {err:#}");
+            assert!(client.is_closed());
+            // The client let its end go: the peer reads the end of the stream.
+            let mut rest = [0u8; 64];
+            let n = tokio::time::timeout(T, peer.read(&mut rest)).await.unwrap().unwrap();
+            assert_eq!(n, 0, "nul_after_bound={nul_after_bound}");
+        }
+    }
+
+    #[test]
+    fn a_framed_message_over_the_bound_is_named_in_the_log() {
+        let said = too_long(None, WS_MESSAGE_MAX);
+        assert!(said.starts_with("the browser sent a message over the 256 MiB navigera reads"), "{said}");
+        assert!(said.contains("ax --grep"), "{said}");
     }
 
     /// A capture's answer is handed over as its JSON text, escapes and all;

@@ -52,6 +52,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
+use crate::cdp::client::WS_MESSAGE_MAX;
 use crate::cdp::CdpClient;
 use crate::protocol::SessionConfig;
 use crate::session::endpoint::{self, Listener, Stream};
@@ -913,13 +914,15 @@ fn serve_client(id: u64, stream: Stream, router: &Arc<Mutex<Router>>) {
         let mut reader = BufReader::with_capacity(256 * 1024, read_half);
         let mut buf = Vec::with_capacity(4096);
         loop {
-            buf.clear();
-            match reader.read_until(0, &mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if buf.last() == Some(&0) {
-                        buf.pop();
+            match read_message(&mut reader, &mut buf, WS_MESSAGE_MAX) {
+                Ok(false) => break,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::InvalidData {
+                        eprintln!("navigera: client {id}: {e}");
                     }
+                    break;
+                }
+                Ok(true) => {
                     let Ok(text) = String::from_utf8(std::mem::take(&mut buf)) else { continue };
                     let Ok(mut r) = router.lock() else { return };
                     r.on_client(id, text);
@@ -930,6 +933,26 @@ fn serve_client(id: u64, stream: Stream, router: &Arc<Mutex<Router>>) {
             r.gone(id);
         }
     });
+}
+
+/// Read one NUL-terminated message into `buf` (without its NUL; the last
+/// one may end with the stream instead). `Ok(false)` at the end of the
+/// stream; a message over `max` bytes is an `InvalidData` error, read no
+/// further than one byte past the bound, as a WebSocket bounds one.
+fn read_message(reader: &mut impl BufRead, buf: &mut Vec<u8>, max: usize) -> std::io::Result<bool> {
+    buf.clear();
+    if std::io::Read::take(&mut *reader, max as u64 + 1).read_until(0, buf)? == 0 {
+        return Ok(false);
+    }
+    if buf.last() == Some(&0) {
+        buf.pop();
+    } else if buf.len() > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("a message over the {} MiB the shared browser's host reads; the connection is closed", max >> 20),
+        ));
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1014,6 +1037,28 @@ mod tests {
         assert_ne!(a, spec("/usr/bin/chrome", true, true).key());
         assert_ne!(a, spec("/opt/chrome", true, false).key());
         assert_eq!(a.len(), 16);
+    }
+
+    /// A client's message is bounded as the browser's are: one of exactly
+    /// the bound is read, one byte more is refused after reading only that
+    /// byte, and the last message may end with the stream.
+    #[test]
+    fn a_client_message_over_the_bound_is_refused() {
+        let mut buf = Vec::new();
+        let mut r = std::io::Cursor::new(b"abc\0defghijk\0tail".to_vec());
+        assert!(read_message(&mut r, &mut buf, 8).unwrap());
+        assert_eq!(buf, b"abc");
+        assert!(read_message(&mut r, &mut buf, 8).unwrap());
+        assert_eq!(buf, b"defghijk");
+        assert!(read_message(&mut r, &mut buf, 8).unwrap());
+        assert_eq!(buf, b"tail");
+        assert!(!read_message(&mut r, &mut buf, 8).unwrap());
+
+        let mut r = std::io::Cursor::new(b"123456789\0".to_vec());
+        let e = read_message(&mut r, &mut buf, 8).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        assert!(e.to_string().contains("the shared browser's host reads"), "{e}");
+        assert_eq!(r.position(), 9, "read one byte past the bound, no further");
     }
 
     fn router() -> (Router, tokio::sync::mpsc::UnboundedReceiver<String>) {

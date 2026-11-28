@@ -134,6 +134,18 @@ All notable changes to this project are documented here. The format follows
   one frame or several; a larger one still closes it, and the session's
   log (over WebDriver BiDi, the command's error) says how large it was
   and how to read a part of the page instead.
+- Chrome's pipe (the default on Linux and macOS) and the shared browser's
+  socket had no bound: a message whose end never came was kept in memory
+  for as long as bytes kept coming. They are bounded as a WebSocket is: a
+  message over 256 MiB closes the connection, a command still waiting is
+  answered "the connection to the browser closed" at once, and the
+  session's log says why and how to read a part of the page instead; the
+  shared browser's host drops a client that sends one and says so in its
+  log. Reading the pipe also stopped moving the rest of a read once per
+  message in it: on the framing alone (local, best of 15), a burst of
+  200,000 events of about 370 bytes takes 15 ms instead of 99 when they
+  come 64 KiB at a time and 580 when they come 256 KiB at a time; a 6 MB
+  capture takes the same 1 ms.
 - `quit --close-browser` on a `--profile` session could answer while
   Chrome was still writing the profile down. It waited for the DevTools
   port to close, which happens early in a shutdown, and for
