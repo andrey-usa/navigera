@@ -1,0 +1,90 @@
+name: experiment-52
+
+# `navigera text` end to end, d323f4f (the reader's 9 KB source sent with
+# every call) vs 7cf81df (the reader kept in the document called by name),
+# both static musl builds as released, on one runner in one job: page_b and
+# page_c of bench/ladder, Chrome and Lightpanda, 5 rounds of A B per engine,
+# 31 calls a page per session (bench/probe/text_ab.py). Numbers as notices and in
+# the job summary; every call in calls.jsonl, the artifact.
+
+on:
+  push:
+    branches: [experiment-52]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: experiment-52
+  cancel-in-progress: true
+
+jobs:
+  text:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      REF_A: d323f4ffdce2bb36bfcd0a9fcb63656cf570f851
+      REF_B: 7cf81df109ea12fb17bb4c5022d597ded852e3be
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: stable
+          cache-on-failure: false
+
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: musl-tools
+
+      - name: Lightpanda binary
+        uses: ./.github/actions/lightpanda
+
+      - name: Build both refs (static musl, as released)
+        run: |
+          set -euo pipefail
+          rustup target add x86_64-unknown-linux-musl
+          for ref in "$REF_A" "$REF_B"; do
+            git worktree add "/tmp/nv-$ref" "$ref"
+            # From inside each tree: cargo reads its own .cargo/config.toml.
+            (cd "/tmp/nv-$ref" && cargo build --release --locked --bin navigera \
+              --target x86_64-unknown-linux-musl --target-dir "/tmp/nv-target-$ref")
+            cp "/tmp/nv-target-$ref/x86_64-unknown-linux-musl/release/navigera" "/tmp/navigera-$ref"
+            "/tmp/navigera-$ref" --version
+            file "/tmp/navigera-$ref"
+          done
+          echo "CHROME_BIN=$(which google-chrome)" >> "$GITHUB_ENV"
+          google-chrome --version
+
+      - name: Fixtures
+        run: python3 bench/ladder/gen_fixtures.py
+
+      - name: navigera text, A B x 5 rounds
+        timeout-minutes: 40
+        run: |
+          python3 bench/probe/text_ab.py run --a "/tmp/navigera-$REF_A" --b "/tmp/navigera-$REF_B" \
+            --label-a "${REF_A:0:7}" --label-b "${REF_B:0:7}" --rounds 5 --calls 31 --out "$RUNNER_TEMP/out"
+
+      - name: Chrome numbers
+        if: always()
+        run: python3 bench/probe/text_ab.py report --out "$RUNNER_TEMP/out" --group chrome
+
+      - name: Lightpanda numbers
+        if: always()
+        run: python3 bench/probe/text_ab.py report --out "$RUNNER_TEMP/out" --group lightpanda
+
+      - name: Setup and output checks
+        if: always()
+        run: python3 bench/probe/text_ab.py report --out "$RUNNER_TEMP/out" --group checks
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: text-ab
+          path: |
+            ${{ runner.temp }}/out/calls.jsonl
+            ${{ runner.temp }}/out/meta.json
