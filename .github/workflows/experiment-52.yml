@@ -68,6 +68,13 @@ jobs:
           python3 bench/probe/text_ab.py run --a "/tmp/navigera-$REF_A" --b "/tmp/navigera-$REF_B" \
             --label-a "${REF_A:0:7}" --label-b "${REF_B:0:7}" --rounds 5 --calls 31 --out "$RUNNER_TEMP/out"
 
+      - name: Shadow-root walks in the page, per engine
+        if: always()
+        timeout-minutes: 15
+        run: |
+          python3 bench/probe/walk_probe.py --navigera "/tmp/navigera-$REF_B" --chrome "$CHROME_BIN" \
+            --lightpanda "$LIGHTPANDA_BIN" --reps 15
+
       - name: Chrome numbers
         if: always()
         run: python3 bench/probe/text_ab.py report --out "$RUNNER_TEMP/out" --group chrome
