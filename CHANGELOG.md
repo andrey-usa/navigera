@@ -115,7 +115,12 @@ All notable changes to this project are documented here. The format follows
   kept in the page so later calls run it warm. The bench's large page with
   40 roots reads in 16-19 ms (24-26 ms on the first calls in a document)
   against 12-13 for the bare `innerText`; reading each row on its own took
-  19-29 ms every call.
+  19-29 ms every call. End to end, a `text` call costs more than before
+  ([run 46118641222](https://github.com/andrey-usa/navigera/actions/runs/46118641222),
+  the released static build against the build before it on one runner,
+  median of 60 calls each): the large page 20.2 -> 26.9 ms on Chrome and
+  9.7 -> 19.5 ms on Lightpanda, and a 2,000-element page with no root
+  2.2 -> 2.5 and 1.9 -> 2.4 ms.
 - A navigation the browser refuses names that browser: on Lightpanda the
   unsafe-port error said "Chrome refuses to open that port".
 - `network` over chromedriver 158's WebDriver BiDi could list a redirect's
