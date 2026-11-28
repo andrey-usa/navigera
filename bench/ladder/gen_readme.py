@@ -125,6 +125,24 @@ def png_kb(cell, sep=""):
     return f"{sep}{b / 1024:.0f} KB" if b is not None else ""
 
 
+# Captures answer on Chrome's frame grid (one frame or two by the request's
+# moment; the bench spreads the moments evenly), so ten reps split between
+# two modes and their median jumps: these ops rank by the mean. Runs from
+# before means were recorded rank by the median.
+MEAN_RANKED = ("screenshot-720",)
+
+
+def calls_note(cell):
+    """", 4 calls" for an op that took more than one call; "" for one."""
+    n = cell.get("calls", 1)
+    return f", {n} calls" if n != 1 else ""
+
+
+def paren(note):
+    """' (a, b)' from ', a, b'; "" when empty."""
+    return f" ({note[2:]})" if note else ""
+
+
 def png_note(cell):
     """' (49 KB PNG)' after a loss line's time; "" without a size."""
     return f" ({png_kb(cell)} PNG)" if png_kb(cell) else ""
@@ -344,8 +362,7 @@ if ops:
                  "browser-use": f"`browser-use` {ver('browser-use', '')} (exec model)".replace("  ", " ")}
     rest = doc.get("ops_rest")
     ops_lines = [
-        "### Matched operations (one call per op, warm session, median of 10"
-        + (", mean beside it)" if rest else ")"),
+        "### Matched operations (one call per op, warm session, median of 10)",
         "",
         numbers + ".",
         "",
@@ -371,7 +388,8 @@ if ops:
         "per-op losses, which rank `screenshot-720`, not the default-viewport row.",
         "",
     ] + ([
-        "Each cell gives the median of the 10 reps, then their mean. Chrome answers a",
+        "Each cell gives the median of the 10 reps (the mean too where it ranks; every",
+        "rep's time is in publish.json) and its calls where there were more than one. Chrome answers a",
         "capture on its 60 Hz frame grid, in one frame (~17 ms) or two (~31 ms) by the",
         "moment the request lands, so each rest before a timed call is lengthened by an",
         "offset in [0, 1/60 s), one seeded sequence that every tool shares",
@@ -400,14 +418,17 @@ if ops:
             elif cell.get("incomplete"):
                 n = cell.get("reps", 0)
                 n_expected = cell.get("expected_reps", 10)
-                row.append(f"incomplete ({n}/{n_expected}) {cell['median_ms']:.1f} ms "
-                           f"({cell['calls']} call{'s' if cell['calls'] != 1 else ''}{size})")
+                row.append(f"incomplete ({n}/{n_expected}) {cell['median_ms']:.1f} ms"
+                           + paren(calls_note(cell) + size))
             else:
-                mean = f", mean {cell['mean_ms']:.1f}" if cell.get("mean_ms") is not None else ""
+                # The mean only where it ranks the op; one-frame shares
+                # only on the captures: the page stays under the site's
+                # word limit, and publish.json keeps the rest.
+                mean = (f", mean {cell['mean_ms']:.1f}"
+                        if op in MEAN_RANKED and cell.get("mean_ms") is not None else "")
                 frames = (f", one frame {cell['one_frame']}/{cell.get('reps', 10)}"
                           if "one_frame" in cell else "")
-                row.append(f"{cell['median_ms']:.1f} ms{mean} ({cell['calls']} call"
-                           f"{'s' if cell['calls'] != 1 else ''}{size}{frames})")
+                row.append(f"{cell['median_ms']:.1f} ms{mean}" + paren(calls_note(cell) + size + frames))
         ops_lines.append("| " + " | ".join(row) + " |")
     if any(png_kb(c) for o in ops_cols for c in (o.get("cells") or {}).values()):
         ops_lines += [
@@ -539,13 +560,6 @@ if nav_agent:
 def ops_engine(o):
     """The browser an ops arm drives: the Firefox arms say so in their name."""
     return "Firefox" if "Firefox" in o["name"] else "Chrome"
-
-
-# Captures answer on Chrome's frame grid (one frame or two by the request's
-# moment; the bench spreads the moments evenly), so ten reps split between
-# two modes and their median jumps: these ops rank by the mean. Runs from
-# before means were recorded rank by the median.
-MEAN_RANKED = ("screenshot-720",)
 
 
 def rank_ms(op, cell):
